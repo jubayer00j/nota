@@ -137,8 +137,22 @@ class AttachmentStore(
         entity
     }
 
+    /**
+     * Runs [block] under the same [fileMutex] that serialises imports,
+     * deletes and [reconcile] (Phase 2b, Codex review PR #8). A multi-step
+     * transition such as note locking — snapshot the note's attachments,
+     * rewrite their files, flip their rows, persist the note — must not
+     * interleave with an import: an import whose row lands after the
+     * snapshot would otherwise stay plaintext under a freshly locked
+     * note, with no later save guaranteed to seal it. Imports hold the
+     * mutex end-to-end, so a lock block and an import can never overlap.
+     * The mutex is NOT reentrant: inside [block], use the `…Locked`
+     * variants below, never the public primitives.
+     */
+    suspend fun <T> runExclusive(block: suspend () -> T): T = fileMutex.withLock { block() }
+
     // --- Per-note lock support (Phase 2b) --------------------------------
-    // All file mutation for sealing/unsealing goes through these two
+    // All file mutation for sealing/unsealing goes through these
     // primitives so it stays under the same [fileMutex] discipline as
     // imports/deletes/reconcile (the F9 race): the lock repository never
     // touches attachment files directly.
@@ -146,8 +160,12 @@ class AttachmentStore(
     /** Reads an attachment's current on-disk bytes (raw payload, or the
      *  envelope text bytes while the owning note is locked). */
     suspend fun readBytes(attachment: AttachmentEntity): ByteArray = fileMutex.withLock {
-        withContext(Dispatchers.IO) { fileFor(attachment).readBytes() }
+        readBytesLocked(attachment)
     }
+
+    /** [readBytes] for callers already holding the mutex via [runExclusive]. */
+    internal suspend fun readBytesLocked(attachment: AttachmentEntity): ByteArray =
+        withContext(Dispatchers.IO) { fileFor(attachment).readBytes() }
 
     /**
      * Overwrites an attachment's file with [newBytes] and updates its row
@@ -161,14 +179,21 @@ class AttachmentStore(
         newBytes: ByteArray,
         encrypted: Boolean,
     ): AttachmentEntity = fileMutex.withLock {
-        withContext(Dispatchers.IO) {
-            val file = fileFor(attachment)
-            file.parentFile?.mkdirs()
-            file.writeBytes(newBytes)
-            val updated = attachment.copy(sizeBytes = newBytes.size.toLong(), encrypted = encrypted)
-            attachmentDao.upsert(updated)
-            updated
-        }
+        rewriteBytesLocked(attachment, newBytes, encrypted)
+    }
+
+    /** [rewriteBytes] for callers already holding the mutex via [runExclusive]. */
+    internal suspend fun rewriteBytesLocked(
+        attachment: AttachmentEntity,
+        newBytes: ByteArray,
+        encrypted: Boolean,
+    ): AttachmentEntity = withContext(Dispatchers.IO) {
+        val file = fileFor(attachment)
+        file.parentFile?.mkdirs()
+        file.writeBytes(newBytes)
+        val updated = attachment.copy(sizeBytes = newBytes.size.toLong(), encrypted = encrypted)
+        attachmentDao.upsert(updated)
+        updated
     }
 
     // --- Editor session temp files (Phase 2b) -----------------------------

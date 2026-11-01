@@ -432,6 +432,15 @@ class RichNoteEditorViewModel(
                 repository.setNoteTags(updated.id, tags)
                 baselineTagsCsv = tags.joinToString(", ")
             }
+            if (!bodyChanged) {
+                // Codex review PR #8: a metadata-only save (folder/tags/
+                // title) must ALSO seal attachments imported during the
+                // session — saveLockedContent's internal seal only runs
+                // on the body-changed path, and this save may be the
+                // last one before the editor closes.
+                noteLockRepository.sealPlaintextAttachments(updated.id, nek)
+                refreshSessionTemps()
+            }
             _note.value = repository.getById(updated.id) ?: updated
             _saveState.value = SaveState.Saved(System.currentTimeMillis())
             onPersisted?.invoke()

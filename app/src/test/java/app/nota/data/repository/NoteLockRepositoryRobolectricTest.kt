@@ -256,6 +256,89 @@ class NoteLockRepositoryRobolectricTest {
     }
 
     @Test
+    fun midSessionPlaintextAttachment_sealsOnDemand() = runBlocking {
+        val note = notes.createRichNote(title = "Session", contentHtml = "<p>body</p>")
+        val locked = lockRepo.lockNote(
+            note.id, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"),
+        )
+        val ok = lockRepo.verifyCredential(
+            locked, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"),
+        )
+        val nek = (ok as NoteUnlockResult.Ok).nek
+        // An attachment imported mid-session: raw file + unencrypted row.
+        val payload = "late file".toByteArray(Charsets.UTF_8)
+        val late = AttachmentEntity(
+            id = "att-late-1",
+            noteId = note.id,
+            fileName = "late.txt",
+            mimeType = "text/plain",
+            sizeBytes = payload.size.toLong(),
+            localPath = "attachments/${note.id}/late.txt",
+            createdAt = System.currentTimeMillis(),
+        )
+        db.attachmentDao().upsert(late)
+        store.fileFor(late).apply { parentFile?.mkdirs(); writeBytes(payload) }
+
+        assertEquals(1, lockRepo.sealPlaintextAttachments(note.id, nek))
+        val row = db.attachmentDao().getForNote(note.id).single()
+        assertTrue(row.encrypted)
+        assertTrue(
+            NoteLockCrypto.isEncryptedContent(
+                String(store.fileFor(row).readBytes(), Charsets.UTF_8),
+            ),
+        )
+        // A second pass seals nothing (already encrypted).
+        assertEquals(0, lockRepo.sealPlaintextAttachments(note.id, nek))
+        nek.fill(0)
+    }
+
+    @Test
+    fun lockFailure_rollsBackAlreadySealedAttachments() = runBlocking {
+        val note = notes.createRichNote(title = "Rollback", contentHtml = "<p>body</p>")
+        val payload = "keep me raw".toByteArray(Charsets.UTF_8)
+        val good = AttachmentEntity(
+            id = "att-good-1",
+            noteId = note.id,
+            fileName = "good.txt",
+            mimeType = "text/plain",
+            sizeBytes = payload.size.toLong(),
+            localPath = "attachments/${note.id}/good.txt",
+            createdAt = 1_000L,
+        )
+        // A second row whose file is MISSING: reading it throws mid-seal,
+        // after the good attachment (earlier createdAt) was sealed.
+        val broken = AttachmentEntity(
+            id = "att-broken-1",
+            noteId = note.id,
+            fileName = "broken.txt",
+            mimeType = "text/plain",
+            sizeBytes = 3L,
+            localPath = "attachments/${note.id}/broken.txt",
+            createdAt = 2_000L,
+        )
+        db.attachmentDao().upsert(good)
+        db.attachmentDao().upsert(broken)
+        store.fileFor(good).apply { parentFile?.mkdirs(); writeBytes(payload) }
+
+        try {
+            lockRepo.lockNote(
+                note.id, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"),
+            )
+            throw AssertionError("lock should have failed on the missing file")
+        } catch (e: Exception) {
+            // Expected: the read failure aborts the lock.
+            assertFalse(e is AssertionError)
+        }
+        // The note stayed unlocked and the good attachment is RAW again.
+        val after = notes.getById(note.id)!!
+        assertFalse(after.locked)
+        assertNull(after.lockRecordJson)
+        val goodRow = db.attachmentDao().getForNote(note.id).first { it.id == "att-good-1" }
+        assertFalse(goodRow.encrypted)
+        assertArrayEquals(payload, store.fileFor(goodRow).readBytes())
+    }
+
+    @Test
     fun lockNote_rejectsWeakCredentialsAndDoubleLock() = runBlocking {
         val note = notes.createRichNote(title = "Weak", contentHtml = "<p>x</p>")
         try {

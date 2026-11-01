@@ -2,6 +2,7 @@ package app.nota.data.repository
 
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentDao
+import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.NoteDocument
 import app.nota.data.security.NoteLockBiometricStore
@@ -63,6 +64,13 @@ class NoteLockRepository(
      *  counter can never lose an increment to a concurrent submission. */
     private val attemptMutex = Mutex()
 
+    /** Serialises lock/unlock TRANSITIONS (Codex review PR #8): two
+     *  concurrent lockNote calls would otherwise both read the unlocked
+     *  row, generate different NEKs, and interleave their attachment
+     *  sealing — leaving an attachment sealed under a NEK the final
+     *  record cannot unwrap. */
+    private val mutationMutex = Mutex()
+
     fun recordFor(note: NoteEntity): NoteLockRecord? = NoteLockRecord.parse(note.lockRecordJson)
 
     private suspend fun persistRecord(note: NoteEntity, record: NoteLockRecord): NoteEntity {
@@ -85,7 +93,7 @@ class NoteLockRepository(
         method: NoteLockMethod,
         canonicalSecret: String,
         enableBiometric: Boolean = false,
-    ): NoteEntity {
+    ): NoteEntity = mutationMutex.withLock {
         val note = noteRepository.getById(noteId) ?: throw IllegalStateException("Note not found.")
         check(!note.locked && note.lockRecordJson == null) { "This note is already locked." }
         require(NoteLockCrypto.isValidCanonicalSecret(method, canonicalSecret)) {
@@ -96,35 +104,66 @@ class NoteLockRepository(
             }
         }
         val nek = NoteLockCrypto.generateNoteKey()
+        // Attachments sealed before the note row flips (1.x order). If
+        // anything fails mid-seal, the note must NOT be left unlocked
+        // with sealed attachments whose only NEK is about to be
+        // discarded (Codex review PR #8): the sealed set is tracked and
+        // rolled back to raw payloads with the NEK still in hand.
+        val sealed = mutableListOf<AttachmentEntity>()
         try {
             val slot = withContext(Dispatchers.Default) {
                 NoteLockCrypto.wrapNoteKey(nek, method, canonicalSecret)
             }
             val encryptedContent = NoteLockCrypto.encryptText(nek, note.contentHtml)
-            sealAttachments(noteId, nek, onlyPlaintext = true)
-
-            var record = NoteLockRecord(
-                v = 1,
-                slots = mapOf(method to slot),
-                biometric = false,
-                failedAttempts = 0,
-                lockoutUntil = null,
-                lockedAt = System.currentTimeMillis(),
-            )
-            if (enableBiometric) {
-                record = record.copy(biometric = biometricStore.storeCopy(noteId, nek))
+            // The seal + note persistence run under the attachment
+            // store's mutex so an in-flight import cannot land a
+            // plaintext attachment after the snapshot (Codex, PR #8).
+            attachmentStore.runExclusive {
+                sealAttachments(noteId, nek, onlyPlaintext = true, track = sealed)
+                var record = NoteLockRecord(
+                    v = 1,
+                    slots = mapOf(method to slot),
+                    biometric = false,
+                    failedAttempts = 0,
+                    lockoutUntil = null,
+                    lockedAt = System.currentTimeMillis(),
+                )
+                if (enableBiometric) {
+                    record = record.copy(biometric = biometricStore.storeCopy(noteId, nek))
+                }
+                val locked = note.copy(
+                    contentHtml = encryptedContent,
+                    plainText = "",
+                    locked = true,
+                    lockRecordJson = record.toJson(),
+                    updatedAt = System.currentTimeMillis(),
+                )
+                noteRepository.upsert(locked)
             }
-            val locked = note.copy(
-                contentHtml = encryptedContent,
-                plainText = "",
-                locked = true,
-                lockRecordJson = record.toJson(),
-                updatedAt = System.currentTimeMillis(),
-            )
-            noteRepository.upsert(locked)
-            return noteRepository.getById(noteId) ?: locked
+            noteRepository.getById(noteId) ?: throw IllegalStateException("Note not found.")
+        } catch (e: Exception) {
+            rollbackSealedAttachments(sealed, nek)
+            if (enableBiometric) {
+                // A copy stored before the failure must not outlive the lock.
+                runCatching { biometricStore.removeCopy(noteId) }
+            }
+            throw e
         } finally {
             nek.fill(0)
+        }
+    }
+
+    /** Best-effort undo of [lockNote]'s attachment sealing after a
+     *  failure: each tracked envelope is decrypted with the still-live
+     *  NEK and the raw payload written back. */
+    private suspend fun rollbackSealedAttachments(sealed: List<AttachmentEntity>, nek: ByteArray) {
+        for (attachment in sealed) {
+            runCatching {
+                val envelopeText = String(attachmentStore.readBytes(attachment), Charsets.UTF_8)
+                val dataUrl = NoteLockCrypto.decryptText(nek, envelopeText)
+                val payload = NoteLockCrypto.parseDataUrl(dataUrl)?.second ?: return@runCatching
+                attachmentStore.rewriteBytes(attachment, payload, encrypted = false)
+            }
         }
     }
 
@@ -206,8 +245,11 @@ class NoteLockRepository(
 
     /** Decrypts a locked note's body and attachments into memory (1.x `decryptNoteData`). */
     suspend fun decryptNoteData(note: NoteEntity, nek: ByteArray): DecryptedNoteData {
+        // GCM + Base64 work runs on Default (Codex review PR #8): the
+        // callers are viewModelScope (main), and a large attachment must
+        // not stall the UI while it is unsealed.
         val content = if (NoteLockCrypto.isEncryptedContent(note.contentHtml)) {
-            NoteLockCrypto.decryptText(nek, note.contentHtml)
+            withContext(Dispatchers.Default) { NoteLockCrypto.decryptText(nek, note.contentHtml) }
         } else {
             note.contentHtml
         }
@@ -216,7 +258,9 @@ class NoteLockRepository(
         for (attachment in attachmentDao.getForNote(note.id)) {
             if (!attachment.encrypted) continue
             val envelopeText = String(attachmentStore.readBytes(attachment), Charsets.UTF_8)
-            val dataUrl = NoteLockCrypto.decryptText(nek, envelopeText)
+            val dataUrl = withContext(Dispatchers.Default) {
+                NoteLockCrypto.decryptText(nek, envelopeText)
+            }
             dataUrls[attachment.id] = dataUrl
             NoteLockCrypto.parseDataUrl(dataUrl)?.let { bytes[attachment.id] = it.second }
         }
@@ -225,16 +269,34 @@ class NoteLockRepository(
 
     /** Seals any still-plaintext attachments of a locked note; returns how many. */
     suspend fun sealPlaintextAttachments(noteId: String, nek: ByteArray): Int =
-        sealAttachments(noteId, nek, onlyPlaintext = true)
+        attachmentStore.runExclusive { sealAttachments(noteId, nek, onlyPlaintext = true) }
 
-    private suspend fun sealAttachments(noteId: String, nek: ByteArray, onlyPlaintext: Boolean): Int {
+    /**
+     * The seal loop. CALLER MUST HOLD the attachment store's mutex (via
+     * [AttachmentStore.runExclusive]) — it uses the store's `…Locked`
+     * primitives so the snapshot/seal sequence cannot interleave with an
+     * import. The data-URL build + AES-GCM transform runs on
+     * [Dispatchers.Default] (Codex review PR #8): file IO already hops to
+     * IO inside the store, and a large generic attachment must not do
+     * its Base64/GCM work on the caller's (main) thread.
+     */
+    private suspend fun sealAttachments(
+        noteId: String,
+        nek: ByteArray,
+        onlyPlaintext: Boolean,
+        track: MutableList<AttachmentEntity>? = null,
+    ): Int {
         var sealed = 0
         for (attachment in attachmentDao.getForNote(noteId)) {
             if (onlyPlaintext && attachment.encrypted) continue
-            val raw = attachmentStore.readBytes(attachment)
-            val dataUrl = NoteLockCrypto.buildDataUrl(attachment.mimeType, raw)
-            val envelope = NoteLockCrypto.encryptText(nek, dataUrl)
-            attachmentStore.rewriteBytes(attachment, envelope.toByteArray(Charsets.UTF_8), encrypted = true)
+            val raw = attachmentStore.readBytesLocked(attachment)
+            val envelope = withContext(Dispatchers.Default) {
+                NoteLockCrypto.encryptText(nek, NoteLockCrypto.buildDataUrl(attachment.mimeType, raw))
+            }
+            val updated = attachmentStore.rewriteBytesLocked(
+                attachment, envelope.toByteArray(Charsets.UTF_8), encrypted = true,
+            )
+            track?.add(updated)
             sealed++
         }
         return sealed
@@ -255,31 +317,38 @@ class NoteLockRepository(
             plainText = "",
             updatedAt = System.currentTimeMillis(),
         )
-        noteRepository.upsert(updated)
-        sealAttachments(note.id, nek, onlyPlaintext = true)
+        attachmentStore.runExclusive {
+            noteRepository.upsert(updated)
+            sealAttachments(note.id, nek, onlyPlaintext = true)
+        }
     }
 
     // ------------------------------------------------------------ manage
 
     /** Permanently removes a note's lock, decrypting body and attachments (1.x `removeNoteLock`). */
-    suspend fun removeNoteLock(noteId: String, nek: ByteArray) {
-        val note = noteRepository.getById(noteId) ?: return
-        if (!note.locked && note.lockRecordJson == null) return
+    suspend fun removeNoteLock(noteId: String, nek: ByteArray) = mutationMutex.withLock {
+        val note = noteRepository.getById(noteId) ?: return@withLock
+        if (!note.locked && note.lockRecordJson == null) return@withLock
+        // Decrypt BEFORE taking the store mutex: decryptNoteData reads
+        // through the store's public (mutex-taking) primitive.
         val data = decryptNoteData(note, nek)
-        for (attachment in attachmentDao.getForNote(noteId)) {
-            if (!attachment.encrypted) continue
-            val payload = data.attachmentBytes[attachment.id] ?: continue
-            attachmentStore.rewriteBytes(attachment, payload, encrypted = false)
+        val attachments = attachmentDao.getForNote(noteId)
+        attachmentStore.runExclusive {
+            for (attachment in attachments) {
+                if (!attachment.encrypted) continue
+                val payload = data.attachmentBytes[attachment.id] ?: continue
+                attachmentStore.rewriteBytesLocked(attachment, payload, encrypted = false)
+            }
+            biometricStore.removeCopy(noteId)
+            val unlocked = note.copy(
+                contentHtml = data.contentHtml,
+                plainText = NoteDocument.plainText(NoteDocument.parse(data.contentHtml)),
+                locked = false,
+                lockRecordJson = null,
+                updatedAt = System.currentTimeMillis(),
+            )
+            noteRepository.upsert(unlocked)
         }
-        biometricStore.removeCopy(noteId)
-        val unlocked = note.copy(
-            contentHtml = data.contentHtml,
-            plainText = NoteDocument.plainText(NoteDocument.parse(data.contentHtml)),
-            locked = false,
-            lockRecordJson = null,
-            updatedAt = System.currentTimeMillis(),
-        )
-        noteRepository.upsert(unlocked)
     }
 
     /** Adds or replaces one credential slot (1.x `setNoteLockSlot`). */
