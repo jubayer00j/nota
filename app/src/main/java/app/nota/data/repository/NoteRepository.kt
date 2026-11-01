@@ -43,7 +43,11 @@ class NoteRepository(
     }
 
     suspend fun search(query: String): List<NoteEntity> {
+        // Tokens are wrapped in double quotes to form FTS phrases, so strip any
+        // embedded quotes first — a raw `"` would unbalance the phrase and make
+        // SQLite reject the MATCH expression outright.
         val match = query.trim().split(Regex("\\s+"))
+            .map { it.replace("\"", "") }
             .filter { it.isNotEmpty() }
             .joinToString(" ") { "\"$it\"*" }
         if (match.isEmpty()) return emptyList()
