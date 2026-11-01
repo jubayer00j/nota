@@ -833,7 +833,7 @@ private fun TableBlock(
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
                     val cols = table.rows.firstOrNull()?.size ?: 1
-                    onChange(TableSegment(table.rows + List(cols) { "" }, table.headerRow))
+                    onChange(TableSegment(table.rows + listOf(List(cols) { "" }), table.headerRow))
                 }) { Text("+ Row") }
                 TextButton(onClick = {
                     onChange(TableSegment(table.rows.map { it + "" }, table.headerRow))
