@@ -1,5 +1,6 @@
 package app.nota.feature.notes
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -60,10 +61,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.domain.SmartFolderKey
+import app.nota.notes.R
 import app.nota.ui.components.NoteCard
 import app.nota.ui.theme.NotaSpacing
 import java.text.SimpleDateFormat
@@ -157,7 +160,22 @@ fun NotesScreen(
                 var sortExpanded by remember { mutableStateOf(false) }
                 var overflowExpanded by remember { mutableStateOf(false) }
                 TopAppBar(
-                    title = { Text("Nota", style = MaterialTheme.typography.headlineMedium) },
+                    title = {
+                        // Brand lockup (Phase 2a rider): the N mark +
+                        // wordmark, replacing the bare text title. The
+                        // mark is a plain vector drawable (API 26-36
+                        // safe); actions/sort menu are untouched, as is
+                        // the selection-mode bar above.
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Image(
+                                painterResource(R.drawable.ic_nota_mark),
+                                contentDescription = null,
+                                modifier = Modifier.size(30.dp),
+                            )
+                            Spacer(Modifier.size(NotaSpacing.sm))
+                            Text("Nota", style = MaterialTheme.typography.headlineMedium)
+                        }
+                    },
                     actions = {
                         IconButton(onClick = onOpenSearch) {
                             Icon(Icons.Filled.Search, contentDescription = "Search")

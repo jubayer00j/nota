@@ -9,7 +9,13 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import app.nota.data.security.AppLockCredential
+import app.nota.data.security.AppLockMethod
+import app.nota.data.security.AppLockSettings
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -90,6 +96,118 @@ class PreferencesRepository(context: Context) {
         safeEdit { this[KEY_START_ON_TODAY] = enabled }
     }
 
+    // ---- App Lock (Phase 2a) -------------------------------------------
+    // Per-method salt+hash slots (like 1.x's separate password/pattern
+    // fields), a biometric convenience flag, the failed-attempt counter
+    // and lockout deadline, and the re-lock timeout. All keys are new in
+    // 2a and cannot collide with the Phase 1a keys above. A credential
+    // slot exists only when BOTH its salt and hash are stored.
+
+    /**
+     * The App Lock slice of the store. Unlike the appearance flows above
+     * (which deliberately degrade to defaults via [safeData]), this flow
+     * FAILS CLOSED: an [IOException] reading the store emits null —
+     * "unknown" — never an empty settings object, because empty would
+     * read as "App Lock off" and open the notes shell on a locked
+     * install (Codex review, PR #7). [AppLockManager] treats null as
+     * stay-locked. Corruption is a different path: the store's
+     * ReplaceFileCorruptionHandler repairs the file before this flow
+     * reads it, so a corrupted file surfaces here as a valid read.
+     */
+    val appLockSettings: Flow<AppLockSettings?> = dataStore.data
+        .map<Preferences, Preferences?> { prefs -> prefs }
+        .catch { exception ->
+            if (exception is IOException) emit(null) else throw exception
+        }
+        .map { prefs ->
+            if (prefs == null) {
+                null
+            } else {
+                fun credential(
+                    saltKey: Preferences.Key<String>,
+                    hashKey: Preferences.Key<String>,
+                ): AppLockCredential? {
+                    val salt = prefs[saltKey]
+                    val hash = prefs[hashKey]
+                    return if (salt != null && hash != null) {
+                        AppLockCredential(salt, hash)
+                    } else {
+                        null
+                    }
+                }
+                AppLockSettings(
+                    password = credential(KEY_LOCK_PASSWORD_SALT, KEY_LOCK_PASSWORD_HASH),
+                    pin = credential(KEY_LOCK_PIN_SALT, KEY_LOCK_PIN_HASH),
+                    pattern = credential(KEY_LOCK_PATTERN_SALT, KEY_LOCK_PATTERN_HASH),
+                    biometricEnabled = prefs[KEY_LOCK_BIOMETRIC] ?: false,
+                    failedAttempts = prefs[KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
+                    lockoutUntil = prefs[KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
+                    lockTimeoutSeconds = prefs[KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
+                )
+            }
+        }
+
+    suspend fun setAppLockCredential(method: AppLockMethod, credential: AppLockCredential) {
+        safeEdit {
+            when (method) {
+                AppLockMethod.PASSWORD -> {
+                    this[KEY_LOCK_PASSWORD_SALT] = credential.salt
+                    this[KEY_LOCK_PASSWORD_HASH] = credential.hash
+                }
+                AppLockMethod.PIN -> {
+                    this[KEY_LOCK_PIN_SALT] = credential.salt
+                    this[KEY_LOCK_PIN_HASH] = credential.hash
+                }
+                AppLockMethod.PATTERN -> {
+                    this[KEY_LOCK_PATTERN_SALT] = credential.salt
+                    this[KEY_LOCK_PATTERN_HASH] = credential.hash
+                }
+            }
+        }
+    }
+
+    suspend fun removeAppLockCredential(method: AppLockMethod) {
+        safeEdit {
+            when (method) {
+                AppLockMethod.PASSWORD -> {
+                    remove(KEY_LOCK_PASSWORD_SALT); remove(KEY_LOCK_PASSWORD_HASH)
+                }
+                AppLockMethod.PIN -> {
+                    remove(KEY_LOCK_PIN_SALT); remove(KEY_LOCK_PIN_HASH)
+                }
+                AppLockMethod.PATTERN -> {
+                    remove(KEY_LOCK_PATTERN_SALT); remove(KEY_LOCK_PATTERN_HASH)
+                }
+            }
+        }
+    }
+
+    /** Removes every credential slot + the biometric flag (App Lock off). */
+    suspend fun clearAppLock() {
+        safeEdit {
+            remove(KEY_LOCK_PASSWORD_SALT); remove(KEY_LOCK_PASSWORD_HASH)
+            remove(KEY_LOCK_PIN_SALT); remove(KEY_LOCK_PIN_HASH)
+            remove(KEY_LOCK_PATTERN_SALT); remove(KEY_LOCK_PATTERN_HASH)
+            remove(KEY_LOCK_BIOMETRIC)
+            remove(KEY_LOCK_FAILED_ATTEMPTS); remove(KEY_LOCK_LOCKOUT_UNTIL)
+        }
+    }
+
+    suspend fun setAppLockBiometricEnabled(enabled: Boolean) {
+        safeEdit { this[KEY_LOCK_BIOMETRIC] = enabled }
+    }
+
+    suspend fun setAppLockFailedAttempts(failedAttempts: Int, lockoutUntil: Long) {
+        safeEdit {
+            this[KEY_LOCK_FAILED_ATTEMPTS] = failedAttempts
+            this[KEY_LOCK_LOCKOUT_UNTIL] = lockoutUntil
+        }
+    }
+
+    suspend fun setAppLockTimeoutSeconds(seconds: Int) {
+        safeEdit { this[KEY_LOCK_TIMEOUT_SECONDS] = seconds }
+    }
+
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
     private val DataStore<Preferences>.safeData: Flow<Preferences>
         get() = data.catch { exception ->
@@ -101,5 +219,15 @@ class PreferencesRepository(context: Context) {
         val KEY_DYNAMIC_COLOUR = booleanPreferencesKey("dynamic_colour")
         val KEY_OLED_BLACK = booleanPreferencesKey("oled_black")
         val KEY_START_ON_TODAY = booleanPreferencesKey("start_on_today")
+        val KEY_LOCK_PASSWORD_SALT = stringPreferencesKey("app_lock_password_salt")
+        val KEY_LOCK_PASSWORD_HASH = stringPreferencesKey("app_lock_password_hash")
+        val KEY_LOCK_PIN_SALT = stringPreferencesKey("app_lock_pin_salt")
+        val KEY_LOCK_PIN_HASH = stringPreferencesKey("app_lock_pin_hash")
+        val KEY_LOCK_PATTERN_SALT = stringPreferencesKey("app_lock_pattern_salt")
+        val KEY_LOCK_PATTERN_HASH = stringPreferencesKey("app_lock_pattern_hash")
+        val KEY_LOCK_BIOMETRIC = booleanPreferencesKey("app_lock_biometric")
+        val KEY_LOCK_FAILED_ATTEMPTS = intPreferencesKey("app_lock_failed_attempts")
+        val KEY_LOCK_LOCKOUT_UNTIL = longPreferencesKey("app_lock_lockout_until")
+        val KEY_LOCK_TIMEOUT_SECONDS = intPreferencesKey("app_lock_timeout_seconds")
     }
 }

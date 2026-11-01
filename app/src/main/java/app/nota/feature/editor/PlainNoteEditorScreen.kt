@@ -196,7 +196,12 @@ fun PlainNoteEditorScreen(
                 onValueChange = { body = it },
                 readOnly = richBody,
                 placeholder = { Text("Write…") },
-                textStyle = NotaEditorBody,
+                // Phase 2a rider 1 audit: pin the body ink to onSurface
+                // explicitly instead of relying on the field's default
+                // text colour merging (same Unspecified-colour hazard as
+                // the rich editor, even though Material3 fields resolve
+                // it to the content colour today).
+                textStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = Color.Transparent,
                     unfocusedContainerColor = Color.Transparent,
