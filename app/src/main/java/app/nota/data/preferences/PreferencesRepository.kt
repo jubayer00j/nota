@@ -1,8 +1,10 @@
 package app.nota.data.preferences
 
 import android.content.Context
+import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -60,11 +62,28 @@ class PreferencesRepository(context: Context) {
     }
 
     suspend fun setDynamicColour(enabled: Boolean) {
-        dataStore.edit { prefs -> prefs[KEY_DYNAMIC_COLOUR] = enabled }
+        safeEdit { this[KEY_DYNAMIC_COLOUR] = enabled }
     }
 
     suspend fun setOledBlack(enabled: Boolean) {
-        dataStore.edit { prefs -> prefs[KEY_OLED_BLACK] = enabled }
+        safeEdit { this[KEY_OLED_BLACK] = enabled }
+    }
+
+    /**
+     * A preference write must never crash the app: if the store file is
+     * unreadable for a plain [IOException] (not corruption, so the
+     * corruption handler above does not repair it), `dataStore.edit`
+     * throws, while reads via [safeData] already degrade to defaults.
+     * Swallow and log the IO failure only — the value simply does not
+     * persist. Any other exception (e.g. a bug in the edit lambda)
+     * still surfaces.
+     */
+    private suspend fun safeEdit(transform: suspend MutablePreferences.() -> Unit) {
+        try {
+            dataStore.edit(transform)
+        } catch (exception: IOException) {
+            Log.w(TAG, "Preference write failed; value will not persist", exception)
+        }
     }
 
     suspend fun setStartOnToday(enabled: Boolean) {
@@ -78,6 +97,7 @@ class PreferencesRepository(context: Context) {
         }
 
     private companion object {
+        const val TAG = "PreferencesRepository"
         val KEY_DYNAMIC_COLOUR = booleanPreferencesKey("dynamic_colour")
         val KEY_OLED_BLACK = booleanPreferencesKey("oled_black")
         val KEY_START_ON_TODAY = booleanPreferencesKey("start_on_today")
