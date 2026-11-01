@@ -22,10 +22,13 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.nota.feature.ask.AskScreen
 import app.nota.feature.designsystem.DesignSystemScreen
+import app.nota.feature.editor.PlainNoteEditorScreen
 import app.nota.feature.notes.NotesScreen
 import app.nota.feature.reminders.RemindersScreen
+import app.nota.feature.search.SearchScreen
 import app.nota.feature.settings.SettingsScreen
 import app.nota.feature.spike.EditorSpikeScreen
+import app.nota.feature.today.TodayScreen
 
 /** The four bottom-navigation destinations (spec §6 — veto-approved defaults). */
 enum class NotaDestination(val route: String, val label: String, val icon: ImageVector) {
@@ -38,22 +41,30 @@ enum class NotaDestination(val route: String, val label: String, val icon: Image
 object NotaRoutes {
     const val DESIGN_SYSTEM = "design-system"
     const val EDITOR_SPIKE = "editor-spike"
+    const val TODAY = "today"
+    const val SEARCH = "search"
+    const val NOTE_EDITOR = "note/{noteId}"
+    fun noteEditor(noteId: String): String = "note/$noteId"
 }
 
 @Composable
-fun NotaNavShell() {
+fun NotaNavShell(startOnToday: Boolean = false) {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
-    val showBottomBar = NotaDestination.entries.any { it.route == currentRoute }
+    // Today has its own route but lives under the Notes bottom-bar item.
+    val showBottomBar = NotaDestination.entries.any { it.route == currentRoute } ||
+        currentRoute == NotaRoutes.TODAY
 
     Scaffold(
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar {
                     NotaDestination.entries.forEach { dest ->
+                        val selected = currentRoute == dest.route ||
+                            (currentRoute == NotaRoutes.TODAY && dest == NotaDestination.Notes)
                         NavigationBarItem(
-                            selected = currentRoute == dest.route,
+                            selected = selected,
                             onClick = {
                                 navController.navigate(dest.route) {
                                     popUpTo(navController.graph.findStartDestination().id) {
@@ -73,10 +84,33 @@ fun NotaNavShell() {
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = NotaDestination.Notes.route,
+            startDestination = if (startOnToday) NotaRoutes.TODAY else NotaDestination.Notes.route,
             modifier = Modifier.padding(innerPadding),
         ) {
-            composable(NotaDestination.Notes.route) { NotesScreen() }
+            composable(NotaDestination.Notes.route) {
+                NotesScreen(
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenSearch = { navController.navigate(NotaRoutes.SEARCH) },
+                )
+            }
+            composable(NotaRoutes.TODAY) {
+                TodayScreen(
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                )
+            }
+            composable(NotaRoutes.SEARCH) {
+                SearchScreen(
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(NotaRoutes.NOTE_EDITOR) { entry ->
+                val noteId = entry.arguments?.getString("noteId").orEmpty()
+                PlainNoteEditorScreen(
+                    noteId = noteId,
+                    onBack = { navController.popBackStack() },
+                )
+            }
             composable(NotaDestination.Ask.route) { AskScreen() }
             composable(NotaDestination.Reminders.route) { RemindersScreen() }
             composable(NotaDestination.Settings.route) {

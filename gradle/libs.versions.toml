@@ -13,6 +13,8 @@ junit = "4.13.2"
 datastore = "1.3.0"
 profileInstaller = "1.4.1"
 baselineProfile = "1.5.0"
+coil = "3.6.3"
+robolectric = "4.16.1"
 
 # Verified 2026-11-01 against Maven Central / Google Maven metadata (latest stable):
 #  Kotlin 2.4.21, AGP 9.5.0 (Gradle 9.8.2), Compose BOM 2026.09.00,
@@ -22,7 +24,10 @@ baselineProfile = "1.5.0"
 # ProfileInstaller 1.4.1, Baseline Profile Gradle plugin 1.5.0.
 # Deferred to later phases (verified stable, not yet dependencies):
 #  WorkManager 2.12.0 (Phase 3/5), OkHttp 5.5.1 + kotlinx-serialization-json 1.12.0
-#  (Phase 3/4), Coil3 3.6.3 (Phase 1), Vico 3.3.1 (Phase 6).
+#  (Phase 3/4), Vico 3.3.1 (Phase 6).
+# Phase 1b additions, verified 2026-11-01: Coil3 coil-compose 3.6.3
+# (coil-kt docs list 3.6.3 as the current release) and Robolectric 4.16.1
+# (latest stable in the 4.16 line) for the Room repository test.
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -46,6 +51,8 @@ koin-androidx-compose = { group = "io.insert-koin", name = "koin-androidx-compos
 koin-android = { group = "io.insert-koin", name = "koin-android", version.ref = "koin" }
 richeditor-compose = { group = "com.mohamedrejeb.richeditor", name = "richeditor-compose", version.ref = "richEditor" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

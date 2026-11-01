@@ -58,6 +58,9 @@ android {
             // The rich-editor state touches a few Android stubs on the JVM;
             // default-returning stubs keep unit tests hermetic.
             isReturnDefaultValues = true
+            // Robolectric (Phase 1b repository test) needs the merged
+            // Android resources on the unit-test classpath.
+            isIncludeAndroidResources = true
         }
     }
 
@@ -110,5 +113,10 @@ dependencies {
     // Phase 0 editor spike (spec §5) — the go/no-go gate for the real editor.
     implementation(libs.richeditor.compose)
 
+    // Phase 1b: note-card cover images from local attachment files only —
+    // coil-compose without any network fetcher module.
+    implementation(libs.coil.compose)
+
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
 }
