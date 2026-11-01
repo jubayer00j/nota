@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
@@ -136,7 +137,7 @@ fun NoteCard(
                         contentDescription = "Locked",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Spacer(Modifier.height(NotaSpacing.xs))
+                    Spacer(Modifier.width(NotaSpacing.xs))
                     Text(
                         text = "Locked",
                         style = MaterialTheme.typography.bodyMedium,

@@ -21,6 +21,7 @@ import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -177,6 +178,8 @@ class RichNoteEditorViewModel(
             nek.fill(0)
             return
         }
+        // A re-unlock replaces any previous session key — zero it first.
+        sessionNek?.fill(0)
         sessionNek = nek
         _lockError.value = null
         val data = noteLockRepository.decryptNoteData(current, nek)
@@ -192,12 +195,15 @@ class RichNoteEditorViewModel(
 
     /** (Re)writes the cacheDir session temps from decrypted bytes, so
      *  image blocks render session-decrypted content through the same
-     *  file seam as stored attachments. */
-    private fun writeSessionTemps(
+     *  file seam as stored attachments. The attachment list is fetched
+     *  fresh — the collected flow may not have emitted yet at unlock
+     *  time, and flags change as saves seal plaintext attachments. */
+    private suspend fun writeSessionTemps(
         noteId: String,
         decrypted: Map<String, ByteArray>,
     ) {
-        for (attachment in _attachments.value) {
+        val attachments = repository.observeAttachmentsForNote(noteId).first()
+        for (attachment in attachments) {
             val bytes = decrypted[attachment.id] ?: continue
             runCatching { attachmentStore.writeSessionBytes(noteId, attachment, bytes) }
         }
