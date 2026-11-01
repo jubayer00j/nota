@@ -37,7 +37,7 @@ val appModule = module {
     single { AttachmentStore(androidContext(), get()) }
     single { TemplateRepository(androidContext()) }
     single { PreferencesRepository(androidContext()) }
-    viewModel { NotesViewModel(get(), get()) }
+    viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get()) }
     viewModel { TemplatesViewModel(get(), get()) }

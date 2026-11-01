@@ -3,6 +3,7 @@ package app.nota.feature.notes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteTagCrossRef
@@ -58,6 +59,7 @@ data class NotesUiState(
 class NotesViewModel(
     private val repository: NoteRepository,
     private val library: LibraryRepository,
+    private val attachmentStore: AttachmentStore,
 ) : ViewModel() {
 
     private val filterFlow = MutableStateFlow<NotesFilter>(NotesFilter.All)
@@ -104,7 +106,19 @@ class NotesViewModel(
                     tagNames = noteTagIds.mapNotNull { tagsById[it]?.name }.sorted(),
                     tagIds = noteTagIds,
                     attachmentCount = noteAttachments.size,
-                    coverImagePath = noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }?.localPath,
+                    coverImagePath = noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }
+                        ?.let { cover ->
+                            // Attachment localPaths are relative to filesDir
+                            // (attachments/<noteId>/<file>); Coil cannot load a
+                            // bare relative string, so resolve it to the absolute
+                            // file path through the store (Codex fix G2). Paths
+                            // already absolute pass through unchanged.
+                            if (cover.localPath.startsWith("/")) {
+                                cover.localPath
+                            } else {
+                                attachmentStore.fileFor(cover).absolutePath
+                            }
+                        },
                 )
             }
             val now = System.currentTimeMillis()
