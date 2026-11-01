@@ -64,11 +64,15 @@ interface NoteDao {
     @Delete
     suspend fun delete(note: NoteEntity)
 
+    // Phase 2b: locked notes DO appear in search — their FTS row carries
+    // the title only (plainText is empty under the seal, see
+    // NoteRepository.upsert), so a body word can never match them, while a
+    // title word finds the locked placeholder, exactly like 1.x.
     @Query(
         """
         SELECT n.* FROM notes n
         JOIN notes_fts f ON f.noteId = n.id
-        WHERE notes_fts MATCH :query AND n.trashedAt IS NULL AND n.archived = 0 AND n.locked = 0
+        WHERE notes_fts MATCH :query AND n.trashedAt IS NULL AND n.archived = 0
         ORDER BY n.updatedAt DESC
         """,
     )

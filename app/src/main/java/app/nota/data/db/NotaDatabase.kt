@@ -6,8 +6,9 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 /**
- * Nota's Room database — schema v3 (Phase 1b added saved_searches, Phase 1c
- * adds note_links for [[backlinks]]; migrations carry installs forward).
+ * Nota's Room database — schema v4 (Phase 1b added saved_searches, Phase 1c
+ * note_links for [[backlinks]], Phase 2b the per-note lock columns;
+ * migrations carry installs forward).
  *
  * Per-account isolation mirrors Noma 1.x (spec §3): one database file per account,
  * named `nota_guest` / `nota_<uid>`.
@@ -25,7 +26,7 @@ import androidx.room.RoomDatabase
         SavedSearchEntity::class,
         NoteLinkEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class NotaDatabase : RoomDatabase() {
@@ -50,6 +51,6 @@ abstract class NotaDatabase : RoomDatabase() {
                 context.applicationContext,
                 NotaDatabase::class.java,
                 databaseName(accountId),
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
     }
 }

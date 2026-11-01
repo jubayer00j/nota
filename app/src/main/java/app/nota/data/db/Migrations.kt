@@ -21,6 +21,18 @@ val MIGRATION_1_2: Migration = object : Migration(1, 2) {
  * statement matches NoteLinkEntity (columns, composite PK, both CASCADE
  * foreign keys, targetId index) so schema validation passes.
  */
+/**
+ * Phase 2b (per-note lock) adds the lock-record column to notes and the
+ * encrypted flag to attachments. Both are plain ADD COLUMNs matching the
+ * entity fields appended in the same order, so schema validation passes.
+ */
+val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `notes` ADD COLUMN `lockRecordJson` TEXT")
+        db.execSQL("ALTER TABLE `attachments` ADD COLUMN `encrypted` INTEGER NOT NULL DEFAULT 0")
+    }
+}
+
 val MIGRATION_2_3: Migration = object : Migration(2, 3) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL(
