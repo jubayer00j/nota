@@ -107,6 +107,17 @@ fun NotesScreen(
         }
     }
 
+    // Permanent delete CASCADEs away tags/attachments/reminders/versions,
+    // so an Undo that re-upserts the bare note row would resurrect a
+    // stripped note and pretend the data came back. No Undo here
+    // (re-review fix) — the message says plainly that it is permanent.
+    fun swipeNoUndo(message: String, action: () -> Unit) {
+        action()
+        scope.launch {
+            snackbarHostState.showSnackbar(message = message)
+        }
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
@@ -280,7 +291,7 @@ fun NotesScreen(
                                     }
                                     SwipeToDismissBoxValue.EndToStart -> {
                                         if (inTrash) {
-                                            swipeWithUndo(note, "Note deleted") { viewModel.deletePermanently(note) }
+                                            swipeNoUndo("Note deleted permanently") { viewModel.deletePermanently(note) }
                                         } else {
                                             swipeWithUndo(note, "Note moved to trash") { viewModel.trash(note) }
                                         }
