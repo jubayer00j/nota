@@ -113,7 +113,7 @@ fun NoteMetaRow(
                     Icon(
                         Icons.Filled.Close,
                         contentDescription = "Remove tag $tag",
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(20.dp)
                             .clickable { onTagsChanged(tags - tag) },
                     )
                 },

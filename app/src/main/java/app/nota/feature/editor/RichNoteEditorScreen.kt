@@ -496,7 +496,13 @@ fun RichNoteEditorScreen(
                                 val ui = segments.last()
                                 val state = richStateFor(ui)
                                 activeSegmentId = ui.id
-                                trailingFocusRequester.requestFocus()
+                                // The trailing editor is composed next to
+                                // this item, but if it has just scrolled
+                                // out of the LazyColumn window the
+                                // requester may be unattached — never
+                                // crash the tap; the editor itself (56dp
+                                // min height) remains directly tappable.
+                                runCatching { trailingFocusRequester.requestFocus() }
                                 state.selection =
                                     TextRange(state.annotatedString.text.length)
                             },
