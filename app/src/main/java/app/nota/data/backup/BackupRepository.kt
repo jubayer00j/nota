@@ -370,6 +370,7 @@ class BackupRepository(
                 }
             }
 
+println("DIAG afterTxn files=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             // ---- Tombstones: merge only, NOT stored (Phase 3 store).
             if (mode == RestoreMode.MERGE && handle.tombstones.isNotEmpty()) {
                 counts += MergeCounts(deleted = applyTombstones(handle.tombstones))
@@ -388,7 +389,9 @@ class BackupRepository(
                 // from templates yet (documented in the PR).
             }
 
+println("DIAG afterTemplates files=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             rebuildFtsAndLinks()
+            println("DIAG afterRebuild files=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             println("DIAG filesBefore=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList())
             println("DIAG rowsBefore=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
             val rec = attachmentStore.reconcile { attachmentDao.getAll() }
