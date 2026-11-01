@@ -281,13 +281,21 @@ class BackupRepository(
             db.withTransaction {
                 if (mode == RestoreMode.REPLACE) {
                     linkDao.deleteAll()
+                    println("DIAG del-links attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     ftsDao.deleteAll()
+                    println("DIAG del-fts attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     tagDao.deleteAllCrossRefs()
+                    println("DIAG del-xrefs attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     reminderDao.deleteAll()
+                    println("DIAG del-reminders attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     attachmentDao.deleteAll()
+                    println("DIAG del-attachments attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     noteDao.deleteAll()
+                    println("DIAG del-notes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     tagDao.deleteAllTags()
+                    println("DIAG del-tags attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     folderDao.deleteAll()
+                    println("DIAG del-folders attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
 
 println("DIAG txnAfterDeletes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     for (folder in handle.folders) folderDao.upsert(folder.toEntity())
