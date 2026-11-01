@@ -390,7 +390,15 @@ class BackupRepository(
             }
 
             rebuildFtsAndLinks()
-            attachmentStore.reconcile { attachmentDao.getAll() }
+            println("DIAG written=" + writtenAttachments.map { it.id + "@" + it.localPath })
+            println("DIAG rowsBefore=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
+            println(
+                "DIAG filesBefore=" + File(context.filesDir, "attachments").walkTopDown()
+                    .filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList(),
+            )
+            val rec = attachmentStore.reconcile { attachmentDao.getAll() }
+            println("DIAG reconcile=" + rec)
+            println("DIAG rowsAfter=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
             counts
         }
 
