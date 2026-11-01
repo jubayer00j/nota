@@ -23,7 +23,7 @@ import androidx.compose.ui.Modifier
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.ui.theme.NotaSpacing
 import kotlinx.coroutines.launch
-import org.koin.androidx.compose.koinInject
+import org.koin.compose.koinInject
 
 /**
  * Settings placeholder. The 8 parity categories (Sync & backup, Security,
