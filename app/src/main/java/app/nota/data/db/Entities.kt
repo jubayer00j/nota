@@ -3,7 +3,7 @@ package app.nota.data.db
 import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
-import androidx.room.Fts5
+import androidx.room.Fts4
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
@@ -154,11 +154,15 @@ data class NoteVersionEntity(
 )
 
 /**
- * FTS5 keyword index over note title + plain text. Standalone (not content-linked)
+ * FTS keyword index over note title + plain text. Standalone (not content-linked)
  * so the repository controls sync explicitly after every note write; [noteId] is the
  * join key back to [NoteEntity]. Rowid is auto-generated.
+ *
+ * Room 2.8 removed the `@Fts5` annotation (verified against room-common 2.8.5 —
+ * only Fts3/Fts4 remain); `@Fts4` is the supported FTS entity API and the MATCH
+ * query surface Nota uses is identical.
  */
-@Fts5
+@Fts4
 @Entity(tableName = "notes_fts")
 data class NoteFtsEntity(
     @PrimaryKey @ColumnInfo(name = "rowid") val rowid: Int = 0,
