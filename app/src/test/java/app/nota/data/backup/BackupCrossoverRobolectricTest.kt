@@ -225,12 +225,16 @@ class BackupCrossoverRobolectricTest {
         // Split read/apply so a failure names its stage.
         val handle = stack.backup.readBackup(fixtureZip(), null)
         assertEquals(
-            "reader staged attachments: " + handle.attachments.map { it.meta.id + ":" + it.meta.noteId + ":" + it.stagedFile.length() },
-            2, handle.attachments.size,
+            "reader staged attachments: " + handle.attachments.map {
+                it.meta.id + "|" + it.meta.noteId + "|" + it.meta.name + "|enc=" + it.meta.encrypted +
+                    "|raw=" + it.meta.rawEntrySuffix + "|len=" + it.stagedFile.length()
+            },
+            setOf("note-plain-1", "note-locked-1"),
+            handle.attachments.map { it.meta.noteId }.toSet(),
         )
         val counts = stack.backup.applyBackup(handle, RestoreMode.REPLACE)
         handle.close()
-        assertTrue(counts.added > 0)
+        assertEquals("counts (folders+tags+notes+attachments+reminders)", 7, counts.added)
         val filesDir = stack.context.filesDir
         val walked = File(filesDir, "attachments").walkTopDown().filter { it.isFile }
             .map { it.relativeTo(filesDir).path + "(" + it.length() + ")" }.toList()
