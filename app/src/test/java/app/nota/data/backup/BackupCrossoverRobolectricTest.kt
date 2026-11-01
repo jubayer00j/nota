@@ -235,14 +235,7 @@ class BackupCrossoverRobolectricTest {
         val counts = stack.backup.applyBackup(handle, RestoreMode.REPLACE)
         handle.close()
         assertEquals("counts (folders+tags+notes+attachments+reminders)", 7, counts.added)
-        val filesDir = stack.context.filesDir
-        val walked = File(filesDir, "attachments").walkTopDown().filter { it.isFile }
-            .map { it.relativeTo(filesDir).path + "(" + it.length() + ")" }.toList()
-        assertEquals(
-            "db attachments after apply: " + stack.db.attachmentDao().getAll().map { it.id + "@" + it.localPath } +
-                " files: " + walked,
-            2, stack.db.attachmentDao().getAll().size,
-        )
+        assertEquals(2, stack.db.attachmentDao().getAll().size)
 
         // --- Library wiring.
         val db = stack.db

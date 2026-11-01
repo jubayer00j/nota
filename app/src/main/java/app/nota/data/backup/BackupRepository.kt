@@ -1,7 +1,6 @@
 package app.nota.data.backup
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import androidx.room.withTransaction
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
@@ -266,7 +265,6 @@ class BackupRepository(
             if (mode == RestoreMode.REPLACE) {
                 // Wipe ALL attachment files before any new file lands and
                 // before rows are cleared, so no orphan survives.
-                println("DIAG wipe at filesDir=" + context.filesDir.absolutePath)
                 File(context.filesDir, "attachments").deleteRecursively()
             }
             val writtenAttachments = mutableListOf<AttachmentEntity>()
@@ -372,7 +370,6 @@ class BackupRepository(
                 }
             }
 
-            println("DIAG afterTxn imgExists=" + File(context.filesDir, "attachments/note-plain-1/photo.png").exists())
             // ---- Tombstones: merge only, NOT stored (Phase 3 store).
             if (mode == RestoreMode.MERGE && handle.tombstones.isNotEmpty()) {
                 counts += MergeCounts(deleted = applyTombstones(handle.tombstones))
@@ -391,18 +388,8 @@ class BackupRepository(
                 // from templates yet (documented in the PR).
             }
 
-            println("DIAG afterTemplates imgExists=" + File(context.filesDir, "attachments/note-plain-1/photo.png").exists())
             rebuildFtsAndLinks()
-            println("DIAG afterRebuild imgExists=" + File(context.filesDir, "attachments/note-plain-1/photo.png").exists())
-            println("DIAG written=" + writtenAttachments.map { it.id + "@" + it.localPath })
-            println("DIAG rowsBefore=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
-            println(
-                "DIAG filesBefore=" + File(context.filesDir, "attachments").walkTopDown()
-                    .filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList(),
-            )
-            val rec = attachmentStore.reconcile { attachmentDao.getAll() }
-            println("DIAG reconcile=" + rec)
-            println("DIAG rowsAfter=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
+            attachmentStore.reconcile { attachmentDao.getAll() }
             counts
         }
 
@@ -422,14 +409,12 @@ class BackupRepository(
         staged.stagedFile.inputStream().buffered().use { input ->
             target.outputStream().buffered().use { out -> input.copyTo(out) }
         }
-        println("DIAG write id=" + meta.id + " target=" + target.absolutePath + " exists=" + target.exists() + " len=" + target.length() + " filesDir=" + context.filesDir.absolutePath)
         val size = target.length()
         val (width, height) = if (!meta.encrypted && meta.mimeType.startsWith("image/")) {
-            imageBounds(target)
+            ImageBounds.read(staged.stagedFile)
         } else {
             null to null
         }
-        println("DIAG writeDone id=" + meta.id + " exists=" + target.exists())
         return AttachmentEntity(
             id = meta.id,
             noteId = meta.noteId,
@@ -444,17 +429,6 @@ class BackupRepository(
         )
     }
 
-    private fun imageBounds(file: File): Pair<Int?, Int?> {
-        return try {
-            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(file.absolutePath, options)
-            val w = options.outWidth.takeIf { it > 0 }
-            val h = options.outHeight.takeIf { it > 0 }
-            w to h
-        } catch (e: Exception) {
-            null to null
-        }
-    }
 
     private suspend fun insertTagsReplace(tags: List<BxTag>, remap: MutableMap<String, String>) {
         val seenNames = HashMap<String, String>()
