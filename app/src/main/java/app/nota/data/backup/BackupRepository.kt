@@ -289,6 +289,7 @@ class BackupRepository(
                     tagDao.deleteAllTags()
                     folderDao.deleteAll()
 
+println("DIAG txnAfterDeletes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     for (folder in handle.folders) folderDao.upsert(folder.toEntity())
                     insertTagsReplace(handle.tags, tagIdRemap)
                     val folderIds = handle.folders.map { it.id }.toSet()
@@ -298,7 +299,9 @@ class BackupRepository(
                     for (note in payloadNotes) {
                         insertCrossRefs(note, tagIdRemap, handle.tags.map { it.id }.toSet())
                     }
+println("DIAG txnAfterNotes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     for (att in writtenAttachments) attachmentDao.upsert(att)
+                    println("DIAG txnAfterAttachments attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     val deduped = dedupeReminders(handle.reminders)
                     for (reminder in deduped) {
                         if (reminder.noteId in payloadNoteIds) reminderDao.upsert(reminder.toEntity())
