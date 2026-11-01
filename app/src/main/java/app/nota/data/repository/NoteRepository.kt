@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.Flow
 
 /**
  * Notes repository — the single write path for notes in Phase 0.
- * Every upsert/delete keeps the FTS5 index in sync inside the same transaction,
+ * Every upsert/delete keeps the FTS4 index in sync inside the same transaction,
  * the discipline 1.x learned with its search index (stale vectors must never
  * surface notes that no longer match).
  */

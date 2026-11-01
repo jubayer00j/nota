@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import app.nota.ui.components.NoteCard
 import app.nota.ui.theme.NotaSpacing
 import org.koin.androidx.compose.koinViewModel
@@ -64,6 +65,9 @@ private val PreviewNotes = listOf(
     ),
 )
 
+/** Bottom clearance so list content scrolls clear of the 56dp FAB. */
+private val FAB_CLEARANCE = 88.dp
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NotesScreen(viewModel: NotesViewModel = koinViewModel()) {
@@ -80,9 +84,22 @@ fun NotesScreen(viewModel: NotesViewModel = koinViewModel()) {
             }
         },
     ) { padding ->
+        // Inset discipline (Phase 1a): this inner Scaffold's `padding`
+        // (its own top bar) is consumed here, and the shell's bottom-bar
+        // inset is already consumed by the NavHost in NotaNavShell, so
+        // the list area lives entirely above the bottom NavigationBar.
+        // The remaining trap is this screen's own FAB, which floats over
+        // the list: the bottom content padding clears it — 56dp FAB +
+        // 16dp margin below it + 16dp breathing room above it — so the
+        // last card can always scroll fully clear of the FAB.
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(NotaSpacing.md),
+            contentPadding = PaddingValues(
+                start = NotaSpacing.md,
+                end = NotaSpacing.md,
+                top = NotaSpacing.md,
+                bottom = FAB_CLEARANCE,
+            ),
             verticalArrangement = Arrangement.spacedBy(NotaSpacing.md),
         ) {
             item {
