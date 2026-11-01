@@ -259,7 +259,11 @@ class BackupRepository(
                     RestoreMode.MERGE -> existing == null ||
                         (staged.meta.updatedAt ?: staged.meta.createdAt) > existing.createdAt
                 }
-                AttPlan(staged, wins && staged.meta.noteId in survivingNoteIds)
+                // A crafted archive can carry path-traversal noteIds
+                // ("../../…"): such attachments are skipped outright —
+                // their payload must never be written outside the
+                // attachment root (Codex review, P1).
+                AttPlan(staged, wins && staged.meta.noteId in survivingNoteIds && isSafeId(staged.meta.noteId))
             }
 
             if (mode == RestoreMode.REPLACE) {
@@ -444,6 +448,13 @@ class BackupRepository(
             context.filesDir,
             "attachments/${staged.meta.noteId}/${storedNameFor(staged.meta)}",
         )
+        // Defence in depth (Codex P1): the canonical target must stay
+        // under the attachment root, whatever the archive claimed.
+        val root = File(context.filesDir, "attachments").canonicalFile
+        val canonicalTarget = target.canonicalFile
+        check(canonicalTarget.path.startsWith(root.path + File.separator)) {
+            "Attachment path escapes the attachment root"
+        }
         target.parentFile?.mkdirs()
         staged.stagedFile.inputStream().buffered().use { input ->
             target.outputStream().buffered().use { out -> input.copyTo(out) }
@@ -585,8 +596,18 @@ class BackupRepository(
         fun wordCount(plainText: String): Int =
             plainText.split(Regex("\\s+")).count { it.isNotEmpty() }
 
-        fun sanitiseStoredName(name: String): String =
-            name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120).ifBlank { "file" }
+        fun sanitiseStoredName(name: String): String {
+            val cleaned = name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(120)
+            // "." / ".." would traverse even after character filtering.
+            return if (cleaned.isBlank() || cleaned == "." || cleaned == "..") "file" else cleaned
+        }
+
+        /** Backup-carried IDs become filesystem path segments (attachment
+         *  files live under attachments/<noteId>/): only the ID alphabet
+         *  Nota/1.x actually mint (UUIDs, slugs) is accepted. */
+        fun isSafeId(id: String): Boolean =
+            id.isNotEmpty() && id.length <= 128 && !id.contains("..") &&
+                id.all { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
     }
 }
 

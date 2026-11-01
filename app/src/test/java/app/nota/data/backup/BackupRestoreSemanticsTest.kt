@@ -284,6 +284,72 @@ class BackupRestoreSemanticsTest {
         assertArrayEquals(pattern, stack2.store.fileFor(restored).readBytes())
     }
 
+    // ------------------------------------------- Codex review regressions
+
+    @Test
+    fun restore_attachmentWithTraversalNoteId_isSkipped() = runBlocking {
+        val stack = newStack()
+        val note = noteJson("good-note", "Good", 1000)
+        val evilAttJson = """{"id": "att-evil", "noteId": "../../evil", "name": "evil.txt", "mimeType": "text/plain", "size": 4, "createdAt": 1000, "data": "data:text/plain;base64,ZXZpbA=="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "settings.json" to "null",
+                "sync.json" to """{"deviceId": null, "syncedAt": "2024-10-26T00:00:00.000Z", "tombstones": []}""",
+                "notes/good-note.json" to note,
+                "attachments/att-evil.json" to evilAttJson,
+            ),
+        )
+        stack.backup.restore(zip, null, RestoreMode.REPLACE)
+        assertTrue(stack.db.attachmentDao().getAll().isEmpty())
+        // Nothing was written outside the attachments root.
+        val filesDir = stack.context.filesDir
+        assertTrue(!java.io.File(filesDir.parentFile, "evil").exists())
+        assertTrue(!java.io.File(filesDir, "evil").exists())
+    }
+
+    @Test
+    fun nomaEnc_absurdIterationCount_rejectedBeforeDeriving() = runBlocking {
+        val stack = newStack()
+        val header = """{"v":1,"salt":"YmFja3VwLXNhbHQtMTIzNA==","iterations":2000000000,"wrappedKey":"AAAA"}"""
+        val headerBytes = header.toByteArray(Charsets.UTF_8)
+        val file = File.createTempFile("crafted", ".bin")
+        file.outputStream().buffered().use { out ->
+            out.write("NOMAENC1".toByteArray(Charsets.US_ASCII))
+            out.write(
+                byteArrayOf(
+                    (headerBytes.size ushr 24).toByte(), (headerBytes.size ushr 16).toByte(),
+                    (headerBytes.size ushr 8).toByte(), headerBytes.size.toByte(),
+                ),
+            )
+            out.write(headerBytes)
+            out.write("""{"nomaEnc":1,"iv":"AAAAAAAAAAAAAAAAAAAAAA==","ct":"AAAA"}""".toByteArray(Charsets.US_ASCII))
+        }
+        try {
+            stack.backup.readBackup(file, "any passphrase")
+            fail("expected BackupUnlockError")
+        } catch (e: BackupUnlockError) {
+            assertTrue(e.message!!.contains("damaged"))
+        }
+    }
+
+    @Test
+    fun restore_lockMemberFoundStructurally_notInsideTitle() = runBlocking {
+        val stack = newStack()
+        val realLock = """{"v":1,"slots":{},"biometric":false,"failedAttempts":0,"lockoutUntil":null,"lockedAt":1730000000000}"""
+        // The title itself contains a fake `"lock": {...}` fragment; the
+        // real member follows later in the object.
+        val noteJson = """{"id": "note-tricky", "title": "see \"lock\": {\"v\": 9} here", "content": "${"{\"nomaEnc\":1,\"iv\":\"oKGio6Slpqeoqaqr\",\"ct\":\"2mhCZSCnbtBCA+6rcw+yu1DbNmL+035D7DA3Y3Mx+tYXjHwbXse5ATqs\"}".replace("\\", "\\\\").replace("\"", "\\\"")}", "contentFormat": "tiptap-html", "createdAt": 1000, "updatedAt": 1000, "folderId": null, "tagIds": [], "pinned": false, "favorite": false, "archived": false, "deleted": false, "deletedAt": null, "reminderAt": null, "wordCount": 0, "lock": $realLock}"""
+        val zip = payloadZip(listOf(noteJson))
+        stack.backup.restore(zip, null, RestoreMode.REPLACE)
+        val stored = stack.db.noteDao().getById("note-tricky")!!
+        assertTrue(stored.locked)
+        assertEquals(realLock, stored.lockRecordJson)
+    }
+
     companion object {
         private const val PRECOMPUTED_NOMAENC1 =
         "Tk9NQUVOQzEAAACdeyJ2IjoxLCJzYWx0IjoiWW1GamEzVndMWE5oYkhRdE1USXpOQT09IiwiaXRl" +

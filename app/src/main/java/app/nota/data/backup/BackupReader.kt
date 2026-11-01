@@ -391,45 +391,83 @@ class BackupReader(private val workDir: File) {
     }
 
     /**
-     * Extracts the raw JSON substring of a top-level object/array value
-     * (the `lock` record) VERBATIM — re-serialising it through org.json
-     * would reorder fields and break the byte-parity lock records need.
-     * String-aware balanced scan from the value's first `{`.
+     * Extracts the raw JSON substring of the TOP-LEVEL `lock` member
+     * VERBATIM — re-serialising it through org.json would reorder fields
+     * and break the byte-parity lock records need. The scan is structural
+     * (Codex review): it walks the top-level object field by field,
+     * skipping string values with full escape awareness, so the text
+     * `"lock": {...}` appearing inside a title or body can never be
+     * mistaken for the member.
      */
     private fun extractRawValue(text: String, key: String): String? {
-        val keyToken = "\"$key\""
-        var searchFrom = 0
-        while (true) {
-            val keyAt = text.indexOf(keyToken, searchFrom)
-            if (keyAt < 0) return null
-            var i = keyAt + keyToken.length
-            while (i < text.length && text[i].isWhitespace()) i++
-            if (i >= text.length || text[i] != ':') { searchFrom = keyAt + 1; continue }
-            i++
-            while (i < text.length && text[i].isWhitespace()) i++
-            if (i >= text.length || text[i] != '{') return null
-            var depth = 0
-            var inString = false
+        var i = 0
+        fun skipWs() { while (i < text.length && text[i].isWhitespace()) i++ }
+        // Index just past the JSON string starting at text[i] == '"', or -1.
+        fun skipString(from: Int): Int {
+            var j = from + 1
             var escaped = false
-            val start = i
-            while (i < text.length) {
-                val c = text[i]
-                if (inString) {
-                    if (escaped) escaped = false
-                    else if (c == '\\') escaped = true
-                    else if (c == '"') inString = false
-                } else {
-                    when (c) {
-                        '"' -> inString = true
-                        '{', '[' -> depth++
-                        '}', ']' -> {
-                            depth--
-                            if (depth == 0) return text.substring(start, i + 1)
-                        }
-                    }
-                }
-                i++
+            while (j < text.length) {
+                val c = text[j]
+                if (escaped) escaped = false
+                else if (c == '\\') escaped = true
+                else if (c == '"') return j + 1
+                j++
             }
+            return -1
+        }
+        // Index just past the balanced value starting at text[i], or -1.
+        fun skipValue(from: Int): Int {
+            if (from >= text.length) return -1
+            return when (text[from]) {
+                '"' -> skipString(from)
+                '{', '[' -> {
+                    var depth = 0
+                    var j = from
+                    while (j < text.length) {
+                        when (text[j]) {
+                            '"' -> { j = skipString(j); if (j < 0) return -1; continue }
+                            '{', '[' -> depth++
+                            '}', ']' -> { depth--; if (depth == 0) return j + 1 }
+                        }
+                        j++
+                    }
+                    -1
+                }
+                else -> {
+                    var j = from
+                    while (j < text.length && text[j] != ',' && text[j] != '}') j++
+                    j
+                }
+            }
+        }
+        skipWs()
+        if (i >= text.length || text[i] != '{') return null
+        i++
+        while (true) {
+            skipWs()
+            if (i >= text.length || text[i] == '}') return null
+            if (text[i] != '"') return null
+            val keyEnd = skipString(i)
+            if (keyEnd < 0) return null
+            val memberName = try {
+                org.json.JSONObject("{\"k\":" + text.substring(i, keyEnd) + "}").getString("k")
+            } catch (e: Exception) {
+                return null
+            }
+            i = keyEnd
+            skipWs()
+            if (i >= text.length || text[i] != ':') return null
+            i++
+            skipWs()
+            if (i >= text.length) return null
+            val valueEnd = skipValue(i)
+            if (valueEnd < 0) return null
+            if (memberName == key) {
+                return if (text[i] == '{' || text[i] == '[') text.substring(i, valueEnd) else null
+            }
+            i = valueEnd
+            skipWs()
+            if (i < text.length && text[i] == ',') { i++; continue }
             return null
         }
     }

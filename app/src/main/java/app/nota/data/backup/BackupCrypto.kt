@@ -175,6 +175,15 @@ object BackupCrypto {
         } catch (e: Exception) {
             throw BackupUnlockError(DAMAGED)
         }
+        // Bound the KDF parameters BEFORE deriving anything (Codex
+        // review): a crafted header could otherwise name an iteration
+        // count near Int.MAX_VALUE and tie up the worker for hours.
+        // Legitimate archives always carry the 600k password slot.
+        if (header.iterations !in 1..2_000_000 ||
+            header.salt.length > 128 || header.wrappedKey.length > 512
+        ) {
+            throw BackupUnlockError(DAMAGED)
+        }
         if (passphrase == null) throw BackupKeyNeededError(KEY_NEEDED)
         val bmk = unwrapBmk(header, passphrase) ?: throw BackupUnlockError(INCORRECT)
 
