@@ -74,7 +74,7 @@ class NoteDocumentTest {
         val segments = NoteDocument.parse(html)
         val table = segments.single() as TableSegment
         assertEquals(TableCellSpan(colSpan = 2), table.cellSpans[0][0])
-        assertEquals(TableCellSpan(rowSpan = 2), table.cellSpans[0][2])
+        assertEquals(TableCellSpan(rowSpan = 2), table.cellSpans[0][1])
         assertEquals(TableCellSpan(), table.cellSpans[1][0])
         assertEquals(TableCellSpan(colSpan = 3), table.cellSpans[2][0])
         val once = NoteDocument.serialize(segments)
