@@ -137,6 +137,65 @@ class AttachmentStore(
         entity
     }
 
+    // --- Per-note lock support (Phase 2b) --------------------------------
+    // All file mutation for sealing/unsealing goes through these two
+    // primitives so it stays under the same [fileMutex] discipline as
+    // imports/deletes/reconcile (the F9 race): the lock repository never
+    // touches attachment files directly.
+
+    /** Reads an attachment's current on-disk bytes (raw payload, or the
+     *  envelope text bytes while the owning note is locked). */
+    suspend fun readBytes(attachment: AttachmentEntity): ByteArray = fileMutex.withLock {
+        withContext(Dispatchers.IO) { fileFor(attachment).readBytes() }
+    }
+
+    /**
+     * Overwrites an attachment's file with [newBytes] and updates its row
+     * (size + [AttachmentEntity.encrypted] flag) in the same locked step.
+     * Used to seal (envelope in, encrypted=true) and unseal (payload back,
+     * encrypted=false) without any window where file and row disagree
+     * about the payload form.
+     */
+    suspend fun rewriteBytes(
+        attachment: AttachmentEntity,
+        newBytes: ByteArray,
+        encrypted: Boolean,
+    ): AttachmentEntity = fileMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val file = fileFor(attachment)
+            file.parentFile?.mkdirs()
+            file.writeBytes(newBytes)
+            val updated = attachment.copy(sizeBytes = newBytes.size.toLong(), encrypted = encrypted)
+            attachmentDao.upsert(updated)
+            updated
+        }
+    }
+
+    // --- Editor session temp files (Phase 2b) -----------------------------
+    // While a locked note is open, its decrypted attachment bytes live
+    // ONLY here (cacheDir — never filesDir, never Room), keyed per note,
+    // and are wiped when the session ends. The editor resolves them
+    // through the same fileFor-style seam it uses for stored files.
+
+    private fun sessionDir(noteId: String): File =
+        File(File(context.cacheDir, "nota-session"), noteId)
+
+    fun sessionFile(noteId: String, attachment: AttachmentEntity): File =
+        File(sessionDir(noteId), attachment.id + ".bin")
+
+    /** Writes decrypted session bytes for [attachment]; returns the file. */
+    fun writeSessionBytes(noteId: String, attachment: AttachmentEntity, bytes: ByteArray): File {
+        val file = sessionFile(noteId, attachment)
+        file.parentFile?.mkdirs()
+        file.writeBytes(bytes)
+        return file
+    }
+
+    /** Deletes every session temp file for [noteId] (session end). */
+    fun clearSession(noteId: String) {
+        sessionDir(noteId).deleteRecursively()
+    }
+
     suspend fun delete(attachment: AttachmentEntity): Unit = fileMutex.withLock {
         deleteLocked(attachment)
     }
