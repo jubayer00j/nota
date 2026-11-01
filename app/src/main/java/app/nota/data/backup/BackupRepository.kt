@@ -389,7 +389,11 @@ class BackupRepository(
             }
 
             rebuildFtsAndLinks()
-            attachmentStore.reconcile { attachmentDao.getAll() }
+            println("DIAG filesBefore=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList())
+            println("DIAG rowsBefore=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
+            val rec = attachmentStore.reconcile { attachmentDao.getAll() }
+            println("DIAG reconcile=" + rec)
+            println("DIAG filesAfter=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList())
             counts
         }
 
@@ -415,6 +419,7 @@ class BackupRepository(
         } else {
             null to null
         }
+        println("DIAG writeDone id=" + meta.id + " targetExists=" + target.exists() + " stagedExists=" + staged.stagedFile.exists())
         return AttachmentEntity(
             id = meta.id,
             noteId = meta.noteId,
