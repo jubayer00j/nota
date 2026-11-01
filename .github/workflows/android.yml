@@ -85,11 +85,15 @@ jobs:
 
       - name: Build signed release APK and bundle
         env:
-          NOTA_RELEASE_STORE_FILE: /home/runner/.android/release.keystore
-          NOTA_RELEASE_STORE_PASSWORD: <redacted>
-          NOTA_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          NOTA_RELEASE_KEY_PASSWORD: <redacted>
-        run: ./gradlew assembleRelease bundleRelease
+          RELEASE_KEYSTORE_PASSWORD: <redacted>
+          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: <redacted>
+        run: |
+          ./gradlew assembleRelease bundleRelease \
+            -Pandroid.injected.signing.store.file=$HOME/.android/release.keystore \
+            -Pandroid.injected.signing.store.password=<redacted> \
+            -Pandroid.injected.signing.key.alias=$RELEASE_KEY_ALIAS \
+            -Pandroid.injected.signing.key.password=<redacted>
 
       - name: Print release APK signing certificate
         run: |

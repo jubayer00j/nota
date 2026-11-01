@@ -8,26 +8,14 @@ plugins {
     alias(libs.plugins.kotlin.kapt)
 }
 
-// Release signing comes from the environment in CI (GitHub Actions secrets):
-//   NOTA_RELEASE_STORE_FILE / NOTA_RELEASE_STORE_PASSWORD /
-//   NOTA_RELEASE_KEY_ALIAS  / NOTA_RELEASE_KEY_PASSWORD
-// Locally, drop a gitignored keystore.properties in the repo root with the same
-// keys (storeFile/storePassword/keyAlias/keyPassword). With neither present the
-// release build stays unsigned so day-to-day local builds always work.
-val ciStoreFile = System.getenv("NOTA_RELEASE_STORE_FILE")
-val localProps = Properties().apply {
-    val f = rootProject.file("keystore.properties")
-    if (f.exists()) FileInputStream(f).use { load(it) }
-}
-val releaseStoreFile = ciStoreFile ?: localProps.getProperty("storeFile")
-val releaseStorePassword = System.getenv("NOTA_RELEASE_STORE_PASSWORD")
-    ?: localProps.getProperty("storePassword")
-val releaseKeyAlias = System.getenv("NOTA_RELEASE_KEY_ALIAS")
-    ?: localProps.getProperty("keyAlias")
-val releaseKeyPassword = System.getenv("NOTA_RELEASE_KEY_PASSWORD")
-    ?: localProps.getProperty("keyPassword")
-val hasReleaseSigning = releaseStoreFile != null && releaseStorePassword != null &&
-    releaseKeyAlias != null && releaseKeyPassword != null
+// Release signing is NOT configured here: CI passes AGP injected-signing
+// properties on the Gradle command line (the same mechanism Noma's CI uses
+// for its debug keystore), fed from GitHub Actions secrets:
+//   -Pandroid.injected.signing.store.file / .store.password /
+//    .key.alias / .key.password
+// Local release builds are therefore unsigned by default; the signed APK/AAB
+// of record always comes from CI. (AGP 9's signing DSL also rejects plain
+// password property assignment — injected signing sidesteps that entirely.)
 
 android {
     namespace = "app.nota.notes"
@@ -41,23 +29,9 @@ android {
         versionName = "0.1.0"
     }
 
-    signingConfigs {
-        if (hasReleaseSigning) {
-            create("release") {
-                storeFile = file(releaseStoreFile!!)
-                storePassword = <redacted>
-                keyAlias = releaseKeyAlias
-                keyPassword = <redacted>
-            }
-        }
-    }
-
     buildTypes {
         release {
             isMinifyEnabled = false
-            if (hasReleaseSigning) {
-                signingConfig = signingConfigs.getByName("release")
-            }
         }
     }
 
