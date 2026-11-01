@@ -273,6 +273,8 @@ class BackupRepository(
                 writtenAttachments += writeAttachmentFile(plan.staged)
             }
 
+            File(context.filesDir, "probe-marker.txt").writeText("probe")
+            println("DIAG beforeTxn filesDir=" + context.filesDir.absolutePath + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             var counts = MergeCounts()
             val tagIdRemap = HashMap<String, String>()
 
@@ -370,7 +372,7 @@ class BackupRepository(
                 }
             }
 
-println("DIAG afterTxn files=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
+println("DIAG afterTxn filesDir=" + context.filesDir.absolutePath + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " filesDirList=" + (context.filesDir.list()?.toList()) + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             // ---- Tombstones: merge only, NOT stored (Phase 3 store).
             if (mode == RestoreMode.MERGE && handle.tombstones.isNotEmpty()) {
                 counts += MergeCounts(deleted = applyTombstones(handle.tombstones))
