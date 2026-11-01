@@ -149,9 +149,32 @@ private val OledColors = darkColorScheme(
  * Material You dynamic colour the default, but on device dynamic colour is
  * exactly what made the UI not match the approved mock-ups, so dynamic
  * colour is now an opt-in Settings toggle ("Material You dynamic colour",
- * persisted in DataStore). OLED true black still overrides dynamic colour
- * when dark + OLED are both on.
+ * persisted in DataStore). OLED true black overrides everything when on.
  */
+
+/** Which colour scheme [NotaTheme] will use — a plain value for testability. */
+enum class NotaScheme { Light, Dark, Oled, DynamicLight, DynamicDark }
+
+/**
+ * Pure scheme selection. Phase 1.5 fix 5: OLED used to be gated on
+ * `darkTheme && oledBlack`, but darkTheme comes only from the system —
+ * the app has no in-app dark-mode control — so flipping the OLED switch
+ * on a light-mode device could never engage the true-black scheme.
+ * OLED is itself a dark scheme, so the persisted flag alone selects it.
+ */
+fun selectScheme(
+    darkTheme: Boolean,
+    oledBlack: Boolean,
+    dynamicColor: Boolean,
+    sdkInt: Int,
+): NotaScheme = when {
+    oledBlack -> NotaScheme.Oled
+    dynamicColor && sdkInt >= Build.VERSION_CODES.S ->
+        if (darkTheme) NotaScheme.DynamicDark else NotaScheme.DynamicLight
+    darkTheme -> NotaScheme.Dark
+    else -> NotaScheme.Light
+}
+
 @Composable
 fun NotaTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -160,13 +183,14 @@ fun NotaTheme(
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    val colors = when {
-        darkTheme && oledBlack -> OledColors
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColors
-        else -> LightColors
+    val colors = when (
+        selectScheme(darkTheme, oledBlack, dynamicColor, Build.VERSION.SDK_INT)
+    ) {
+        NotaScheme.Oled -> OledColors
+        NotaScheme.DynamicDark -> dynamicDarkColorScheme(context)
+        NotaScheme.DynamicLight -> dynamicLightColorScheme(context)
+        NotaScheme.Dark -> DarkColors
+        NotaScheme.Light -> LightColors
     }
     MaterialTheme(
         colorScheme = colors,

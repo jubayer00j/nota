@@ -51,13 +51,10 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -169,7 +166,6 @@ fun RichNoteEditorScreen(
 
     var menuExpanded by remember { mutableStateOf(false) }
     var insertMenuExpanded by remember { mutableStateOf(false) }
-    var folderExpanded by remember { mutableStateOf(false) }
     var showLinkDialog by remember { mutableStateOf(false) }
     var linkUrl by remember { mutableStateOf("") }
     var showOutline by remember { mutableStateOf(false) }
@@ -351,8 +347,8 @@ fun RichNoteEditorScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { persistNow() }) {
-                        Icon(Icons.Filled.Check, contentDescription = "Save")
+                    IconButton(onClick = { persistNow(onBack) }) {
+                        Icon(Icons.Filled.Check, contentDescription = "Save and done")
                     }
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "More")
@@ -440,6 +436,15 @@ fun RichNoteEditorScreen(
                         }
                     }
                 }
+                item(key = "meta") {
+                    NoteMetaRow(
+                        folders = folders,
+                        folderId = folderId,
+                        onFolderSelected = { folderId = it },
+                        tags = parseTagsCsv(tagsCsv),
+                        onTagsChanged = { tagsCsv = it.joinToString(", ") },
+                    )
+                }
                 itemsIndexed(segments, key = { _, ui -> ui.id }) { _, ui ->
                     SegmentEditor(
                         ui = ui,
@@ -452,48 +457,6 @@ fun RichNoteEditorScreen(
                         fileFor = { viewModel.attachmentFile(it) },
                         bringIntoView = bringIntoView,
                     )
-                }
-                item(key = "folder-tags") {
-                    Column {
-                        ExposedDropdownMenuBox(
-                            expanded = folderExpanded,
-                            onExpandedChange = { folderExpanded = it },
-                        ) {
-                            OutlinedTextField(
-                                value = folders.firstOrNull { it.id == folderId }?.name ?: "No folder",
-                                onValueChange = {},
-                                readOnly = true,
-                                label = { Text("Folder") },
-                                trailingIcon = {
-                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = folderExpanded)
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                                    .menuAnchor(MenuAnchorType.PrimaryNotEditable),
-                            )
-                            ExposedDropdownMenu(
-                                expanded = folderExpanded,
-                                onDismissRequest = { folderExpanded = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("No folder") },
-                                    onClick = { folderId = null; folderExpanded = false },
-                                )
-                                folders.forEach { folder ->
-                                    DropdownMenuItem(
-                                        text = { Text(folder.name) },
-                                        onClick = { folderId = folder.id; folderExpanded = false },
-                                    )
-                                }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = tagsCsv,
-                            onValueChange = { tagsCsv = it },
-                            label = { Text("Tags (comma-separated)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().padding(top = NotaSpacing.sm),
-                        )
-                    }
                 }
                 item(key = "attachments") {
                     AttachmentsSection(

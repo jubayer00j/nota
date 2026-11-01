@@ -18,13 +18,9 @@ import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MenuAnchorType
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -111,7 +107,6 @@ fun PlainNoteEditorScreen(
     BackHandler { saveIfDirty(onBack) }
 
     var menuExpanded by remember { mutableStateOf(false) }
-    var folderExpanded by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -123,8 +118,8 @@ fun PlainNoteEditorScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { saveIfDirty {} }) {
-                        Icon(Icons.Filled.Check, contentDescription = "Save")
+                    IconButton(onClick = { saveIfDirty(onBack) }) {
+                        Icon(Icons.Filled.Check, contentDescription = "Save and done")
                     }
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "More")
@@ -178,6 +173,14 @@ fun PlainNoteEditorScreen(
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
+            NoteMetaRow(
+                folders = folders,
+                folderId = folderId,
+                onFolderSelected = { folderId = it },
+                tags = parseTagsCsv(tagsCsv),
+                onTagsChanged = { tagsCsv = it.joinToString(", ") },
+                modifier = Modifier.padding(vertical = NotaSpacing.xs),
+            )
             val richBody = viewModel.isRichBody(current)
             if (richBody) {
                 Text(
@@ -202,38 +205,6 @@ fun PlainNoteEditorScreen(
                 ),
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 12,
-            )
-            ExposedDropdownMenuBox(
-                expanded = folderExpanded,
-                onExpandedChange = { folderExpanded = it },
-            ) {
-                OutlinedTextField(
-                    value = folders.firstOrNull { it.id == folderId }?.name ?: "No folder",
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Folder") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = folderExpanded) },
-                    modifier = Modifier.fillMaxWidth().menuAnchor(MenuAnchorType.PrimaryNotEditable),
-                )
-                ExposedDropdownMenu(expanded = folderExpanded, onDismissRequest = { folderExpanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text("No folder") },
-                        onClick = { folderId = null; folderExpanded = false },
-                    )
-                    folders.forEach { folder ->
-                        DropdownMenuItem(
-                            text = { Text(folder.name) },
-                            onClick = { folderId = folder.id; folderExpanded = false },
-                        )
-                    }
-                }
-            }
-            OutlinedTextField(
-                value = tagsCsv,
-                onValueChange = { tagsCsv = it },
-                label = { Text("Tags (comma-separated)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(top = NotaSpacing.sm),
             )
         }
     }
