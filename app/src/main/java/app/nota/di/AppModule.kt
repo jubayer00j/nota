@@ -3,8 +3,12 @@ package app.nota.di
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.security.AndroidKeystoreNoteLockKeyProvider
 import app.nota.data.security.AppLockManager
+import app.nota.data.security.NoteLockBiometricStore
+import app.nota.data.security.NoteLockDeviceKeyProvider
 import app.nota.data.repository.LibraryRepository
+import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.data.templates.TemplateRepository
 import app.nota.feature.editor.PlainNoteEditorViewModel
@@ -39,9 +43,14 @@ val appModule = module {
     single { TemplateRepository(androidContext()) }
     single { PreferencesRepository(androidContext()) }
     single { AppLockManager(get()) }
+    // Phase 2b per-note lock: Keystore device-key provider + biometric
+    // copy store + the lock repository (Koin singles).
+    single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }
+    single { NoteLockBiometricStore(get(), get()) }
+    single { NoteLockRepository(get(), get(), get(), get()) }
     viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
-    viewModel { RichNoteEditorViewModel(get(), get(), get()) }
+    viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
     viewModel { TemplatesViewModel(get(), get()) }
     viewModel { TodayViewModel(get(), get()) }
     viewModel { SearchViewModel(get()) }

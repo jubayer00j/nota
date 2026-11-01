@@ -137,6 +137,90 @@ class AttachmentStore(
         entity
     }
 
+    /**
+     * Runs [block] under the same [fileMutex] that serialises imports,
+     * deletes and [reconcile] (Phase 2b, Codex review PR #8). A multi-step
+     * transition such as note locking — snapshot the note's attachments,
+     * rewrite their files, flip their rows, persist the note — must not
+     * interleave with an import: an import whose row lands after the
+     * snapshot would otherwise stay plaintext under a freshly locked
+     * note, with no later save guaranteed to seal it. Imports hold the
+     * mutex end-to-end, so a lock block and an import can never overlap.
+     * The mutex is NOT reentrant: inside [block], use the `…Locked`
+     * variants below, never the public primitives.
+     */
+    suspend fun <T> runExclusive(block: suspend () -> T): T = fileMutex.withLock { block() }
+
+    // --- Per-note lock support (Phase 2b) --------------------------------
+    // All file mutation for sealing/unsealing goes through these
+    // primitives so it stays under the same [fileMutex] discipline as
+    // imports/deletes/reconcile (the F9 race): the lock repository never
+    // touches attachment files directly.
+
+    /** Reads an attachment's current on-disk bytes (raw payload, or the
+     *  envelope text bytes while the owning note is locked). */
+    suspend fun readBytes(attachment: AttachmentEntity): ByteArray = fileMutex.withLock {
+        readBytesLocked(attachment)
+    }
+
+    /** [readBytes] for callers already holding the mutex via [runExclusive]. */
+    internal suspend fun readBytesLocked(attachment: AttachmentEntity): ByteArray =
+        withContext(Dispatchers.IO) { fileFor(attachment).readBytes() }
+
+    /**
+     * Overwrites an attachment's file with [newBytes] and updates its row
+     * (size + [AttachmentEntity.encrypted] flag) in the same locked step.
+     * Used to seal (envelope in, encrypted=true) and unseal (payload back,
+     * encrypted=false) without any window where file and row disagree
+     * about the payload form.
+     */
+    suspend fun rewriteBytes(
+        attachment: AttachmentEntity,
+        newBytes: ByteArray,
+        encrypted: Boolean,
+    ): AttachmentEntity = fileMutex.withLock {
+        rewriteBytesLocked(attachment, newBytes, encrypted)
+    }
+
+    /** [rewriteBytes] for callers already holding the mutex via [runExclusive]. */
+    internal suspend fun rewriteBytesLocked(
+        attachment: AttachmentEntity,
+        newBytes: ByteArray,
+        encrypted: Boolean,
+    ): AttachmentEntity = withContext(Dispatchers.IO) {
+        val file = fileFor(attachment)
+        file.parentFile?.mkdirs()
+        file.writeBytes(newBytes)
+        val updated = attachment.copy(sizeBytes = newBytes.size.toLong(), encrypted = encrypted)
+        attachmentDao.upsert(updated)
+        updated
+    }
+
+    // --- Editor session temp files (Phase 2b) -----------------------------
+    // While a locked note is open, its decrypted attachment bytes live
+    // ONLY here (cacheDir — never filesDir, never Room), keyed per note,
+    // and are wiped when the session ends. The editor resolves them
+    // through the same fileFor-style seam it uses for stored files.
+
+    private fun sessionDir(noteId: String): File =
+        File(File(context.cacheDir, "nota-session"), noteId)
+
+    fun sessionFile(noteId: String, attachment: AttachmentEntity): File =
+        File(sessionDir(noteId), attachment.id + ".bin")
+
+    /** Writes decrypted session bytes for [attachment]; returns the file. */
+    fun writeSessionBytes(noteId: String, attachment: AttachmentEntity, bytes: ByteArray): File {
+        val file = sessionFile(noteId, attachment)
+        file.parentFile?.mkdirs()
+        file.writeBytes(bytes)
+        return file
+    }
+
+    /** Deletes every session temp file for [noteId] (session end). */
+    fun clearSession(noteId: String) {
+        sessionDir(noteId).deleteRecursively()
+    }
+
     suspend fun delete(attachment: AttachmentEntity): Unit = fileMutex.withLock {
         deleteLocked(attachment)
     }

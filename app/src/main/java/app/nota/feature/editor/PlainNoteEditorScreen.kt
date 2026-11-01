@@ -156,6 +156,20 @@ fun PlainNoteEditorScreen(
             }
             return@Scaffold
         }
+        if (current.locked) {
+            // Phase 2b defence-in-depth: the plain editor is not routed
+            // in the nav graph today (the rich editor owns the route),
+            // but if it is ever reached with a locked note it must show
+            // the lock state, never the (sealed) body.
+            Column(Modifier.fillMaxSize().padding(padding).padding(NotaSpacing.lg)) {
+                Text("This note is locked", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Unlock it from the note editor to read or change it.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@Scaffold
+        }
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
                 .padding(NotaSpacing.md),

@@ -11,12 +11,17 @@ import app.nota.data.html.DocSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
 import app.nota.data.html.TextSegment
+import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
+import app.nota.data.repository.NoteUnlockResult
+import app.nota.data.security.AppLockMethod
+import app.nota.data.security.NoteLockMethod
 import app.nota.data.templates.TemplateRepository
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -44,6 +49,7 @@ class RichNoteEditorViewModel(
     private val repository: NoteRepository,
     private val attachmentStore: AttachmentStore,
     private val templateRepository: TemplateRepository,
+    private val noteLockRepository: NoteLockRepository,
 ) : ViewModel() {
 
     private val _note = MutableStateFlow<NoteEntity?>(null)
@@ -68,6 +74,27 @@ class RichNoteEditorViewModel(
     private val _saveState = MutableStateFlow<SaveState>(SaveState.Saved(0))
     val saveState: StateFlow<SaveState> = _saveState
 
+    // --- Per-note lock session (Phase 2b) ----------------------------------
+    // While a locked note is open, the NEK and the decrypted content live
+    // ONLY in this VM's memory (never in Room, never in files except the
+    // cacheDir session temps for attachment bytes). The session ends when
+    // the VM is cleared: the NEK is zeroed and the temps are deleted.
+    // (Invalidation when App Lock engages is out of scope for 2b.)
+
+    private var sessionNek: ByteArray? = null
+
+    private val _sessionActive = MutableStateFlow(false)
+    val sessionActive: StateFlow<Boolean> = _sessionActive
+
+    /** Decrypted body HTML for the active session; null while gated. */
+    private val _sessionHtml = MutableStateFlow<String?>(null)
+    val sessionHtml: StateFlow<String?> = _sessionHtml
+
+    private val _lockError = MutableStateFlow<String?>(null)
+    val lockError: StateFlow<String?> = _lockError
+
+    val hasSession: Boolean get() = sessionNek != null
+
     /** Registered by the screen: inserts text at the active editor's caret. */
     @Volatile
     var textInserter: ((String) -> Unit)? = null
@@ -84,10 +111,13 @@ class RichNoteEditorViewModel(
         viewModelScope.launch {
             val loaded = repository.getById(noteId)
             _note.value = loaded
-            if (loaded != null) {
+            if (loaded != null && !loaded.locked) {
                 // Storage form (Phase 1.5 fix 2): the editor's ephemeral
                 // trailing caret segment is stripped here too, so merely
                 // opening a block-ending note never counts as a change.
+                // A LOCKED note's contentHtml is an envelope, not HTML:
+                // no baseline is taken from it — the session start sets
+                // the baseline from the decrypted body instead.
                 baselineHtml = NoteDocument.serialize(
                     NoteDocument.stripTrailingEmptyTextSegments(
                         NoteDocument.parse(loaded.contentHtml),
@@ -110,6 +140,171 @@ class RichNoteEditorViewModel(
         }
         viewModelScope.launch {
             repository.observeLinkedFrom(noteId).collect { _linkedFrom.value = it }
+        }
+    }
+
+    // --- Lock gate / session (Phase 2b) --------------------------------------
+
+    /** One credential attempt from the gate. Canonical secret, as reported
+     *  by PR-A's shared credential components. */
+    fun unlockWithCredential(method: AppLockMethod, canonicalSecret: String) {
+        val current = _note.value ?: return
+        viewModelScope.launch {
+            when (val result = noteLockRepository.verifyCredential(
+                current,
+                NoteLockMethod.fromAppLockMethod(method),
+                canonicalSecret,
+            )) {
+                is NoteUnlockResult.Ok -> startSession(result.nek)
+                is NoteUnlockResult.Error -> _lockError.value = result.message
+            }
+        }
+    }
+
+    /** Biometric success path: the prompt already ran (in the gate); the
+     *  repository only releases the device copy. */
+    fun unlockWithBiometric() {
+        val current = _note.value ?: return
+        viewModelScope.launch {
+            when (val result = noteLockRepository.unlockWithBiometric(current)) {
+                is NoteUnlockResult.Ok -> startSession(result.nek)
+                is NoteUnlockResult.Error -> _lockError.value = result.message
+            }
+        }
+    }
+
+    private suspend fun startSession(nek: ByteArray) {
+        val current = _note.value ?: run {
+            nek.fill(0)
+            return
+        }
+        // A re-unlock replaces any previous session key — zero it first.
+        sessionNek?.fill(0)
+        sessionNek = nek
+        _lockError.value = null
+        val data = noteLockRepository.decryptNoteData(current, nek)
+        _sessionHtml.value = data.contentHtml
+        baselineHtml = NoteDocument.serialize(
+            NoteDocument.stripTrailingEmptyTextSegments(NoteDocument.parse(data.contentHtml)),
+        )
+        baselineTitle = current.title
+        baselineFolderId = current.folderId
+        writeSessionTemps(current.id, data.attachmentBytes)
+        _sessionActive.value = true
+    }
+
+    /** (Re)writes the cacheDir session temps from decrypted bytes, so
+     *  image blocks render session-decrypted content through the same
+     *  file seam as stored attachments. The attachment list is fetched
+     *  fresh — the collected flow may not have emitted yet at unlock
+     *  time, and flags change as saves seal plaintext attachments. */
+    private suspend fun writeSessionTemps(
+        noteId: String,
+        decrypted: Map<String, ByteArray>,
+    ) {
+        val attachments = repository.observeAttachmentsForNote(noteId).first()
+        for (attachment in attachments) {
+            val bytes = decrypted[attachment.id] ?: continue
+            runCatching { attachmentStore.writeSessionBytes(noteId, attachment, bytes) }
+        }
+    }
+
+    private suspend fun refreshSessionTemps() {
+        val nek = sessionNek ?: return
+        val current = _note.value ?: return
+        if (!current.locked) return
+        val data = noteLockRepository.decryptNoteData(current, nek)
+        writeSessionTemps(current.id, data.attachmentBytes)
+    }
+
+    /** Ends the session: NEK zeroed, decrypted state dropped, temps deleted. */
+    private fun endSession() {
+        sessionNek?.fill(0)
+        sessionNek = null
+        _sessionActive.value = false
+        _sessionHtml.value = null
+        loadedNoteId?.let { attachmentStore.clearSession(it) }
+    }
+
+    override fun onCleared() {
+        endSession()
+        super.onCleared()
+    }
+
+    // --- Lock management (Phase 2b) -------------------------------------------
+
+    /** Locks the currently open (unlocked) note, then ends editing: the
+     *  caller navigates back — no session is started implicitly. */
+    fun lockCurrentNote(
+        method: AppLockMethod,
+        canonicalSecret: String,
+        enableBiometric: Boolean,
+        onDone: (String?) -> Unit,
+    ) {
+        val current = _note.value ?: return onDone("Note not loaded.")
+        viewModelScope.launch {
+            try {
+                val locked = noteLockRepository.lockNote(
+                    current.id,
+                    NoteLockMethod.fromAppLockMethod(method),
+                    canonicalSecret,
+                    enableBiometric,
+                )
+                _note.value = locked
+                onDone(null)
+            } catch (e: Exception) {
+                onDone(e.message ?: "Could not lock this note.")
+            }
+        }
+    }
+
+    fun setLockSlot(method: AppLockMethod, canonicalSecret: String, onDone: (String?) -> Unit) {
+        val current = _note.value ?: return onDone("Note not loaded.")
+        val nek = sessionNek ?: return onDone("Unlock the note first.")
+        viewModelScope.launch {
+            try {
+                noteLockRepository.setSlot(
+                    current, nek, NoteLockMethod.fromAppLockMethod(method), canonicalSecret,
+                )
+                _note.value = repository.getById(current.id)
+                onDone(null)
+            } catch (e: Exception) {
+                onDone(e.message ?: "Could not update the credential.")
+            }
+        }
+    }
+
+    fun removeLockSlot(method: AppLockMethod, onDone: (Boolean) -> Unit) {
+        val current = _note.value ?: return onDone(false)
+        viewModelScope.launch {
+            val removed = noteLockRepository.removeSlot(
+                current, NoteLockMethod.fromAppLockMethod(method),
+            )
+            if (removed) _note.value = repository.getById(current.id)
+            onDone(removed)
+        }
+    }
+
+    fun setLockBiometric(enabled: Boolean, onDone: (Boolean) -> Unit) {
+        val current = _note.value ?: return onDone(false)
+        val nek = sessionNek ?: return onDone(false)
+        viewModelScope.launch {
+            val ok = noteLockRepository.setBiometric(current, nek, enabled)
+            if (ok) _note.value = repository.getById(current.id)
+            onDone(ok)
+        }
+    }
+
+    /** Removes the lock entirely (session required); the editor session
+     *  ends and the caller navigates back to the now-plaintext note. */
+    fun removeCurrentLock(onDone: () -> Unit) {
+        val current = _note.value ?: return
+        val nek = sessionNek ?: return
+        viewModelScope.launch {
+            noteLockRepository.removeNoteLock(current.id, nek)
+            endSession()
+            _note.value = repository.getById(current.id)
+            onDone()
         }
     }
 
@@ -143,7 +338,27 @@ class RichNoteEditorViewModel(
         val folderChanged = folderId != baselineFolderId
         val tagsChanged = tags != baselineTags
         if (!bodyChanged && !folderChanged && !tagsChanged) {
-            onPersisted?.invoke()
+            // Phase 2b: even a no-change persist seals attachments that
+            // were imported during a locked session (they land as
+            // plaintext files and must not stay that way past any save
+            // tick, including this autosave).
+            val nek = sessionNek
+            if (current.locked && nek != null) {
+                viewModelScope.launch {
+                    noteLockRepository.sealPlaintextAttachments(current.id, nek)
+                    refreshSessionTemps()
+                    onPersisted?.invoke()
+                }
+            } else {
+                onPersisted?.invoke()
+            }
+            return
+        }
+        if (current.locked) {
+            // Phase 2b: a locked note persists ONLY through the seal —
+            // never through the plaintext write path (which now also
+            // refuses locked notes as defence-in-depth).
+            persistLocked(current, title, html, folderId, tags, bodyChanged, folderChanged, tagsChanged, onPersisted)
             return
         }
         _saveState.value = SaveState.Saving
@@ -162,6 +377,69 @@ class RichNoteEditorViewModel(
             if (tagsChanged) {
                 repository.setNoteTags(updated.id, tags)
                 baselineTagsCsv = tags.joinToString(", ")
+            }
+            _note.value = repository.getById(updated.id) ?: updated
+            _saveState.value = SaveState.Saved(System.currentTimeMillis())
+            onPersisted?.invoke()
+        }
+    }
+
+    /**
+     * The locked-session persist: title (plaintext metadata by design)
+     * goes through the title-only update; the body is re-sealed via
+     * [NoteLockRepository.saveLockedContent], which also seals any
+     * attachments imported during the session. Without a session NEK
+     * nothing is written at all.
+     */
+    private fun persistLocked(
+        current: NoteEntity,
+        title: String,
+        html: String,
+        folderId: String?,
+        tags: List<String>,
+        bodyChanged: Boolean,
+        folderChanged: Boolean,
+        tagsChanged: Boolean,
+        onPersisted: (() -> Unit)?,
+    ) {
+        val nek = sessionNek
+        if (nek == null) {
+            onPersisted?.invoke()
+            return
+        }
+        _saveState.value = SaveState.Saving
+        viewModelScope.launch {
+            var updated = repository.getById(current.id) ?: current
+            if (title != baselineTitle) {
+                updated = repository.updateTitle(updated, title)
+                baselineTitle = title
+            }
+            if (bodyChanged) {
+                noteLockRepository.saveLockedContent(updated, nek, html)
+                baselineHtml = html
+                updated = repository.getById(current.id) ?: updated
+                // Attachments sealed by the save now hold envelopes on
+                // disk; refresh the session temps so image blocks keep
+                // rendering the decrypted bytes.
+                refreshSessionTemps()
+            }
+            if (folderChanged) {
+                repository.moveToFolder(updated, folderId)
+                updated = updated.copy(folderId = folderId)
+                baselineFolderId = folderId
+            }
+            if (tagsChanged) {
+                repository.setNoteTags(updated.id, tags)
+                baselineTagsCsv = tags.joinToString(", ")
+            }
+            if (!bodyChanged) {
+                // Codex review PR #8: a metadata-only save (folder/tags/
+                // title) must ALSO seal attachments imported during the
+                // session — saveLockedContent's internal seal only runs
+                // on the body-changed path, and this save may be the
+                // last one before the editor closes.
+                noteLockRepository.sealPlaintextAttachments(updated.id, nek)
+                refreshSessionTemps()
             }
             _note.value = repository.getById(updated.id) ?: updated
             _saveState.value = SaveState.Saved(System.currentTimeMillis())
@@ -192,6 +470,12 @@ class RichNoteEditorViewModel(
     fun deleteAttachment(attachment: AttachmentEntity) {
         viewModelScope.launch {
             attachmentStore.delete(attachment)
+            // Phase 2b: in a locked session the stored body is an
+            // envelope — the screen has already dropped the block from
+            // its working segments, and the next persist re-seals the
+            // cleaned document. The plaintext strip below must NOT run
+            // (it would fail the locked-write guard, by design).
+            if (_note.value?.locked == true) return@launch
             // Codex F7: an embedded ImageSegment pointing at this
             // attachment would otherwise be left referencing a deleted
             // file/row. Strip it from the owning note's stored document
@@ -217,11 +501,24 @@ class RichNoteEditorViewModel(
         }
     }
 
-    fun attachmentFile(attachment: AttachmentEntity): File = attachmentStore.fileFor(attachment)
+    fun attachmentFile(attachment: AttachmentEntity): File =
+        // Phase 2b: during a locked session, an encrypted attachment's
+        // stored file holds an envelope — render the session temp with
+        // the decrypted bytes instead. Plaintext attachments imported
+        // mid-session keep the normal file until a save seals them.
+        if (_sessionActive.value && attachment.encrypted) {
+            attachmentStore.sessionFile(attachment.noteId, attachment)
+        } else {
+            attachmentStore.fileFor(attachment)
+        }
 
     // --- Templates -------------------------------------------------------------
 
     fun saveAsTemplate(name: String, title: String, segments: List<DocSegment>) {
+        // Phase 2b: templates are a plaintext store (templates.json) — a
+        // locked note's body must never be copied into one, not even from
+        // an unlocked session. The screen also hides the action.
+        if (_note.value?.locked == true) return
         viewModelScope.launch {
             // Codex re-review N4: an embedded attachment image references
             // this note's attachment id (nota-attachment://<id>), but no

@@ -64,9 +64,15 @@ class NoteRepository(
             val previousTitle = noteDao.getById(note.id)?.title
             noteDao.upsert(note)
             ftsDao.deleteForNote(note.id)
-            if (note.trashedAt == null && !note.locked) {
+            if (note.trashedAt == null) {
+                // Phase 2b title-only discipline: a locked note's FTS row
+                // carries its TITLE and an EMPTY body — body words must
+                // never match (the body is sealed), title words do, so
+                // the locked placeholder is findable exactly like 1.x.
+                // Trashed notes keep no FTS row at all (unchanged).
+                val ftsPlainText = if (note.locked) "" else note.plainText
                 ftsDao.insert(
-                    NoteFtsEntity(noteId = note.id, title = note.title, plainText = note.plainText),
+                    NoteFtsEntity(noteId = note.id, title = note.title, plainText = ftsPlainText),
                 )
             }
             relink(note)
@@ -173,6 +179,11 @@ class NoteRepository(
     }
 
     suspend fun updateBody(note: NoteEntity, title: String, plainBody: String): NoteEntity {
+        // Phase 2b defence-in-depth: a locked note's body may only be
+        // written through NoteLockRepository.saveLockedContent (sealed).
+        // Any other path landing here with plaintext would silently
+        // break the seal, so it fails loudly instead.
+        require(!note.locked) { "Note is locked; body writes must go through the lock session." }
         val updated = note.copy(
             title = title,
             contentHtml = PlainTextCodec.textToHtml(plainBody),
@@ -219,6 +230,8 @@ class NoteRepository(
 
     /** Replaces a note's title + HTML body, re-deriving plain text, FTS and links. */
     suspend fun updateRichBody(note: NoteEntity, title: String, contentHtml: String): NoteEntity {
+        // Phase 2b: see updateBody — plaintext must never overwrite a seal.
+        require(!note.locked) { "Note is locked; body writes must go through the lock session." }
         val updated = note.copy(
             title = title,
             contentHtml = contentHtml,

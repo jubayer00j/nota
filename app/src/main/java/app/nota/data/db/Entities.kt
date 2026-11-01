@@ -72,6 +72,14 @@ data class NoteEntity(
     val lockEnvelope: String? = null,
     /** Monotonic content hash used by the sync merge (spec §4.4) — set by engines in Phase 3. */
     val contentHash: String = "",
+    /**
+     * Phase 2b: the per-note lock record JSON (1.x `NoteLock` shape,
+     * stored verbatim — see NoteLockRecord). Null when the note is not
+     * locked. While locked, [contentHtml] holds the AES-256-GCM envelope
+     * and [plainText] is empty. [lockEnvelope] above stays UNUSED: it was
+     * a Phase 0 placeholder and is neither repurposed nor dropped.
+     */
+    val lockRecordJson: String? = null,
 )
 
 @Entity(
@@ -118,6 +126,10 @@ data class AttachmentEntity(
     val widthPx: Int? = null,
     val heightPx: Int? = null,
     val createdAt: Long,
+    /** Phase 2b: true when the file on disk holds a per-note-lock
+     *  AES-256-GCM envelope (of the attachment's data URL) instead of the
+     *  raw payload bytes. */
+    val encrypted: Boolean = false,
 )
 
 @Entity(

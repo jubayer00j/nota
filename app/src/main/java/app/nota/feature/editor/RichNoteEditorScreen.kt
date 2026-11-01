@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Star
@@ -110,7 +111,11 @@ import app.nota.data.html.TableSegment
 import app.nota.data.html.TaskItem
 import app.nota.data.html.TaskListSegment
 import app.nota.data.html.TextSegment
+import app.nota.data.security.NoteLockRecord
 import app.nota.data.text.PlainTextCodec
+import app.nota.feature.lock.LockNoteDialog
+import app.nota.feature.lock.ManageLockDialog
+import app.nota.feature.lock.NoteLockGate
 import app.nota.ui.theme.NotaEditorBody
 import app.nota.ui.theme.NotaSpacing
 import coil3.compose.AsyncImage
@@ -164,6 +169,14 @@ fun RichNoteEditorScreen(
     val linkedFrom by viewModel.linkedFrom.collectAsState()
     val linkableNotes by viewModel.linkableNotes.collectAsState()
     val saveState by viewModel.saveState.collectAsState()
+    // Phase 2b lock session state.
+    val sessionActive by viewModel.sessionActive.collectAsState()
+    val sessionHtml by viewModel.sessionHtml.collectAsState()
+    val lockError by viewModel.lockError.collectAsState()
+    var showLockDialog by remember { mutableStateOf(false) }
+    var showManageLock by remember { mutableStateOf(false) }
+    var lockDialogError by remember { mutableStateOf<String?>(null) }
+    var manageFeedback by remember { mutableStateOf<String?>(null) }
 
     var initializedFor by remember { mutableStateOf<String?>(null) }
     var title by remember { mutableStateOf("") }
@@ -192,12 +205,17 @@ fun RichNoteEditorScreen(
     val trailingFocusRequester = remember { FocusRequester() }
 
     val current = note
-    if (current != null && initializedFor != current.id) {
+    // Phase 2b: a locked note initialises from the SESSION's decrypted
+    // HTML only — the stored contentHtml is an envelope and must never
+    // reach the editor. While gated, sourceHtml stays null and no
+    // segments are built at all.
+    val sourceHtml = if (current?.locked == true) sessionHtml else current?.contentHtml
+    if (current != null && sourceHtml != null && initializedFor != current.id) {
         initializedFor = current.id
         title = current.title
         folderId = current.folderId
         segments = NoteDocument.ensureTrailingTextSegment(
-            NoteDocument.parse(current.contentHtml),
+            NoteDocument.parse(sourceHtml),
         ).map { UiSegment(newUiId(), it) }
     }
     var tagsSeeded by remember { mutableStateOf(false) }
@@ -402,14 +420,34 @@ fun RichNoteEditorScreen(
                             text = { Text(if (focusMode) "Focus mode: on" else "Focus mode: off") },
                             onClick = { focusMode = !focusMode; menuExpanded = false },
                         )
-                        DropdownMenuItem(
-                            text = { Text("Save as template") },
-                            onClick = {
-                                templateName = title.ifBlank { "Untitled template" }
-                                showTemplateDialog = true
-                                menuExpanded = false
-                            },
-                        )
+                        if (current?.locked != true) {
+                            DropdownMenuItem(
+                                text = { Text("Save as template") },
+                                onClick = {
+                                    templateName = title.ifBlank { "Untitled template" }
+                                    showTemplateDialog = true
+                                    menuExpanded = false
+                                },
+                            )
+                        }
+                        // Phase 2b per-note lock actions.
+                        if (current?.locked == true) {
+                            DropdownMenuItem(
+                                text = { Text("Manage lock…") },
+                                leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+                                onClick = { showManageLock = true; menuExpanded = false },
+                            )
+                        } else if (current != null) {
+                            DropdownMenuItem(
+                                text = { Text("Lock note…") },
+                                leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
+                                onClick = {
+                                    lockDialogError = null
+                                    showLockDialog = true
+                                    menuExpanded = false
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Archive") },
                             leadingIcon = { Icon(Icons.Filled.Archive, contentDescription = null) },
@@ -428,6 +466,33 @@ fun RichNoteEditorScreen(
         if (current == null) {
             Column(Modifier.fillMaxSize().padding(padding).padding(NotaSpacing.lg)) {
                 Text("Loading note…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            return@Scaffold
+        }
+        if (current.locked && !sessionActive) {
+            // Phase 2b gate: no editor content exists in this branch —
+            // only the title, the lock affordance and the credential
+            // prompt for the methods this note actually has.
+            val record = NoteLockRecord.parse(current.lockRecordJson)
+            if (record != null) {
+                NoteLockGate(
+                    noteTitle = current.title,
+                    record = record,
+                    error = lockError,
+                    onBack = onBack,
+                    onSubmitCredential = { method, secret ->
+                        viewModel.unlockWithCredential(method, secret)
+                    },
+                    onBiometricSuccess = { viewModel.unlockWithBiometric() },
+                    modifier = Modifier.padding(padding),
+                )
+            } else {
+                Column(Modifier.fillMaxSize().padding(padding).padding(NotaSpacing.lg)) {
+                    Text(
+                        "This note is locked, but its lock record is unreadable.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
             return@Scaffold
         }
@@ -691,6 +756,66 @@ fun RichNoteEditorScreen(
                 TextButton(onClick = { showTemplateDialog = false }) { Text("Cancel") }
             },
         )
+    }
+
+    if (showLockDialog) {
+        LockNoteDialog(
+            error = lockDialogError,
+            onDismiss = { showLockDialog = false },
+            onLock = { method, canonical, biometric ->
+                // Flush pending edits through the normal persist first,
+                // so the seal covers the latest stored body; then lock
+                // and leave — reopening the note now shows the gate.
+                persistNow {
+                    viewModel.lockCurrentNote(method, canonical, biometric) { error ->
+                        if (error == null) {
+                            showLockDialog = false
+                            onBack()
+                        } else {
+                            lockDialogError = error
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    if (showManageLock) {
+        val manageRecord = current?.let { NoteLockRecord.parse(it.lockRecordJson) }
+        if (manageRecord != null) {
+            ManageLockDialog(
+                record = manageRecord,
+                feedback = manageFeedback,
+                onDismiss = { showManageLock = false },
+                onSetSlot = { method, canonical ->
+                    viewModel.setLockSlot(method, canonical) { error ->
+                        manageFeedback = error
+                    }
+                },
+                onRemoveSlot = { method ->
+                    viewModel.removeLockSlot(method) { removed ->
+                        manageFeedback = if (removed) {
+                            null
+                        } else {
+                            "That credential couldn't be removed."
+                        }
+                    }
+                },
+                onSetBiometric = { enabled ->
+                    viewModel.setLockBiometric(enabled) { ok ->
+                        manageFeedback = if (ok) {
+                            null
+                        } else {
+                            "Fingerprint unlock couldn't be updated on this device."
+                        }
+                    }
+                },
+                onRemoveLock = {
+                    showManageLock = false
+                    viewModel.removeCurrentLock { onBack() }
+                },
+            )
+        }
     }
 }
 

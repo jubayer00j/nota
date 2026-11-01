@@ -11,8 +11,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -80,6 +82,10 @@ fun NoteCard(
     favourite: Boolean = false,
     coverImagePath: String? = null,
     selected: Boolean = false,
+    /** Phase 2b: a locked note's card shows title + lock affordance ONLY —
+     *  no snippet and no cover, even if a caller passes them (the seal
+     *  must hold at the component, not just at each call site). */
+    locked: Boolean = false,
     onClick: () -> Unit = {},
     onLongClick: (() -> Unit)? = null,
 ) {
@@ -88,7 +94,7 @@ fun NoteCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = NotaSpacing.xs),
     ) {
-        if (coverImagePath != null) {
+        if (coverImagePath != null && !locked) {
             // Local files only (Phase 1b): absolute paths load as Files,
             // anything else is passed to Coil as-is. No network module.
             val model: Any = if (coverImagePath.startsWith("/")) File(coverImagePath) else coverImagePath
@@ -123,7 +129,22 @@ fun NoteCard(
                     )
                 }
             }
-            if (snippet.isNotBlank()) {
+            if (locked) {
+                Spacer(Modifier.height(NotaSpacing.xs))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = "Locked",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(NotaSpacing.xs))
+                    Text(
+                        text = "Locked",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else if (snippet.isNotBlank()) {
                 Spacer(Modifier.height(NotaSpacing.xs))
                 Text(
                     text = snippet,
