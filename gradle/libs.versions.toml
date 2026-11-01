@@ -8,6 +8,7 @@ navigationCompose = "2.10.2"
 room = "2.8.5"
 koin = "4.2.2"
 richEditor = "1.2.1"
+ksp = "2.3.13"
 junit = "4.13.2"
 
 # Verified 2026-11-01 against Maven Central / Google Maven metadata (latest stable):
@@ -44,6 +45,7 @@ android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 
 [bundles]
 compose = [
