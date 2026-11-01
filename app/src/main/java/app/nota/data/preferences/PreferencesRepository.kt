@@ -19,6 +19,7 @@ import app.nota.data.security.AppLockSettings
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /**
@@ -206,6 +207,26 @@ class PreferencesRepository(context: Context) {
 
     suspend fun setAppLockTimeoutSeconds(seconds: Int) {
         safeEdit { this[KEY_LOCK_TIMEOUT_SECONDS] = seconds }
+    }
+
+    // ---- Per-note lock biometric copies (Phase 2b) ----------------------
+    // The on-device NEK copy a fingerprint prompt may release for one
+    // locked note, sealed under the Android-Keystore device key (see
+    // NoteLockBiometricStore). Keyed per note as `notelock_bio_<noteId>`;
+    // device-local only — these values never enter Room or a backup.
+
+    private fun noteLockBioKey(noteId: String) =
+        stringPreferencesKey("notelock_bio_$noteId")
+
+    suspend fun getNoteLockBiometricCopy(noteId: String): String? =
+        dataStore.safeData.first()[noteLockBioKey(noteId)]
+
+    suspend fun setNoteLockBiometricCopy(noteId: String, packed: String) {
+        safeEdit { this[noteLockBioKey(noteId)] = packed }
+    }
+
+    suspend fun removeNoteLockBiometricCopy(noteId: String) {
+        safeEdit { remove(noteLockBioKey(noteId)) }
     }
 
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
