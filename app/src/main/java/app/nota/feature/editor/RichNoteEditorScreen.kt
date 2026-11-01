@@ -711,6 +711,16 @@ private fun SegmentEditor(
 ) {
     val focusModifier = Modifier.onFocusChanged { if (it.isFocused) onFocus() }
     val activeModifier = if (isActive) Modifier.bringIntoViewRequester(bringIntoView) else Modifier
+    // Phase 2a rider 1 (dark/OLED editor ink): BasicRichTextEditor is the
+    // FOUNDATION variant — unlike the Material3 RichTextEditor used in the
+    // spike, it applies no LocalContentColor/theme colour, so a textStyle
+    // with Color.Unspecified falls back to the platform default BLACK for
+    // every unstyled span. On paper that looked right; on the dark/OLED
+    // schemes it rendered near-black ink on a black surface. Pin the base
+    // colour to onSurface: unstyled body/headings/lists/quotes inherit it
+    // (heading styles derive from this base style), while spans with an
+    // explicit colour from the document HTML still win over the base.
+    val editorTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
     when (val segment = ui.segment) {
         is TextSegment -> {
             val state = stateFor()
@@ -726,7 +736,7 @@ private fun SegmentEditor(
             }
             BasicRichTextEditor(
                 state = state,
-                textStyle = NotaEditorBody,
+                textStyle = editorTextStyle,
                 modifier = editorModifier,
             )
         }
@@ -740,7 +750,7 @@ private fun SegmentEditor(
                 Spacer(Modifier.width(NotaSpacing.sm))
                 BasicRichTextEditor(
                     state = state,
-                    textStyle = NotaEditorBody,
+                    textStyle = editorTextStyle,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
