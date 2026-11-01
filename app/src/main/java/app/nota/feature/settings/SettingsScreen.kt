@@ -2,40 +2,112 @@ package app.nota.feature.settings
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import app.nota.data.preferences.PreferencesRepository
 import app.nota.ui.theme.NotaSpacing
+import kotlinx.coroutines.launch
+import org.koin.androidx.compose.koinInject
 
 /**
  * Settings placeholder. The 8 parity categories (Sync & backup, Security,
  * Appearance, Writing, AI features, Data, Account, About) fill in as their
- * features land (spec §6). Phase 0 links the two review surfaces from here.
+ * features land (spec §6). Phase 0 links the two review surfaces from here;
+ * Phase 1a adds the first functional category — Appearance.
  */
 @Composable
 fun SettingsScreen(
     onOpenDesignSystem: () -> Unit = {},
     onOpenEditorSpike: () -> Unit = {},
+    preferencesRepository: PreferencesRepository = koinInject(),
 ) {
-    Column(Modifier.fillMaxSize().padding(NotaSpacing.md)) {
+    val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
+    val oledBlack by preferencesRepository.oledBlack.collectAsState(initial = false)
+    val scope = rememberCoroutineScope()
+
+    // Scrollable so the growing category list can never be clipped behind
+    // the shell's bottom navigation bar (Phase 1a inset audit). The shell
+    // already passes its innerPadding to the NavHost, so this column lives
+    // entirely above the bottom bar.
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(NotaSpacing.md),
+    ) {
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(NotaSpacing.md))
+
+        Text(
+            "Appearance",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        SettingsSwitchRow(
+            title = "Material You dynamic colour",
+            subtitle = "Colour the app from your wallpaper instead of Nota's pine & paper theme",
+            checked = dynamicColour,
+            onCheckedChange = { enabled ->
+                scope.launch { preferencesRepository.setDynamicColour(enabled) }
+            },
+        )
+        SettingsSwitchRow(
+            title = "OLED true black (dark theme)",
+            subtitle = "Use true-black backgrounds in dark theme, saving power on OLED screens",
+            checked = oledBlack,
+            onCheckedChange = { enabled ->
+                scope.launch { preferencesRepository.setOledBlack(enabled) }
+            },
+        )
+        HorizontalDivider()
+        Spacer(Modifier.height(NotaSpacing.sm))
+
         SettingsRow("Design system preview", "Pine & paper tokens, type scale, components", onOpenDesignSystem)
         HorizontalDivider()
         SettingsRow("Editor spike (Phase 0)", "Compose Rich Editor go/no-go test bench", onOpenEditorSpike)
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.md))
         Text(
-            "Sync & backup · Security · Appearance · Writing · AI features · Data · Account · About — arrive with their phases.",
+            "Sync & backup · Security · Writing · AI features · Data · Account · About — arrive with their phases.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun SettingsSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = NotaSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 

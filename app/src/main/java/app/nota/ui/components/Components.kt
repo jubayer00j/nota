@@ -2,12 +2,13 @@ package app.nota.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.AssistChip
@@ -59,6 +60,7 @@ fun NotaCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
  * serif title, structured snippet, folder/tag chips, pin + favourite affordances.
  * Phase 0 renders it with preview data; Phase 1 binds it to Room.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun NoteCard(
     title: String,
@@ -105,6 +107,9 @@ fun NoteCard(
                 )
             }
             Spacer(Modifier.height(NotaSpacing.sm))
+            // Timestamp + favourite keep their own row; the chips below
+            // them wrap inside the card (Phase 1a — a single Row let long
+            // folder/tag lists overflow the card's edge on device).
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
@@ -121,9 +126,18 @@ fun NoteCard(
                         color = MaterialTheme.colorScheme.tertiary,
                     )
                 }
-                Spacer(Modifier.width(NotaSpacing.xs))
-                if (folderName != null) NotaChip(folderName)
-                tagNames.forEach { NotaChip("#$it") }
+            }
+            if (folderName != null || tagNames.isNotEmpty()) {
+                Spacer(Modifier.height(NotaSpacing.xs))
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(NotaSpacing.xs),
+                    maxLines = 2,
+                ) {
+                    if (folderName != null) NotaChip(folderName)
+                    tagNames.forEach { NotaChip("#$it") }
+                }
             }
         }
     }

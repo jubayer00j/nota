@@ -1,6 +1,7 @@
 package app.nota.di
 
 import app.nota.data.db.NotaDatabase
+import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.feature.notes.NotesViewModel
 import org.koin.android.ext.koin.androidContext
@@ -22,5 +23,6 @@ val appModule = module {
     single { get<NotaDatabase>().noteVersionDao() }
     single { get<NotaDatabase>().noteFtsDao() }
     single { NoteRepository(get(), get(), get()) }
+    single { PreferencesRepository(androidContext()) }
     viewModel { NotesViewModel(get()) }
 }

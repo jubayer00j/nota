@@ -6,6 +6,11 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    // Baseline Profiles infrastructure (Phase 1a). The plugin only wires
+    // the packaging/generation tasks; actually GENERATING a profile still
+    // requires a device/emulator session with a generator target, so no
+    // profile is bundled yet and none is hand-written.
+    alias(libs.plugins.androidx.baselineprofile)
 }
 
 // Release signing is NOT configured here: CI passes AGP injected-signing
@@ -29,8 +34,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -77,7 +82,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.text.google.fonts)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     debugImplementation(libs.androidx.compose.ui.tooling)
@@ -95,6 +99,13 @@ dependencies {
 
     implementation(libs.koin.android)
     implementation(libs.koin.androidx.compose)
+
+    // Phase 1a: persisted app preferences (theme choices in Settings).
+    implementation(libs.androidx.datastore.preferences)
+
+    // Phase 1a: installs any Baseline Profile bundled with the APK at
+    // first launch (profile generation itself needs a device session).
+    implementation(libs.androidx.profileinstaller)
 
     // Phase 0 editor spike (spec §5) — the go/no-go gate for the real editor.
     implementation(libs.richeditor.compose)

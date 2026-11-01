@@ -6,8 +6,6 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.googlefonts.Font
-import androidx.compose.ui.text.googlefonts.GoogleFont
 import androidx.compose.ui.unit.sp
 import app.nota.notes.R
 
@@ -15,30 +13,19 @@ import app.nota.notes.R
  * Nota type system (spec §6): Newsreader serif for reading, Public Sans for UI,
  * bundled Hind Siliguri so Bengali renders identically on every device.
  *
- * Newsreader + Public Sans load through Google Fonts downloadable fonts;
- * Hind Siliguri is bundled in res/font. The UI family lists Hind Siliguri after
- * Public Sans so Bengali glyphs fall back to the bundled font deterministically.
+ * Phase 1a: ALL families are built purely from static TTFs bundled in
+ * res/font. Phase 0 loaded Newsreader + Public Sans through Google Fonts
+ * downloadable fonts (GMS provider), which fails on devices where the
+ * Google app is disabled — bundling removes that dependency entirely.
+ * The UI family lists Hind Siliguri after Public Sans so Bengali glyphs
+ * fall back to the bundled font deterministically.
  */
-private val gmsFontProvider = GoogleFont.Provider(
-    providerAuthority = "com.google.android.gms.fonts",
-    providerPackage = "com.google.android.gms",
-    // The certs array ships in the ui-text-google-fonts library; with
-    // non-transitive R classes it must be referenced via the library's R.
-    certificates = androidx.compose.ui.text.googlefonts.R.array.com_google_android_gms_fonts_certs,
-)
-
-private fun googleFontFamily(name: String, vararg weights: FontWeight): FontFamily =
-    FontFamily(
-        weights.map { w ->
-            Font(googleFont = GoogleFont(name), fontProvider = gmsFontProvider, weight = w)
-        },
-    )
-
 val NotaSerifFamily: FontFamily = FontFamily(
-    Font(googleFont = GoogleFont("Newsreader"), fontProvider = gmsFontProvider, weight = FontWeight.Normal),
-    Font(googleFont = GoogleFont("Newsreader"), fontProvider = gmsFontProvider, weight = FontWeight.Medium),
-    Font(googleFont = GoogleFont("Newsreader"), fontProvider = gmsFontProvider, weight = FontWeight.SemiBold),
-    Font(googleFont = GoogleFont("Newsreader"), fontProvider = gmsFontProvider, weight = FontWeight.Normal, style = FontStyle.Italic),
+    Font(R.font.newsreader_regular, FontWeight.Normal),
+    Font(R.font.newsreader_medium, FontWeight.Medium),
+    Font(R.font.newsreader_semibold, FontWeight.SemiBold),
+    Font(R.font.newsreader_italic, FontWeight.Normal, style = FontStyle.Italic),
+    Font(R.font.newsreader_italic_medium, FontWeight.Medium, style = FontStyle.Italic),
 )
 
 val NotaBengaliFamily = FontFamily(
@@ -50,10 +37,10 @@ val NotaBengaliFamily = FontFamily(
 
 /** UI family: Public Sans first, bundled Hind Siliguri as the Bengali fallback. */
 val NotaSansFamily: FontFamily = FontFamily(
-    Font(googleFont = GoogleFont("Public Sans"), fontProvider = gmsFontProvider, weight = FontWeight.Normal),
-    Font(googleFont = GoogleFont("Public Sans"), fontProvider = gmsFontProvider, weight = FontWeight.Medium),
-    Font(googleFont = GoogleFont("Public Sans"), fontProvider = gmsFontProvider, weight = FontWeight.SemiBold),
-    Font(googleFont = GoogleFont("Public Sans"), fontProvider = gmsFontProvider, weight = FontWeight.Bold),
+    Font(R.font.public_sans_regular, FontWeight.Normal),
+    Font(R.font.public_sans_medium, FontWeight.Medium),
+    Font(R.font.public_sans_semibold, FontWeight.SemiBold),
+    Font(R.font.public_sans_bold, FontWeight.Bold),
     Font(R.font.hind_siliguri_regular, FontWeight.Normal),
     Font(R.font.hind_siliguri_medium, FontWeight.Medium),
     Font(R.font.hind_siliguri_semibold, FontWeight.SemiBold),
