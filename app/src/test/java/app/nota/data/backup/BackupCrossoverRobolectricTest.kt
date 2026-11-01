@@ -222,8 +222,19 @@ class BackupCrossoverRobolectricTest {
     @Test
     fun crossoverFixture_restoreExportRestore() = runBlocking {
         val stack = newStack()
-        val counts = stack.backup.restore(fixtureZip(), null, RestoreMode.REPLACE)
+        // Split read/apply so a failure names its stage.
+        val handle = stack.backup.readBackup(fixtureZip(), null)
+        assertEquals(
+            "reader staged attachments: " + handle.attachments.map { it.meta.id + ":" + it.meta.noteId + ":" + it.stagedFile.length() },
+            2, handle.attachments.size,
+        )
+        val counts = stack.backup.applyBackup(handle, RestoreMode.REPLACE)
+        handle.close()
         assertTrue(counts.added > 0)
+        assertEquals(
+            "db attachments after apply: " + stack.db.attachmentDao().getAll().map { it.id + "@" + it.localPath },
+            2, stack.db.attachmentDao().getAll().size,
+        )
 
         // --- Library wiring.
         val db = stack.db
