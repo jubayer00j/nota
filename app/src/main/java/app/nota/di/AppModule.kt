@@ -3,6 +3,7 @@ package app.nota.di
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.security.AppLockManager
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.data.templates.TemplateRepository
@@ -37,6 +38,7 @@ val appModule = module {
     single { AttachmentStore(androidContext(), get()) }
     single { TemplateRepository(androidContext()) }
     single { PreferencesRepository(androidContext()) }
+    single { AppLockManager(get()) }
     viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get()) }
