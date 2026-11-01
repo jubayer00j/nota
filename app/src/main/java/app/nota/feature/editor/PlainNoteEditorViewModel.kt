@@ -6,6 +6,7 @@ import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.repository.NoteRepository
 import app.nota.data.text.PlainTextCodec
+import app.nota.data.text.RichBody
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +44,9 @@ class PlainNoteEditorViewModel(
 
     fun bodyText(note: NoteEntity): String = PlainTextCodec.htmlToText(note.contentHtml)
 
+    /** Rich-bodied notes are body-protected in the plain editor (see [RichBody]). */
+    fun isRichBody(note: NoteEntity): Boolean = RichBody.isRich(note.contentHtml)
+
     fun save(
         title: String,
         plainBody: String,
@@ -52,7 +56,14 @@ class PlainNoteEditorViewModel(
     ) {
         val current = _note.value ?: return
         viewModelScope.launch {
-            var updated = repository.updateBody(current, title, plainBody)
+            // A rich body must never round-trip through the plain codec:
+            // for those notes only the title is written here; folder and
+            // tag edits below still apply.
+            var updated = if (isRichBody(current)) {
+                repository.updateTitle(current, title)
+            } else {
+                repository.updateBody(current, title, plainBody)
+            }
             if (updated.folderId != folderId) {
                 repository.moveToFolder(updated, folderId)
                 updated = updated.copy(folderId = folderId)

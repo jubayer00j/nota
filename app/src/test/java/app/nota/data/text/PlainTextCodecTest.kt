@@ -33,4 +33,20 @@ class PlainTextCodecTest {
         assertEquals("", PlainTextCodec.textToHtml(""))
         assertEquals("", PlainTextCodec.htmlToText(""))
     }
+
+    @Test
+    fun blockBoundariesBecomeLineBreaksNotFusedWords() {
+        // Rich-editor shapes must not fuse adjacent blocks into single
+        // words in the plain-text projection (snippets + FTS).
+        val html = "<h1>Shopping</h1><ul><li>milk</li><li>eggs</li></ul>" +
+            "<blockquote><p>note</p></blockquote>" +
+            "<table><tbody><tr><td>Physics</td><td>133</td></tr></tbody></table>"
+        val text = PlainTextCodec.htmlToText(html)
+        assertTrue(text.contains("Shopping\n"))
+        assertTrue(text.contains("milk\n"))
+        assertTrue(text.contains("eggs"))
+        assertTrue(text.contains("Physics 133"))
+        assertTrue(!text.contains("Shoppingmilk"))
+        assertTrue(!text.contains("milkeggs"))
+    }
 }

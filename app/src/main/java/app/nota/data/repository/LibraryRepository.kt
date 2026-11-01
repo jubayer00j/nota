@@ -42,6 +42,13 @@ class LibraryRepository(
         return updated
     }
 
+    /** Sets (or clears, with null) a folder's cover colour (spec §12 folder covers). */
+    suspend fun setFolderColor(folder: FolderEntity, colorArgb: Int?): FolderEntity {
+        val updated = folder.copy(colorArgb = colorArgb, updatedAt = System.currentTimeMillis())
+        folderDao.upsert(updated)
+        return updated
+    }
+
     suspend fun deleteFolder(folder: FolderEntity) = folderDao.delete(folder)
 
     suspend fun createTag(name: String, colorArgb: Int? = null): TagEntity {

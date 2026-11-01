@@ -168,7 +168,8 @@ class NotesViewModel(
     fun batchDelete() { val n = selectedNotes(); viewModelScope.launch { n.forEach { repository.deletePermanently(it) }; clearSelection() } }
 
     // Folder management (overflow dialog)
-    fun createFolder(name: String) { if (name.isNotBlank()) viewModelScope.launch { library.createFolder(name) } }
+    fun createFolder(name: String, colorArgb: Int? = null) { if (name.isNotBlank()) viewModelScope.launch { library.createFolder(name, colorArgb) } }
     fun renameFolder(folder: FolderEntity, name: String) { if (name.isNotBlank()) viewModelScope.launch { library.renameFolder(folder, name) } }
+    fun setFolderColor(folder: FolderEntity, colorArgb: Int?) { viewModelScope.launch { library.setFolderColor(folder, colorArgb) } }
     fun deleteFolder(folder: FolderEntity) { viewModelScope.launch { library.deleteFolder(folder) } }
 }

@@ -168,9 +168,20 @@ fun PlainNoteEditorScreen(
                 ),
                 modifier = Modifier.fillMaxWidth(),
             )
+            val richBody = viewModel.isRichBody(current)
+            if (richBody) {
+                Text(
+                    "This note uses rich formatting — its body is protected in " +
+                        "the plain editor and opens fully in the rich editor.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = NotaSpacing.sm),
+                )
+            }
             TextField(
                 value = body,
                 onValueChange = { body = it },
+                readOnly = richBody,
                 placeholder = { Text("Write…") },
                 textStyle = NotaEditorBody,
                 colors = TextFieldDefaults.colors(

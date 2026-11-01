@@ -107,6 +107,17 @@ class NoteRepository(
         return updated
     }
 
+    /**
+     * Title-only update that leaves the body untouched. The plain editor
+     * uses this for rich-bodied notes (see [app.nota.data.text.RichBody]):
+     * their HTML must not be rewritten by the plain codec.
+     */
+    suspend fun updateTitle(note: NoteEntity, title: String): NoteEntity {
+        val updated = note.copy(title = title, updatedAt = System.currentTimeMillis())
+        upsert(updated)
+        return updated
+    }
+
     // --- State ops (copies through the FTS-synced upsert) --------------------
     suspend fun setPinned(note: NoteEntity, pinned: Boolean) =
         upsert(note.copy(pinned = pinned, updatedAt = System.currentTimeMillis()))

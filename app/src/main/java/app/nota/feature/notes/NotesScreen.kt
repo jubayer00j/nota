@@ -1,6 +1,8 @@
 package app.nota.feature.notes
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -337,25 +339,69 @@ fun NotesScreen(
     if (showFoldersDialog) {
         ManageFoldersDialog(
             folders = state.folders,
-            onCreate = { viewModel.createFolder(it) },
+            onCreate = { name, color -> viewModel.createFolder(name, color) },
             onRename = { folder, name -> viewModel.renameFolder(folder, name) },
+            onSetColor = { folder, color -> viewModel.setFolderColor(folder, color) },
             onDelete = { viewModel.deleteFolder(it) },
             onDismiss = { showFoldersDialog = false },
         )
     }
 }
 
+/** Preset folder cover colours (spec §12 folder covers). */
+private val FOLDER_COLORS: List<Int> = listOf(
+    0xFF5B7553.toInt(), 0xFFB5654A.toInt(), 0xFF4A6FA5.toInt(), 0xFFC2A14D.toInt(),
+    0xFF7A5FA0.toInt(), 0xFF4E7E79.toInt(), 0xFF9C6644.toInt(), 0xFF6B7280.toInt(),
+)
+
+@Composable
+private fun FolderColorRow(selected: Int?, onSelect: (Int?) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = NotaSpacing.xs),
+        horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Colour", style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(
+            Modifier.size(22.dp).clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { onSelect(null) },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("✕", style = MaterialTheme.typography.labelSmall)
+        }
+        FOLDER_COLORS.forEach { color ->
+            Box(
+                Modifier.size(22.dp).clip(CircleShape)
+                    .background(Color(color))
+                    .then(
+                        if (selected == color) {
+                            Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .clickable { onSelect(color) },
+            )
+        }
+    }
+}
+
 @Composable
 private fun ManageFoldersDialog(
     folders: List<FolderEntity>,
-    onCreate: (String) -> Unit,
+    onCreate: (String, Int?) -> Unit,
     onRename: (FolderEntity, String) -> Unit,
+    onSetColor: (FolderEntity, Int?) -> Unit,
     onDelete: (FolderEntity) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var newName by remember { mutableStateOf("") }
+    var newColor by remember { mutableStateOf<Int?>(null) }
     var editing by remember { mutableStateOf<FolderEntity?>(null) }
     var editName by remember { mutableStateOf("") }
+    var editColor by remember { mutableStateOf<Int?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Manage folders") },
@@ -366,8 +412,15 @@ private fun ManageFoldersDialog(
                 }
                 folders.forEach { folder ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(10.dp).clip(CircleShape)
+                                .background(Color(folder.colorArgb ?: 0xFF5B7553.toInt())),
+                        )
+                        Spacer(Modifier.size(NotaSpacing.sm))
                         Text(folder.name, Modifier.weight(1f))
-                        TextButton(onClick = { editing = folder; editName = folder.name }) { Text("Rename") }
+                        TextButton(onClick = {
+                            editing = folder; editName = folder.name; editColor = folder.colorArgb
+                        }) { Text("Rename") }
                         IconButton(onClick = { onDelete(folder) }) {
                             Icon(Icons.Filled.Delete, contentDescription = "Delete ${folder.name}")
                         }
@@ -380,8 +433,12 @@ private fun ManageFoldersDialog(
                         label = { Text("Folder name") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    FolderColorRow(selected = editColor, onSelect = { editColor = it })
                     TextButton(
-                        onClick = { editing?.let { onRename(it, editName) }; editing = null },
+                        onClick = {
+                            editing?.let { onRename(it, editName); onSetColor(it, editColor) }
+                            editing = null
+                        },
                     ) { Text("Save rename") }
                 } else {
                     OutlinedTextField(
@@ -389,8 +446,13 @@ private fun ManageFoldersDialog(
                         label = { Text("New folder") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    FolderColorRow(selected = newColor, onSelect = { newColor = it })
                     TextButton(
-                        onClick = { if (newName.isNotBlank()) { onCreate(newName); newName = "" } },
+                        onClick = {
+                            if (newName.isNotBlank()) {
+                                onCreate(newName, newColor); newName = ""; newColor = null
+                            }
+                        },
                     ) { Text("Add folder") }
                 }
             }

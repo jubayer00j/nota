@@ -28,11 +28,23 @@ object PlainTextCodec {
         if (html.isBlank()) return ""
         var s = html
         s = s.replace(Regex("(?i)<br\\s*/?>"), "\n")
+        s = s.replace(Regex("(?i)<hr\\s*/?>"), "\n\n")
         s = s.replace(Regex("(?i)</p>"), "\n\n")
+        // Block boundaries the rich editor produces (headings, quotes, code
+        // blocks, list items, table rows) must become line breaks BEFORE the
+        // generic tag strip, or adjacent blocks fuse into one word in the
+        // plain-text projection ("<h1>Shopping</h1><ul><li>milk</li>" would
+        // project as "Shoppingmilk"). Review fix, Phase 1 re-review.
+        s = s.replace(Regex("(?i)</(h[1-6]|blockquote|pre|div)>"), "\n\n")
+        s = s.replace(Regex("(?i)</li>"), "\n")
+        s = s.replace(Regex("(?i)</tr>"), "\n")
+        s = s.replace(Regex("(?i)</t[dh]>"), " ")
         s = s.replace(Regex("(?i)<p[^>]*>"), "")
         s = s.replace(Regex("<[^>]+>"), "")
         s = unescape(s)
         return s.trim().replace(Regex("\n{3,}"), "\n\n")
+            .replace(Regex("[ \t]+\n"), "\n")
+            .replace(Regex("\n[ \t]+"), "\n")
     }
 
     private fun escape(text: String): String = text
