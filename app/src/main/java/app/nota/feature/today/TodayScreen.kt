@@ -83,10 +83,11 @@ fun TodayScreen(
             items(state.pinned, key = { it.id }) { note ->
                 NoteCard(
                     title = note.title,
-                    snippet = note.plainText,
+                    snippet = if (note.locked) "" else note.plainText,
                     updatedLabel = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(note.updatedAt)),
                     pinned = true,
                     favourite = note.favourite,
+                    locked = note.locked,
                     onClick = { onOpenNote(note.id) },
                 )
             }

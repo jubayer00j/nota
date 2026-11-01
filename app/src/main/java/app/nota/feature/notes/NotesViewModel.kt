@@ -118,8 +118,14 @@ class NotesViewModel(
                     tagNames = noteTagIds.mapNotNull { tagsById[it]?.name }.sorted(),
                     tagIds = noteTagIds,
                     attachmentCount = noteAttachments.size,
-                    coverImagePath = noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }
-                        ?.let(coverPath),
+                    // Phase 2b: a locked note never shows a cover — its
+                    // attachment files hold envelopes, not images.
+                    coverImagePath = if (note.locked) {
+                        null
+                    } else {
+                        noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }
+                            ?.let(coverPath)
+                    },
                 )
             }
             val now = System.currentTimeMillis()

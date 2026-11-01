@@ -345,13 +345,14 @@ fun NotesScreen(
                         ) {
                             NoteCard(
                                 title = note.title,
-                                snippet = note.plainText,
+                                snippet = if (note.locked) "" else note.plainText,
                                 updatedLabel = formatUpdated(note.updatedAt),
                                 folderName = item.folderName,
                                 tagNames = item.tagNames,
                                 pinned = note.pinned,
                                 favourite = note.favourite,
-                                coverImagePath = item.coverImagePath,
+                                coverImagePath = if (note.locked) null else item.coverImagePath,
+                                locked = note.locked,
                                 selected = note.id in state.selection,
                                 onClick = {
                                     if (state.selection.isNotEmpty()) viewModel.toggleSelect(note.id)
