@@ -58,6 +58,9 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE trashedAt IS NULL AND locked = 0 ORDER BY title COLLATE NOCASE ASC")
     fun observeLinkable(): Flow<List<NoteEntity>>
 
+    @Query("DELETE FROM notes")
+    suspend fun deleteAll()
+
     @Upsert
     suspend fun upsert(note: NoteEntity)
 
@@ -84,6 +87,15 @@ interface FolderDao {
     @Query("SELECT * FROM folders ORDER BY sortOrder ASC, name ASC")
     fun observeAll(): Flow<List<FolderEntity>>
 
+    @Query("SELECT * FROM folders")
+    suspend fun getAll(): List<FolderEntity>
+
+    @Query("SELECT * FROM folders WHERE id = :id")
+    suspend fun getById(id: String): FolderEntity?
+
+    @Query("DELETE FROM folders")
+    suspend fun deleteAll()
+
     @Upsert
     suspend fun upsert(folder: FolderEntity)
 
@@ -98,6 +110,18 @@ interface TagDao {
 
     @Query("SELECT * FROM tags WHERE name = :name LIMIT 1")
     suspend fun getByName(name: String): TagEntity?
+
+    @Query("SELECT * FROM tags")
+    suspend fun getAllTags(): List<TagEntity>
+
+    @Query("SELECT * FROM tags WHERE id = :id")
+    suspend fun getById(id: String): TagEntity?
+
+    @Query("DELETE FROM tags")
+    suspend fun deleteAllTags()
+
+    @Query("DELETE FROM note_tags")
+    suspend fun deleteAllCrossRefs()
 
     @Upsert
     suspend fun upsert(tag: TagEntity)
@@ -132,6 +156,15 @@ interface AttachmentDao {
     @Query("SELECT * FROM attachments WHERE noteId = :noteId ORDER BY createdAt ASC")
     suspend fun getForNote(noteId: String): List<AttachmentEntity>
 
+    @Query("SELECT * FROM attachments")
+    suspend fun getAll(): List<AttachmentEntity>
+
+    @Query("SELECT * FROM attachments WHERE id = :id")
+    suspend fun getById(id: String): AttachmentEntity?
+
+    @Query("DELETE FROM attachments")
+    suspend fun deleteAll()
+
     @Upsert
     suspend fun upsert(attachment: AttachmentEntity)
 
@@ -143,6 +176,18 @@ interface AttachmentDao {
 interface ReminderDao {
     @Query("SELECT * FROM reminders WHERE enabled = 1 ORDER BY triggerAt ASC")
     fun observeEnabled(): Flow<List<ReminderEntity>>
+
+    @Query("SELECT * FROM reminders")
+    suspend fun getAll(): List<ReminderEntity>
+
+    @Query("SELECT * FROM reminders WHERE id = :id")
+    suspend fun getById(id: String): ReminderEntity?
+
+    @Query("SELECT * FROM reminders WHERE noteId = :noteId")
+    suspend fun getForNote(noteId: String): List<ReminderEntity>
+
+    @Query("DELETE FROM reminders")
+    suspend fun deleteAll()
 
     @Upsert
     suspend fun upsert(reminder: ReminderEntity)
@@ -169,6 +214,9 @@ interface NoteFtsDao {
 
     @Query("DELETE FROM notes_fts WHERE noteId = :noteId")
     suspend fun deleteForNote(noteId: String)
+
+    @Query("DELETE FROM notes_fts")
+    suspend fun deleteAll()
 }
 
 @Dao
@@ -202,6 +250,9 @@ interface NoteLinkDao {
 
     @Query("DELETE FROM note_links WHERE sourceId = :sourceId")
     suspend fun deleteForSource(sourceId: String)
+
+    @Query("DELETE FROM note_links")
+    suspend fun deleteAll()
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(links: List<NoteLinkEntity>)
