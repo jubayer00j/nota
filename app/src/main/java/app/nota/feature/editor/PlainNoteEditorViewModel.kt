@@ -31,6 +31,15 @@ class PlainNoteEditorViewModel(
     private val _tagNames = MutableStateFlow<List<String>>(emptyList())
     val tagNames: StateFlow<List<String>> = _tagNames
 
+    /**
+     * True once the tags stream has emitted at least once. Until then the
+     * screen cannot distinguish "note has no tags" from "tags not loaded
+     * yet" — snapshotting or saving tag state before this point would
+     * silently wipe the note's tags (re-review fix).
+     */
+    private val _tagsLoaded = MutableStateFlow(false)
+    val tagsLoaded: StateFlow<Boolean> = _tagsLoaded
+
     fun load(noteId: String) {
         if (noteIdFlow.value == noteId) return
         noteIdFlow.value = noteId
@@ -38,6 +47,7 @@ class PlainNoteEditorViewModel(
             _note.value = repository.getById(noteId)
             repository.observeTagsForNote(noteId).collect { tags ->
                 _tagNames.value = tags.map { it.name }
+                _tagsLoaded.value = true
             }
         }
     }
@@ -51,7 +61,7 @@ class PlainNoteEditorViewModel(
         title: String,
         plainBody: String,
         folderId: String?,
-        tagsCsv: String,
+        tagsCsv: String?,
         onSaved: () -> Unit,
     ) {
         val current = _note.value ?: return
@@ -68,10 +78,14 @@ class PlainNoteEditorViewModel(
                 repository.moveToFolder(updated, folderId)
                 updated = updated.copy(folderId = folderId)
             }
-            repository.setNoteTags(
-                updated.id,
-                tagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() },
-            )
+            // tagsCsv == null means "tags not loaded yet": leave the note's
+            // tags untouched rather than wiping them with an empty list.
+            if (tagsCsv != null) {
+                repository.setNoteTags(
+                    updated.id,
+                    tagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+                )
+            }
             _note.value = repository.getById(updated.id) ?: updated
             onSaved()
         }

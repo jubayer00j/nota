@@ -60,6 +60,7 @@ fun PlainNoteEditorScreen(
     val note by viewModel.currentNote.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val existingTags by viewModel.tagNames.collectAsState()
+    val tagsLoaded by viewModel.tagsLoaded.collectAsState()
 
     var initializedFor by remember { mutableStateOf<String?>(null) }
     var title by remember { mutableStateOf("") }
@@ -67,6 +68,7 @@ fun PlainNoteEditorScreen(
     var tagsCsv by remember { mutableStateOf("") }
     var folderId by remember { mutableStateOf<String?>(null) }
     var savedSnapshot by remember { mutableStateOf<List<String?>>(emptyList()) }
+    var savedTagsCsv by remember { mutableStateOf<String?>(null) }
 
     val current = note
     if (current != null && initializedFor != current.id) {
@@ -75,22 +77,30 @@ fun PlainNoteEditorScreen(
         body = viewModel.bodyText(current)
         folderId = current.folderId
     }
-    // Tags arrive on their own stream; seed the field once they load.
-    var tagsSeeded by remember { mutableStateOf(false) }
-    if (!tagsSeeded && existingTags.isNotEmpty()) {
-        tagsCsv = existingTags.joinToString(", ")
-        tagsSeeded = true
+    // Tags arrive on their own stream. Only once they have LOADED do we
+    // know the persisted value: record it as the tag snapshot and seed the
+    // field — without clobbering text the user already typed. Snapshotting
+    // or saving tag state before load would read the not-yet-seeded empty
+    // field as "all tags removed" and silently wipe them (re-review fix).
+    if (tagsLoaded && savedTagsCsv == null) {
+        val loaded = existingTags.joinToString(", ")
+        savedTagsCsv = loaded
+        if (tagsCsv.isEmpty()) tagsCsv = loaded
     }
     if (current != null && savedSnapshot.isEmpty()) {
-        savedSnapshot = listOf(title, body, tagsCsv, folderId)
+        savedSnapshot = listOf(title, body, folderId)
     }
-    val dirty = current != null && savedSnapshot.isNotEmpty() &&
-        listOf(title, body, tagsCsv, folderId) != savedSnapshot
+    val fieldsDirty = current != null && savedSnapshot.isNotEmpty() &&
+        listOf(title, body, folderId) != savedSnapshot
+    val tagsDirty = savedTagsCsv != null && tagsCsv != savedTagsCsv
+    val dirty = fieldsDirty || tagsDirty
 
     fun saveIfDirty(then: () -> Unit) {
         if (dirty) {
-            viewModel.save(title, body, folderId, tagsCsv) {
-                savedSnapshot = listOf(title, body, tagsCsv, folderId)
+            // Tags not loaded yet -> null tells the VM to leave them alone.
+            viewModel.save(title, body, folderId, if (tagsLoaded) tagsCsv else null) {
+                savedSnapshot = listOf(title, body, folderId)
+                if (tagsLoaded) savedTagsCsv = tagsCsv
                 then()
             }
         } else {
