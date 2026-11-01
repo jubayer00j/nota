@@ -372,6 +372,7 @@ class BackupRepository(
                 }
             }
 
+            println("DIAG afterTxn imgExists=" + File(context.filesDir, "attachments/note-plain-1/photo.png").exists())
             // ---- Tombstones: merge only, NOT stored (Phase 3 store).
             if (mode == RestoreMode.MERGE && handle.tombstones.isNotEmpty()) {
                 counts += MergeCounts(deleted = applyTombstones(handle.tombstones))
@@ -390,7 +391,9 @@ class BackupRepository(
                 // from templates yet (documented in the PR).
             }
 
+            println("DIAG afterTemplates imgExists=" + File(context.filesDir, "attachments/note-plain-1/photo.png").exists())
             rebuildFtsAndLinks()
+            println("DIAG afterRebuild imgExists=" + File(context.filesDir, "attachments/note-plain-1/photo.png").exists())
             println("DIAG written=" + writtenAttachments.map { it.id + "@" + it.localPath })
             println("DIAG rowsBefore=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
             println(
@@ -426,6 +429,7 @@ class BackupRepository(
         } else {
             null to null
         }
+        println("DIAG writeDone id=" + meta.id + " exists=" + target.exists())
         return AttachmentEntity(
             id = meta.id,
             noteId = meta.noteId,
