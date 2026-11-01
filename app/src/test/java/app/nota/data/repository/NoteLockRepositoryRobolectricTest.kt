@@ -320,15 +320,16 @@ class NoteLockRepositoryRobolectricTest {
         db.attachmentDao().upsert(broken)
         store.fileFor(good).apply { parentFile?.mkdirs(); writeBytes(payload) }
 
+        var thrown: Throwable? = null
         try {
             lockRepo.lockNote(
                 note.id, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"),
             )
-            throw AssertionError("lock should have failed on the missing file")
-        } catch (e: Exception) {
-            // Expected: the read failure aborts the lock.
-            assertFalse(e is AssertionError)
+        } catch (t: Throwable) {
+            thrown = t
         }
+        // Expected: the read failure aborts the lock (not our own assert).
+        assertTrue(thrown != null && thrown !is AssertionError)
         // The note stayed unlocked and the good attachment is RAW again.
         val after = notes.getById(note.id)!!
         assertFalse(after.locked)
