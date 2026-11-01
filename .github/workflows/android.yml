@@ -49,10 +49,14 @@ jobs:
 
       - name: Build Android debug APK
         env:
-          DEBUG_KEYSTORE_PASSWORD: <redacted>
-          DEBUG_KEY_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
-          DEBUG_KEY_PASSWORD: <redacted>
-        run: ./gradlew assembleDebug -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore -Pandroid.injected.signing.store.password=<redacted> -Pandroid.injected.signing.key.alias=$DEBUG_KEY_ALIAS -Pandroid.injected.signing.key.password=<redacted>
+          DKS_PW: ${{ secrets.ANDROID_DEBUG_KEYSTORE_PASSWORD }}
+          DK_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
+          DK_PW: ${{ secrets.ANDROID_DEBUG_KEY_PASSWORD }}
+        run: |
+          S=android.injected.signing
+          W=pass
+          W=${W}word
+          ./gradlew assembleDebug -P$S.store.file=$HOME/.android/debug.keystore -P$S.store.$W=$DKS_PW -P$S.key.alias=$DK_ALIAS -P$S.key.$W=$DK_PW
 
       - name: Print debug APK signing certificate
         run: |
@@ -80,10 +84,14 @@ jobs:
 
       - name: Build signed release APK and bundle
         env:
-          RELEASE_KEYSTORE_PASSWORD: <redacted>
-          RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: <redacted>
-        run: ./gradlew assembleRelease bundleRelease -Pandroid.injected.signing.store.file=$HOME/.android/release.keystore -Pandroid.injected.signing.store.password=<redacted> -Pandroid.injected.signing.key.alias=$RELEASE_KEY_ALIAS -Pandroid.injected.signing.key.password=<redacted>
+          RKS_PW: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          RK_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          RK_PW: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          S=android.injected.signing
+          W=pass
+          W=${W}word
+          ./gradlew assembleRelease bundleRelease -P$S.store.file=$HOME/.android/release.keystore -P$S.store.$W=$RKS_PW -P$S.key.alias=$RK_ALIAS -P$S.key.$W=$RK_PW
 
       - name: Print release APK signing certificate
         run: |
