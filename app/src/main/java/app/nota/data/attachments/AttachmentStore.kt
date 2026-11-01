@@ -123,9 +123,18 @@ class AttachmentStore(
     /**
      * Orphan reconciliation (spec §7 parity): removes files no row points
      * at and rows whose file is gone. Returns (filesRemoved, rowsRemoved).
+     *
+     * [allProvider] is invoked INSIDE [fileMutex] (Codex re-review N3):
+     * computing the snapshot before acquiring the lock left a race — an
+     * import completing after the snapshot but before the sweep would not
+     * be in knownPaths, so its file would be deleted while its Room row
+     * remained. Fetching under the same lock that serialises imports
+     * closes that window.
      */
-    suspend fun reconcile(all: List<AttachmentEntity>): Pair<Int, Int> =
-        fileMutex.withLock { reconcileLocked(all) }
+    suspend fun reconcile(
+        allProvider: suspend () -> List<AttachmentEntity>,
+    ): Pair<Int, Int> =
+        fileMutex.withLock { reconcileLocked(allProvider()) }
 
     private suspend fun reconcileLocked(all: List<AttachmentEntity>): Pair<Int, Int> = withContext(Dispatchers.IO) {
         var filesRemoved = 0

@@ -32,7 +32,9 @@ class NotaApplication : Application() {
                 val koin = org.koin.core.context.GlobalContext.get()
                 val repository = koin.get<NoteRepository>()
                 val store = koin.get<AttachmentStore>()
-                store.reconcile(repository.observeAttachments().first())
+                // Provider form: the snapshot is taken inside the
+                // store's file mutex, not before it (Codex re-review N3).
+                store.reconcile { repository.observeAttachments().first() }
             }
         }
     }
