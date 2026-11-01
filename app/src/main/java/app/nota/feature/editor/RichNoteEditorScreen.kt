@@ -31,7 +31,7 @@ import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
-import androidx.compose.material.icons.automirrored.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AttachFile
@@ -1056,7 +1056,7 @@ private fun EditorToolbar(
             Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Bullet list")
         }
         IconButton(onClick = { state?.toggleOrderedList() }, enabled = enabled) {
-            Icon(Icons.AutoMirrored.Filled.FormatListNumbered, contentDescription = "Numbered list")
+            Icon(Icons.Filled.FormatListNumbered, contentDescription = "Numbered list")
         }
         IconButton(onClick = onLinkRequest, enabled = enabled) {
             Icon(Icons.Filled.Link, contentDescription = "Insert link")
