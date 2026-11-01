@@ -184,22 +184,29 @@ class BackupReader(private val workDir: File) {
         // Raw-entry stored names: a second lightweight pass over entry
         // NAMES only (no content reads) — the `<id>-<name>` suffix is
         // the storedName source for restored attachment files.
-        val rawSuffixes = HashMap<String, String>()
+        // Attachment IDs themselves contain dashes, so the split is
+        // matched against the KNOWN staged ids (longest first), never at
+        // the first dash.
+        val rawNames = mutableListOf<String>()
         try {
             ZipInputStream(zipFile.inputStream().buffered()).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     val name = entry.name
                     if (name.startsWith("attachments/") && !name.endsWith(".json")) {
-                        val rest = name.removePrefix("attachments/")
-                        val dash = rest.indexOf('-')
-                        if (dash > 0) rawSuffixes[rest.substring(0, dash)] = rest.substring(dash + 1)
+                        rawNames += name.removePrefix("attachments/")
                     }
                     zip.closeEntry()
                 }
             }
         } catch (e: Exception) {
             // Names pass is best-effort; imports fall back to synthesised names.
+        }
+        val rawSuffixes = HashMap<String, String>()
+        for (staged in attachments) {
+            val id = staged.meta.id
+            val match = rawNames.firstOrNull { it.startsWith("$id-") }
+            if (match != null) rawSuffixes[id] = match.removePrefix("$id-")
         }
         val withSuffixes = attachments.map { staged ->
             val suffix = rawSuffixes[staged.meta.id]
