@@ -52,12 +52,7 @@ jobs:
           DEBUG_KEYSTORE_PASSWORD: <redacted>
           DEBUG_KEY_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
           DEBUG_KEY_PASSWORD: <redacted>
-        run: |
-          ./gradlew assembleDebug \
-            -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore \
-            -Pandroid.injected.signing.store.password=<redacted> \
-            -Pandroid.injected.signing.key.alias=$DEBUG_KEY_ALIAS \
-            -Pandroid.injected.signing.key.password=<redacted>
+        run: ./gradlew assembleDebug -Pandroid.injected.signing.store.file=$HOME/.android/debug.keystore -Pandroid.injected.signing.store.password=<redacted> -Pandroid.injected.signing.key.alias=$DEBUG_KEY_ALIAS -Pandroid.injected.signing.key.password=<redacted>
 
       - name: Print debug APK signing certificate
         run: |
@@ -88,12 +83,7 @@ jobs:
           RELEASE_KEYSTORE_PASSWORD: <redacted>
           RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: <redacted>
-        run: |
-          ./gradlew assembleRelease bundleRelease \
-            -Pandroid.injected.signing.store.file=$HOME/.android/release.keystore \
-            -Pandroid.injected.signing.store.password=<redacted> \
-            -Pandroid.injected.signing.key.alias=$RELEASE_KEY_ALIAS \
-            -Pandroid.injected.signing.key.password=<redacted>
+        run: ./gradlew assembleRelease bundleRelease -Pandroid.injected.signing.store.file=$HOME/.android/release.keystore -Pandroid.injected.signing.store.password=<redacted> -Pandroid.injected.signing.key.alias=$RELEASE_KEY_ALIAS -Pandroid.injected.signing.key.password=<redacted>
 
       - name: Print release APK signing certificate
         run: |
