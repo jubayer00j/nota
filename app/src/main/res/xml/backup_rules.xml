@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Nota's own backup/sync (Drive archive, spec §4) is the data-safety story;
+     platform cloud backup is disabled for note databases by design. -->
+<full-backup-content>
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+</full-backup-content>

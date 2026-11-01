@@ -1,0 +1,15 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/app/build
+/app/schemas/*.json.tmp
+captures
+.externalNativeBuild
+.cxx
+# Signing — NEVER commit keystores or their passwords.
+*.keystore
+*.jks
+keystore.properties
