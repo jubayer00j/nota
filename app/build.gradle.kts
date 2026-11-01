@@ -19,7 +19,11 @@ plugins {
 
 android {
     namespace = "app.nota.notes"
-    compileSdk = 36
+    // compileSdk 37: the current libraries (Compose BOM 2026.09, navigation 2.10,
+    // rich-editor 1.2.1) are built against API 37 and refuse less. This is a
+    // compile-time floor only — targetSdk stays 36 per spec §1 (runtime
+    // behaviour opt-ins unchanged).
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "app.nota.notes"
@@ -56,6 +60,12 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
