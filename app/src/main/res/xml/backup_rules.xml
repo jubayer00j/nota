@@ -4,4 +4,7 @@
 <full-backup-content>
     <exclude domain="database" path="." />
     <exclude domain="sharedpref" path="." />
+    <!-- Attachment binaries live under files/attachments (Phase 1c store);
+         they travel in Nota's own backup ZIP, never in platform cloud backup. -->
+    <exclude domain="file" path="attachments/" />
 </full-backup-content>
