@@ -38,7 +38,7 @@ class TodayViewModel(
         TodayUiState(
             pinned = notes.filter { it.pinned },
             dueToday = reminders
-                .filter { it.triggerAt >= startOfToday && it.triggerAt < startOfTomorrow }
+                .filter { it.triggerAt < startOfTomorrow }
                 .map { DueReminder(it, titles[it.noteId] ?: "Untitled") },
             todayDate = LocalDate.now(zone).toString(),
         )
