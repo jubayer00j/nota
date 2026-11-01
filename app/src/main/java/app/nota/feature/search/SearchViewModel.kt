@@ -5,11 +5,11 @@ import androidx.lifecycle.viewModelScope
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.repository.NoteRepository
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
