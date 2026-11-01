@@ -211,7 +211,21 @@ class RichNoteEditorViewModel(
 
     fun saveAsTemplate(name: String, title: String, segments: List<DocSegment>) {
         viewModelScope.launch {
-            templateRepository.add(name, title, NoteDocument.serialize(segments))
+            // Codex re-review N4: an embedded attachment image references
+            // this note's attachment id (nota-attachment://<id>), but no
+            // attachment file/metadata travels with a template — applying
+            // the template would create a note whose image can never
+            // resolve. Strip attachment ImageSegments from the stored
+            // template HTML so a template never contains an unresolvable
+            // reference. (External-URL images are untouched; copying the
+            // underlying files into each applied note is a future
+            // enhancement, not done here.)
+            val cleaned = segments.filterNot {
+                it is ImageSegment &&
+                    it.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)
+            }
+            val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
+            templateRepository.add(name, title, NoteDocument.serialize(kept))
         }
     }
 
