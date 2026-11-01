@@ -55,6 +55,12 @@ class PreferencesRepository(context: Context) {
         prefs[KEY_OLED_BLACK] ?: false
     }
 
+    /** Phase 1b: open on the Today surface instead of Notes. Default false;
+     *  read once at launch by MainActivity — changes apply on next launch. */
+    val startOnToday: Flow<Boolean> = dataStore.safeData.map { prefs ->
+        prefs[KEY_START_ON_TODAY] ?: false
+    }
+
     suspend fun setDynamicColour(enabled: Boolean) {
         safeEdit { this[KEY_DYNAMIC_COLOUR] = enabled }
     }
@@ -80,6 +86,10 @@ class PreferencesRepository(context: Context) {
         }
     }
 
+    suspend fun setStartOnToday(enabled: Boolean) {
+        safeEdit { this[KEY_START_ON_TODAY] = enabled }
+    }
+
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
     private val DataStore<Preferences>.safeData: Flow<Preferences>
         get() = data.catch { exception ->
@@ -90,5 +100,6 @@ class PreferencesRepository(context: Context) {
         const val TAG = "PreferencesRepository"
         val KEY_DYNAMIC_COLOUR = booleanPreferencesKey("dynamic_colour")
         val KEY_OLED_BLACK = booleanPreferencesKey("oled_black")
+        val KEY_START_ON_TODAY = booleanPreferencesKey("start_on_today")
     }
 }

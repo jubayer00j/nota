@@ -40,6 +40,7 @@ fun SettingsScreen(
 ) {
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
     val oledBlack by preferencesRepository.oledBlack.collectAsState(initial = false)
+    val startOnToday by preferencesRepository.startOnToday.collectAsState(initial = false)
     val scope = rememberCoroutineScope()
 
     // Scrollable so the growing category list can never be clipped behind
@@ -74,6 +75,14 @@ fun SettingsScreen(
             enabled = dynamicColourSupported,
             onCheckedChange = { enabled ->
                 scope.launch { preferencesRepository.setDynamicColour(enabled) }
+            },
+        )
+        SettingsSwitchRow(
+            title = "Start on Today",
+            subtitle = "Applies on next launch",
+            checked = startOnToday,
+            onCheckedChange = { enabled ->
+                scope.launch { preferencesRepository.setStartOnToday(enabled) }
             },
         )
         SettingsSwitchRow(

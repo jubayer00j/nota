@@ -170,3 +170,12 @@ data class NoteFtsEntity(
     val title: String,
     val plainText: String,
 )
+
+/** A named, re-runnable search (Phase 1b). Saved from the Search screen. */
+@Entity(tableName = "saved_searches")
+data class SavedSearchEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val query: String,
+    val createdAt: Long,
+)

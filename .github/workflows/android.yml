@@ -3,8 +3,9 @@ name: Build Android App
 on:
   push:
     branches: ["main"]
+  # No branch filter: stacked phase PRs (base = previous phase branch)
+  # must run CI on their own PRs, not only PRs targeting main.
   pull_request:
-    branches: ["main"]
 
 jobs:
   build-android:

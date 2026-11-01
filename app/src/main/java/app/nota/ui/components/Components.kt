@@ -1,5 +1,7 @@
 package app.nota.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -22,7 +25,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import coil3.compose.AsyncImage
+import java.io.File
 import app.nota.ui.theme.NotaSpacing
 
 /** Primary action in Nota's voice: filled pine button. */
@@ -60,7 +67,7 @@ fun NotaCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
  * serif title, structured snippet, folder/tag chips, pin + favourite affordances.
  * Phase 0 renders it with preview data; Phase 1 binds it to Room.
  */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun NoteCard(
     title: String,
@@ -71,14 +78,27 @@ fun NoteCard(
     tagNames: List<String> = emptyList(),
     pinned: Boolean = false,
     favourite: Boolean = false,
+    coverImagePath: String? = null,
+    selected: Boolean = false,
     onClick: () -> Unit = {},
+    onLongClick: (() -> Unit)? = null,
 ) {
     Card(
-        onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = NotaSpacing.xs),
     ) {
+        if (coverImagePath != null) {
+            // Local files only (Phase 1b): absolute paths load as Files,
+            // anything else is passed to Coil as-is. No network module.
+            val model: Any = if (coverImagePath.startsWith("/")) File(coverImagePath) else coverImagePath
+            AsyncImage(
+                model = model,
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+                contentScale = ContentScale.Crop,
+            )
+        }
         Column(Modifier.padding(NotaSpacing.md)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -88,6 +108,13 @@ fun NoteCard(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                if (selected) {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 if (pinned) {
                     Icon(
                         Icons.Filled.PushPin,

@@ -2,8 +2,12 @@ package app.nota.di
 
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
+import app.nota.feature.editor.PlainNoteEditorViewModel
 import app.nota.feature.notes.NotesViewModel
+import app.nota.feature.search.SearchViewModel
+import app.nota.feature.today.TodayViewModel
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
@@ -22,7 +26,12 @@ val appModule = module {
     single { get<NotaDatabase>().reminderDao() }
     single { get<NotaDatabase>().noteVersionDao() }
     single { get<NotaDatabase>().noteFtsDao() }
-    single { NoteRepository(get(), get(), get()) }
+    single { get<NotaDatabase>().savedSearchDao() }
+    single { NoteRepository(get(), get(), get(), get(), get(), get(), get()) }
+    single { LibraryRepository(get(), get(), get(), get()) }
     single { PreferencesRepository(androidContext()) }
-    viewModel { NotesViewModel(get()) }
+    viewModel { NotesViewModel(get(), get()) }
+    viewModel { PlainNoteEditorViewModel(get()) }
+    viewModel { TodayViewModel(get(), get()) }
+    viewModel { SearchViewModel(get()) }
 }

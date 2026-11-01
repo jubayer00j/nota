@@ -29,8 +29,10 @@ class MainActivity : ComponentActivity() {
                 .collectAsState(initial = false)
             val oledBlack by preferencesRepository.oledBlack
                 .collectAsState(initial = false)
+            val startOnToday by preferencesRepository.startOnToday
+                .collectAsState(initial = false)
             NotaTheme(dynamicColor = dynamicColour, oledBlack = oledBlack) {
-                NotaNavShell()
+                NotaNavShell(startOnToday = startOnToday)
             }
         }
     }
