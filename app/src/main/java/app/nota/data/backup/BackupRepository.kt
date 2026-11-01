@@ -273,6 +273,7 @@ class BackupRepository(
                 writtenAttachments += writeAttachmentFile(plan.staged)
             }
 
+            println("DIAG beforeTxn thread=" + Thread.currentThread().name)
             File(context.filesDir, "probe-marker.txt").writeText("probe")
             println("DIAG beforeTxn filesDir=" + context.filesDir.absolutePath + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             var counts = MergeCounts()
@@ -281,7 +282,7 @@ class BackupRepository(
             db.withTransaction {
                 if (mode == RestoreMode.REPLACE) {
                     linkDao.deleteAll()
-                    println("DIAG del-links attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
+                    println("DIAG del-links thread=" + Thread.currentThread().name + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " filesDirList=" + (context.filesDir.list()?.toList()) + " attDirList=" + (File(context.filesDir, "attachments").list()?.toList()) + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     ftsDao.deleteAll()
                     println("DIAG del-fts attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     tagDao.deleteAllCrossRefs()
