@@ -234,10 +234,35 @@ class NoteRepository(
     }
 
     // --- Daily notes -------------------------------------------------------------
-    /** Returns the daily note for [date] ("yyyy-MM-dd"), creating it if needed. */
-    suspend fun ensureDailyNote(date: String): NoteEntity {
-        noteDao.getDaily(date)?.let { return it }
-        return createNote(title = date, plainBody = "", dailyDate = date)
+    /**
+     * Returns the daily note for [date] ("yyyy-MM-dd"), creating it if needed.
+     *
+     * The lookup-and-create runs inside a single transaction with the
+     * recheck inside it, so concurrent callers (e.g. a double-tap) cannot
+     * both miss the lookup and create duplicates: a later transaction
+     * observes the earlier one's note. A unique index on dailyDate would
+     * enforce this at the schema level, but that is deferred to a
+     * schema v4 migration (the schema is owned by the 1c branch).
+     */
+    suspend fun ensureDailyNote(date: String): NoteEntity = db.withTransaction {
+        val existing = noteDao.getDaily(date)
+        if (existing != null) return@withTransaction existing
+        val now = System.currentTimeMillis()
+        val note = NoteEntity(
+            id = UUID.randomUUID().toString(),
+            title = date,
+            contentHtml = PlainTextCodec.textToHtml(""),
+            plainText = "",
+            createdAt = now,
+            updatedAt = now,
+            dailyDate = date,
+        )
+        noteDao.upsert(note)
+        ftsDao.deleteForNote(note.id)
+        ftsDao.insert(
+            NoteFtsEntity(noteId = note.id, title = note.title, plainText = note.plainText),
+        )
+        note
     }
 
     // --- Saved searches ------------------------------------------------------------

@@ -143,12 +143,12 @@ fun PlainNoteEditorScreen(
                         DropdownMenuItem(
                             text = { Text("Archive") },
                             leadingIcon = { Icon(Icons.Filled.Archive, contentDescription = null) },
-                            onClick = { menuExpanded = false; viewModel.archive(onBack) },
+                            onClick = { menuExpanded = false; saveIfDirty { viewModel.archive(onBack) } },
                         )
                         DropdownMenuItem(
                             text = { Text("Move to trash") },
                             leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                            onClick = { menuExpanded = false; viewModel.delete(onBack) },
+                            onClick = { menuExpanded = false; saveIfDirty { viewModel.delete(onBack) } },
                         )
                     }
                 },

@@ -1,5 +1,6 @@
 package app.nota.feature.settings
 
+import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -58,10 +59,21 @@ fun SettingsScreen(
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.primary,
         )
+        // Dynamic colour only exists on Android 12+ (API 31): NotaTheme
+        // gates it on SDK_INT >= S, so below that the switch must not
+        // pretend to work — disable it with an explanatory subtitle.
+        // The persisted preference is left stored and takes effect if
+        // the device is ever upgraded.
+        val dynamicColourSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
         SettingsSwitchRow(
             title = "Material You dynamic colour",
-            subtitle = "Colour the app from your wallpaper instead of Nota's pine & paper theme",
+            subtitle = if (dynamicColourSupported) {
+                "Colour the app from your wallpaper instead of Nota's pine & paper theme"
+            } else {
+                "Requires Android 12 or newer — not available on this device"
+            },
             checked = dynamicColour,
+            enabled = dynamicColourSupported,
             onCheckedChange = { enabled ->
                 scope.launch { preferencesRepository.setDynamicColour(enabled) }
             },
@@ -113,6 +125,7 @@ private fun SettingsSwitchRow(
     subtitle: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = NotaSpacing.sm),
@@ -126,7 +139,7 @@ private fun SettingsSwitchRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
