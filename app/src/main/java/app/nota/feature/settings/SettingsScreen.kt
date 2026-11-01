@@ -101,6 +101,10 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
+        BackupSection()
+        HorizontalDivider()
+        Spacer(Modifier.height(NotaSpacing.sm))
+
         Text(
             "Writing",
             style = MaterialTheme.typography.titleMedium,
@@ -116,7 +120,7 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.md))
         Text(
-            "Sync & backup · AI features · Data · Account · About — arrive with their phases.",
+            "AI features · Data · Account · About — arrive with their phases.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

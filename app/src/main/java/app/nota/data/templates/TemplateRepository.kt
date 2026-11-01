@@ -65,6 +65,39 @@ class TemplateRepository(private val context: Context) {
         return template
     }
 
+    /** Current snapshot (loads first). Used by backup export. */
+    suspend fun snapshot(): List<NoteTemplate> {
+        load()
+        return _templates.value ?: emptyList()
+    }
+
+    /**
+     * Backup import (Phase 2c): inserts or replaces the user template
+     * with [id] (built-ins are never imported — they never leave the app
+     * in an export, and an imported id can never shadow one).
+     */
+    suspend fun importTemplate(id: String, name: String, title: String, contentHtml: String) {
+        load()
+        mutex.withLock {
+            val current = _templates.value ?: emptyList()
+            if (current.any { it.builtIn && it.id == id }) return
+            val template = NoteTemplate(id = id, name = name, title = title, contentHtml = contentHtml, builtIn = false)
+            val updated = current.filterNot { it.id == id } + template
+            _templates.value = updated
+            withContext(Dispatchers.IO) { persist(updated) }
+        }
+    }
+
+    /** Backup Replace mode: drops every user template (built-ins stay). */
+    suspend fun clearUserTemplates() {
+        load()
+        mutex.withLock {
+            val updated = (_templates.value ?: emptyList()).filter { it.builtIn }
+            _templates.value = updated
+            withContext(Dispatchers.IO) { persist(updated) }
+        }
+    }
+
     suspend fun delete(id: String) {
         load()
         mutex.withLock {

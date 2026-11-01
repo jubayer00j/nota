@@ -1,6 +1,7 @@
 package app.nota.di
 
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.backup.BackupRepository
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AndroidKeystoreNoteLockKeyProvider
@@ -48,6 +49,8 @@ val appModule = module {
     single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }
     single { NoteLockBiometricStore(get(), get()) }
     single { NoteLockRepository(get(), get(), get(), get()) }
+    // Phase 2c backup/restore engine (local ZIP + NOMAENC1 + crossover).
+    single { BackupRepository(androidContext(), get(), get(), get()) }
     viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
