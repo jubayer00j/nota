@@ -9,7 +9,7 @@ package app.nota.data.repository
  */
 object FtsQueryBuilder {
     fun build(raw: String): String? {
-        val match = raw.trim().split(Regex("\s+"))
+        val match = raw.trim().split(Regex("\\s+"))
             .map { it.replace("\"", "") }
             .filter { it.isNotEmpty() }
             .joinToString(" ") { "\"$it\"*" }

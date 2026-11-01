@@ -27,7 +27,7 @@ object PlainTextCodec {
     fun htmlToText(html: String): String {
         if (html.isBlank()) return ""
         var s = html
-        s = s.replace(Regex("(?i)<br\s*/?>"), "\n")
+        s = s.replace(Regex("(?i)<br\\s*/?>"), "\n")
         s = s.replace(Regex("(?i)</p>"), "\n\n")
         s = s.replace(Regex("(?i)<p[^>]*>"), "")
         s = s.replace(Regex("<[^>]+>"), "")
