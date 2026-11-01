@@ -51,14 +51,24 @@ class AttachmentStore(
         val width = bounds.outWidth
         val height = bounds.outHeight
         require(width > 0 && height > 0) { "Not a readable image" }
-        var sample = 1
-        while (width / (sample * 2) >= MAX_IMAGE_DIM || height / (sample * 2) >= MAX_IMAGE_DIM) {
-            sample *= 2
-        }
+        // Codex fix G4: the sample must bring BOTH dimensions under the
+        // cap (the old loop stopped as soon as the halved height dipped
+        // below it and decoded e.g. 4000x3000 full-size).
+        val sample = ImageSampling.inSampleSize(width, height, MAX_IMAGE_DIM)
         val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val bitmap = resolver.openInputStream(uri)?.use {
+        var bitmap = resolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, decodeOpts)
         } ?: error("Could not read image")
+        // Exact post-decode scale: sampling is power-of-two and decoders
+        // may round, so enforce the cap precisely before re-encoding.
+        val (fitW, fitH) = ImageSampling.fitWithin(bitmap.width, bitmap.height, MAX_IMAGE_DIM)
+        if (fitW != bitmap.width || fitH != bitmap.height) {
+            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, fitW, fitH, true)
+            if (scaledBitmap !== bitmap) {
+                bitmap.recycle()
+                bitmap = scaledBitmap
+            }
+        }
         val dir = File(root, noteId).apply { mkdirs() }
         val fileName = "${UUID.randomUUID()}.jpg"
         val file = File(dir, fileName)
