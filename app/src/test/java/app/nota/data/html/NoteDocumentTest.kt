@@ -212,4 +212,226 @@ class NoteDocumentTest {
         assertTrue(segments[0] is TextSegment)
         assertEquals(html, NoteDocument.serialize(segments))
     }
+
+    // ------------------------------------------------ Phase 1.5 fix 2
+    // Trailing caret segment: the editor's working state always ends in
+    // exactly one text segment; the stored form never gains it.
+
+    @Test
+    fun trailingBlockGetsOneEmptyTextSegment() {
+        val fixtures = listOf(
+            "<p>a</p><p><img src=\"nota-attachment://abc\" alt=\"d\"></p>",
+            "<p>a</p><table><tbody><tr><td>1</td></tr></tbody></table>",
+            "<p>a</p><ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>t</p></div></li></ul>",
+            "<p>a</p><hr>",
+            "<p>a</p><blockquote><p>q</p></blockquote>",
+            "<p>a</p><pre><code>x</code></pre>",
+            "<p>a</p><div class=\"custom-widget\">w</div>",
+        )
+        for (html in fixtures) {
+            val parsed = NoteDocument.parse(html)
+            assertTrue("fixture should end in a block: $html", parsed.last() !is TextSegment)
+            val ensured = NoteDocument.ensureTrailingTextSegment(parsed)
+            assertEquals(parsed.size + 1, ensured.size)
+            assertEquals(parsed, ensured.dropLast(1))
+            assertEquals(TextSegment(""), ensured.last())
+        }
+    }
+
+    @Test
+    fun documentEndingInTextIsUnchanged() {
+        for (html in listOf(fullNote, "<h2>H</h2><p>tail</p>")) {
+            val parsed = NoteDocument.parse(html)
+            assertEquals(parsed, NoteDocument.ensureTrailingTextSegment(parsed))
+            assertEquals(
+                NoteDocument.serialize(parsed),
+                NoteDocument.serialize(NoteDocument.ensureTrailingTextSegment(parsed)),
+            )
+        }
+    }
+
+    @Test
+    fun openSaveCyclesNeverAccumulateEmptyParagraphs() {
+        // Simulated editor cycle: load (ensure) -> save (strip).
+        fun cycle(html: String): String = NoteDocument.serialize(
+            NoteDocument.stripTrailingEmptyTextSegments(
+                NoteDocument.ensureTrailingTextSegment(NoteDocument.parse(html)),
+            ),
+        )
+        val starts = listOf(
+            "<p>a</p><p><img src=\"nota-attachment://abc\" alt=\"d\"></p>",
+            "<p>a</p><table><tbody><tr><td>1</td></tr></tbody></table>",
+        )
+        for (start in starts) {
+            var html = start
+            repeat(3) { html = cycle(html) }
+            // Stable from the first cycle, and equal to the plain
+            // parse->serialize storage form (the VM baseline contract).
+            assertEquals(
+                NoteDocument.serialize(NoteDocument.parse(start)),
+                html,
+            )
+            val working = NoteDocument.ensureTrailingTextSegment(NoteDocument.parse(html))
+            assertTrue(working.last() is TextSegment)
+            assertTrue(
+                NoteDocument.isEmptyTextSegment(working.last()),
+            )
+        }
+    }
+
+    @Test
+    fun blankAndEmptyOnlyDocumentsStaySingleEmptyTextSegment() {
+        assertEquals(
+            listOf(TextSegment("")),
+            NoteDocument.ensureTrailingTextSegment(NoteDocument.parse("")),
+        )
+        assertEquals(
+            listOf(TextSegment("")),
+            NoteDocument.ensureTrailingTextSegment(NoteDocument.parse("<p></p>")),
+        )
+    }
+
+    @Test
+    fun existingTrailingEmptyParagraphsCollapseToOne() {
+        val parsed = NoteDocument.parse(
+            "<table><tbody><tr><td>1</td></tr></tbody></table><p></p>",
+        )
+        val ensured = NoteDocument.ensureTrailingTextSegment(parsed)
+        assertTrue(ensured.last() is TextSegment)
+        assertEquals(1, ensured.count { it is TextSegment })
+
+        val manual = listOf(
+            ImageSegment("x"),
+            TextSegment(""),
+            TextSegment("<p></p>"),
+        )
+        assertEquals(
+            listOf(ImageSegment("x"), TextSegment("")),
+            NoteDocument.ensureTrailingTextSegment(manual),
+        )
+    }
+
+    @Test
+    fun typedTrailingSegmentSurvivesSaveStrip() {
+        val working = listOf(ImageSegment("x"), TextSegment("<p>after</p>"))
+        assertEquals(working, NoteDocument.stripTrailingEmptyTextSegments(working))
+        val stored = NoteDocument.serialize(working)
+        assertTrue(stored.endsWith("<p>after</p>"))
+        assertEquals(
+            working,
+            NoteDocument.ensureTrailingTextSegment(NoteDocument.parse(stored)),
+        )
+    }
+
+    @Test
+    fun stripRemovesOnlyTrailingEmpties() {
+        val middle = listOf(
+            TextSegment("<p>a</p>"),
+            TextSegment(""),
+            ImageSegment("x"),
+        )
+        assertEquals(middle, NoteDocument.stripTrailingEmptyTextSegments(middle))
+        // An empty LIST inside a text segment is user content, never
+        // classified as an empty paragraph.
+        val emptyList = TextSegment("<ul><li><p></p></li></ul>")
+        assertTrue(!NoteDocument.isEmptyTextSegment(emptyList))
+        assertTrue(NoteDocument.isEmptyTextSegment(TextSegment("<p><br></p>")))
+        assertTrue(NoteDocument.isEmptyTextSegment(TextSegment("<p>&nbsp;</p>")))
+        assertTrue(!NoteDocument.isEmptyTextSegment(TextSegment("<p>x</p>")))
+    }
+
+    // ------------------------------------------------ Phase 1.5 fix 3
+    // ImageSegment.widthPercent, serialised as width="N%".
+
+    @Test
+    fun imageWidthParsesAndRoundTripsByteForByte() {
+        val html = "<p><img src=\"nota-attachment://abc\" alt=\"diagram\" width=\"50%\"></p>"
+        val segments = NoteDocument.parse(html)
+        assertEquals(
+            listOf(ImageSegment("nota-attachment://abc", "diagram", 50)),
+            segments,
+        )
+        assertEquals(html, NoteDocument.serialize(segments))
+        assertEquals(segments, NoteDocument.parse(NoteDocument.serialize(segments)))
+    }
+
+    @Test
+    fun imageWithoutWidthDefaultsTo100AndSerializesWithoutAttribute() {
+        val html = "<p><img src=\"x\" alt=\"y\"></p>"
+        val segments = NoteDocument.parse(html)
+        assertEquals(100, (segments.single() as ImageSegment).widthPercent)
+        assertEquals(html, NoteDocument.serialize(segments))
+    }
+
+    @Test
+    fun imageWidthClampsToRange() {
+        fun widthOf(html: String) =
+            (NoteDocument.parse(html).single() as ImageSegment).widthPercent
+        assertEquals(25, widthOf("<p><img src=\"x\" width=\"10%\"></p>"))
+        assertEquals(100, widthOf("<p><img src=\"x\" width=\"150%\"></p>"))
+        assertEquals(25, widthOf("<p><img src=\"x\" width=\"25%\"></p>"))
+        // 150% clamps to the default, so the attribute disappears.
+        assertEquals(
+            "<p><img src=\"x\" alt=\"\"></p>",
+            NoteDocument.serialize(NoteDocument.parse("<p><img src=\"x\" width=\"150%\"></p>")),
+        )
+        assertEquals(
+            "<p><img src=\"x\" alt=\"\" width=\"25%\"></p>",
+            NoteDocument.serialize(NoteDocument.parse("<p><img src=\"x\" width=\"10%\"></p>")),
+        )
+    }
+
+    @Test
+    fun imageWidthIgnoresPixelAndGarbageValues() {
+        fun widthOf(html: String) =
+            (NoteDocument.parse(html).single() as ImageSegment).widthPercent
+        assertEquals(100, widthOf("<p><img src=\"x\" width=\"600\"></p>"))
+        assertEquals(100, widthOf("<p><img src=\"x\" width=\"abc%\"></p>"))
+        assertEquals(100, widthOf("<p><img src=\"x\" width=\"\"></p>"))
+    }
+
+    @Test
+    fun imageWidthFromStyleFallbackAndAttributePrecedence() {
+        fun widthOf(html: String) =
+            (NoteDocument.parse(html).single() as ImageSegment).widthPercent
+        assertEquals(40, widthOf("<p><img src=\"x\" style=\"width: 40%;\"></p>"))
+        assertEquals(75, widthOf("<p><img src=\"x\" style=\"color: red; width:75%\"></p>"))
+        assertEquals(
+            50,
+            widthOf("<p><img src=\"x\" width=\"50%\" style=\"width: 75%\"></p>"),
+        )
+        // The fallback is rescued INTO the canonical attribute form.
+        assertEquals(
+            "<p><img src=\"x\" alt=\"\" width=\"40%\"></p>",
+            NoteDocument.serialize(
+                NoteDocument.parse("<p><img src=\"x\" style=\"width: 40%;\"></p>"),
+            ),
+        )
+    }
+
+    @Test
+    fun imageWidthSurvivesAllThreeParsePaths() {
+        // Bare <img>.
+        val bare = NoteDocument.parse("<img src=\"x\" width=\"50%\">")
+        assertEquals(50, (bare.single() as ImageSegment).widthPercent)
+        // <img> split out of a paragraph, surrounding text intact.
+        val split = NoteDocument.parse("<p>before <img src=\"x\" width=\"30%\"> after</p>")
+        val image = split.filterIsInstance<ImageSegment>().single()
+        assertEquals(30, image.widthPercent)
+        assertTrue(split.first() is TextSegment)
+        assertTrue(split.last() is TextSegment)
+        // <figure> with a caption.
+        val figure = NoteDocument.parse(
+            "<figure><img src=\"x\" width=\"60%\"><figcaption>cap</figcaption></figure>",
+        )
+        assertEquals(60, (figure.first() as ImageSegment).widthPercent)
+        assertTrue(figure.last() is TextSegment)
+    }
+
+    @Test
+    fun imageWidthSingleQuotedAttribute() {
+        val segments = NoteDocument.parse("<p><img src='x' width='45%'></p>")
+        assertEquals(45, (segments.single() as ImageSegment).widthPercent)
+    }
 }

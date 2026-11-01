@@ -1,6 +1,7 @@
 package app.nota.data.html
 
 import app.nota.data.text.PlainTextCodec
+import kotlin.math.roundToInt
 
 /**
  * Nota's document model + HTML guard layer (SPIKE-REPORT condition 1).
@@ -51,8 +52,19 @@ data class TaskItem(val contentHtml: String, val checked: Boolean)
 /** A Tiptap task list (<ul data-type="taskList">). */
 data class TaskListSegment(val items: List<TaskItem>) : DocSegment
 
-/** A standalone image. [src] may be an attachment id URI (nota-attachment://<id>). */
-data class ImageSegment(val src: String, val alt: String = "") : DocSegment
+/**
+ * A standalone image. [src] may be an attachment id URI
+ * (nota-attachment://<id>). [widthPercent] is the persisted display
+ * width (Phase 1.5 fix 3), serialised as the `width="N%"` attribute —
+ * the attribute Tiptap's image node declares and round-trips in 1.x,
+ * whereas a `style` width is dropped there. 100 = full width and is
+ * omitted from the HTML so default images stay byte-for-byte canonical.
+ */
+data class ImageSegment(
+    val src: String,
+    val alt: String = "",
+    val widthPercent: Int = 100,
+) : DocSegment
 
 /** A blockquote; [innerHtml] is edited as rich text like a text segment. */
 data class QuoteSegment(val innerHtml: String) : DocSegment
@@ -79,6 +91,11 @@ data class OutlineEntry(val segmentIndex: Int, val level: Int, val title: String
 object NoteDocument {
 
     const val ATTACHMENT_SRC_PREFIX = "nota-attachment://"
+
+    /** Display-width bounds for [ImageSegment.widthPercent] (Phase 1.5 fix 3). */
+    const val IMAGE_MIN_WIDTH_PERCENT = 25
+    const val IMAGE_MAX_WIDTH_PERCENT = 100
+    const val IMAGE_DEFAULT_WIDTH_PERCENT = 100
 
     // ---------------------------------------------------------------- parse
 
@@ -172,7 +189,7 @@ object NoteDocument {
                 }
                 "img" -> {
                     flushText()
-                    out += ImageSegment(attr(tag.attrs, "src"), attr(tag.attrs, "alt"))
+                    out += imageSegmentFrom(tag)
                     i = tag.end
                 }
                 "p" -> {
@@ -206,7 +223,7 @@ object NoteDocument {
                                 if (img != null) {
                                     val imgTag = readTag(inner, img.range.first)
                                     if (imgTag != null) {
-                                        out += ImageSegment(attr(imgTag.attrs, "src"), attr(imgTag.attrs, "alt"))
+                                        out += imageSegmentFrom(imgTag)
                                     }
                                 }
                                 val caption = Regex("(?is)<figcaption[^>]*>(.*?)</figcaption>")
@@ -287,7 +304,7 @@ object NoteDocument {
                 break
             }
             flushText()
-            out += ImageSegment(attr(imgTag.attrs, "src"), attr(imgTag.attrs, "alt"))
+            out += imageSegmentFrom(imgTag)
             idx = imgTag.end
         }
     }
@@ -300,9 +317,17 @@ object NoteDocument {
                 is TextSegment -> append(segment.html)
                 is TableSegment -> append(serializeTable(segment))
                 is TaskListSegment -> append(serializeTaskList(segment))
-                is ImageSegment -> append("<p><img src=\"")
-                    .append(escapeAttr(segment.src)).append("\" alt=\"")
-                    .append(escapeAttr(segment.alt)).append("\"></p>")
+                is ImageSegment -> {
+                    append("<p><img src=\"").append(escapeAttr(segment.src))
+                        .append("\" alt=\"").append(escapeAttr(segment.alt)).append("\"")
+                    val w = segment.widthPercent.coerceIn(
+                        IMAGE_MIN_WIDTH_PERCENT, IMAGE_MAX_WIDTH_PERCENT,
+                    )
+                    if (w != IMAGE_DEFAULT_WIDTH_PERCENT) {
+                        append(" width=\"").append(w).append("%\"")
+                    }
+                    append("></p>")
+                }
                 is QuoteSegment -> append("<blockquote>").append(segment.innerHtml).append("</blockquote>")
                 is CodeSegment -> append("<pre><code>").append(escapeText(segment.text)).append("</code></pre>")
                 DividerSegment -> append("<hr>")
@@ -311,6 +336,84 @@ object NoteDocument {
             }
         }
     }
+
+    /** Builds an [ImageSegment] from a parsed `<img>` tag (all parse paths). */
+    private fun imageSegmentFrom(tag: Tag): ImageSegment = ImageSegment(
+        src = attr(tag.attrs, "src"),
+        alt = attr(tag.attrs, "alt"),
+        widthPercent = parseImageWidthPercent(tag.attrs),
+    )
+
+    /**
+     * Reads the persisted display width from an `<img>` tag's attributes.
+     * The canonical form is the percent `width="N%"` attribute; a
+     * `style="width: N%"` written by another editor is rescued as a
+     * fallback. Bare pixel widths (`width="600"`) are deliberately NOT
+     * interpreted as percents — they fall back to the full-width default.
+     * Out-of-range values are coerced into
+     * [IMAGE_MIN_WIDTH_PERCENT]..[IMAGE_MAX_WIDTH_PERCENT] rather than
+     * failing the parse.
+     */
+    private fun parseImageWidthPercent(attrs: String): Int {
+        val w = attr(attrs, "width").trim()
+        if (w.endsWith("%")) {
+            w.dropLast(1).trim().toIntOrNull()?.let {
+                return it.coerceIn(IMAGE_MIN_WIDTH_PERCENT, IMAGE_MAX_WIDTH_PERCENT)
+            }
+        }
+        val style = attr(attrs, "style")
+        Regex("""(?i)width\s*:\s*(\d+(?:\.\d+)?)\s*%""").find(style)?.let {
+            return it.groupValues[1].toDouble().roundToInt()
+                .coerceIn(IMAGE_MIN_WIDTH_PERCENT, IMAGE_MAX_WIDTH_PERCENT)
+        }
+        return IMAGE_DEFAULT_WIDTH_PERCENT
+    }
+
+    // --------------------------------------------- trailing caret segment
+
+    /**
+     * True when [segment] is a text segment with no visible content and no
+     * embedded structure — "", `"<p></p>"`, `"<p><br></p>"`,
+     * `"<p>&nbsp;</p>"`. A text segment holding a list, table or image is
+     * user content even when its visible text is empty, and is NOT empty
+     * by this definition (Phase 1.5 fix 2).
+     */
+    fun isEmptyTextSegment(segment: DocSegment): Boolean {
+        if (segment !is TextSegment) return false
+        if (segment.html.isBlank()) return true
+        if (Regex("(?i)<(img|hr|table|ul|ol|input)[\\s>/]").containsMatchIn(segment.html)) {
+            return false
+        }
+        val text = PlainTextCodec.htmlToText(segment.html)
+            .replace("&nbsp;", " ").replace('\u00A0', ' ')
+        return text.isBlank()
+    }
+
+    /**
+     * Editor working-state form (Phase 1.5 fix 2): exactly one trailing
+     * [TextSegment] to hold a caret below a trailing non-text block.
+     * Existing trailing empty text segments collapse into that one; a
+     * document already ending in a non-empty text segment is returned
+     * unchanged. Applied ONLY at the editor boundary — [parse] itself
+     * stays the guard's faithful decomposition for non-editor callers.
+     */
+    fun ensureTrailingTextSegment(segments: List<DocSegment>): List<DocSegment> {
+        val trimmed = segments.dropLastWhile { isEmptyTextSegment(it) }
+        return when {
+            trimmed.isEmpty() -> listOf(TextSegment(""))
+            trimmed.last() is TextSegment -> trimmed
+            else -> trimmed + TextSegment("")
+        }
+    }
+
+    /**
+     * Storage form (Phase 1.5 fix 2): the caret segment is ephemeral and
+     * is never persisted, so repeated open→save cycles cannot accumulate
+     * empty paragraphs. Only TRAILING empty text segments are removed —
+     * an empty text segment in the middle of a document is left alone.
+     */
+    fun stripTrailingEmptyTextSegments(segments: List<DocSegment>): List<DocSegment> =
+        segments.dropLastWhile { isEmptyTextSegment(it) }
 
     private fun serializeTable(table: TableSegment): String = buildString {
         append("<table><tbody>")
