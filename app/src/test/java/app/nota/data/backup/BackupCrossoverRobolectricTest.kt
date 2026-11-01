@@ -90,7 +90,11 @@ class BackupCrossoverRobolectricTest {
         val store = AttachmentStore(context, db.attachmentDao())
         val templates = TemplateRepository(context)
         val backup = BackupRepository(context, db, templates, store)
-        val lockRepo = NoteLockRepository(notes, db.attachmentDao(), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider()))
+        // Built lazily so no DataStore/preferences machinery exists
+        // while the backup restore under test runs.
+        val lockRepo by lazy {
+            NoteLockRepository(notes, db.attachmentDao(), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider()))
+        }
     }
 
     private fun newStack(): Stack {

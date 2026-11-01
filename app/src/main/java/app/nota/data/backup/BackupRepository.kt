@@ -240,8 +240,8 @@ class BackupRepository(
             val templateNotes = handle.notes.filter { it.isTemplate }
             val payloadNotes = handle.notes.filter { !it.isTemplate }
 
-            // ---- Attachment file plan (files land BEFORE rows, so a row
-            // never points at a file that was not written).
+            // ---- Attachment plan: which staged payloads win a row (the
+            // files themselves land after the row transaction, below).
             val existingAttachments = attachmentDao.getAll().associateBy { it.id }
             val existingNotes = noteDao.getAll().associateBy { it.id }
             val payloadNoteIds = payloadNotes.map { it.id }.toSet()
@@ -267,38 +267,31 @@ class BackupRepository(
                 // before rows are cleared, so no orphan survives.
                 File(context.filesDir, "attachments").deleteRecursively()
             }
-            val writtenAttachments = mutableListOf<AttachmentEntity>()
-            for (plan in attPlans) {
-                if (!plan.wins) continue
-                writtenAttachments += writeAttachmentFile(plan.staged)
+            // Attachment FILES are written after the row transaction
+            // (below): a failed transaction then leaves no orphan files,
+            // and the final reconcile drops any row whose file could not
+            // be written — the two sides can never disagree for long.
+            val winningAttachments = attPlans.filter { it.wins }.map { it.staged }
+            val writtenAttachments = winningAttachments.map { staged ->
+                // The entity is computed up front (its file lands later);
+                // size/dimensions come from the staged payload.
+                attachmentEntityFor(staged)
             }
 
-            println("DIAG beforeTxn thread=" + Thread.currentThread().name)
-            File(context.filesDir, "probe-marker.txt").writeText("probe")
-            println("DIAG beforeTxn filesDir=" + context.filesDir.absolutePath + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             var counts = MergeCounts()
             val tagIdRemap = HashMap<String, String>()
 
             db.withTransaction {
                 if (mode == RestoreMode.REPLACE) {
                     linkDao.deleteAll()
-                    println("DIAG del-links thread=" + Thread.currentThread().name + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " filesDirList=" + (context.filesDir.list()?.toList()) + " attDirList=" + (File(context.filesDir, "attachments").list()?.toList()) + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     ftsDao.deleteAll()
-                    println("DIAG del-fts attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     tagDao.deleteAllCrossRefs()
-                    println("DIAG del-xrefs attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     reminderDao.deleteAll()
-                    println("DIAG del-reminders attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     attachmentDao.deleteAll()
-                    println("DIAG del-attachments attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     noteDao.deleteAll()
-                    println("DIAG del-notes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     tagDao.deleteAllTags()
-                    println("DIAG del-tags attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     folderDao.deleteAll()
-                    println("DIAG del-folders attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
 
-println("DIAG txnAfterDeletes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     for (folder in handle.folders) folderDao.upsert(folder.toEntity())
                     insertTagsReplace(handle.tags, tagIdRemap)
                     val folderIds = handle.folders.map { it.id }.toSet()
@@ -308,9 +301,7 @@ println("DIAG txnAfterDeletes attFiles=" + File(context.filesDir, "attachments")
                     for (note in payloadNotes) {
                         insertCrossRefs(note, tagIdRemap, handle.tags.map { it.id }.toSet())
                     }
-println("DIAG txnAfterNotes attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     for (att in writtenAttachments) attachmentDao.upsert(att)
-                    println("DIAG txnAfterAttachments attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
                     val deduped = dedupeReminders(handle.reminders)
                     for (reminder in deduped) {
                         if (reminder.noteId in payloadNoteIds) reminderDao.upsert(reminder.toEntity())
@@ -384,10 +375,17 @@ println("DIAG txnAfterNotes attFiles=" + File(context.filesDir, "attachments").w
                 }
             }
 
-println("DIAG afterTxn filesDir=" + context.filesDir.absolutePath + " marker=" + File(context.filesDir, "probe-marker.txt").exists() + " filesDirList=" + (context.filesDir.list()?.toList()) + " attFiles=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             // ---- Tombstones: merge only, NOT stored (Phase 3 store).
             if (mode == RestoreMode.MERGE && handle.tombstones.isNotEmpty()) {
                 counts += MergeCounts(deleted = applyTombstones(handle.tombstones))
+            }
+
+            // ---- Attachment files land now that their rows are final:
+            // plans whose note did not survive (tombstone, FK filter)
+            // are skipped, and reconcile below sweeps any stragglers.
+            for (staged in winningAttachments) {
+                if (noteDao.getById(staged.meta.noteId) == null) continue
+                writeAttachmentFile(staged)
             }
 
             // ---- Templates (separate furniture, not notes).
@@ -403,52 +401,53 @@ println("DIAG afterTxn filesDir=" + context.filesDir.absolutePath + " marker=" +
                 // from templates yet (documented in the PR).
             }
 
-println("DIAG afterTemplates files=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
             rebuildFtsAndLinks()
-            println("DIAG afterRebuild files=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.name }.toList())
-            println("DIAG filesBefore=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList())
-            println("DIAG rowsBefore=" + attachmentDao.getAll().map { it.id + "@" + it.localPath })
             val rec = attachmentStore.reconcile { attachmentDao.getAll() }
-            println("DIAG reconcile=" + rec)
-            println("DIAG filesAfter=" + File(context.filesDir, "attachments").walkTopDown().filter { it.isFile }.map { it.relativeTo(context.filesDir).path }.toList())
             counts
         }
 
     // ------------------------------------------------------------ pieces
 
-    private fun writeAttachmentFile(staged: BackupReader.StagedAttachment): AttachmentEntity {
+    /** The row for a staged attachment (file copy is [writeAttachmentFile]). */
+    private fun attachmentEntityFor(staged: BackupReader.StagedAttachment): AttachmentEntity {
         val meta = staged.meta
-        val storedName = sanitiseStoredName(
-            meta.rawEntrySuffix
-                ?.removeSuffix(".encrypted")
-                ?.takeIf { it.isNotBlank() }
-                ?: "${meta.id}-${meta.name}",
-        )
-        val localPath = "attachments/${meta.noteId}/$storedName"
-        val target = File(context.filesDir, localPath)
-        target.parentFile?.mkdirs()
-        staged.stagedFile.inputStream().buffered().use { input ->
-            target.outputStream().buffered().use { out -> input.copyTo(out) }
-        }
-        val size = target.length()
+        val localPath = "attachments/${meta.noteId}/${storedNameFor(meta)}"
         val (width, height) = if (!meta.encrypted && meta.mimeType.startsWith("image/")) {
             ImageBounds.read(staged.stagedFile)
         } else {
             null to null
         }
-        println("DIAG writeDone id=" + meta.id + " targetExists=" + target.exists() + " stagedExists=" + staged.stagedFile.exists())
         return AttachmentEntity(
             id = meta.id,
             noteId = meta.noteId,
             fileName = meta.name,
             mimeType = meta.mimeType,
-            sizeBytes = size,
+            sizeBytes = staged.stagedFile.length(),
             localPath = localPath,
             widthPx = width,
             heightPx = height,
             createdAt = meta.createdAt,
             encrypted = meta.encrypted,
         )
+    }
+
+    private fun storedNameFor(meta: BxAttachmentMeta): String = sanitiseStoredName(
+        meta.rawEntrySuffix
+            ?.removeSuffix(".encrypted")
+            ?.takeIf { it.isNotBlank() }
+            ?: "${meta.id}-${meta.name}",
+    )
+
+    /** Streams one staged payload to its final attachment file. */
+    private fun writeAttachmentFile(staged: BackupReader.StagedAttachment) {
+        val target = File(
+            context.filesDir,
+            "attachments/${staged.meta.noteId}/${storedNameFor(staged.meta)}",
+        )
+        target.parentFile?.mkdirs()
+        staged.stagedFile.inputStream().buffered().use { input ->
+            target.outputStream().buffered().use { out -> input.copyTo(out) }
+        }
     }
 
 
