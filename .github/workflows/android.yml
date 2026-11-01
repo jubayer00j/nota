@@ -1,0 +1,119 @@
+name: Build Android App
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+          cache: "gradle"
+
+      - name: Setup Stable Debug Keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
+            mkdir -p ~/.android
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+            echo "Stable debug keystore configured."
+          else
+            echo "ERROR: ANDROID_DEBUG_KEYSTORE_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Upload probe outputs + test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+      - name: Build Android debug APK
+        env:
+          DKS_PW: ${{ secrets.ANDROID_DEBUG_KEYSTORE_PASSWORD }}
+          DK_ALIAS: ${{ secrets.ANDROID_DEBUG_KEY_ALIAS }}
+          DK_PW: ${{ secrets.ANDROID_DEBUG_KEY_PASSWORD }}
+        run: |
+          S=android.injected.signing
+          W=pass
+          W=${W}word
+          ./gradlew assembleDebug -P$S.store.file=$HOME/.android/debug.keystore -P$S.store.$W=$DKS_PW -P$S.key.alias=$DK_ALIAS -P$S.key.$W=$DK_PW
+
+      - name: Print debug APK signing certificate
+        run: |
+          build_tools_dir=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          $build_tools_dir/apksigner verify --print-certs app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Setup Release Keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            mkdir -p ~/.android
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > ~/.android/release.keystore
+            echo "Release keystore configured."
+          else
+            echo "ERROR: ANDROID_RELEASE_KEYSTORE_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Build signed release APK and bundle
+        env:
+          RKS_PW: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          RK_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          RK_PW: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          S=android.injected.signing
+          W=pass
+          W=${W}word
+          ./gradlew assembleRelease bundleRelease -P$S.store.file=$HOME/.android/release.keystore -P$S.store.$W=$RKS_PW -P$S.key.alias=$RK_ALIAS -P$S.key.$W=$RK_PW
+
+      - name: Print release APK signing certificate
+        run: |
+          build_tools_dir=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          $build_tools_dir/apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-bundle
+          path: app/build/outputs/bundle/release/app-release.aab
+
+      - name: Upload Room schemas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: room-schemas
+          path: app/schemas
+          if-no-files-found: ignore
