@@ -3,6 +3,8 @@ package app.nota.data.attachments
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
 import app.nota.data.db.AttachmentDao
@@ -55,10 +57,24 @@ class AttachmentStore(
         // cap (the old loop stopped as soon as the halved height dipped
         // below it and decoded e.g. 4000x3000 full-size).
         val sample = ImageSampling.inSampleSize(width, height, MAX_IMAGE_DIM)
+        // Codex fix G7: read the EXIF orientation BEFORE decoding so the
+        // bitmap can be uprighted before the JPEG re-encode; without this
+        // portrait photos (orientation 6/8) import sideways. Sources with
+        // no EXIF (screenshots, PNGs, unreadable metadata) default to
+        // ORIENTATION_NORMAL and pass through untouched.
+        val orientation = runCatching {
+            resolver.openInputStream(uri)?.use { input ->
+                ExifInterface(input).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+            } ?: ExifInterface.ORIENTATION_NORMAL
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
         val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
         var bitmap = resolver.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, decodeOpts)
         } ?: error("Could not read image")
+        bitmap = applyExifOrientation(bitmap, orientation)
         // Exact post-decode scale: sampling is power-of-two and decoders
         // may round, so enforce the cap precisely before re-encoding.
         val (fitW, fitH) = ImageSampling.fitWithin(bitmap.width, bitmap.height, MAX_IMAGE_DIM)
@@ -165,6 +181,38 @@ class AttachmentStore(
             }
         }
         filesRemoved to rowsRemoved
+    }
+
+    /**
+     * Returns [bitmap] transformed to its EXIF-intended orientation
+     * (rotations AND mirror flips), recycling the source when a new
+     * bitmap is produced. ORIENTATION_NORMAL / undefined / unknown
+     * values return the bitmap unchanged (Codex fix G7).
+     */
+    private fun applyExifOrientation(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> {
+                matrix.postRotate(180f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            else -> return bitmap
+        }
+        val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (transformed !== bitmap) bitmap.recycle()
+        return transformed
     }
 
     private fun displayName(uri: Uri): String? {
