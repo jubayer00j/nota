@@ -87,7 +87,7 @@ class PreferencesRepository(context: Context) {
     }
 
     suspend fun setStartOnToday(enabled: Boolean) {
-        dataStore.edit { prefs -> prefs[KEY_START_ON_TODAY] = enabled }
+        safeEdit { this[KEY_START_ON_TODAY] = enabled }
     }
 
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
