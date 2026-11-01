@@ -87,8 +87,8 @@ fun SettingsScreen(
             },
         )
         SettingsSwitchRow(
-            title = "OLED true black (dark theme)",
-            subtitle = "Use true-black backgrounds in dark theme, saving power on OLED screens",
+            title = "OLED true black",
+            subtitle = "Use the true-black theme, saving power on OLED screens",
             checked = oledBlack,
             onCheckedChange = { enabled ->
                 scope.launch { preferencesRepository.setOledBlack(enabled) }

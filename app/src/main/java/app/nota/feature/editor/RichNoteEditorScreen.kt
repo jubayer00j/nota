@@ -5,6 +5,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +41,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.MoreVert
@@ -51,13 +55,10 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -72,15 +73,21 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -113,6 +120,7 @@ import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
 import java.text.SimpleDateFormat
 import java.util.Date
+import kotlin.math.roundToInt
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -169,7 +177,6 @@ fun RichNoteEditorScreen(
 
     var menuExpanded by remember { mutableStateOf(false) }
     var insertMenuExpanded by remember { mutableStateOf(false) }
-    var folderExpanded by remember { mutableStateOf(false) }
     var showLinkDialog by remember { mutableStateOf(false) }
     var linkUrl by remember { mutableStateOf("") }
     var showOutline by remember { mutableStateOf(false) }
@@ -181,14 +188,17 @@ fun RichNoteEditorScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val bringIntoView = remember { BringIntoViewRequester() }
+    // Phase 1.5 fix 2: focus target for "tap below the last block".
+    val trailingFocusRequester = remember { FocusRequester() }
 
     val current = note
     if (current != null && initializedFor != current.id) {
         initializedFor = current.id
         title = current.title
         folderId = current.folderId
-        segments = NoteDocument.parse(current.contentHtml)
-            .map { UiSegment(newUiId(), it) }
+        segments = NoteDocument.ensureTrailingTextSegment(
+            NoteDocument.parse(current.contentHtml),
+        ).map { UiSegment(newUiId(), it) }
     }
     var tagsSeeded by remember { mutableStateOf(false) }
     if (!tagsSeeded && existingTags.isNotEmpty()) {
@@ -224,19 +234,31 @@ fun RichNoteEditorScreen(
         segments = segments.map { if (it.id == id) it.copy(segment = segment) else it }
     }
 
+    /**
+     * Phase 1.5 fix 2: the working document always ends with a text
+     * segment to hold a caret below the last block. Re-applied after
+     * structural edits only (insert/remove), never per keystroke.
+     */
+    fun ensureTrailing(list: List<UiSegment>): List<UiSegment> = when {
+        list.isEmpty() -> listOf(UiSegment(newUiId(), TextSegment("")))
+        list.last().segment is TextSegment -> list
+        else -> list + UiSegment(newUiId(), TextSegment(""))
+    }
+
     fun removeBlock(id: String) {
-        segments = segments.filterNot { it.id == id }
-        if (segments.isEmpty()) segments = listOf(UiSegment(newUiId(), TextSegment("")))
+        segments = ensureTrailing(segments.filterNot { it.id == id })
     }
 
     fun insertBlock(segment: DocSegment) {
         val ui = UiSegment(newUiId(), segment)
         val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
-        segments = if (activeIndex >= 0) {
-            segments.toMutableList().apply { add(activeIndex + 1, ui) }
-        } else {
-            segments + ui
-        }
+        segments = ensureTrailing(
+            if (activeIndex >= 0) {
+                segments.toMutableList().apply { add(activeIndex + 1, ui) }
+            } else {
+                segments + ui
+            },
+        )
     }
 
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
@@ -351,8 +373,8 @@ fun RichNoteEditorScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { persistNow() }) {
-                        Icon(Icons.Filled.Check, contentDescription = "Save")
+                    IconButton(onClick = { persistNow(onBack) }) {
+                        Icon(Icons.Filled.Check, contentDescription = "Save and done")
                     }
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "More")
@@ -440,10 +462,22 @@ fun RichNoteEditorScreen(
                         }
                     }
                 }
-                itemsIndexed(segments, key = { _, ui -> ui.id }) { _, ui ->
+                item(key = "meta") {
+                    NoteMetaRow(
+                        folders = folders,
+                        folderId = folderId,
+                        onFolderSelected = { folderId = it },
+                        tags = parseTagsCsv(tagsCsv),
+                        onTagsChanged = { tagsCsv = it.joinToString(", ") },
+                    )
+                }
+                itemsIndexed(segments, key = { _, ui -> ui.id }) { index, ui ->
                     SegmentEditor(
                         ui = ui,
                         isActive = ui.id == activeSegmentId,
+                        isTrailingCaret = index == segments.lastIndex &&
+                            ui.segment is TextSegment,
+                        trailingFocusRequester = trailingFocusRequester,
                         stateFor = { richStateFor(ui) },
                         onFocus = { activeSegmentId = ui.id },
                         onChange = { updateBlock(ui.id, it) },
@@ -453,45 +487,26 @@ fun RichNoteEditorScreen(
                         bringIntoView = bringIntoView,
                     )
                 }
-                item(key = "folder-tags") {
-                    Column {
-                        ExposedDropdownMenuBox(
-                            expanded = folderExpanded,
-                            onExpandedChange = { folderExpanded = it },
-                        ) {
-                            OutlinedTextField(
-                                value = folders.firstOrNull { it.id == folderId }?.name ?: "No folder",
-                                onValueChange = {},
-                                readOnly = true,
-                                label = { Text("Folder") },
-                                trailingIcon = {
-                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = folderExpanded)
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                                    .menuAnchor(MenuAnchorType.PrimaryNotEditable),
-                            )
-                            ExposedDropdownMenu(
-                                expanded = folderExpanded,
-                                onDismissRequest = { folderExpanded = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("No folder") },
-                                    onClick = { folderId = null; folderExpanded = false },
-                                )
-                                folders.forEach { folder ->
-                                    DropdownMenuItem(
-                                        text = { Text(folder.name) },
-                                        onClick = { folderId = folder.id; folderExpanded = false },
-                                    )
-                                }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = tagsCsv,
-                            onValueChange = { tagsCsv = it },
-                            label = { Text("Tags (comma-separated)") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().padding(top = NotaSpacing.sm),
+                if (segments.lastOrNull()?.segment is TextSegment) {
+                    // Phase 1.5 fix 2: the empty area below the last block
+                    // is a tap target that drops the caret at the very end
+                    // of the document, in the trailing text segment.
+                    item(key = "below-blocks") {
+                        Box(
+                            Modifier.fillMaxWidth().height(96.dp).clickable {
+                                val ui = segments.last()
+                                val state = richStateFor(ui)
+                                activeSegmentId = ui.id
+                                // The trailing editor is composed next to
+                                // this item, but if it has just scrolled
+                                // out of the LazyColumn window the
+                                // requester may be unattached — never
+                                // crash the tap; the editor itself (56dp
+                                // min height) remains directly tappable.
+                                runCatching { trailingFocusRequester.requestFocus() }
+                                state.selection =
+                                    TextRange(state.annotatedString.text.length)
+                            },
                         )
                     }
                 }
@@ -521,12 +536,11 @@ fun RichNoteEditorScreen(
                             // the VM strips it from the stored document.
                             val targetSrc =
                                 NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
-                            segments = segments.filterNot {
-                                (it.segment as? ImageSegment)?.src == targetSrc
-                            }
-                            if (segments.isEmpty()) {
-                                segments = listOf(UiSegment(newUiId(), TextSegment("")))
-                            }
+                            segments = ensureTrailing(
+                                segments.filterNot {
+                                    (it.segment as? ImageSegment)?.src == targetSrc
+                                },
+                            )
                             viewModel.deleteAttachment(attachment)
                         },
                     )
@@ -685,6 +699,8 @@ fun RichNoteEditorScreen(
 private fun SegmentEditor(
     ui: UiSegment,
     isActive: Boolean,
+    isTrailingCaret: Boolean = false,
+    trailingFocusRequester: FocusRequester? = null,
     stateFor: () -> RichTextState,
     onFocus: () -> Unit,
     onChange: (DocSegment) -> Unit,
@@ -698,10 +714,20 @@ private fun SegmentEditor(
     when (val segment = ui.segment) {
         is TextSegment -> {
             val state = stateFor()
+            var editorModifier = Modifier.fillMaxWidth().then(focusModifier).then(activeModifier)
+            if (isTrailingCaret) {
+                // Phase 1.5 fix 2: the trailing caret segment is the tap
+                // target below the last block — give it a real height and
+                // the shared focus requester the tap area uses.
+                if (trailingFocusRequester != null) {
+                    editorModifier = editorModifier.focusRequester(trailingFocusRequester)
+                }
+                editorModifier = editorModifier.heightIn(min = 56.dp)
+            }
             BasicRichTextEditor(
                 state = state,
                 textStyle = NotaEditorBody,
-                modifier = Modifier.fillMaxWidth().then(focusModifier).then(activeModifier),
+                modifier = editorModifier,
             )
         }
         is QuoteSegment -> {
@@ -721,7 +747,7 @@ private fun SegmentEditor(
         }
         is TableSegment -> TableBlock(ui.id, segment, onChange, onRemove)
         is TaskListSegment -> TaskListBlock(ui.id, segment, onChange, onRemove)
-        is ImageSegment -> ImageBlock(segment, attachments, fileFor, onRemove)
+        is ImageSegment -> ImageBlock(segment, attachments, fileFor, onChange, onRemove)
         is ChartSegment -> BlockShell(onRemove) {
             Text(
                 "Chart — preserved as-is. Chart editing arrives in a later phase.",
@@ -968,6 +994,7 @@ private fun ImageBlock(
     image: ImageSegment,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
+    onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
 ) {
     val attachment = if (image.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)) {
@@ -977,13 +1004,33 @@ private fun ImageBlock(
     } else {
         null
     }
+    // Phase 1.5 fix 3: tap the image to select it; a drag handle then
+    // sets the persisted display width (ImageSegment.widthPercent).
+    var selected by remember { mutableStateOf(false) }
+    var areaWidthPx by remember { mutableIntStateOf(0) }
+    // The drag coroutine below is keyed by src only, so it must read the
+    // LATEST segment through rememberUpdatedState — capturing `image`
+    // directly would freeze the width at drag start and every delta
+    // would recompute from the original width (Codex review, PR #6).
+    val currentImage by rememberUpdatedState(image)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
+        border = if (selected) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+        } else {
+            null
+        },
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(NotaSpacing.sm)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(
+            Modifier.padding(NotaSpacing.sm),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(
                     image.alt.ifBlank { "Image" },
                     style = MaterialTheme.typography.labelMedium,
@@ -999,11 +1046,65 @@ private fun ImageBlock(
                 else -> null
             }
             if (model != null) {
-                AsyncImage(
-                    model = model,
-                    contentDescription = image.alt,
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
-                )
+                Box(
+                    Modifier.fillMaxWidth()
+                        .onSizeChanged { areaWidthPx = it.width }
+                        .clickable { selected = !selected },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AsyncImage(
+                        model = model,
+                        contentDescription = image.alt,
+                        modifier = Modifier
+                            .fillMaxWidth(image.widthPercent / 100f)
+                            .heightIn(max = 320.dp),
+                    )
+                }
+                if (selected) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(top = NotaSpacing.xs),
+                    ) {
+                        Text(
+                            "Width ${image.widthPercent}% — drag to resize",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Box(
+                            Modifier.size(width = 56.dp, height = 28.dp)
+                                .background(
+                                    MaterialTheme.colorScheme.primary,
+                                    RoundedCornerShape(14.dp),
+                                )
+                                .pointerInput(image.src) {
+                                    detectDragGestures { change, dragAmount ->
+                                        change.consume()
+                                        if (areaWidthPx > 0) {
+                                            val base = currentImage
+                                            val delta =
+                                                (dragAmount.x / areaWidthPx * 100).roundToInt()
+                                            val next = (base.widthPercent + delta)
+                                                .coerceIn(
+                                                    NoteDocument.IMAGE_MIN_WIDTH_PERCENT,
+                                                    NoteDocument.IMAGE_MAX_WIDTH_PERCENT,
+                                                )
+                                            if (next != base.widthPercent) {
+                                                onChange(base.copy(widthPercent = next))
+                                            }
+                                        }
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.DragHandle,
+                                contentDescription = "Drag to resize image",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                            )
+                        }
+                    }
+                }
             }
         }
     }

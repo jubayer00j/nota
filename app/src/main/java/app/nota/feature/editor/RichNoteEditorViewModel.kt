@@ -85,7 +85,14 @@ class RichNoteEditorViewModel(
             val loaded = repository.getById(noteId)
             _note.value = loaded
             if (loaded != null) {
-                baselineHtml = NoteDocument.serialize(NoteDocument.parse(loaded.contentHtml))
+                // Storage form (Phase 1.5 fix 2): the editor's ephemeral
+                // trailing caret segment is stripped here too, so merely
+                // opening a block-ending note never counts as a change.
+                baselineHtml = NoteDocument.serialize(
+                    NoteDocument.stripTrailingEmptyTextSegments(
+                        NoteDocument.parse(loaded.contentHtml),
+                    ),
+                )
                 baselineTitle = loaded.title
                 baselineFolderId = loaded.folderId
             }
@@ -124,7 +131,12 @@ class RichNoteEditorViewModel(
         onPersisted: (() -> Unit)? = null,
     ) {
         val current = _note.value ?: return
-        val html = NoteDocument.serialize(segments)
+        // Storage form (Phase 1.5 fix 2): never persist the editor's
+        // trailing caret segment; repeated saves cannot accumulate
+        // empty paragraphs at the end of a note.
+        val html = NoteDocument.serialize(
+            NoteDocument.stripTrailingEmptyTextSegments(segments),
+        )
         val tags = tagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         val baselineTags = baselineTagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         val bodyChanged = html != baselineHtml || title != baselineTitle
@@ -225,7 +237,13 @@ class RichNoteEditorViewModel(
                     it.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)
             }
             val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
-            templateRepository.add(name, title, NoteDocument.serialize(kept))
+            templateRepository.add(
+                name,
+                title,
+                NoteDocument.serialize(
+                    NoteDocument.stripTrailingEmptyTextSegments(kept),
+                ),
+            )
         }
     }
 
