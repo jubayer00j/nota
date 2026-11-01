@@ -73,7 +73,6 @@ fun EditorSpikeScreen(onBack: () -> Unit = {}) {
                 SpikeButton("U") { state.toggleSpanStyle(SpanStyle(textDecoration = TextDecoration.Underline)) }
                 SpikeButton("S") { state.toggleSpanStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) }
                 SpikeButton("code") { state.toggleCodeSpan() }
-                SpikeButton("{ }") { state.toggleCode() }
                 SpikeButton("H1") { state.setHeadingStyle(HeadingStyle.H1) }
                 SpikeButton("H2") { state.setHeadingStyle(HeadingStyle.H2) }
                 SpikeButton("H3") { state.setHeadingStyle(HeadingStyle.H3) }
