@@ -14,9 +14,15 @@ import org.koin.core.context.startKoin
 class NotaApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        startKoin {
-            androidContext(this@NotaApplication)
-            modules(appModule)
+        // Guarded: Robolectric re-creates the Application per test method,
+        // and a second startKoin in the same process would throw
+        // KoinApplicationAlreadyStartedException. In production onCreate
+        // runs once per process, so the guard is a no-op there.
+        if (org.koin.core.context.GlobalContext.getOrNull() == null) {
+            startKoin {
+                androidContext(this@NotaApplication)
+                modules(appModule)
+            }
         }
         // Attachment orphan reconciliation (spec §7): sweep files no Room
         // row points at and drop rows whose file vanished. Fire-and-forget
