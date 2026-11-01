@@ -76,8 +76,14 @@ class BackupReader(private val workDir: File) {
                 decryptedZip = tmp
                 try {
                     source.inputStream().buffered().use { input ->
-                        // Skip the 8 magic bytes already identified.
-                        input.skip(8)
+                        // Skip the 8 magic bytes already identified
+                        // (InputStream.skip may skip fewer; loop to 8).
+                        var skipped = 0L
+                        while (skipped < 8) {
+                            val n = input.skip(8 - skipped)
+                            if (n <= 0) break
+                            skipped += n
+                        }
                         val (bmk, envelope) = BackupCrypto.openEnvelope(input, passphrase)
                         try {
                             tmp.outputStream().buffered().use { out ->
@@ -143,7 +149,7 @@ class BackupReader(private val workDir: File) {
                             name == "settings.json" -> {
                                 // Never imported (device-local credentials
                                 // by design); the entry is drained only.
-                                zip.readBytes()
+                                drainEntry(zip)
                             }
                             name == "sync.json" -> {
                                 val parsed = parseSyncTolerant(readEntryText(zip))
@@ -159,7 +165,7 @@ class BackupReader(private val workDir: File) {
                                 !name.endsWith("index.json") -> {
                                 parseAttachmentEntry(zip, stagingDir)?.let { attachments += it }
                             }
-                            else -> zip.readBytes() // raw attachment entries etc: drained, map read below
+                            else -> drainEntry(zip) // raw attachment entries etc: drained (streaming), names pass below
                         }
                     } finally {
                         zip.closeEntry()
@@ -214,6 +220,13 @@ class BackupReader(private val workDir: File) {
             stagingDir = stagingDir,
             decryptedZip = decryptedZip,
         )
+    }
+
+    /** Discards the current entry through a fixed buffer — never loads
+     *  an entry (e.g. a multi-MB raw attachment) into memory. */
+    private fun drainEntry(zip: ZipInputStream) {
+        val buf = ByteArray(8192)
+        while (zip.read(buf) >= 0) { /* discard */ }
     }
 
     private fun readEntryText(zip: ZipInputStream): String =
