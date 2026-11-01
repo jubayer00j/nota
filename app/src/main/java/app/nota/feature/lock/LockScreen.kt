@@ -102,9 +102,13 @@ fun LockScreen(
         activity != null && isBiometricAvailable(context)
 
     // Auto-prompt ONCE per lock-screen appearance when biometric is on.
+    // Never during a lockout: unlockWithBiometric refuses while locked
+    // out, so a prompt there would "succeed" yet leave the app locked.
     var biometricPrompted by remember { mutableStateOf(false) }
     LaunchedEffect(biometricReady) {
-        if (biometricReady && !biometricPrompted && activity != null) {
+        if (biometricReady && !biometricPrompted && activity != null &&
+            System.currentTimeMillis() >= settings.lockoutUntil
+        ) {
             biometricPrompted = true
             showBiometricPrompt(
                 activity,
