@@ -34,8 +34,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -116,6 +116,11 @@ dependencies {
     // Phase 1b: note-card cover images from local attachment files only —
     // coil-compose without any network fetcher module.
     implementation(libs.coil.compose)
+
+    // Phase 2a App Lock: BiometricPrompt (fingerprint convenience gate)
+    // and ProcessLifecycleOwner (background/foreground re-lock tracking).
+    implementation(libs.androidx.biometric)
+    implementation(libs.androidx.lifecycle.process)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
