@@ -2,6 +2,7 @@ package app.nota.data.repository
 
 import androidx.room.Room
 import app.nota.data.db.NotaDatabase
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -34,7 +35,7 @@ class NoteRepositoryRobolectricTest {
             .build()
         repository = NoteRepository(
             db, db.noteDao(), db.noteFtsDao(), db.folderDao(),
-            db.tagDao(), db.attachmentDao(), db.savedSearchDao(),
+            db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao(),
         )
     }
 
@@ -79,5 +80,29 @@ class NoteRepositoryRobolectricTest {
         repository.setArchived(restored, true)
         assertTrue(repository.searchNotes("apple").isEmpty())
         assertEquals(listOf(second.id), repository.searchNotes("zebra").map { it.id })
+    }
+
+    @Test
+    fun backlinksResolveOnWriteAndClearOnTrash() = runBlocking {
+        val target = repository.createNote(title = "Project Plan", plainBody = "roadmap")
+        val source = repository.createRichNote(
+            title = "Meeting",
+            contentHtml = "<p>See [[Project Plan]] for details</p>",
+        )
+        // Edge exists after the write.
+        val incoming = repository.observeLinkedFrom(target.id).first()
+        assertEquals(listOf(source.id), incoming.map { it.id })
+
+        // Rewriting the source without the link removes the edge.
+        val stored = db.noteDao().getById(source.id)!!
+        repository.updateRichBody(stored, "Meeting", "<p>No links here</p>")
+        assertTrue(repository.observeLinkedFrom(target.id).first().isEmpty())
+
+        // A link to a missing title resolves to nothing (no crash, no edge).
+        repository.createRichNote(
+            title = "Orphan",
+            contentHtml = "<p>Points at [[No Such Note]]</p>",
+        )
+        assertTrue(repository.observeLinkedFrom(target.id).first().isEmpty())
     }
 }

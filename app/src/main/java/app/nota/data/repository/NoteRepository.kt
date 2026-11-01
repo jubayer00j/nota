@@ -9,12 +9,15 @@ import app.nota.data.db.NoteDao
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteFtsDao
 import app.nota.data.db.NoteFtsEntity
+import app.nota.data.db.NoteLinkDao
+import app.nota.data.db.NoteLinkEntity
 import app.nota.data.db.NoteTagCrossRef
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.SavedSearchDao
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.db.TagDao
 import app.nota.data.db.TagEntity
+import app.nota.data.html.NoteDocument
 import app.nota.data.text.PlainTextCodec
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
@@ -33,6 +36,7 @@ class NoteRepository(
     private val tagDao: TagDao,
     private val attachmentDao: AttachmentDao,
     private val savedSearchDao: SavedSearchDao,
+    private val noteLinkDao: NoteLinkDao,
 ) {
     // --- Observation -------------------------------------------------------
     fun observeActive(): Flow<List<NoteEntity>> = noteDao.observeActive()
@@ -48,6 +52,8 @@ class NoteRepository(
     fun observeTagsForNote(noteId: String): Flow<List<TagEntity>> = tagDao.observeForNote(noteId)
     fun observeAllCrossRefs(): Flow<List<NoteTagCrossRef>> = tagDao.observeAllCrossRefs()
     fun observeAttachments(): Flow<List<AttachmentEntity>> = attachmentDao.observeAll()
+    fun observeAttachmentsForNote(noteId: String): Flow<List<AttachmentEntity>> =
+        attachmentDao.observeForNote(noteId)
     fun observeSavedSearches(): Flow<List<SavedSearchEntity>> = savedSearchDao.observeAll()
 
     suspend fun getById(id: String): NoteEntity? = noteDao.getById(id)
@@ -62,7 +68,30 @@ class NoteRepository(
                     NoteFtsEntity(noteId = note.id, title = note.title, plainText = note.plainText),
                 )
             }
+            relink(note)
         }
+    }
+
+    /**
+     * Recomputes [note]'s outgoing [[backlink]] edges from its plain text.
+     * Runs inside the caller's transaction (the upsert/delete write path),
+     * so edges can never diverge from the stored body. Locked or trashed
+     * notes hold no resolvable body text here, so their edges are cleared.
+     */
+    private suspend fun relink(note: NoteEntity) {
+        noteLinkDao.deleteForSource(note.id)
+        if (note.locked || note.trashedAt != null) return
+        val titles = NoteDocument.backlinkTitles(note.plainText)
+        if (titles.isEmpty()) return
+        val links = titles.mapNotNull { title ->
+            val target = noteDao.getByTitle(title)
+            if (target != null && target.id != note.id && !target.locked) {
+                NoteLinkEntity(sourceId = note.id, targetId = target.id)
+            } else {
+                null
+            }
+        }
+        if (links.isNotEmpty()) noteLinkDao.insertAll(links)
     }
 
     suspend fun delete(note: NoteEntity) {
@@ -117,6 +146,48 @@ class NoteRepository(
         upsert(updated)
         return updated
     }
+
+    // --- Rich create / edit (Phase 1c) --------------------------------------
+    /** Creates a note from canonical HTML (rich editor, templates, daily notes). */
+    suspend fun createRichNote(
+        title: String = "",
+        contentHtml: String = "",
+        folderId: String? = null,
+        dailyDate: String? = null,
+    ): NoteEntity {
+        val now = System.currentTimeMillis()
+        val note = NoteEntity(
+            id = UUID.randomUUID().toString(),
+            folderId = folderId,
+            title = title,
+            contentHtml = contentHtml,
+            plainText = NoteDocument.plainText(NoteDocument.parse(contentHtml)),
+            createdAt = now,
+            updatedAt = now,
+            dailyDate = dailyDate,
+        )
+        upsert(note)
+        return note
+    }
+
+    /** Replaces a note's title + HTML body, re-deriving plain text, FTS and links. */
+    suspend fun updateRichBody(note: NoteEntity, title: String, contentHtml: String): NoteEntity {
+        val updated = note.copy(
+            title = title,
+            contentHtml = contentHtml,
+            plainText = NoteDocument.plainText(NoteDocument.parse(contentHtml)),
+            updatedAt = System.currentTimeMillis(),
+        )
+        upsert(updated)
+        return updated
+    }
+
+    // --- Backlinks (Phase 1c) --------------------------------------------------
+    /** Notes whose bodies reference [noteId] via [[title]] — "Linked from…". */
+    fun observeLinkedFrom(noteId: String): Flow<List<NoteEntity>> = noteLinkDao.observeIncoming(noteId)
+
+    /** Notes eligible as [[ ]] autocomplete targets. */
+    fun observeLinkable(): Flow<List<NoteEntity>> = noteDao.observeLinkable()
 
     // --- State ops (copies through the FTS-synced upsert) --------------------
     suspend fun setPinned(note: NoteEntity, pinned: Boolean) =

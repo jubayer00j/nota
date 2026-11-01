@@ -179,3 +179,24 @@ data class SavedSearchEntity(
     val query: String,
     val createdAt: Long,
 )
+
+/**
+ * A resolved [[backlink]] edge (Phase 1c): [sourceId]'s body references the
+ * note [targetId] by title. Edges are recomputed by the repository on every
+ * note write from the note's plain text, so they can never go stale; title
+ * renames simply re-resolve on the source's next save. Deleting either note
+ * cascades its edges away.
+ */
+@Entity(
+    tableName = "note_links",
+    primaryKeys = ["sourceId", "targetId"],
+    foreignKeys = [
+        ForeignKey(NoteEntity::class, ["id"], ["sourceId"], onDelete = ForeignKey.CASCADE),
+        ForeignKey(NoteEntity::class, ["id"], ["targetId"], onDelete = ForeignKey.CASCADE),
+    ],
+    indices = [Index("targetId")],
+)
+data class NoteLinkEntity(
+    val sourceId: String,
+    val targetId: String,
+)
