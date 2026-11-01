@@ -172,4 +172,44 @@ class NoteDocumentTest {
         assertEquals(listOf(TextSegment("")), NoteDocument.parse(""))
         assertEquals("", NoteDocument.serialize(NoteDocument.parse("")))
     }
+
+    @Test
+    fun bareUnknownBlockElementsAreOpaque() {
+        // Codex fix G6: a bare <video> (not wrapped in div/figure) used to
+        // fall into the text path and be mangled by the editor.
+        val video = "<video src=\"clip.mp4\" controls>" +
+            "<source src=\"clip.mp4\" type=\"video/mp4\">fallback</video>"
+        val html = "<p>a</p>$video<p>b</p>"
+        val segments = NoteDocument.parse(html)
+        assertEquals(
+            listOf("TextSegment", "OpaqueSegment", "TextSegment"),
+            segments.map { it::class.simpleName },
+        )
+        assertEquals(video, (segments[1] as OpaqueSegment).rawHtml)
+        assertEquals(html, NoteDocument.serialize(segments))
+        assertEquals(segments, NoteDocument.parse(NoteDocument.serialize(segments)))
+    }
+
+    @Test
+    fun bareIframeAndEmbedAreOpaque() {
+        val iframe = "<iframe src=\"https://example.com/embed\"></iframe>"
+        val iframeSegments = NoteDocument.parse(iframe)
+        assertEquals(listOf("OpaqueSegment"), iframeSegments.map { it::class.simpleName })
+        assertEquals(iframe, NoteDocument.serialize(iframeSegments))
+
+        val embed = "<embed src=\"movie.swf\">"
+        val embedSegments = NoteDocument.parse(embed)
+        assertEquals(listOf("OpaqueSegment"), embedSegments.map { it::class.simpleName })
+        assertEquals(embed, NoteDocument.serialize(embedSegments))
+    }
+
+    @Test
+    fun knownInlineTagsStillFlowAsText() {
+        // G6 must not reclassify anything previously textual.
+        val html = "<p>one</p><strong>bold</strong> tail"
+        val segments = NoteDocument.parse(html)
+        assertEquals(1, segments.size)
+        assertTrue(segments[0] is TextSegment)
+        assertEquals(html, NoteDocument.serialize(segments))
+    }
 }

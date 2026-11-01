@@ -220,6 +220,29 @@ object NoteDocument {
                         i = close.second
                     }
                 }
+                in UNKNOWN_BLOCK_TAGS -> {
+                    // Codex fix G6: a BARE top-level unknown block element
+                    // (video, iframe, ...) must not fall into the text path,
+                    // where the editor would mangle it. Preserve the whole
+                    // subtree verbatim as opaque, like div/figure above.
+                    // <embed> is a void element: no close tag to find.
+                    val close = if (tag.name == "embed" || tag.attrs.trimEnd().endsWith("/")) {
+                        null
+                    } else {
+                        findClose(html, tag.end, tag.name)
+                    }
+                    when {
+                        tag.name == "embed" || tag.attrs.trimEnd().endsWith("/") -> {
+                            flushText(); out += OpaqueSegment(html.substring(lt, tag.end)); i = tag.end
+                        }
+                        close == null -> {
+                            text.append(html.substring(lt, tag.end)); i = tag.end
+                        }
+                        else -> {
+                            flushText(); out += OpaqueSegment(html.substring(lt, close.second)); i = close.second
+                        }
+                    }
+                }
                 else -> {
                     text.append(html.substring(lt, tag.end))
                     i = tag.end
@@ -229,6 +252,18 @@ object NoteDocument {
         flushText()
         return if (out.isEmpty()) listOf(TextSegment("")) else out
     }
+
+    /**
+     * Block-level tags the guard does not model. Handled tags (table, ul,
+     * ol, blockquote, pre, hr, img, p, div, figure) and the text-path tags
+     * (headings, lists items, inline marks) are deliberately absent: only
+     * genuinely unknown blocks land here and become [OpaqueSegment]s.
+     */
+    private val UNKNOWN_BLOCK_TAGS = setOf(
+        "video", "audio", "iframe", "object", "embed",
+        "section", "article", "aside", "header", "footer", "nav", "main",
+        "fieldset", "form", "details", "address", "picture",
+    )
 
     private fun splitParagraphWithImages(
         inner: String,
