@@ -2,6 +2,7 @@ package app.nota.data.preferences
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -19,6 +20,14 @@ import kotlinx.coroutines.flow.map
  */
 private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "nota_preferences",
+    // A corrupt file is replaced with empty preferences (defaults)
+    // instead of failing every read AND write: without a handler,
+    // dataStore.edit throws CorruptionException on a corrupt file,
+    // so the read-side catch in PreferencesRepository could never
+    // actually recover via a Settings write.
+    corruptionHandler = ReplaceFileCorruptionHandler(
+        produceNewData = { emptyPreferences() },
+    ),
 )
 
 /**
