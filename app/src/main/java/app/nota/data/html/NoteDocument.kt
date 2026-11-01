@@ -31,8 +31,20 @@ sealed interface DocSegment
 /** HTML the rich text editor may own (lossless shapes only). */
 data class TextSegment(val html: String) : DocSegment
 
-/** A table. [rows] are cell inner-HTML strings; [headerRow] marks row 0 as <th>. */
-data class TableSegment(val rows: List<List<String>>, val headerRow: Boolean) : DocSegment
+/** Span of one table cell (1 = not merged in that direction). */
+data class TableCellSpan(val rowSpan: Int = 1, val colSpan: Int = 1)
+
+/**
+ * A table. [rows] are cell inner-HTML strings; [headerRow] marks row 0
+ * as <th>. [cellSpans] parallels [rows] cell-for-cell and carries each
+ * cell's rowspan/colspan so merged cells survive parse -> serialize;
+ * it is empty for tables built in the editor (all spans are 1 there).
+ */
+data class TableSegment(
+    val rows: List<List<String>>,
+    val headerRow: Boolean,
+    val cellSpans: List<List<TableCellSpan>> = emptyList(),
+) : DocSegment
 
 data class TaskItem(val contentHtml: String, val checked: Boolean)
 
@@ -270,9 +282,13 @@ object NoteDocument {
         table.rows.forEachIndexed { index, row ->
             append("<tr>")
             val cellTag = if (index == 0 && table.headerRow) "th" else "td"
-            for (cell in row) {
-                append('<').append(cellTag).append('>').append(cell)
-                    .append("</").append(cellTag).append('>')
+            row.forEachIndexed { cellIndex, cell ->
+                val span = table.cellSpans.getOrNull(index)?.getOrNull(cellIndex)
+                    ?: TableCellSpan()
+                append('<').append(cellTag)
+                if (span.rowSpan > 1) append(" rowspan=\"").append(span.rowSpan).append('"')
+                if (span.colSpan > 1) append(" colspan=\"").append(span.colSpan).append('"')
+                append('>').append(cell).append("</").append(cellTag).append('>')
             }
             append("</tr>")
         }
@@ -421,6 +437,7 @@ object NoteDocument {
 
     private fun parseTable(whole: String): TableSegment? {
         val rows = mutableListOf<List<String>>()
+        val rowSpans = mutableListOf<List<TableCellSpan>>()
         var headerRow = false
         var idx = 0
         var firstRow = true
@@ -431,6 +448,7 @@ object NoteDocument {
             val close = findClose(whole, trTag.end, "tr") ?: break
             val rowHtml = whole.substring(trTag.end, close.first)
             val cells = mutableListOf<String>()
+            val spans = mutableListOf<TableCellSpan>()
             var allTh = true
             var cIdx = 0
             while (true) {
@@ -440,17 +458,24 @@ object NoteDocument {
                 val cellTag = readTag(rowHtml, cellAt) ?: break
                 val cellClose = findClose(rowHtml, cellTag.end, cellTag.name) ?: break
                 cells += rowHtml.substring(cellTag.end, cellClose.first).trim()
+                spans += TableCellSpan(
+                    rowSpan = attr(cellTag.attrs, "rowspan").toIntOrNull()
+                        ?.coerceAtLeast(1) ?: 1,
+                    colSpan = attr(cellTag.attrs, "colspan").toIntOrNull()
+                        ?.coerceAtLeast(1) ?: 1,
+                )
                 if (cellTag.name != "th") allTh = false
                 cIdx = cellClose.second
             }
             if (cells.isNotEmpty()) {
                 if (firstRow && allTh) headerRow = true
                 rows += cells
+                rowSpans += spans
             }
             firstRow = false
             idx = close.second
         }
-        return if (rows.isEmpty()) null else TableSegment(rows, headerRow)
+        return if (rows.isEmpty()) null else TableSegment(rows, headerRow, rowSpans)
     }
 
     private fun parseTaskItems(inner: String): List<TaskItem> {

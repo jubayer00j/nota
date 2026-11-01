@@ -8,7 +8,9 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.DocSegment
+import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
+import app.nota.data.html.TextSegment
 import app.nota.data.repository.NoteRepository
 import app.nota.data.templates.TemplateRepository
 import java.io.File
@@ -176,7 +178,31 @@ class RichNoteEditorViewModel(
     }
 
     fun deleteAttachment(attachment: AttachmentEntity) {
-        viewModelScope.launch { attachmentStore.delete(attachment) }
+        viewModelScope.launch {
+            attachmentStore.delete(attachment)
+            // Codex F7: an embedded ImageSegment pointing at this
+            // attachment would otherwise be left referencing a deleted
+            // file/row. Strip it from the owning note's stored document
+            // through the NoteDocument guard layer and persist if the
+            // document actually changed. (The screen also drops the
+            // block from its working segments, so the next autosave
+            // cannot resurrect it.)
+            val owner = repository.getById(attachment.noteId) ?: return@launch
+            val segments = NoteDocument.parse(owner.contentHtml)
+            val targetSrc = NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
+            val cleaned = segments.filterNot {
+                it is ImageSegment && it.src == targetSrc
+            }
+            if (cleaned.size != segments.size) {
+                val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
+                val html = NoteDocument.serialize(kept)
+                val updated = repository.updateRichBody(owner, owner.title, html)
+                if (loadedNoteId == owner.id) {
+                    baselineHtml = html
+                    _note.value = updated
+                }
+            }
+        }
     }
 
     fun attachmentFile(attachment: AttachmentEntity): File = attachmentStore.fileFor(attachment)

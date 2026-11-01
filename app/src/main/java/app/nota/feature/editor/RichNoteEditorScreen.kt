@@ -98,6 +98,7 @@ import app.nota.data.html.NoteDocument
 import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.OutlineEntry
 import app.nota.data.html.QuoteSegment
+import app.nota.data.html.TableCellSpan
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TaskItem
 import app.nota.data.html.TaskListSegment
@@ -395,7 +396,7 @@ fun RichNoteEditorScreen(
                         DropdownMenuItem(
                             text = { Text("Move to trash") },
                             leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                            onClick = { menuExpanded = false; viewModel.delete(onBack) },
+                            onClick = { menuExpanded = false; persistNow { viewModel.delete(onBack) } },
                         )
                     }
                 },
@@ -513,7 +514,21 @@ fun RichNoteEditorScreen(
                                 ),
                             )
                         },
-                        onDelete = { viewModel.deleteAttachment(it) },
+                        onDelete = { attachment ->
+                            // Drop any embedded image block for this
+                            // attachment from the working segments too
+                            // (Codex F7) so autosave cannot resurrect it;
+                            // the VM strips it from the stored document.
+                            val targetSrc =
+                                NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
+                            segments = segments.filterNot {
+                                (it.segment as? ImageSegment)?.src == targetSrc
+                            }
+                            if (segments.isEmpty()) {
+                                segments = listOf(UiSegment(newUiId(), TextSegment("")))
+                            }
+                            viewModel.deleteAttachment(attachment)
+                        },
                     )
                 }
                 if (linkedFrom.isNotEmpty()) {
@@ -823,7 +838,7 @@ private fun TableBlock(
                                         rowCells
                                     }
                                 }
-                                onChange(TableSegment(newRows, table.headerRow))
+                                onChange(TableSegment(newRows, table.headerRow, table.cellSpans))
                             },
                         )
                     }
@@ -833,19 +848,44 @@ private fun TableBlock(
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
                     val cols = table.rows.firstOrNull()?.size ?: 1
-                    onChange(TableSegment(table.rows + listOf(List(cols) { "" }), table.headerRow))
+                    val newSpans = if (table.cellSpans.isEmpty()) {
+                        emptyList()
+                    } else {
+                        table.cellSpans + listOf(List(cols) { TableCellSpan() })
+                    }
+                    onChange(
+                        TableSegment(table.rows + listOf(List(cols) { "" }), table.headerRow, newSpans),
+                    )
                 }) { Text("+ Row") }
                 TextButton(onClick = {
-                    onChange(TableSegment(table.rows.map { it + "" }, table.headerRow))
+                    onChange(
+                        TableSegment(
+                            table.rows.map { it + "" },
+                            table.headerRow,
+                            table.cellSpans.map { it + TableCellSpan() },
+                        ),
+                    )
                 }) { Text("+ Col") }
                 if (table.rows.size > 1) {
                     TextButton(onClick = {
-                        onChange(TableSegment(table.rows.dropLast(1), table.headerRow))
+                        onChange(
+                            TableSegment(
+                                table.rows.dropLast(1),
+                                table.headerRow,
+                                table.cellSpans.dropLast(1),
+                            ),
+                        )
                     }) { Text("− Row") }
                 }
                 if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
                     TextButton(onClick = {
-                        onChange(TableSegment(table.rows.map { it.dropLast(1) }, table.headerRow))
+                        onChange(
+                            TableSegment(
+                                table.rows.map { it.dropLast(1) },
+                                table.headerRow,
+                                table.cellSpans.map { it.dropLast(1) },
+                            ),
+                        )
                     }) { Text("− Col") }
                 }
                 Spacer(Modifier.weight(1f))

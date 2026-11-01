@@ -64,6 +64,26 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun mergedTableCellsKeepSpansThroughRoundTrip() {
+        // Merged cells (Codex F8): spans must survive parse -> serialize
+        // or any edit silently un-merges the table on re-save.
+        val html = "<table><tbody>" +
+            "<tr><th colspan=\"2\">Head</th><th rowspan=\"2\">Side</th></tr>" +
+            "<tr><td>a</td><td>b</td></tr>" +
+            "<tr><td colspan=\"3\">wide</td></tr></tbody></table>"
+        val segments = NoteDocument.parse(html)
+        val table = segments.single() as TableSegment
+        assertEquals(TableCellSpan(colSpan = 2), table.cellSpans[0][0])
+        assertEquals(TableCellSpan(rowSpan = 2), table.cellSpans[0][2])
+        assertEquals(TableCellSpan(), table.cellSpans[1][0])
+        assertEquals(TableCellSpan(colSpan = 3), table.cellSpans[2][0])
+        val once = NoteDocument.serialize(segments)
+        assertEquals(html, once)
+        assertEquals(once, NoteDocument.serialize(NoteDocument.parse(once)))
+        assertEquals(table, NoteDocument.parse(once).single())
+    }
+
+    @Test
     fun plainTextProjectionCoversBlocks() {
         val text = NoteDocument.plainText(NoteDocument.parse(fullNote))
         assertTrue(text.contains("Physics notes"))

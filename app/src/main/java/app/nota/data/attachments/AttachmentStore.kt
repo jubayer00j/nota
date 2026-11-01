@@ -10,6 +10,8 @@ import app.nota.data.db.AttachmentEntity
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -27,12 +29,22 @@ class AttachmentStore(
     private val context: Context,
     private val attachmentDao: AttachmentDao,
 ) {
+    /**
+     * Serialises imports against [reconcile] (and deletes): an import
+     * writes its file BEFORE its Room row exists, so an unsynchronised
+     * reconcile snapshot could mistake the in-progress file for an
+     * orphan and delete it (Codex F9). All file+row mutations take this.
+     */
+    private val fileMutex = Mutex()
     private val root: File
         get() = File(context.filesDir, "attachments")
 
     fun fileFor(attachment: AttachmentEntity): File = File(context.filesDir, attachment.localPath)
 
-    suspend fun importImage(noteId: String, uri: Uri): AttachmentEntity = withContext(Dispatchers.IO) {
+    suspend fun importImage(noteId: String, uri: Uri): AttachmentEntity =
+        fileMutex.withLock { importImageLocked(noteId, uri) }
+
+    private suspend fun importImageLocked(noteId: String, uri: Uri): AttachmentEntity = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -73,7 +85,10 @@ class AttachmentStore(
         entity
     }
 
-    suspend fun importFile(noteId: String, uri: Uri): AttachmentEntity = withContext(Dispatchers.IO) {
+    suspend fun importFile(noteId: String, uri: Uri): AttachmentEntity =
+        fileMutex.withLock { importFileLocked(noteId, uri) }
+
+    private suspend fun importFileLocked(noteId: String, uri: Uri): AttachmentEntity = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val originalName = displayName(uri) ?: "file"
         val safeName = originalName.replace(Regex("[^A-Za-z0-9._-]"), "_")
@@ -96,7 +111,11 @@ class AttachmentStore(
         entity
     }
 
-    suspend fun delete(attachment: AttachmentEntity) = withContext(Dispatchers.IO) {
+    suspend fun delete(attachment: AttachmentEntity): Unit = fileMutex.withLock {
+        deleteLocked(attachment)
+    }
+
+    private suspend fun deleteLocked(attachment: AttachmentEntity) = withContext(Dispatchers.IO) {
         fileFor(attachment).delete()
         attachmentDao.delete(attachment)
     }
@@ -105,7 +124,10 @@ class AttachmentStore(
      * Orphan reconciliation (spec §7 parity): removes files no row points
      * at and rows whose file is gone. Returns (filesRemoved, rowsRemoved).
      */
-    suspend fun reconcile(all: List<AttachmentEntity>): Pair<Int, Int> = withContext(Dispatchers.IO) {
+    suspend fun reconcile(all: List<AttachmentEntity>): Pair<Int, Int> =
+        fileMutex.withLock { reconcileLocked(all) }
+
+    private suspend fun reconcileLocked(all: List<AttachmentEntity>): Pair<Int, Int> = withContext(Dispatchers.IO) {
         var filesRemoved = 0
         var rowsRemoved = 0
         val knownPaths = all.map { it.localPath }.toSet()
