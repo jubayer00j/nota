@@ -37,5 +37,15 @@ class NotaApplication : Application() {
                 store.reconcile { repository.observeAttachments().first() }
             }
         }
+        // Backlink backfill (Codex fix G5b): the v2->v3 migration created
+        // note_links empty, so pre-1c notes need one relink pass. The
+        // repository call is a no-op once any link exists. Fire-and-forget
+        // on IO at process start, like the reconcile above.
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                koin.get<NoteRepository>().backfillLinksIfNeeded()
+            }
+        }
     }
 }

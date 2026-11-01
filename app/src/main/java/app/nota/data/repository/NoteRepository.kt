@@ -61,6 +61,7 @@ class NoteRepository(
     // --- Core write path (FTS-synced) --------------------------------------
     suspend fun upsert(note: NoteEntity) {
         db.withTransaction {
+            val previousTitle = noteDao.getById(note.id)?.title
             noteDao.upsert(note)
             ftsDao.deleteForNote(note.id)
             if (note.trashedAt == null && !note.locked) {
@@ -69,7 +70,53 @@ class NoteRepository(
                 )
             }
             relink(note)
+            if (previousTitle != note.title) {
+                // Codex fix G5a: creating a note or renaming one changes
+                // which [[title]] references resolve. Re-run extraction
+                // for notes referencing the old or new title, so their
+                // edges track the rename instead of going stale.
+                relinkReferencingNotes(previousTitle, note.title, excludeId = note.id)
+            }
         }
+    }
+
+    /**
+     * Re-runs [relink] for every note whose body references [oldTitle] or
+     * [newTitle] (either may be the side a rename just changed). Runs
+     * inside the caller's transaction. Locked/trashed notes are skipped:
+     * [relink] clears their edges and their own next upsert rebuilds them.
+     */
+    private suspend fun relinkReferencingNotes(oldTitle: String?, newTitle: String, excludeId: String) {
+        val titles = listOfNotNull(oldTitle, newTitle).toSet()
+        if (titles.isEmpty()) return
+        for (other in noteDao.getAll()) {
+            if (other.id == excludeId || other.locked || other.trashedAt != null) continue
+            if (NoteDocument.backlinkTitles(other.plainText).any { it in titles }) {
+                relink(other)
+            }
+        }
+    }
+
+    /**
+     * One-time backfill for the v2->v3 migration (Codex fix G5b):
+     * MIGRATION_2_3 created note_links EMPTY, so notes written before
+     * Phase 1c have no edges until each is individually re-saved. When
+     * the table is empty but notes exist, relink every note that
+     * mentions a [[title]]. Cheap and idempotent: once any edge exists
+     * this returns immediately, and notes without "[[" are skipped
+     * without a relink, so a library with no links at all only pays a
+     * substring scan per note per launch. Returns true when it ran.
+     */
+    suspend fun backfillLinksIfNeeded(): Boolean {
+        if (noteLinkDao.count() > 0) return false
+        val notes = noteDao.getAll()
+        if (notes.isEmpty()) return false
+        db.withTransaction {
+            for (note in notes) {
+                if (note.plainText.contains("[[")) relink(note)
+            }
+        }
+        return true
     }
 
     /**

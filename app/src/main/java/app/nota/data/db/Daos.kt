@@ -50,6 +50,10 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE id = :id")
     suspend fun getById(id: String): NoteEntity?
 
+    /** Every note, for backlink re-resolution and the startup backfill. */
+    @Query("SELECT * FROM notes")
+    suspend fun getAll(): List<NoteEntity>
+
     /** Notes that can be the target of a [[backlink]] (not trashed/locked). */
     @Query("SELECT * FROM notes WHERE trashedAt IS NULL AND locked = 0 ORDER BY title COLLATE NOCASE ASC")
     fun observeLinkable(): Flow<List<NoteEntity>>
@@ -188,6 +192,9 @@ interface NoteLinkDao {
         """,
     )
     fun observeIncoming(noteId: String): Flow<List<NoteEntity>>
+
+    @Query("SELECT COUNT(*) FROM note_links")
+    suspend fun count(): Int
 
     @Query("DELETE FROM note_links WHERE sourceId = :sourceId")
     suspend fun deleteForSource(sourceId: String)
