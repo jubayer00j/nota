@@ -266,6 +266,7 @@ class BackupRepository(
             if (mode == RestoreMode.REPLACE) {
                 // Wipe ALL attachment files before any new file lands and
                 // before rows are cleared, so no orphan survives.
+                println("DIAG wipe at filesDir=" + context.filesDir.absolutePath)
                 File(context.filesDir, "attachments").deleteRecursively()
             }
             val writtenAttachments = mutableListOf<AttachmentEntity>()
@@ -418,6 +419,7 @@ class BackupRepository(
         staged.stagedFile.inputStream().buffered().use { input ->
             target.outputStream().buffered().use { out -> input.copyTo(out) }
         }
+        println("DIAG write id=" + meta.id + " target=" + target.absolutePath + " exists=" + target.exists() + " len=" + target.length() + " filesDir=" + context.filesDir.absolutePath)
         val size = target.length()
         val (width, height) = if (!meta.encrypted && meta.mimeType.startsWith("image/")) {
             imageBounds(target)
