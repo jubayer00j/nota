@@ -2,6 +2,8 @@ package app.nota.data.repository
 
 import androidx.room.Room
 import app.nota.data.db.NotaDatabase
+import app.nota.data.db.NoteEntity
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -34,7 +36,7 @@ class NoteRepositoryRobolectricTest {
             .build()
         repository = NoteRepository(
             db, db.noteDao(), db.noteFtsDao(), db.folderDao(),
-            db.tagDao(), db.attachmentDao(), db.savedSearchDao(),
+            db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao(),
         )
     }
 
@@ -79,5 +81,77 @@ class NoteRepositoryRobolectricTest {
         repository.setArchived(restored, true)
         assertTrue(repository.searchNotes("apple").isEmpty())
         assertEquals(listOf(second.id), repository.searchNotes("zebra").map { it.id })
+    }
+
+    @Test
+    fun backlinksResolveOnWriteAndClearOnTrash() = runBlocking {
+        val target = repository.createNote(title = "Project Plan", plainBody = "roadmap")
+        val source = repository.createRichNote(
+            title = "Meeting",
+            contentHtml = "<p>See [[Project Plan]] for details</p>",
+        )
+        // Edge exists after the write.
+        val incoming = repository.observeLinkedFrom(target.id).first()
+        assertEquals(listOf(source.id), incoming.map { it.id })
+
+        // Rewriting the source without the link removes the edge.
+        val stored = db.noteDao().getById(source.id)!!
+        repository.updateRichBody(stored, "Meeting", "<p>No links here</p>")
+        assertTrue(repository.observeLinkedFrom(target.id).first().isEmpty())
+
+        // A link to a missing title resolves to nothing (no crash, no edge).
+        repository.createRichNote(
+            title = "Orphan",
+            contentHtml = "<p>Points at [[No Such Note]]</p>",
+        )
+        assertTrue(repository.observeLinkedFrom(target.id).first().isEmpty())
+    }
+
+    @Test
+    fun backlinksResolveWhenTargetIsCreatedOrRenamed() = runBlocking {
+        // Source references a title that does not exist yet.
+        val source = repository.createRichNote(
+            title = "Source",
+            contentHtml = "<p>See [[Future Note]]</p>",
+        )
+        // Creating the target re-resolves the referencing note (G5a).
+        val target = repository.createNote(title = "Future Note", plainBody = "body")
+        assertEquals(
+            listOf(source.id),
+            repository.observeLinkedFrom(target.id).first().map { it.id },
+        )
+        // Renaming the target away drops the edge without touching the source.
+        val stored = db.noteDao().getById(target.id)!!
+        repository.updateTitle(stored, "Other Title")
+        assertTrue(repository.observeLinkedFrom(target.id).first().isEmpty())
+        // Renaming it back re-resolves the reference again.
+        val renamed = db.noteDao().getById(target.id)!!
+        repository.updateTitle(renamed, "Future Note")
+        assertEquals(
+            listOf(source.id),
+            repository.observeLinkedFrom(target.id).first().map { it.id },
+        )
+    }
+
+    @Test
+    fun backfillRelinksNotesWrittenBypassingRepository() = runBlocking {
+        // Simulate pre-migration rows: written straight through the DAO,
+        // so note_links stays empty although a [[reference]] exists.
+        val now = System.currentTimeMillis()
+        db.noteDao().upsert(
+            NoteEntity(id = "t1", title = "Target", plainText = "body", createdAt = now, updatedAt = now),
+        )
+        db.noteDao().upsert(
+            NoteEntity(id = "s1", title = "Source", plainText = "See [[Target]]", createdAt = now, updatedAt = now),
+        )
+        assertTrue(repository.observeLinkedFrom("t1").first().isEmpty())
+
+        assertTrue(repository.backfillLinksIfNeeded())
+        assertEquals(
+            listOf("s1"),
+            repository.observeLinkedFrom("t1").first().map { it.id },
+        )
+        // Idempotent: with edges present the backfill is a no-op.
+        assertTrue(!repository.backfillLinksIfNeeded())
     }
 }

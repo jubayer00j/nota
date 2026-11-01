@@ -50,6 +50,14 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE id = :id")
     suspend fun getById(id: String): NoteEntity?
 
+    /** Every note, for backlink re-resolution and the startup backfill. */
+    @Query("SELECT * FROM notes")
+    suspend fun getAll(): List<NoteEntity>
+
+    /** Notes that can be the target of a [[backlink]] (not trashed/locked). */
+    @Query("SELECT * FROM notes WHERE trashedAt IS NULL AND locked = 0 ORDER BY title COLLATE NOCASE ASC")
+    fun observeLinkable(): Flow<List<NoteEntity>>
+
     @Upsert
     suspend fun upsert(note: NoteEntity)
 
@@ -169,4 +177,28 @@ interface SavedSearchDao {
 
     @Delete
     suspend fun delete(search: SavedSearchEntity)
+}
+
+/** Resolved [[backlink]] edges (Phase 1c); written only by NoteRepository. */
+@Dao
+interface NoteLinkDao {
+    /** Notes that link TO [noteId] ("Linked from…"), newest first. */
+    @Query(
+        """
+        SELECT n.* FROM notes n
+        JOIN note_links l ON l.sourceId = n.id
+        WHERE l.targetId = :noteId AND n.trashedAt IS NULL AND n.locked = 0
+        ORDER BY n.updatedAt DESC
+        """,
+    )
+    fun observeIncoming(noteId: String): Flow<List<NoteEntity>>
+
+    @Query("SELECT COUNT(*) FROM note_links")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM note_links WHERE sourceId = :sourceId")
+    suspend fun deleteForSource(sourceId: String)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(links: List<NoteLinkEntity>)
 }

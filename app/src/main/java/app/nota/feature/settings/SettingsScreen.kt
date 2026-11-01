@@ -36,6 +36,7 @@ import org.koin.compose.koinInject
 fun SettingsScreen(
     onOpenDesignSystem: () -> Unit = {},
     onOpenEditorSpike: () -> Unit = {},
+    onOpenTemplates: () -> Unit = {},
     preferencesRepository: PreferencesRepository = koinInject(),
 ) {
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
@@ -96,13 +97,22 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
+        Text(
+            "Writing",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        SettingsRow("Templates", "Start notes from templates; create them from any note's menu", onOpenTemplates)
+        HorizontalDivider()
+        Spacer(Modifier.height(NotaSpacing.sm))
+
         SettingsRow("Design system preview", "Pine & paper tokens, type scale, components", onOpenDesignSystem)
         HorizontalDivider()
         SettingsRow("Editor spike (Phase 0)", "Compose Rich Editor go/no-go test bench", onOpenEditorSpike)
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.md))
         Text(
-            "Sync & backup · Security · Writing · AI features · Data · Account · About — arrive with their phases.",
+            "Sync & backup · Security · AI features · Data · Account · About — arrive with their phases.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

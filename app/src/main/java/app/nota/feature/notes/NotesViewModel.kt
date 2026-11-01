@@ -3,6 +3,7 @@ package app.nota.feature.notes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteTagCrossRef
@@ -58,6 +59,7 @@ data class NotesUiState(
 class NotesViewModel(
     private val repository: NoteRepository,
     private val library: LibraryRepository,
+    private val attachmentStore: AttachmentStore,
 ) : ViewModel() {
 
     private val filterFlow = MutableStateFlow<NotesFilter>(NotesFilter.All)
@@ -75,7 +77,19 @@ class NotesViewModel(
         .combine(repository.observeAttachments()) { snap, attachments -> snap.copy(attachments = attachments) }
         .combine(filterFlow) { snap, filter -> snap.copy(filter = filter) }
         .combine(sortFlow) { snap, sort -> snap.copy(sort = sort) }
-        .combine(selectionFlow) { snap, selection -> snap.toUiState(selection) }
+        .combine(selectionFlow) { snap, selection ->
+            snap.toUiState(selection) { attachment ->
+                // Attachment localPaths are relative to filesDir
+                // (attachments/<noteId>/<file>); Coil cannot load a bare
+                // relative string, so resolve through the store (Codex
+                // fix G2). Paths already absolute pass through unchanged.
+                if (attachment.localPath.startsWith("/")) {
+                    attachment.localPath
+                } else {
+                    attachmentStore.fileFor(attachment).absolutePath
+                }
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NotesUiState())
 
     private data class LibrarySnapshot(
@@ -89,7 +103,7 @@ class NotesViewModel(
         val filter: NotesFilter = NotesFilter.All,
         val sort: SortOrder = SortOrder.UpdatedDesc,
     ) {
-        fun toUiState(selection: Set<String>): NotesUiState {
+        fun toUiState(selection: Set<String>, coverPath: (AttachmentEntity) -> String): NotesUiState {
             val tagsById = tags.associateBy { it.id }
             val foldersById = folders.associateBy { it.id }
             val tagIdsByNote = crossRefs.groupBy({ it.noteId }, { it.tagId })
@@ -104,7 +118,8 @@ class NotesViewModel(
                     tagNames = noteTagIds.mapNotNull { tagsById[it]?.name }.sorted(),
                     tagIds = noteTagIds,
                     attachmentCount = noteAttachments.size,
-                    coverImagePath = noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }?.localPath,
+                    coverImagePath = noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }
+                        ?.let(coverPath),
                 )
             }
             val now = System.currentTimeMillis()

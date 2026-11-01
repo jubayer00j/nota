@@ -22,12 +22,13 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.nota.feature.ask.AskScreen
 import app.nota.feature.designsystem.DesignSystemScreen
-import app.nota.feature.editor.PlainNoteEditorScreen
+import app.nota.feature.editor.RichNoteEditorScreen
 import app.nota.feature.notes.NotesScreen
 import app.nota.feature.reminders.RemindersScreen
 import app.nota.feature.search.SearchScreen
 import app.nota.feature.settings.SettingsScreen
 import app.nota.feature.spike.EditorSpikeScreen
+import app.nota.feature.templates.TemplatesScreen
 import app.nota.feature.today.TodayScreen
 
 /** The four bottom-navigation destinations (spec §6 — veto-approved defaults). */
@@ -41,6 +42,7 @@ enum class NotaDestination(val route: String, val label: String, val icon: Image
 object NotaRoutes {
     const val DESIGN_SYSTEM = "design-system"
     const val EDITOR_SPIKE = "editor-spike"
+    const val TEMPLATES = "templates"
     const val TODAY = "today"
     const val SEARCH = "search"
     const val NOTE_EDITOR = "note/{noteId}"
@@ -106,9 +108,10 @@ fun NotaNavShell(startOnToday: Boolean = false) {
             }
             composable(NotaRoutes.NOTE_EDITOR) { entry ->
                 val noteId = entry.arguments?.getString("noteId").orEmpty()
-                PlainNoteEditorScreen(
+                RichNoteEditorScreen(
                     noteId = noteId,
                     onBack = { navController.popBackStack() },
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
                 )
             }
             composable(NotaDestination.Ask.route) { AskScreen() }
@@ -117,6 +120,13 @@ fun NotaNavShell(startOnToday: Boolean = false) {
                 SettingsScreen(
                     onOpenDesignSystem = { navController.navigate(NotaRoutes.DESIGN_SYSTEM) },
                     onOpenEditorSpike = { navController.navigate(NotaRoutes.EDITOR_SPIKE) },
+                    onOpenTemplates = { navController.navigate(NotaRoutes.TEMPLATES) },
+                )
+            }
+            composable(NotaRoutes.TEMPLATES) {
+                TemplatesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
                 )
             }
             composable(NotaRoutes.DESIGN_SYSTEM) {
