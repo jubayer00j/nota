@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Outcome of one unlock attempt on the lock screen. */
@@ -57,12 +59,32 @@ class AppLockManager(
     private val _isLocked = MutableStateFlow(true)
     val isLocked: StateFlow<Boolean> = _isLocked.asStateFlow()
 
+    /**
+     * True while the persisted lock settings cannot be read (the
+     * repository flow emitted null). The manager fails CLOSED in this
+     * state: ready, still locked, and MainActivity shows an explanatory
+     * locked screen instead of the notes.
+     */
+    private val _settingsUnreadable = MutableStateFlow(false)
+    val settingsUnreadable: StateFlow<Boolean> = _settingsUnreadable.asStateFlow()
+
+    /** Serialises unlock attempts so the failed-attempt counter can
+     *  never lose an increment to a concurrent submission (Codex, PR #7). */
+    private val attemptMutex = Mutex()
+
     @Volatile
     private var backgroundedAtMillis: Long? = null
 
     init {
         scope.launch {
             repository.appLockSettings.collect { loaded ->
+                if (loaded == null) {
+                    // Fail closed: an unreadable store is NOT "lock off".
+                    _settingsUnreadable.value = true
+                    _ready.value = true
+                    return@collect
+                }
+                _settingsUnreadable.value = false
                 _settings.value = loaded
                 if (!_ready.value) {
                     _ready.value = true
@@ -108,14 +130,30 @@ class AppLockManager(
         if (System.currentTimeMillis() < current.lockoutUntil) return
         _isLocked.value = false
         backgroundedAtMillis = null
-        scope.launch { repository.setAppLockFailedAttempts(0, 0L) }
+        scope.launch {
+            attemptMutex.withLock { repository.setAppLockFailedAttempts(0, 0L) }
+        }
     }
 
     /**
-     * One credential unlock attempt. PBKDF2 runs on Dispatchers.Default —
-     * the password derivation (600k iterations) must never block the UI.
+     * One credential unlock attempt. Serialised on [attemptMutex]: the
+     * read-modify-write of the failed-attempt counter must be atomic,
+     * or two in-flight submissions could snapshot the same count and a
+     * failure would be lost (delaying the lockout). PBKDF2 runs on
+     * Dispatchers.Default — the password derivation (600k iterations)
+     * must never block the UI.
      */
-    suspend fun attemptUnlock(method: AppLockMethod, canonicalSecret: String): UnlockResult {
+    suspend fun attemptUnlock(
+        method: AppLockMethod,
+        canonicalSecret: String,
+    ): UnlockResult = attemptMutex.withLock {
+        attemptUnlockLocked(method, canonicalSecret)
+    }
+
+    private suspend fun attemptUnlockLocked(
+        method: AppLockMethod,
+        canonicalSecret: String,
+    ): UnlockResult {
         val current = _settings.value
         val now = System.currentTimeMillis()
         if (now < current.lockoutUntil) return UnlockResult.LockedOut(current.lockoutUntil)

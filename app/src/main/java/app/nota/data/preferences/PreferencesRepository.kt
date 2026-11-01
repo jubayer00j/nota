@@ -103,25 +103,49 @@ class PreferencesRepository(context: Context) {
     // 2a and cannot collide with the Phase 1a keys above. A credential
     // slot exists only when BOTH its salt and hash are stored.
 
-    val appLockSettings: Flow<AppLockSettings> = dataStore.safeData.map { prefs ->
-        fun credential(
-            saltKey: Preferences.Key<String>,
-            hashKey: Preferences.Key<String>,
-        ): AppLockCredential? {
-            val salt = prefs[saltKey]
-            val hash = prefs[hashKey]
-            return if (salt != null && hash != null) AppLockCredential(salt, hash) else null
+    /**
+     * The App Lock slice of the store. Unlike the appearance flows above
+     * (which deliberately degrade to defaults via [safeData]), this flow
+     * FAILS CLOSED: an [IOException] reading the store emits null —
+     * "unknown" — never an empty settings object, because empty would
+     * read as "App Lock off" and open the notes shell on a locked
+     * install (Codex review, PR #7). [AppLockManager] treats null as
+     * stay-locked. Corruption is a different path: the store's
+     * ReplaceFileCorruptionHandler repairs the file before this flow
+     * reads it, so a corrupted file surfaces here as a valid read.
+     */
+    val appLockSettings: Flow<AppLockSettings?> = dataStore.data
+        .map<Preferences, Preferences?> { prefs -> prefs }
+        .catch { exception ->
+            if (exception is IOException) emit(null) else throw exception
         }
-        AppLockSettings(
-            password = credential(KEY_LOCK_PASSWORD_SALT, KEY_LOCK_PASSWORD_HASH),
-            pin = credential(KEY_LOCK_PIN_SALT, KEY_LOCK_PIN_HASH),
-            pattern = credential(KEY_LOCK_PATTERN_SALT, KEY_LOCK_PATTERN_HASH),
-            biometricEnabled = prefs[KEY_LOCK_BIOMETRIC] ?: false,
-            failedAttempts = prefs[KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
-            lockoutUntil = prefs[KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
-            lockTimeoutSeconds = prefs[KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
-        )
-    }
+        .map { prefs ->
+            if (prefs == null) {
+                null
+            } else {
+                fun credential(
+                    saltKey: Preferences.Key<String>,
+                    hashKey: Preferences.Key<String>,
+                ): AppLockCredential? {
+                    val salt = prefs[saltKey]
+                    val hash = prefs[hashKey]
+                    return if (salt != null && hash != null) {
+                        AppLockCredential(salt, hash)
+                    } else {
+                        null
+                    }
+                }
+                AppLockSettings(
+                    password = credential(KEY_LOCK_PASSWORD_SALT, KEY_LOCK_PASSWORD_HASH),
+                    pin = credential(KEY_LOCK_PIN_SALT, KEY_LOCK_PIN_HASH),
+                    pattern = credential(KEY_LOCK_PATTERN_SALT, KEY_LOCK_PATTERN_HASH),
+                    biometricEnabled = prefs[KEY_LOCK_BIOMETRIC] ?: false,
+                    failedAttempts = prefs[KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
+                    lockoutUntil = prefs[KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
+                    lockTimeoutSeconds = prefs[KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
+                )
+            }
+        }
 
     suspend fun setAppLockCredential(method: AppLockMethod, credential: AppLockCredential) {
         safeEdit {
