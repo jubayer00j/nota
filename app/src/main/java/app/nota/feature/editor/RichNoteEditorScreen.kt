@@ -76,6 +76,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -1007,6 +1008,11 @@ private fun ImageBlock(
     // sets the persisted display width (ImageSegment.widthPercent).
     var selected by remember { mutableStateOf(false) }
     var areaWidthPx by remember { mutableIntStateOf(0) }
+    // The drag coroutine below is keyed by src only, so it must read the
+    // LATEST segment through rememberUpdatedState — capturing `image`
+    // directly would freeze the width at drag start and every delta
+    // would recompute from the original width (Codex review, PR #6).
+    val currentImage by rememberUpdatedState(image)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
@@ -1075,15 +1081,16 @@ private fun ImageBlock(
                                     detectDragGestures { change, dragAmount ->
                                         change.consume()
                                         if (areaWidthPx > 0) {
+                                            val base = currentImage
                                             val delta =
                                                 (dragAmount.x / areaWidthPx * 100).roundToInt()
-                                            val next = (image.widthPercent + delta)
+                                            val next = (base.widthPercent + delta)
                                                 .coerceIn(
                                                     NoteDocument.IMAGE_MIN_WIDTH_PERCENT,
                                                     NoteDocument.IMAGE_MAX_WIDTH_PERCENT,
                                                 )
-                                            if (next != image.widthPercent) {
-                                                onChange(image.copy(widthPercent = next))
+                                            if (next != base.widthPercent) {
+                                                onChange(base.copy(widthPercent = next))
                                             }
                                         }
                                     }

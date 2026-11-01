@@ -362,7 +362,10 @@ object NoteDocument {
             }
         }
         val style = attr(attrs, "style")
-        Regex("""(?i)width\s*:\s*(\d+(?:\.\d+)?)\s*%""").find(style)?.let {
+        // Property boundary required: without it, "max-width: 50%" or
+        // "min-width: 30%" would match their "width:" suffix and be
+        // rewritten as a fixed display width (Codex review, PR #6).
+        Regex("""(?i)(?:^|;)\s*width\s*:\s*(\d+(?:\.\d+)?)\s*%""").find(style)?.let {
             return it.groupValues[1].toDouble().roundToInt()
                 .coerceIn(IMAGE_MIN_WIDTH_PERCENT, IMAGE_MAX_WIDTH_PERCENT)
         }

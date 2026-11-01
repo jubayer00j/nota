@@ -411,6 +411,21 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun imageWidthStyleFallbackIgnoresMaxAndMinWidth() {
+        // A max-/min-width constraint is not a fixed display width: the
+        // fallback must not match the "width:" inside those properties
+        // (Codex review, PR #6).
+        fun widthOf(html: String) =
+            (NoteDocument.parse(html).single() as ImageSegment).widthPercent
+        assertEquals(100, widthOf("<p><img src=\"x\" style=\"max-width: 50%\"></p>"))
+        assertEquals(100, widthOf("<p><img src=\"x\" style=\"min-width: 30%\"></p>"))
+        assertEquals(
+            60,
+            widthOf("<p><img src=\"x\" style=\"max-width: 90%; width: 60%\"></p>"),
+        )
+    }
+
+    @Test
     fun imageWidthSurvivesAllThreeParsePaths() {
         // Bare <img>.
         val bare = NoteDocument.parse("<img src=\"x\" width=\"50%\">")
