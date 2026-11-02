@@ -32,6 +32,7 @@ import org.robolectric.RuntimeEnvironment
 class GuestLibraryTransferTest {
 
     private lateinit var provider: DatabaseProvider
+    private lateinit var prefs: app.nota.data.preferences.PreferencesRepository
     private lateinit var transfer: GuestLibraryTransfer
 
     @Before
@@ -41,7 +42,8 @@ class GuestLibraryTransferTest {
             context.deleteDatabase(NotaDatabase.databaseName(account))
         }
         provider = DatabaseProvider(context, NotaDatabase.GUEST_ACCOUNT)
-        transfer = GuestLibraryTransfer(context, provider)
+        prefs = app.nota.data.preferences.PreferencesRepository(context)
+        transfer = GuestLibraryTransfer(context, provider, prefs)
     }
 
     @After
@@ -157,4 +159,67 @@ class GuestLibraryTransferTest {
         provider.switchTo("uid-transfer")
         assertEquals(2, transfer.guestNoteCount())
     }
+    @Test
+    fun biometricCopyFollowsCopiedLockedNote() = runBlocking {
+        seedGuest()
+        // A locked guest note whose fingerprint copy lives in the
+        // guest scope of preferences (the account scope starts empty).
+        val guest = provider.current
+        guest.noteDao().upsert(
+            note("n-locked", "Secret").copy(
+                lockRecordJson = """{"v":1,"slots":{},"biometric":true,""" +
+                    """"failedAttempts":0,"lockoutUntil":null,"lockedAt":1}""",
+            ),
+        )
+        prefs.setNoteLockBiometricCopy(
+            app.nota.data.preferences.PreferencesRepository.GUEST_ACCOUNT_ID,
+            "n-locked",
+            "sealed-nek-blob",
+        )
+        provider.switchTo("uid-transfer")
+        transfer.copyGuestIntoCurrentAccount()
+        assertEquals(
+            "sealed-nek-blob",
+            prefs.getNoteLockBiometricCopy("uid-transfer", "n-locked"),
+        )
+        // The guest's own copy stays for the guest library's note.
+        assertEquals(
+            "sealed-nek-blob",
+            prefs.getNoteLockBiometricCopy(
+                app.nota.data.preferences.PreferencesRepository.GUEST_ACCOUNT_ID,
+                "n-locked",
+            ),
+        )
+    }
+
+    @Test
+    fun attachmentCopyFailureAbortsAndInsertsNothing() = runBlocking {
+        seedGuest()
+        // Sabotage the would-be destination: a DIRECTORY where the
+        // duplicated binary must land makes the copy throw.
+        provider.switchTo("uid-transfer")
+        val blocker = java.io.File(
+            RuntimeEnvironment.getApplication().filesDir,
+            "attachments/n1~uid-transfer/a1-photo.jpg",
+        )
+        blocker.mkdirs()
+        var thrown: Exception? = null
+        try {
+            transfer.copyGuestIntoCurrentAccount()
+        } catch (e: Exception) {
+            thrown = e
+        }
+        assertTrue("the copy must abort, not fall back to the guest's path", thrown != null)
+        assertEquals(0, provider.current.noteDao().getAll().size)
+        assertEquals(0, provider.current.attachmentDao().getAll().size)
+        blocker.deleteRecursively()
+        // Guest untouched, and the retry (blocker gone) succeeds.
+        provider.switchTo(NotaDatabase.GUEST_ACCOUNT)
+        assertEquals(2, provider.current.noteDao().getAll().size)
+        provider.switchTo("uid-transfer")
+        val counts = transfer.copyGuestIntoCurrentAccount()
+        assertEquals(2, counts.notes)
+        assertEquals(1, counts.attachments)
+    }
+
 }

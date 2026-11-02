@@ -60,6 +60,7 @@ data class TransferCounts(
 class GuestLibraryTransfer(
     context: Context,
     private val provider: DatabaseProvider,
+    private val prefs: app.nota.data.preferences.PreferencesRepository,
 ) {
     private val filesDir: File = context.filesDir
     /** Notes in the guest library (the offer's gate). Reads the guest
@@ -116,6 +117,7 @@ class GuestLibraryTransfer(
             var folders = 0
             var tags = 0
             var attachments = 0
+            val insertedLockedNoteIds = mutableListOf<String>()
             target.withTransaction {
                 val folderDao = target.folderDao()
                 for (folder in sourceFolders) {
@@ -136,6 +138,7 @@ class GuestLibraryTransfer(
                     if (noteDao.getById(note.id) == null) {
                         noteDao.upsert(note)
                         notes++
+                        if (note.lockRecordJson != null) insertedLockedNoteIds += note.id
                     }
                 }
                 // Links only land when both ends exist in the target
@@ -171,6 +174,26 @@ class GuestLibraryTransfer(
                     if (search.id !in existingSearchIds) searchDao.upsert(search)
                 }
             }
+            // Phase 2.5: per-note biometric copies follow their notes
+            // (Codex re-review). A copied locked note's lock record
+            // still says "biometric enabled", and since Phase 3a the
+            // sealed NEK copies are account-scoped preferences — the
+            // Room copy alone would leave the account's unlock screen
+            // offering a fingerprint that can never succeed. The
+            // sealed blob stays valid verbatim (same NEK, device-bound
+            // Keystore seal), so it is copied into the target scope;
+            // the guest's own entry is left in place for the guest
+            // library's copy of the note.
+            val targetAccountId = provider.accountId.value
+            for (noteId in insertedLockedNoteIds) {
+                val packed = prefs.getNoteLockBiometricCopy(
+                    app.nota.data.preferences.PreferencesRepository.GUEST_ACCOUNT_ID,
+                    noteId,
+                )
+                if (packed != null) {
+                    prefs.setNoteLockBiometricCopy(targetAccountId, noteId, packed)
+                }
+            }
             rebuildLibraryIndexes(target)
             return TransferCounts(
                 notes = notes,
@@ -188,8 +211,11 @@ class GuestLibraryTransfer(
      * and returns the row pointing at the copy. A missing source file
      * (a row whose binary is already gone) copies as-is — there is
      * nothing on disk for the two libraries to fight over. A failed
-     * duplication falls back to the shared path for that one
-     * attachment rather than failing the whole library copy.
+     * duplication ABORTS the transfer (Codex re-review): it runs in
+     * phase 1.5, before a single row is written, so aborting leaves
+     * the target untouched and the copy safely retryable — whereas
+     * falling back to the guest's path would reintroduce exactly the
+     * shared-file corruption the account-local copy exists to prevent.
      */
     private fun accountLocalCopy(
         source: AttachmentEntity,
@@ -200,15 +226,11 @@ class GuestLibraryTransfer(
         val storedName = source.localPath.substringAfterLast('/')
         val newPath = "attachments/${source.noteId}~${accountPathSuffix(targetAccountId)}/$storedName"
         val dest = File(filesDir, newPath)
-        return try {
-            dest.parentFile?.mkdirs()
-            sourceFile.inputStream().use { input ->
-                dest.outputStream().use { output -> input.copyTo(output) }
-            }
-            source.copy(localPath = newPath)
-        } catch (e: Exception) {
-            source
+        dest.parentFile?.mkdirs()
+        sourceFile.inputStream().use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
         }
+        return source.copy(localPath = newPath)
     }
 
     private fun accountPathSuffix(accountId: String): String =
