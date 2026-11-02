@@ -55,8 +55,14 @@ data class PendingInsertRecord(
     val segmentIndex: Int = -1,
     val segmentAnchor: String = "",
     val caretOffset: Int = 0,
+    /** Selection end at staging; -1 = same as [caretOffset]. */
+    val caretEndOffset: Int = -1,
     val stagedAtMillis: Long = System.currentTimeMillis(),
 ) {
+    /** The selection end to restore (never before the start). */
+    val selectionEnd: Int
+        get() = if (caretEndOffset >= caretOffset) caretEndOffset else caretOffset
+
     fun toJson(): String = JSONObject()
         .put("id", id)
         .put("accountId", accountId)
@@ -66,12 +72,14 @@ data class PendingInsertRecord(
         .put("segmentIndex", segmentIndex)
         .put("segmentAnchor", segmentAnchor)
         .put("caretOffset", caretOffset)
+        .put("caretEndOffset", caretEndOffset)
         .put("stagedAtMillis", stagedAtMillis)
         .toString()
 
     companion object {
         fun parse(json: String): PendingInsertRecord? = try {
             val obj = JSONObject(json)
+            val caret = obj.optInt("caretOffset", 0)
             PendingInsertRecord(
                 id = obj.getString("id"),
                 accountId = obj.getString("accountId"),
@@ -80,7 +88,14 @@ data class PendingInsertRecord(
                 mode = PendingInsertMode.valueOf(obj.getString("mode")),
                 segmentIndex = obj.optInt("segmentIndex", -1),
                 segmentAnchor = obj.optString("segmentAnchor", ""),
-                caretOffset = obj.optInt("caretOffset", 0),
+                caretOffset = caret,
+                // A record staged before the range was kept reads as
+                // a collapsed caret.
+                caretEndOffset = if (obj.has("caretEndOffset")) {
+                    obj.optInt("caretEndOffset", -1)
+                } else {
+                    caret
+                },
                 stagedAtMillis = obj.optLong("stagedAtMillis", 0L),
             )
         } catch (e: Exception) {

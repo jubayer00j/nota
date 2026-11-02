@@ -37,6 +37,7 @@ class PendingInsertStoreTest {
         segmentIndex = 3,
         segmentAnchor = "Bravo middle paragraph",
         caretOffset = 7,
+        caretEndOffset = 12,
         stagedAtMillis = 123_456L,
     )
 
@@ -55,6 +56,11 @@ class PendingInsertStoreTest {
         assertEquals(3, restored.segmentIndex)
         assertEquals("Bravo middle paragraph", restored.segmentAnchor)
         assertEquals(7, restored.caretOffset)
+        // The selection END survives too: a picker insert over a
+        // selected range must keep Phase 3.5's replace-selection
+        // behaviour after the round trip (Codex, PR #19).
+        assertEquals(12, restored.caretEndOffset)
+        assertEquals(12, restored.selectionEnd)
     }
 
     @Test

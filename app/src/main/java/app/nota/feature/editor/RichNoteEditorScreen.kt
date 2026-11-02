@@ -680,8 +680,18 @@ fun RichNoteEditorScreen(
                 else -> 0f
             }
             if (step != 0f) {
-                listState.scrollBy(step)
-                if (evaluateBlockSwap(ui)) hapticTick()
+                val consumed = listState.scrollBy(step)
+                if (consumed != 0f) {
+                    // The list moved under the stationary finger:
+                    // absorb the scroll into the drag translation so
+                    // the block stays glued to the finger (and inside
+                    // the edge zone) while the slots walk beneath it.
+                    // Without this the block's visual edge retreats
+                    // out of the zone and the scroll stalls after one
+                    // step (Codex, PR #19).
+                    dragOffsetPx += consumed
+                    if (evaluateBlockSwap(ui)) hapticTick()
+                }
             }
         }
     }
@@ -716,13 +726,16 @@ fun RichNoteEditorScreen(
         val textLike = activeSegment is TextSegment || activeSegment is QuoteSegment
         val anchor: String
         val caret: Int
+        val caretEnd: Int
         if (mode == PendingInsertMode.INSERT_AT_CARET && activeUi != null && textLike) {
             val state = textStates[activeUi.id]
             anchor = (state?.annotatedString?.text ?: "").take(INSERT_ANCHOR_CHARS)
             caret = state?.selection?.start ?: 0
+            caretEnd = state?.selection?.end ?: caret
         } else {
             anchor = ""
             caret = 0
+            caretEnd = 0
         }
         pendingInsertStore.stage(
             PendingInsertRecord(
@@ -737,6 +750,7 @@ fun RichNoteEditorScreen(
                 },
                 segmentAnchor = anchor,
                 caretOffset = caret,
+                caretEndOffset = caretEnd,
             ),
         )
     }
@@ -764,12 +778,15 @@ fun RichNoteEditorScreen(
             return
         }
         activeSegmentId = target.id
-        richStateFor(target).selection = TextRange(
-            record.caretOffset.coerceIn(
-                0,
-                textStates[target.id]?.annotatedString?.text?.length ?: 0,
-            ),
-        )
+        // Restore the SELECTION, not just the caret: Phase 3.5's
+        // caret insert deletes a selected range (insert-over-
+        // selection), and the round trip must not silently degrade
+        // that into an insert-at-start (Codex, PR #19).
+        val length = textStates[target.id]?.annotatedString?.text?.length ?: 0
+        val start = record.caretOffset.coerceIn(0, length)
+        val end = record.selectionEnd.coerceIn(0, length)
+        richStateFor(target).selection =
+            TextRange(minOf(start, end), maxOf(start, end))
         insertBlockAtCaret(block)
     }
 
