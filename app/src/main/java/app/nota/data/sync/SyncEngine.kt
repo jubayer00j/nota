@@ -189,6 +189,11 @@ object SyncEngine {
         val mergedAttachments = mutableListOf<BxAttachmentMeta>()
         val mergedAttachmentContent = mutableMapOf<String, String>()
         val conflictAttachmentSources = mutableMapOf<String, Pair<String, Boolean>>()
+        // Conflict-copy body rewrites (Codex P2): copyId -> (loser
+        // attachment id -> clone id), applied to the copies' content
+        // before assembly so their inline images resolve to the
+        // clones, not the winner's attachments.
+        val copyRewrites = mutableMapOf<String, MutableMap<String, String>>()
 
         fun addMergedAttachment(meta: BxAttachmentMeta, contentSha: String) {
             mergedAttachments += meta
@@ -223,6 +228,7 @@ object SyncEngine {
                                 loserContent,
                             )
                             conflictAttachmentSources[cloneId] = id to conflict.loserIsRemote
+                            copyRewrites.getOrPut(conflict.copyId) { mutableMapOf() }[id] = cloneId
                         }
                     }
                 } else if (loserMeta != null) {
@@ -233,6 +239,7 @@ object SyncEngine {
                         contentOfSide(loserMeta, conflict.loserIsRemote, localAttachmentContent, remoteAttachmentContent),
                     )
                     conflictAttachmentSources[cloneId] = id to conflict.loserIsRemote
+                    copyRewrites.getOrPut(conflict.copyId) { mutableMapOf() }[id] = cloneId
                 }
                 continue
             }
@@ -245,6 +252,26 @@ object SyncEngine {
 
         // Reminders of killed notes cascade away (FK parity).
         val finalReminders = mergedReminders.filter { it.noteId !in killedNoteIds }
+
+        // ---- Conflict copies: point their inline attachment
+        // references at the clones (both the archive dialect
+        // "attachments/<id>" and the editor dialect
+        // "nota-attachment://<id>").
+        if (copyRewrites.isNotEmpty()) {
+            for (index in mergedNotes.indices) {
+                val note = mergedNotes[index]
+                val rewrites = copyRewrites[note.id] ?: continue
+                var content = note.content
+                for ((oldId, cloneId) in rewrites.entries.sortedByDescending { it.key.length }) {
+                    content = content
+                        .replace("attachments/$oldId", "attachments/$cloneId")
+                        .replace("nota-attachment://$oldId", "nota-attachment://$cloneId")
+                }
+                if (content != note.content) {
+                    mergedNotes[index] = note.copy(content = content)
+                }
+            }
+        }
 
         // ---- Assemble merged snapshot + new base hashes.
         val mergedHashes = mutableMapOf<String, String>()
@@ -267,10 +294,21 @@ object SyncEngine {
 
         val localHashes = snapshotHashes(local, localAttachmentContent)
         val remoteHashes = snapshotHashes(remote, remoteAttachmentContent)
+        // Tombstone-set differences count too (Codex P1): a cycle
+        // whose ONLY divergence is a tombstone (the entity is already
+        // absent on the other side) must still push/pull, or the
+        // tombstone never leaves this device and the deletion can
+        // resurrect from a stale copy elsewhere.
+        fun tombKey(t: BxTombstone): String = "${t.entity}:${t.id}:${t.deletedAt}"
+        val mergedTombKeys = tombstones.map { tombKey(it) }.toSet()
+        val localTombKeys = local.tombstones.map { tombKey(it) }.toSet()
+        val remoteTombKeys = remote.tombstones.map { tombKey(it) }.toSet()
         val changedVsLocal = mergedHashes.count { (k, v) -> localHashes[k] != v } +
-            localHashes.keys.count { it !in mergedHashes }
+            localHashes.keys.count { it !in mergedHashes } +
+            (mergedTombKeys union localTombKeys).size - (mergedTombKeys intersect localTombKeys).size
         val changedVsRemote = mergedHashes.count { (k, v) -> remoteHashes[k] != v } +
-            remoteHashes.keys.count { it !in mergedHashes }
+            remoteHashes.keys.count { it !in mergedHashes } +
+            (mergedTombKeys union remoteTombKeys).size - (mergedTombKeys intersect remoteTombKeys).size
 
         val merged = BackupWriter.ExportData(
             manifest = local.manifest.copy(

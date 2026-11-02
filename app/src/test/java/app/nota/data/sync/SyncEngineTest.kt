@@ -206,4 +206,72 @@ class SyncEngineTest {
         assertEquals(2, outcome.merged.manifest.noteCount)
         assertEquals("uid-1", outcome.merged.manifest.ownerId)
     }
+    @Test
+    fun tombstoneOnlyDifferenceCountsAsRemoteChange() {
+        val tomb = BxTombstone("note", "ghost", deletedAt = 500L, deviceId = "device-a")
+        val local = snapshot(tombstones = listOf(tomb))
+        val remote = snapshot()
+        val outcome = merge(local, remote)
+        assertTrue(outcome.mergedTombstones.any { it.id == "ghost" })
+        assertTrue(
+            "a tombstone the archive lacks must still be pushed",
+            outcome.changedVsRemote > 0,
+        )
+        assertEquals(0, outcome.changedVsLocal)
+    }
+
+    @Test
+    fun conflictCopyContentReferencesAreRewrittenToClones() {
+        val att = BxAttachmentMeta(
+            id = "a1", noteId = "n1", name = "photo.png", mimeType = "image/png",
+            size = 3L, createdAt = 10L, updatedAt = 100L, encrypted = false,
+        )
+        val baseSnap = snapshot(
+            notes = listOf(note("n1", "Original", 100L, content = "<p>base</p>")),
+            attachments = listOf(att),
+        )
+        val base = SyncEngine.snapshotHashes(baseSnap, mapOf("a1" to "basehash"))
+        val local = snapshot(
+            notes = listOf(
+                note("n1", "Local", 300L, content = "<p>local <img src=\"attachments/a1\"></p>"),
+            ),
+            attachments = listOf(att),
+        )
+        val remote = snapshot(
+            notes = listOf(
+                note("n1", "Remote", 200L, content = "<p>remote <img src=\"attachments/a1\"></p>"),
+            ),
+            attachments = listOf(att),
+        )
+        val outcome = merge(
+            local, remote, base,
+            localContent = mapOf("a1" to "localhash"),
+            remoteContent = mapOf("a1" to "remotehash"),
+        )
+        val winner = outcome.merged.notes.first { it.id == "n1" }
+        assertTrue(winner.content.contains("attachments/a1"))
+        val copy = outcome.merged.notes.first { it.id != "n1" }
+        val clone = outcome.merged.attachments.first { it.noteId == copy.id }
+        assertTrue(
+            "copy body must point at the clone, was: ${copy.content}",
+            copy.content.contains("attachments/${clone.id}"),
+        )
+        assertTrue(!copy.content.contains("attachments/a1"))
+    }
+
+    @Test
+    fun templateHashesIgnoreSyntheticTimestamps() {
+        val early = note("t1", "Template", 100L).copy(
+            isTemplate = true, createdAt = 100L, updatedAt = 100L,
+        )
+        val late = note("t1", "Template", 100L).copy(
+            isTemplate = true, createdAt = 999L, updatedAt = 999L,
+        )
+        assertEquals(EntityHash.noteHash(early), EntityHash.noteHash(late))
+        // Real notes keep strict timestamp hashing.
+        val realEarly = note("n1", "Real", 100L).copy(createdAt = 100L, updatedAt = 100L)
+        val realLate = note("n1", "Real", 100L).copy(createdAt = 999L, updatedAt = 999L)
+        assertTrue(EntityHash.noteHash(realEarly) != EntityHash.noteHash(realLate))
+    }
+
 }

@@ -61,7 +61,15 @@ object EntityHash {
     fun noteHash(note: BxNote): String = fnv1a(
         fields(
             ENTITY_NOTE, note.id, note.title, note.content, note.folderId,
-            note.createdAt, note.updatedAt, note.pinned, note.favorite,
+            // Templates carry SYNTHETIC timestamps: collectExport stamps
+            // them fresh (now) on every export because the template
+            // store has none. Hashing them would make every library
+            // with a user template look changed on every sync cycle —
+            // endless uploads and cross-device churn (Codex P2) — so
+            // template identity here is content-only.
+            if (note.isTemplate) 0L else note.createdAt,
+            if (note.isTemplate) 0L else note.updatedAt,
+            note.pinned, note.favorite,
             note.archived, note.deleted, note.deletedAt, note.reminderAt,
             note.dailyDate, note.lockJson, note.isTemplate, note.dailyDefault,
             note.tagIds.sorted().joinToString(","),
