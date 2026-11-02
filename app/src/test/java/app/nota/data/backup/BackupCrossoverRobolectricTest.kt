@@ -345,7 +345,7 @@ override fun sealCipherResult(): StepResult<Cipher> =
             }
             val manifest = JSONObject(entryText("manifest.json"))
             assertEquals(2, manifest.getInt("backupFormatVersion"))
-            assertEquals("0.3.0", manifest.getString("nomaVersion"))
+            assertEquals("0.4.0", manifest.getString("nomaVersion"))
             assertEquals("nota_guest", manifest.getString("libraryId"))
             // Locked note round-trips byte-identically.
             val lockedJson = JSONObject(entryText("notes/note-locked-1.json"))
