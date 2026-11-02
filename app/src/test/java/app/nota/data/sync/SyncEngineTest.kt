@@ -260,6 +260,98 @@ class SyncEngineTest {
     }
 
     @Test
+    fun conflictCopyClonesSharedAttachmentEvenWithIdenticalBytes() {
+        // Codex P2 (re-review): with identical bytes on both sides
+        // the old code made NO clone for the copy — its body kept
+        // pointing at the winner's attachment row, so the copy's
+        // image hung off the winner note's lifecycle.
+        val att = BxAttachmentMeta(
+            id = "a1", noteId = "n1", name = "photo.png", mimeType = "image/png",
+            size = 3L, createdAt = 10L, updatedAt = 100L, encrypted = false,
+        )
+        val base = SyncEngine.snapshotHashes(
+            snapshot(
+                notes = listOf(note("n1", "Original", 100L, content = "<p>base</p>")),
+                attachments = listOf(att),
+            ),
+            mapOf("a1" to "basehash"),
+        )
+        val local = snapshot(
+            notes = listOf(
+                note("n1", "Local", 300L, content = "<p>local <img src=\"attachments/a1\"></p>"),
+            ),
+            attachments = listOf(att),
+        )
+        val remote = snapshot(
+            notes = listOf(
+                note("n1", "Remote", 200L, content = "<p>remote <img src=\"attachments/a1\"></p>"),
+            ),
+            attachments = listOf(att),
+        )
+        val outcome = merge(
+            local, remote, base,
+            localContent = mapOf("a1" to "samehash"),
+            remoteContent = mapOf("a1" to "samehash"),
+        )
+        val copy = outcome.merged.notes.first { it.id != "n1" }
+        val clone = outcome.merged.attachments.firstOrNull { it.noteId == copy.id }
+        assertTrue("copy must own a clone of the shared attachment", clone != null)
+        assertEquals("samehash", outcome.mergedAttachmentContent[clone!!.id])
+        assertTrue(
+            "copy body must point at its clone, was: ${copy.content}",
+            copy.content.contains("attachments/${clone.id}"),
+        )
+        assertTrue(!copy.content.contains("attachments/a1"))
+    }
+
+    @Test
+    fun conflictNoteByteConflictClonesLoserBytesExactlyOnce_forTheCopy() {
+        // Codex P2 (re-review): the generic merge used to clone the
+        // losing bytes onto the WINNER note (unreferenced), and the
+        // conflict path then cloned the same payload again for the
+        // copy — two clones, one of them stray.
+        val att = BxAttachmentMeta(
+            id = "a1", noteId = "n1", name = "photo.png", mimeType = "image/png",
+            size = 3L, createdAt = 10L, updatedAt = 100L, encrypted = false,
+        )
+        val base = SyncEngine.snapshotHashes(
+            snapshot(
+                notes = listOf(note("n1", "Original", 100L, content = "<p>base</p>")),
+                attachments = listOf(att),
+            ),
+            mapOf("a1" to "basehash"),
+        )
+        val local = snapshot(
+            notes = listOf(
+                note("n1", "Local", 300L, content = "<p>local <img src=\"attachments/a1\"></p>"),
+            ),
+            attachments = listOf(att),
+        )
+        val remote = snapshot(
+            notes = listOf(
+                note("n1", "Remote", 200L, content = "<p>remote <img src=\"attachments/a1\"></p>"),
+            ),
+            attachments = listOf(att),
+        )
+        val outcome = merge(
+            local, remote, base,
+            localContent = mapOf("a1" to "localhash"),
+            remoteContent = mapOf("a1" to "remotehash"),
+        )
+        val copy = outcome.merged.notes.first { it.id != "n1" }
+        // Exactly two attachment rows: the winner's a1 and ONE clone,
+        // owned by the copy — no stray clone on the winner note.
+        assertEquals(2, outcome.merged.attachments.size)
+        assertEquals(
+            listOf("n1"),
+            outcome.merged.attachments.filter { it.noteId == "n1" }.map { it.id },
+        )
+        val clone = outcome.merged.attachments.first { it.noteId == copy.id }
+        assertEquals("remotehash", outcome.mergedAttachmentContent[clone.id])
+        assertEquals(setOf(clone.id), outcome.conflictAttachmentSources.keys)
+    }
+
+    @Test
     fun templateHashesIgnoreSyntheticTimestamps() {
         val early = note("t1", "Template", 100L).copy(
             isTemplate = true, createdAt = 100L, updatedAt = 100L,

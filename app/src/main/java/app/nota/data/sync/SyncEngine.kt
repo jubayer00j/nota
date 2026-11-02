@@ -210,26 +210,37 @@ object SyncEngine {
                 val inWinner = id in conflict.winnerAttachments
                 val loserMeta = conflict.loserAttachments[id]
                 if (inWinner) {
-                    // The winner's own attachment: normal hash merge.
+                    // The winner's own attachment: normal hash merge,
+                    // but WITHOUT the generic loser clone — the losing
+                    // bytes belong to the conflict copy (below), never
+                    // as an unreferenced extra row on the winner
+                    // (Codex P2).
                     addAttachmentGeneric(
                         id, l, r, baseHashes, localAttachmentContent, remoteAttachmentContent,
                         ::killedByTombstone, ::addMergedAttachment,
                         newId, conflictAttachmentSources,
+                        allowLoserClone = false,
                     )
-                    // If the loser ALSO had this id with different
-                    // bytes, clone the loser's version too.
-                    if (loserMeta != null) {
-                        val loserContent = contentOfSide(loserMeta, conflict.loserIsRemote, localAttachmentContent, remoteAttachmentContent)
-                        val winnerContent = mergedAttachmentContent[id]
-                        if (loserContent != winnerContent) {
-                            val cloneId = newId()
-                            addMergedAttachment(
-                                loserMeta.copy(id = cloneId, noteId = conflict.copyId),
-                                loserContent,
-                            )
-                            conflictAttachmentSources[cloneId] = id to conflict.loserIsRemote
-                            copyRewrites.getOrPut(conflict.copyId) { mutableMapOf() }[id] = cloneId
-                        }
+                    // The copy ALWAYS gets its own clone of the
+                    // loser's version of this attachment — even when
+                    // the bytes are identical (Codex P2): the copy's
+                    // body must resolve through ITS OWN attachment
+                    // rows, so a later deletion of the winner note
+                    // (which tombstones its attachments) can never
+                    // dangle the copy's inline images. Skipped only
+                    // when the merge itself dropped the attachment
+                    // (tombstone-killed above).
+                    if (loserMeta != null && mergedAttachmentContent.containsKey(id)) {
+                        val cloneId = newId()
+                        addMergedAttachment(
+                            loserMeta.copy(id = cloneId, noteId = conflict.copyId),
+                            contentOfSide(
+                                loserMeta, conflict.loserIsRemote,
+                                localAttachmentContent, remoteAttachmentContent,
+                            ),
+                        )
+                        conflictAttachmentSources[cloneId] = id to conflict.loserIsRemote
+                        copyRewrites.getOrPut(conflict.copyId) { mutableMapOf() }[id] = cloneId
                     }
                 } else if (loserMeta != null) {
                     // Loser-only attachment: clone under the copy.
@@ -395,6 +406,10 @@ object SyncEngine {
         add: (BxAttachmentMeta, String) -> Unit,
         newId: () -> String,
         conflictSources: MutableMap<String, Pair<String, Boolean>>,
+        // False when the caller handles the losing bytes itself
+        // (note-conflict path: they belong to the conflict copy, not
+        // as an unreferenced clone on the winner note — Codex P2).
+        allowLoserClone: Boolean = true,
     ) {
         val winner: BxAttachmentMeta
         val winnerContent: String
@@ -419,7 +434,7 @@ object SyncEngine {
                     }
                     val loserContent =
                         if (remoteWins) localContent[id] ?: "" else remoteContent[id] ?: ""
-                    if (loserContent != winnerContent) {
+                    if (allowLoserClone && loserContent != winnerContent) {
                         loserClone = Triple(
                             if (remoteWins) l else r,
                             loserContent,
