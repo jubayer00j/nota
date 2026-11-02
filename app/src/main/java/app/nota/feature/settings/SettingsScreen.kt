@@ -102,7 +102,7 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
-        BackupSection()
+        BackupSection(onOpenSignIn = onOpenSignIn)
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
