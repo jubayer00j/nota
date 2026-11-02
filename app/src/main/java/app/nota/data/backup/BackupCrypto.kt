@@ -4,6 +4,7 @@ import app.nota.data.security.NoteLockCrypto
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockSlot
 import java.io.BufferedInputStream
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -43,6 +44,24 @@ object BackupCrypto {
 
     fun isEncryptedPrefix(prefix: ByteArray): Boolean =
         prefix.size >= MAGIC.length && String(prefix, 0, MAGIC.length, Charsets.US_ASCII) == MAGIC
+
+    /**
+     * Header-only parse of an encrypted archive's prefix (Phase 3b,
+     * Codex P1): the wrap parameters (salt / iterations / wrappedKey)
+     * are not secret, and learning them lets a device that has never
+     * seen the archive ADOPT its encryption — store a keyless local
+     * record and unlock with the passphrase — instead of overwriting
+     * the archive with a plaintext backup. Returns null for plaintext
+     * or unreadable input. [prefix] must cover the magic + header
+     * (the header is a few hundred bytes; 1 KB is generous).
+     */
+    fun parseHeader(prefix: ByteArray): Header? {
+        if (!isEncryptedPrefix(prefix)) return null
+        return runCatching {
+            val body = prefix.copyOfRange(MAGIC.length, prefix.size)
+            readHeader(BufferedInputStream(ByteArrayInputStream(body)))
+        }.getOrNull()
+    }
 
     /** Creates the header for a fresh BMK under [passphrase]. Returns
      *  (header, bmk). The caller owns (and should zero) the BMK. */

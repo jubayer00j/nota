@@ -173,6 +173,33 @@ class DriveRepository(
             val token = ensureAccess()
             val folderId = gateway.findOrCreateFolder(token)
             val canonical = gateway.findCanonicalBackup(token, folderId)
+            if (record == null && canonical != null) {
+                // Another device may have set up backup encryption:
+                // the record is deliberately never synced, so this
+                // device has none — and exporting plaintext over the
+                // shared archive would silently downgrade the whole
+                // account's backups (Codex P1). Sniff the archive's
+                // header; if it is encrypted, ADOPT the header as a
+                // keyless local record (the unlock flow below can
+                // then bring this device in) and pause instead of
+                // overwriting. A plaintext archive proceeds as before.
+                val prefix = gateway.downloadPrefix(token, canonical.id, ARCHIVE_PREFIX_BYTES)
+                if (BackupCrypto.isEncryptedPrefix(prefix)) {
+                    BackupCrypto.parseHeader(prefix)?.let { header ->
+                        prefs.setDriveEncryptionRecord(
+                            uid,
+                            PreferencesRepository.DriveEncryptionRecord(
+                                salt = header.salt,
+                                iterations = header.iterations,
+                                wrappedKey = header.wrappedKey,
+                                deviceKeyBase64 = null,
+                            ),
+                        )
+                    }
+                    _state.value = State.Paused(ENCRYPTED_ELSEWHERE_COPY)
+                    return
+                }
+            }
             if (bmk != null && header != null) {
                 backups.exportToFileKeyed(tmp, bmk, header)
             } else {
@@ -194,13 +221,23 @@ class DriveRepository(
     /** Worker entry: one scheduled backup when due. Returns false
      *  only for transient failures worth a WorkManager retry. */
     suspend fun runScheduledBackup(): Boolean {
-        val uid = signedInUid() ?: return true
-        if (prefs.driveBackupModeNow() != PreferencesRepository.DRIVE_MODE_SCHEDULED) return true
-        val intervalMillis = prefs.driveBackupIntervalHoursNow().coerceIn(1, 720) * 3_600_000L
-        val (lastAt, _) = prefs.getDriveLastBackup(uid)
-        if (System.currentTimeMillis() - lastAt < intervalMillis) return true
-        runBackup()
-        return _state.value !is State.Failed
+        // Serialize with interactive operations (Codex P2): a
+        // scheduled run that finds a manual backup/restore in flight
+        // defers to a WorkManager retry instead of racing it to the
+        // canonical file (an older export finishing last would win).
+        if (inFlight) return false
+        inFlight = true
+        try {
+            val uid = signedInUid() ?: return true
+            if (prefs.driveBackupModeNow() != PreferencesRepository.DRIVE_MODE_SCHEDULED) return true
+            val intervalMillis = prefs.driveBackupIntervalHoursNow().coerceIn(1, 720) * 3_600_000L
+            val (lastAt, _) = prefs.getDriveLastBackup(uid)
+            if (System.currentTimeMillis() - lastAt < intervalMillis) return true
+            runBackup()
+            return _state.value !is State.Failed
+        } finally {
+            inFlight = false
+        }
     }
 
     // ------------------------------------------------------------ restore
@@ -378,6 +415,11 @@ class DriveRepository(
 
     companion object {
         const val RESULT_OK = "Backup complete"
+        const val ENCRYPTED_ELSEWHERE_COPY =
+            "The Drive backup is encrypted — it was set up on another device — " +
+                "so it was NOT overwritten. Unlock backup encryption below with " +
+                "your passphrase to bring this device in."
+        const val ARCHIVE_PREFIX_BYTES = 1024
         const val LOCKED_COPY =
             "Backup encryption is on, but this device doesn't hold the key — " +
                 "backups are paused. Unlock encryption below to resume."

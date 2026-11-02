@@ -52,6 +52,11 @@ interface DriveGateway {
     /** Streams a file's bytes to [out] (alt=media). */
     suspend fun download(token: String, fileId: String, out: File)
 
+    /** The first [maxBytes] of a file (Range request; servers that
+     *  ignore Range are truncated client-side). Used to sniff an
+     *  archive's NOMAENC1 header without downloading the whole file. */
+    suspend fun downloadPrefix(token: String, fileId: String, maxBytes: Int): ByteArray
+
     /** Creates (existingId null, multipart with the folder parent) or
      *  overwrites (media PATCH) the canonical file; returns its meta. */
     suspend fun upload(token: String, folderId: String, existingId: String?, file: File): DriveFileMeta
@@ -120,6 +125,35 @@ class DriveClient(
                 }
             }
         }
+
+    override suspend fun downloadPrefix(
+        token: String,
+        fileId: String,
+        maxBytes: Int,
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("$apiBase/files/$fileId?alt=media")
+            .header("Authorization", "Bearer $token")
+            .header("Range", "bytes=0-${maxBytes - 1}")
+            .get()
+            .build()
+        http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw DriveError(driveFailure(response.code))
+            val body = response.body ?: return@withContext ByteArray(0)
+            val out = java.io.ByteArrayOutputStream()
+            body.byteStream().use { input ->
+                val buffer = ByteArray(8192)
+                var remaining = maxBytes
+                while (remaining > 0) {
+                    val n = input.read(buffer, 0, minOf(buffer.size, remaining))
+                    if (n < 0) break
+                    out.write(buffer, 0, n)
+                    remaining -= n
+                }
+            }
+            out.toByteArray()
+        }
+    }
 
     override suspend fun upload(
         token: String,

@@ -47,6 +47,7 @@ class DriveRepositoryTest {
         var downloadBytes: ByteArray? = null
         var uploadedBytes: ByteArray? = null
         var uploadedExistingId: String? = "unset"
+        var uploadGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
         override suspend fun findOrCreateFolder(token: String): String = "folder-1"
         override suspend fun findCanonicalBackup(token: String, folderId: String) = canonical
@@ -55,12 +56,19 @@ class DriveRepositoryTest {
             out.writeBytes(downloadBytes ?: error("no download bytes set"))
         }
 
+        override suspend fun downloadPrefix(
+            token: String,
+            fileId: String,
+            maxBytes: Int,
+        ): ByteArray = (downloadBytes ?: ByteArray(0)).copyOf(minOf(maxBytes, (downloadBytes ?: ByteArray(0)).size))
+
         override suspend fun upload(
             token: String,
             folderId: String,
             existingId: String?,
             file: File,
         ): DriveFileMeta {
+            uploadGate?.await()
             uploadedBytes = file.readBytes()
             uploadedExistingId = existingId
             return DriveFileMeta("file-1", "Noma Backup.zip", 0L, 0L, null, uploadedBytes!!.size.toLong())
@@ -299,4 +307,61 @@ class DriveRepositoryTest {
         }
         assertEquals(null, provider.current.noteDao().getById("n-other"))
     }
+    // ---- Codex P1: never downgrade another device's encrypted archive
+
+    @Test
+    fun backupRefusesToOverwriteEncryptedArchive_andAdoptsItsHeader() = runBlocking {
+        // Another device sealed the shared archive under a passphrase
+        // this device has never seen; there is no local record.
+        val zip = java.io.File(context.cacheDir, "elsewhere-plain.zip")
+        zip.writeBytes("PK-elsewhere".toByteArray())
+        val sealed = java.io.File(context.cacheDir, "elsewhere-sealed.bin")
+        val bmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        val header = app.nota.data.backup.BackupCrypto.createHeader("elsewhere-pass", bmk)
+        sealed.outputStream().use { out ->
+            app.nota.data.backup.BackupCrypto.seal(zip, bmk, header, out)
+        }
+        bmk.fill(0)
+        gateway.canonical = DriveFileMeta("file-1", "Noma Backup.zip", 0L, 0L, null, sealed.length())
+        gateway.downloadBytes = sealed.readBytes()
+
+        seedNote("n-1", "Local")
+        drive.startBackup()
+        val state = withTimeout(30_000) {
+            drive.state.first { it is DriveRepository.State.Paused }
+        }
+        assertTrue((state as DriveRepository.State.Paused).message.contains("another device"))
+        assertTrue("no upload may happen", gateway.uploadedBytes == null)
+        // The header was adopted as a keyless record…
+        val adopted = prefs.getDriveEncryptionRecord(uid)
+        assertTrue(adopted != null && adopted!!.deviceKeyBase64 == null)
+        // …so the existing unlock flow brings this device in, and the
+        // next backup proceeds — still encrypted under the same key.
+        assertTrue(drive.unlockEncryption("elsewhere-pass"))
+        drive.startBackup()
+        awaitDriveDone()
+        val uploaded = java.io.File(context.cacheDir, "adopted-upload.bin")
+        uploaded.writeBytes(gateway.uploadedBytes!!)
+        val handle = backups.readBackup(uploaded, "elsewhere-pass")
+        assertEquals(1, handle.notes.size)
+        handle.close()
+    }
+
+    // ---- Codex P2: scheduled runs serialize with interactive ones
+
+    @Test
+    fun scheduledBackupDefersWhileAnotherOpIsInFlight() = runBlocking {
+        prefs.setDriveBackupMode(PreferencesRepository.DRIVE_MODE_SCHEDULED)
+        prefs.setDriveLastBackup(uid, 0L, DriveRepository.RESULT_OK)
+        seedNote("n-1", "Local")
+        gateway.uploadGate = kotlinx.coroutines.CompletableDeferred()
+        drive.startBackup() // sets inFlight synchronously; upload blocks on the gate
+        assertTrue(
+            "a scheduled run must defer (retry) while a manual op is in flight",
+            !drive.runScheduledBackup(),
+        )
+        gateway.uploadGate?.complete(Unit)
+        awaitDriveDone()
+    }
+
 }
