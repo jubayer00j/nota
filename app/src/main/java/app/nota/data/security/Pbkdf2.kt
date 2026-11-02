@@ -17,7 +17,11 @@ import javax.crypto.spec.SecretKeySpec
  * already ran on Dispatchers.Default) or duplicate verification
  * (the audit found exactly one derivation per unlock attempt on
  * every surface). A tight HMAC loop has a fraction of the factory
- * path's per-iteration overhead on that provider.
+ * path's per-iteration overhead on that provider: each iteration
+ * is one native Conscrypt HMAC instead of the factory provider's
+ * Java PBKDF2 wrapper. (On a desktop JVM the ranking inverts —
+ * SunJCE ships a specialised PBKDF2 engine; Android 8.1 does not.
+ * See Pbkdf2Test's benchmark note.)
  *
  * BYTE PARITY IS THE CONTRACT: this implementation must derive
  * bit-identical output to the factory path it replaces, because
