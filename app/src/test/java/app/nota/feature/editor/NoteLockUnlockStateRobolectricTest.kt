@@ -271,6 +271,16 @@ class NoteLockUnlockStateRobolectricTest {
                 vm.lockError.value?.contains("Too many attempts") == true
             }
             settle()
+            // The refusal's outcome is published BEFORE the attempt's
+            // coroutine fully unwinds (the record refresh and the
+            // in-flight flag reset happen after the error is set).
+            // Wait for the attempt to be completely finished before
+            // submitting again — otherwise the ViewModel's (correct)
+            // one-attempt-in-flight guard would silently drop the
+            // post-backoff submission this test is about to make.
+            awaitCondition("backoff refusal attempt finished") {
+                !vm.unlockInProgress.value
+            }
             assertTrue(!vm.sessionActive.value)
             assertEquals(
                 5,
