@@ -125,11 +125,15 @@ class TapBelowContentTest {
 
     @Test
     fun paddingSegmentShapeAndCap() {
-        assertEquals("<p></p><p></p><p></p>", paddingSegmentHtml(2))
+        // One empty paragraph per requested row: the caret lands in
+        // the segment's last paragraph, the same row the in-state
+        // growth would have produced below the list.
+        assertEquals("<p></p><p></p>", paddingSegmentHtml(2))
+        assertEquals("<p></p>", paddingSegmentHtml(1))
         assertEquals("<p></p>", paddingSegmentHtml(0))
         val capped = paddingSegmentHtml(MAX_TAP_GROW_PARAGRAPHS + 40)
         assertEquals(
-            MAX_TAP_GROW_PARAGRAPHS + 1,
+            MAX_TAP_GROW_PARAGRAPHS,
             Regex("<p></p>").findAll(capped).count(),
         )
     }
