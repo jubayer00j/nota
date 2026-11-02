@@ -46,3 +46,21 @@ val MIGRATION_2_3: Migration = object : Migration(2, 3) {
         )
     }
 }
+
+/**
+ * Phase 3c (Drive sync) adds the tombstones + sync_meta tables; the
+ * statements match TombstoneEntity / SyncMetaEntity exactly so
+ * Room's post-migration schema validation passes.
+ */
+val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `tombstones` (`entity` TEXT NOT NULL, `id` TEXT NOT NULL, " +
+                "`deletedAt` INTEGER NOT NULL, `deviceId` TEXT, PRIMARY KEY(`entity`, `id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `sync_meta` (`key` TEXT NOT NULL, `value` TEXT NOT NULL, " +
+                "PRIMARY KEY(`key`))",
+        )
+    }
+}

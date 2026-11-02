@@ -49,7 +49,15 @@ class LibraryRepository(
         return updated
     }
 
-    suspend fun deleteFolder(folder: FolderEntity) = folderDao.delete(folder)
+    suspend fun deleteFolder(folder: FolderEntity) {
+        // Phase 3c: sync tombstone (see NoteRepository.delete).
+        app.nota.data.sync.SyncStore(db).recordTombstone(
+            app.nota.data.sync.EntityHash.ENTITY_FOLDER,
+            folder.id,
+            System.currentTimeMillis(),
+        )
+        folderDao.delete(folder)
+    }
 
     suspend fun createTag(name: String, colorArgb: Int? = null): TagEntity {
         val cleaned = name.trim()
@@ -70,5 +78,13 @@ class LibraryRepository(
         return updated
     }
 
-    suspend fun deleteTag(tag: TagEntity) = tagDao.delete(tag)
+    suspend fun deleteTag(tag: TagEntity) {
+        // Phase 3c: sync tombstone (see NoteRepository.delete).
+        app.nota.data.sync.SyncStore(db).recordTombstone(
+            app.nota.data.sync.EntityHash.ENTITY_TAG,
+            tag.id,
+            System.currentTimeMillis(),
+        )
+        tagDao.delete(tag)
+    }
 }

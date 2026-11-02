@@ -30,7 +30,18 @@ class DriveBackupWorker(
         val repository = runCatching {
             GlobalContext.get().get<DriveRepository>()
         }.getOrNull() ?: return Result.success()
-        val ok = runCatching { repository.runScheduledBackup() }.getOrDefault(false)
+        val prefs = runCatching {
+            GlobalContext.get().get<PreferencesRepository>()
+        }.getOrNull() ?: return Result.success()
+        // Phase 3c: in sync mode the tick runs a sync cycle instead —
+        // WorkManager's 15-minute floor is the coarsest sync trigger
+        // (app-start, edit-debounce and "Sync now" are the fast ones;
+        // the spec's 5-minute cadence is below WorkManager's floor).
+        val ok = if (prefs.driveBackupModeNow() == PreferencesRepository.DRIVE_MODE_SYNC) {
+            runCatching { repository.runScheduledSync() }.getOrDefault(false)
+        } else {
+            runCatching { repository.runScheduledBackup() }.getOrDefault(false)
+        }
         return if (ok) Result.success() else Result.retry()
     }
 }
@@ -39,11 +50,24 @@ object DriveBackupScheduler {
     private const val WORK_NAME = "nota-drive-backup"
 
     /** Reconciles the unique periodic work with the current mode:
-     *  scheduled → (re)enqueued at the chosen interval; anything
-     *  else → cancelled. Called at startup and whenever the setting
-     *  changes in the UI. */
+     *  scheduled → (re)enqueued at the chosen interval; sync →
+     *  enqueued at WorkManager's 15-minute floor (the tick runs sync
+     *  cycles — see the worker); off → cancelled. Called at startup
+     *  and whenever the setting changes in the UI. */
     fun sync(context: Context, mode: String, intervalHours: Int) {
         val manager = WorkManager.getInstance(context)
+        if (mode == PreferencesRepository.DRIVE_MODE_SYNC) {
+            val request = PeriodicWorkRequestBuilder<DriveBackupWorker>(15, TimeUnit.MINUTES)
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .build(),
+                )
+                .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.MINUTES)
+                .build()
+            manager.enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+            return
+        }
         if (mode != PreferencesRepository.DRIVE_MODE_SCHEDULED) {
             manager.cancelUniqueWork(WORK_NAME)
             return

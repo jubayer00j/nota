@@ -3,6 +3,7 @@ package app.nota.data.drive
 import android.content.Context
 import android.content.IntentSender
 import app.nota.data.auth.Session
+import app.nota.data.sync.toExportData
 import app.nota.data.backup.BackupCrypto
 import app.nota.data.backup.BackupRepository
 import app.nota.data.backup.PendingRestoreState
@@ -42,6 +43,8 @@ class DriveRepository(
     private val backups: BackupRepository,
     private val prefs: PreferencesRepository,
     private val pendingRestore: PendingRestoreStore,
+    private val syncApplier: app.nota.data.sync.SyncApplier,
+    private val provider: app.nota.data.db.DatabaseProvider,
 ) {
     sealed interface State {
         data object Idle : State
@@ -57,7 +60,7 @@ class DriveRepository(
         data class NeedsConsent(val intentSender: IntentSender) : State
     }
 
-    private enum class Op { ACCESS, BACKUP, RESTORE }
+    private enum class Op { ACCESS, BACKUP, RESTORE, SYNC }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -113,6 +116,7 @@ class DriveRepository(
         when (op) {
             Op.BACKUP -> startBackup()
             Op.RESTORE -> startRestore()
+            Op.SYNC -> startSync()
             Op.ACCESS, null -> startConnect()
         }
     }
@@ -412,6 +416,263 @@ class DriveRepository(
             BackupCrypto.isEncryptedPrefix(prefix.copyOf(read))
         }
     }.getOrDefault(false)
+
+    // ------------------------------------------------------------ sync (Phase 3c)
+
+    /** Sync's own status line — separate from the backup/restore
+     *  [state] so a sync result never clobbers a restore outcome. */
+    sealed interface SyncStatus {
+        data object NotRun : SyncStatus
+        data object Running : SyncStatus
+        data class Synced(val atMillis: Long, val message: String) : SyncStatus
+        data class Failed(val message: String) : SyncStatus
+
+        /** Calm stop (encryption on, no device key) — not an error. */
+        data class Paused(val message: String) : SyncStatus
+    }
+
+    private val _syncStatus = MutableStateFlow<SyncStatus>(SyncStatus.NotRun)
+    val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
+
+    /** Worker entry for sync mode: the same in-flight serialization
+     *  as scheduled backups (Codex P2) — busy means retry later. */
+    suspend fun runScheduledSync(): Boolean {
+        if (inFlight) return false
+        inFlight = true
+        try {
+            return runSyncCycle()
+        } finally {
+            inFlight = false
+        }
+    }
+
+    fun startSync() {
+        if (inFlight) return
+        inFlight = true
+        scope.launch {
+            try {
+                runSyncCycle()
+            } finally {
+                inFlight = false
+            }
+        }
+    }
+
+    /**
+     * One three-way sync cycle against the shared canonical archive
+     * (spec §4.3): fetch remote meta → skip when provably unchanged →
+     * download + read (device key when the archive is encrypted) →
+     * owner gate → [app.nota.data.sync.SyncEngine.merge] → apply the
+     * merged snapshot locally → push the converged library through
+     * the normal export path when the remote differs → record the new
+     * base (hashes + remote meta + merged tombstones).
+     *
+     * Own-echo: a push updates the stored remote meta, so the next
+     * cycle sees "remote unchanged" and compares local content
+     * signatures — a device never re-downloads its own upload.
+     *
+     * Returns false only for transient failures a WorkManager tick
+     * should retry; calm stops (signed out, locked encryption, owner
+     * mismatch) return true and surface in [syncStatus].
+     */
+    suspend fun runSyncCycle(): Boolean {
+        val uid = signedInUid() ?: return true
+        val record = prefs.getDriveEncryptionRecord(uid)
+        val db = provider.current
+        val store = app.nota.data.sync.SyncStore(db)
+        _syncStatus.value = SyncStatus.Running
+        var handle: app.nota.data.backup.BackupReader.Handle? = null
+        val staged = File(context.cacheDir, "drive-sync-${System.nanoTime()}.zip")
+        val pushTmp = File(context.cacheDir, "drive-sync-push-${System.nanoTime()}.zip")
+        try {
+            val token = ensureAccess()
+            val folderId = gateway.findOrCreateFolder(token)
+            val meta = gateway.findCanonicalBackup(token, folderId)
+            val base = store.loadBaseState()
+
+            if (meta == null) {
+                // First sync ever: the local library becomes the archive.
+                val local = backups.collectExport()
+                val localHashes = app.nota.data.sync.SyncEngine.snapshotHashes(
+                    local, backups.attachmentContentHashes(local),
+                )
+                pushConverged(uid, record, folderId, token, null, pushTmp, store, localHashes)
+                _syncStatus.value = SyncStatus.Synced(
+                    System.currentTimeMillis(),
+                    "First sync complete — your library is in Drive.",
+                )
+                return true
+            }
+
+            val remoteUnchanged = base.lastRemoteChecksum != null &&
+                meta.md5Checksum != null &&
+                base.lastRemoteChecksum == meta.md5Checksum &&
+                base.lastRemoteModifiedTime == meta.modifiedTimeMillis.toString()
+            if (remoteUnchanged) {
+                val local = backups.collectExport()
+                val localHashes = app.nota.data.sync.SyncEngine.snapshotHashes(
+                    local, backups.attachmentContentHashes(local),
+                )
+                val now = System.currentTimeMillis()
+                val localSig = app.nota.data.sync.EntityHash.signature(
+                    localHashes, store.tombstones(),
+                )
+                val baseSig = app.nota.data.sync.EntityHash.signature(
+                    base.hashes, store.tombstones(),
+                )
+                if (localSig == baseSig) {
+                    _syncStatus.value = SyncStatus.Synced(now, "Everything is in sync.")
+                    return true
+                }
+                // Local-only changes: the merged result IS local.
+                pushConverged(uid, record, folderId, token, meta.id, pushTmp, store, localHashes)
+                _syncStatus.value = SyncStatus.Synced(now, "Changes uploaded.")
+                return true
+            }
+
+            // Remote changed (or first sight of it): download + read.
+            gateway.download(token, meta.id, staged)
+            val bmk = record?.deviceKeyBase64?.let { Base64.getDecoder().decode(it) }
+            handle = when {
+                looksEncrypted(staged) -> {
+                    if (bmk == null) {
+                        _syncStatus.value = SyncStatus.Paused(
+                            "The Drive archive is encrypted and this device doesn't hold " +
+                                "the key — unlock backup encryption to sync.",
+                        )
+                        return true
+                    }
+                    backups.readBackupWithBmk(staged, bmk)
+                }
+                else -> backups.readBackup(staged, null)
+            }
+            val remote = handle.toExportData()
+            val remoteOwner = remote.manifest.ownerId
+            if (remoteOwner != null && remoteOwner != uid) {
+                _syncStatus.value = SyncStatus.Failed(
+                    "The Drive archive belongs to a different account, so sync stopped " +
+                        "without changing anything.",
+                )
+                return true
+            }
+            val local = backups.collectExport()
+            val stagedById = handle.attachments.associate { it.meta.id to it.stagedFile }
+            val remoteContent = remote.attachments.associate { att ->
+                att.id to (stagedById[att.id]?.takeIf { it.isFile }
+                    ?.let { app.nota.data.sync.EntityHash.sha256Hex(it) } ?: "")
+            }
+            val now = System.currentTimeMillis()
+            val localContent = backups.attachmentContentHashes(local)
+            val outcome = app.nota.data.sync.SyncEngine.merge(
+                local = local,
+                remote = remote,
+                baseHashes = base.hashes,
+                localAttachmentContent = localContent,
+                remoteAttachmentContent = remoteContent,
+                nowMillis = now,
+                nowIso = java.time.Instant.ofEpochMilli(now).toString(),
+                newId = { java.util.UUID.randomUUID().toString() },
+            )
+            if (outcome.changedVsLocal > 0) {
+                syncApplier.applyMerged(outcome.merged, local, remote, outcome, handle, localContent)
+            }
+            store.replaceTombstones(outcome.mergedTombstones)
+            store.purgeOldTombstones(now)
+            var pushedMeta: app.nota.data.drive.DriveFileMeta? = null
+            if (outcome.changedVsRemote > 0) {
+                pushedMeta = pushConverged(
+                    uid, record, folderId, token, meta.id, pushTmp, store,
+                    outcome.newBaseHashes, saveBase = false,
+                )
+            }
+            val finalMeta = pushedMeta ?: meta
+            store.saveBaseState(
+                app.nota.data.sync.SyncStore.BaseState(
+                    lastSyncAt = now,
+                    lastRemoteModifiedTime = finalMeta.modifiedTimeMillis.toString(),
+                    lastRemoteChecksum = finalMeta.md5Checksum,
+                    hashes = outcome.newBaseHashes,
+                ),
+            )
+            val conflicts = outcome.conflictTitles.size
+            _syncStatus.value = SyncStatus.Synced(
+                now,
+                when {
+                    conflicts > 0 ->
+                        "Synced — $conflicts note(s) were edited on two devices; " +
+                            "both versions were kept as conflict copies."
+                    outcome.changedVsLocal > 0 && outcome.changedVsRemote > 0 ->
+                        "Synced — changes merged both ways."
+                    outcome.changedVsLocal > 0 -> "Synced — new changes downloaded."
+                    outcome.changedVsRemote > 0 -> "Synced — changes uploaded."
+                    else -> "Everything is in sync."
+                },
+            )
+            return true
+        } catch (e: DriveAuthNeededException) {
+            pendingOp = Op.SYNC
+            _state.value = State.NeedsConsent(e.intentSender)
+            _syncStatus.value = SyncStatus.Failed("Drive asked for consent — see above.")
+            return true
+        } catch (e: PausedSyncException) {
+            _syncStatus.value = SyncStatus.Paused(LOCKED_COPY)
+            return true
+        } catch (e: Exception) {
+            _syncStatus.value = SyncStatus.Failed(friendly(e, "Sync failed."))
+            return false
+        } finally {
+            handle?.close()
+            staged.delete()
+            pushTmp.delete()
+        }
+    }
+
+    /**
+     * Exports the ACTIVE library (which, post-apply, IS the converged
+     * snapshot) and uploads it as the canonical archive, honouring the
+     * encryption record exactly like a manual backup: a passphrase
+     * library never silently downgrades to plaintext. On success the
+     * base state is saved with the fresh remote meta (unless the
+     * caller defers it), which is what makes the next cycle's
+     * own-echo skip work.
+     */
+    private suspend fun pushConverged(
+        uid: String,
+        record: PreferencesRepository.DriveEncryptionRecord?,
+        folderId: String,
+        token: String,
+        existingId: String?,
+        tmp: File,
+        store: app.nota.data.sync.SyncStore,
+        hashes: Map<String, String>,
+        saveBase: Boolean = true,
+    ): app.nota.data.drive.DriveFileMeta {
+        if (record != null) {
+            val held = record.deviceKeyBase64
+                ?: throw PausedSyncException()
+            val bmk = Base64.getDecoder().decode(held)
+            val header = BackupCrypto.Header(record.salt, record.iterations, record.wrappedKey)
+            backups.exportToFileKeyed(tmp, bmk, header)
+        } else {
+            backups.exportToFile(tmp, null)
+        }
+        val meta = gateway.upload(token, folderId, existingId, tmp)
+        if (saveBase) {
+            store.saveBaseState(
+                app.nota.data.sync.SyncStore.BaseState(
+                    lastSyncAt = System.currentTimeMillis(),
+                    lastRemoteModifiedTime = meta.modifiedTimeMillis.toString(),
+                    lastRemoteChecksum = meta.md5Checksum,
+                    hashes = hashes,
+                ),
+            )
+        }
+        return meta
+    }
+
+    /** Internal calm-stop signal for a locked encryption record met
+     *  mid-push; converted to a Paused status by the cycle. */
+    private class PausedSyncException : Exception()
 
     companion object {
         const val RESULT_OK = "Backup complete"

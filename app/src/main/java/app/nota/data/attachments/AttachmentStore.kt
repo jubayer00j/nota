@@ -227,6 +227,15 @@ class AttachmentStore(
     }
 
     suspend fun delete(attachment: AttachmentEntity): Unit = fileMutex.withLock {
+        // Phase 3c: explicit user deletion leaves a sync tombstone.
+        // (Reconcile's corruption-repair row removal deliberately does
+        // NOT tombstone — sync's absence-without-tombstone rule then
+        // errs toward keeping the attachment on other devices.)
+        app.nota.data.sync.SyncStore(provider.current).recordTombstone(
+            app.nota.data.sync.EntityHash.ENTITY_ATTACHMENT,
+            attachment.id,
+            System.currentTimeMillis(),
+        )
         deleteLocked(attachment)
     }
 

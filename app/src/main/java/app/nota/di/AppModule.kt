@@ -74,6 +74,7 @@ val appModule = module {
     // REST gateway, and the app-scoped operations coordinator.
     single { app.nota.data.drive.DriveAuth(get()) }
     single<app.nota.data.drive.DriveGateway> { app.nota.data.drive.DriveClient() }
+    single { app.nota.data.sync.SyncApplier(get(), get(), get(), get()) }
     single {
         app.nota.data.drive.DriveRepository(
             context = get(),
@@ -83,6 +84,8 @@ val appModule = module {
             backups = get(),
             prefs = get(),
             pendingRestore = app.nota.data.backup.PendingRestoreStore.shared,
+            syncApplier = get(),
+            provider = get(),
         )
     }
     viewModel { NotesViewModel(get(), get(), get()) }

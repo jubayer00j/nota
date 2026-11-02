@@ -67,6 +67,7 @@ fun DriveBackupSection(onOpenSignIn: () -> Unit) {
 
     val session by auth.session.collectAsState()
     val driveState by drive.state.collectAsState()
+    val syncStatus by drive.syncStatus.collectAsState()
     val mode by prefs.driveBackupMode.collectAsState(initial = PreferencesRepository.DRIVE_MODE_OFF)
     val intervalHours by prefs.driveBackupIntervalHours.collectAsState(initial = 24)
 
@@ -195,6 +196,53 @@ fun DriveBackupSection(onOpenSignIn: () -> Unit) {
                         }
                     },
                 )
+                DriveModeRow(
+                    label = "Sync",
+                    selected = mode == PreferencesRepository.DRIVE_MODE_SYNC,
+                    onClick = {
+                        scope.launch {
+                            prefs.setDriveBackupMode(PreferencesRepository.DRIVE_MODE_SYNC)
+                        }
+                    },
+                )
+                if (mode == PreferencesRepository.DRIVE_MODE_SYNC) {
+                    Text(
+                        "Sync keeps this library and the shared Drive archive continuously " +
+                            "merged — newest edit wins, clashes are kept as conflict copies, " +
+                            "deletions travel too. Settings never sync.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    when (val s = syncStatus) {
+                        is DriveRepository.SyncStatus.Synced ->
+                            DriveStatusText(
+                                "Synced ${relativeTime(s.atMillis)} — ${s.message}",
+                                MaterialTheme.colorScheme.primary,
+                            )
+                        is DriveRepository.SyncStatus.Failed ->
+                            DriveStatusText(
+                                "Sync problem: ${s.message}",
+                                MaterialTheme.colorScheme.error,
+                            )
+                        is DriveRepository.SyncStatus.Paused ->
+                            DriveStatusText(s.message, MaterialTheme.colorScheme.tertiary)
+                        DriveRepository.SyncStatus.Running ->
+                            DriveStatusText(
+                                "Syncing…",
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        DriveRepository.SyncStatus.NotRun ->
+                            DriveStatusText(
+                                "Not synced yet on this device.",
+                                MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                    }
+                    OutlinedButton(
+                        onClick = { drive.startSync() },
+                        enabled = working == null,
+                        modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                    ) { Text("Sync now") }
+                }
                 if (mode == PreferencesRepository.DRIVE_MODE_SCHEDULED) {
                     Row(
                         modifier = Modifier

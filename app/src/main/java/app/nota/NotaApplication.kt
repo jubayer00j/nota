@@ -9,6 +9,7 @@ import app.nota.di.appModule
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.context.startKoin
@@ -79,6 +80,53 @@ class NotaApplication : Application() {
                     preferences.driveBackupModeNow(),
                     preferences.driveBackupIntervalHoursNow(),
                 )
+            }
+        }
+        // Phase 3c sync triggers (spec §4.3): a cycle shortly after
+        // process start when sync mode is on (the own-echo skip makes
+        // an up-to-date cycle cheap), plus an edit-debounced trigger —
+        // note-list emissions are re-debounced at 15 s, so a burst of
+        // typing produces ONE cycle, mirroring the 1.x arrangement.
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                val preferences = koin.get<app.nota.data.preferences.PreferencesRepository>()
+                if (preferences.driveBackupModeNow() ==
+                    app.nota.data.preferences.PreferencesRepository.DRIVE_MODE_SYNC
+                ) {
+                    koin.get<app.nota.data.drive.DriveRepository>().startSync()
+                }
+            }
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                val provider = koin.get<DatabaseProvider>()
+                val preferences = koin.get<app.nota.data.preferences.PreferencesRepository>()
+                val drive = koin.get<app.nota.data.drive.DriveRepository>()
+                var debounceJob: kotlinx.coroutines.Job? = null
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                provider.accountId
+                    .flatMapLatest {
+                        // `current` is re-read at switch time, so the
+                        // observed list is always the ACTIVE account's.
+                        provider.current.noteDao().observeActive()
+                    }
+                    .collect {
+                        // The emission is only a change signal; the
+                        // cycle itself re-reads everything.
+                        debounceJob?.cancel()
+                        debounceJob = CoroutineScope(Dispatchers.IO).launch {
+                            kotlinx.coroutines.delay(15_000)
+                            runCatching {
+                                if (preferences.driveBackupModeNow() ==
+                                    app.nota.data.preferences.PreferencesRepository.DRIVE_MODE_SYNC
+                                ) {
+                                    drive.startSync()
+                                }
+                            }
+                        }
+                    }
             }
         }
     }
