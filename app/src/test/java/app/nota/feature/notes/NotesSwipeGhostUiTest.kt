@@ -16,6 +16,7 @@ import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.ui.theme.NotaTheme
@@ -91,6 +92,8 @@ class NotesSwipeGhostUiTest {
             repository,
             LibraryRepository(provider),
             AttachmentStore(context, provider),
+            provider,
+            PreferencesRepository(context),
         )
         runBlocking {
             db.noteDao().upsert(note("alpha", "Ghost alpha", updatedAt = 2_000))
@@ -104,9 +107,17 @@ class NotesSwipeGhostUiTest {
                 )
             }
         }
-        composeRule.waitForIdle()
-        composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
-        composeRule.onNodeWithText("Ghost beta").assertIsDisplayed()
+        // The first Room emission rides the (paused) main looper; a
+        // bare waitForIdle can return before it lands, so poll.
+        awaitTrue("initial notes displayed") {
+            try {
+                composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
+                composeRule.onNodeWithText("Ghost beta").assertIsDisplayed()
+                true
+            } catch (e: AssertionError) {
+                false
+            }
+        }
     }
 
     /** Pumps the (paused) main looper while waiting for a Db-side fact,
@@ -146,10 +157,14 @@ class NotesSwipeGhostUiTest {
     @Test
     fun swipeArchive_afterAccountSwitch_rowLeavesListAndCannotBeTappedOpen() {
         val alpha = runBlocking { repository.getById("alpha") }!!
+        val beta = runBlocking { repository.getById("beta") }!!
         assertTrue(provider.switchTo("uid-ghost-test"))
-        // The guest→account copy preserves ids (Phase 3a): the same
-        // note now also exists in the account database.
-        runBlocking { provider.current.noteDao().upsert(alpha) }
+        // The guest→account copy preserves ids (Phase 3a): the whole
+        // guest library now also exists in the account database.
+        runBlocking {
+            provider.current.noteDao().upsert(alpha)
+            provider.current.noteDao().upsert(beta)
+        }
 
         composeRule.waitForIdle()
         // Split-brain precondition: the pre-switch list still renders.

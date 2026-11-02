@@ -8,6 +8,7 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.DocSegment
+import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
 import app.nota.data.html.TextSegment
@@ -590,8 +591,11 @@ class RichNoteEditorViewModel(
             val owner = repository.getById(attachment.noteId) ?: return@launch
             val segments = NoteDocument.parse(owner.contentHtml)
             val targetSrc = NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
+            // Phase 3.5 (D4): file blocks reference the attachment by
+            // id directly — strip them on the same rule as images.
             val cleaned = segments.filterNot {
-                it is ImageSegment && it.src == targetSrc
+                (it is ImageSegment && it.src == targetSrc) ||
+                    (it is FileSegment && it.attachmentId == attachment.id)
             }
             if (cleaned.size != segments.size) {
                 val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
@@ -633,9 +637,12 @@ class RichNoteEditorViewModel(
             // reference. (External-URL images are untouched; copying the
             // underlying files into each applied note is a future
             // enhancement, not done here.)
+            // Phase 3.5 (D4): a file block references this note's
+            // attachment id exactly the same way — strip those too.
             val cleaned = segments.filterNot {
-                it is ImageSegment &&
-                    it.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)
+                (it is ImageSegment &&
+                    it.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)) ||
+                    it is FileSegment
             }
             val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
             templateRepository.add(

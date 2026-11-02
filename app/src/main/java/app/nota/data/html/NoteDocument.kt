@@ -77,6 +77,25 @@ data class ImageSegment(
     val widthPercent: Int = 100,
 ) : DocSegment
 
+/**
+ * A file attachment placed IN the document (Phase 3.5, D4). Before
+ * 3.5 a non-image attachment had no document presence at all — it
+ * lived only in the editor's attachments section, effectively pinned
+ * to the end of the note. As a segment it sits at the caret like any
+ * block, can be dragged among the paragraphs, and its position is
+ * the document order, so it persists and backs up with the body.
+ * [fileName]/[mimeType] are a display snapshot from insert time; the
+ * attachments table stays the source of truth for size/existence.
+ * Serialised as a `<div data-nota-file="…">` — a shape 1.x does not
+ * model (it preserves the div opaquely) and [RichBody] counts as
+ * rich, so a note holding one never falls into the plain editor.
+ */
+data class FileSegment(
+    val attachmentId: String,
+    val fileName: String,
+    val mimeType: String = "",
+) : DocSegment
+
 /** A blockquote; [innerHtml] is edited as rich text like a text segment. */
 data class QuoteSegment(val innerHtml: String) : DocSegment
 
@@ -227,6 +246,19 @@ object NoteDocument {
                         val whole = html.substring(lt, close.second)
                         val inner = html.substring(tag.end, close.first)
                         when {
+                            // Phase 3.5 (D4): an in-document file
+                            // block. Checked before the chart/opaque
+                            // fallbacks; a div whose data-nota-file
+                            // id is blank is not ours and falls
+                            // through to preservation as opaque.
+                            attr(tag.attrs, "data-nota-file").isNotBlank() -> {
+                                flushText()
+                                out += FileSegment(
+                                    attachmentId = attr(tag.attrs, "data-nota-file"),
+                                    fileName = attr(tag.attrs, "data-name"),
+                                    mimeType = attr(tag.attrs, "data-mime"),
+                                )
+                            }
                             isChartBlock(tag.attrs) -> {
                                 flushText(); out += ChartSegment(attr(tag.attrs, "data-payload"), whole)
                             }
@@ -564,6 +596,12 @@ object NoteDocument {
                     }
                     append("></p>")
                 }
+                is FileSegment -> {
+                    append("<div data-nota-file=\"").append(escapeAttr(segment.attachmentId))
+                        .append("\" data-name=\"").append(escapeAttr(segment.fileName))
+                        .append("\" data-mime=\"").append(escapeAttr(segment.mimeType))
+                        .append("\"></div>")
+                }
                 is QuoteSegment -> append("<blockquote>").append(segment.innerHtml).append("</blockquote>")
                 is CodeSegment -> append("<pre><code>").append(escapeText(segment.text)).append("</code></pre>")
                 DividerSegment -> append("<hr>")
@@ -847,6 +885,7 @@ object NoteDocument {
                     PlainTextCodec.htmlToText(it.contentHtml)
                 }
                 is ImageSegment -> segment.alt
+                is FileSegment -> segment.fileName
                 is QuoteSegment -> PlainTextCodec.htmlToText(segment.innerHtml)
                 is CodeSegment -> segment.text
                 DividerSegment -> ""

@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Archive
@@ -45,12 +46,13 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxState
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -62,6 +64,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import app.nota.data.db.FolderEntity
@@ -100,9 +104,31 @@ fun NotesScreen(
     viewModel: NotesViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val swipePrefs by viewModel.swipePreferences.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
     var showFoldersDialog by remember { mutableStateOf(false) }
+
+    // Phase 3.5 (D1): a swiped note's row leaves the composition at
+    // COMMIT time, not whenever the database round-trip lands. The
+    // pre-3.5 list removed a row only when the observed Room flow
+    // re-emitted; any stall in that path (the flow bound to a
+    // superseded database after an account switch — see
+    // NotesViewModel) left the dismissed item composed forever at
+    // its dismissed offset: a background-only, still-tappable ghost
+    // row. Ids enter [dismissedIds] the moment their swipe commits
+    // and are rendered out of the list from that frame on; the undo
+    // batch resolution lifts exactly the batch's ids (see
+    // [swipeWithUndo]), and the pruning effect drops ids the data no
+    // longer contains (a dismissal the data has confirmed needs no
+    // further guarding).
+    val dismissedIds = remember { mutableStateListOf<String>() }
+    LaunchedEffect(state.items) {
+        val liveIds = state.items.mapTo(HashSet()) { it.note.id }
+        dismissedIds.removeAll(dismissedIds.filter { it !in liveIds })
+    }
+    val visibleItems = state.items.filter { it.note.id !in dismissedIds }
 
     // Phase 2.9 (J3): undo is BATCHED. A single SnackbarHostState
     // carries ONE snackbar: a second swipe dismisses the first
@@ -126,16 +152,28 @@ fun NotesScreen(
     val pendingUndo = remember { mutableStateListOf<NoteEntity>() }
     var undoJob by remember { mutableStateOf<Job?>(null) }
 
-    fun swipeWithUndo(note: NoteEntity, message: String, action: () -> Unit) {
+    /**
+     * Phase 2.9 batching (unchanged) + Phase 3.5 optimistic exclusion:
+     * when [exclude] is true the note's row unmounts in the same frame
+     * (see [dismissedIds]); Pin passes false because the note stays in
+     * the list — only its pinned flag (and sort position) changes.
+     * Resolution lifts exactly this batch's exclusions; a cancelled
+     * job (a newer swipe took the window over) never runs its
+     * resolution block, so no batch can drop another's ids.
+     */
+    fun swipeWithUndo(note: NoteEntity, message: String, exclude: Boolean = true, action: () -> Unit) {
         action()
         pendingUndo += note
+        if (exclude) dismissedIds += note.id
         undoJob?.cancel()
         undoJob = scope.launch {
             val result = snackbarHostState.showSnackbar(message = message, actionLabel = "Undo")
+            val batchIds = pendingUndo.map { it.id }
             if (result == SnackbarResult.ActionPerformed) {
                 pendingUndo.asReversed().forEach { viewModel.upsert(it) }
             }
             pendingUndo.clear()
+            dismissedIds.removeAll(batchIds)
         }
     }
 
@@ -143,10 +181,33 @@ fun NotesScreen(
     // so an Undo that re-upserts the bare note row would resurrect a
     // stripped note and pretend the data came back. No Undo here
     // (re-review fix) — the message says plainly that it is permanent.
-    fun swipeNoUndo(message: String, action: () -> Unit) {
+    // Phase 3.5: the row still leaves at commit via [dismissedIds].
+    fun swipeNoUndo(note: NoteEntity, message: String, action: () -> Unit) {
         action()
+        dismissedIds += note.id
         scope.launch {
             snackbarHostState.showSnackbar(message = message)
+        }
+    }
+
+    /** Performs a resolved swipe behaviour (Phase 3.5, D2/D3). */
+    fun performSwipe(kind: SwipeKind, note: NoteEntity) {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        when (kind) {
+            SwipeKind.ARCHIVE ->
+                swipeWithUndo(note, "Note archived") { viewModel.archive(note) }
+            SwipeKind.TRASH ->
+                swipeWithUndo(note, "Note moved to trash") { viewModel.trash(note) }
+            SwipeKind.RESTORE ->
+                swipeWithUndo(note, "Note restored") { viewModel.restore(note) }
+            SwipeKind.PIN ->
+                swipeWithUndo(
+                    note,
+                    if (note.pinned) "Note unpinned" else "Note pinned",
+                    exclude = false,
+                ) { viewModel.setPinned(note, !note.pinned) }
+            SwipeKind.DELETE_FOREVER ->
+                swipeNoUndo(note, "Note deleted permanently") { viewModel.deletePermanently(note) }
         }
     }
 
@@ -304,7 +365,7 @@ fun NotesScreen(
                     )
                 }
             }
-            if (state.items.isEmpty()) {
+            if (visibleItems.isEmpty()) {
                 Box(Modifier.fillMaxSize().padding(NotaSpacing.lg), contentAlignment = Alignment.Center) {
                     Text(
                         emptyText(state.filter),
@@ -321,55 +382,44 @@ fun NotesScreen(
                     ),
                     verticalArrangement = Arrangement.spacedBy(NotaSpacing.md),
                 ) {
-                    items(state.items, key = { it.note.id }) { item ->
+                    items(visibleItems, key = { it.note.id }) { item ->
                         val note = item.note
-                        val inTrash = state.filter is NotesFilter.Trash
-                        val inArchived = state.filter is NotesFilter.Archived
-                        val dismissState = rememberSwipeToDismissBoxState(
-                            confirmValueChange = { value ->
-                                when (value) {
-                                    SwipeToDismissBoxValue.StartToEnd -> {
-                                        if (inTrash || inArchived) {
-                                            swipeWithUndo(note, "Note restored") { viewModel.restore(note) }
-                                        } else {
-                                            swipeWithUndo(note, "Note archived") { viewModel.archive(note) }
-                                        }
-                                        true
-                                    }
-                                    SwipeToDismissBoxValue.EndToStart -> {
-                                        if (inTrash) {
-                                            swipeNoUndo("Note deleted permanently") { viewModel.deletePermanently(note) }
-                                        } else {
-                                            swipeWithUndo(note, "Note moved to trash") { viewModel.trash(note) }
-                                        }
-                                        true
-                                    }
-                                    SwipeToDismissBoxValue.Settled -> false
-                                }
-                            },
-                        )
+                        val startKind = resolveSwipeKind(state.filter, SwipeDirection.RIGHT, swipePrefs)
+                        val endKind = resolveSwipeKind(state.filter, SwipeDirection.LEFT, swipePrefs)
+                        // Phase 3.5 (D1): the dismiss state is a plain
+                        // remember keyed by note id — deliberately NOT
+                        // rememberSaveable. The saveable variant
+                        // restores a dismissed value when an item with
+                        // the same key re-enters the list (an undone
+                        // note, a filter round-trip), recomposing it
+                        // already dismissed: another ghost-row path. A
+                        // disposed row now forgets its state, so a
+                        // returning note always starts Settled.
+                        val dismissState = remember(note.id) {
+                            SwipeToDismissBoxState(
+                                initialValue = SwipeToDismissBoxValue.Settled,
+                                positionalThreshold = { total -> total * SWIPE_COMMIT_FRACTION },
+                            )
+                        }
                         SwipeToDismissBox(
                             state = dismissState,
-                            backgroundContent = {
-                                val isStart = dismissState.targetValue == SwipeToDismissBoxValue.StartToEnd
-                                Box(
-                                    Modifier.fillMaxSize()
-                                        .background(
-                                            if (isStart) MaterialTheme.colorScheme.primaryContainer
-                                            else MaterialTheme.colorScheme.errorContainer,
-                                        )
-                                        .padding(horizontal = NotaSpacing.md),
-                                    contentAlignment = if (isStart) Alignment.CenterStart else Alignment.CenterEnd,
-                                ) {
-                                    Icon(
-                                        if (isStart) {
-                                            if (inTrash || inArchived) Icons.Filled.Restore else Icons.Filled.Archive
-                                        } else {
-                                            if (inTrash) Icons.Filled.DeleteForever else Icons.Filled.Delete
-                                        },
-                                        contentDescription = null,
-                                    )
+                            enableDismissFromStartToEnd = startKind != null,
+                            enableDismissFromEndToStart = endKind != null,
+                            onDismiss = { value ->
+                                val kind = when (value) {
+                                    SwipeToDismissBoxValue.StartToEnd -> startKind
+                                    SwipeToDismissBoxValue.EndToStart -> endKind
+                                    SwipeToDismissBoxValue.Settled -> null
                                 }
+                                if (kind != null) performSwipe(kind, note)
+                            },
+                            backgroundContent = {
+                                SwipeReveal(
+                                    targetValue = dismissState.targetValue,
+                                    startKind = startKind,
+                                    endKind = endKind,
+                                    pinned = note.pinned,
+                                )
                             },
                         ) {
                             NoteCard(
@@ -404,6 +454,83 @@ fun NotesScreen(
             onDelete = { viewModel.deleteFolder(it) },
             onDismiss = { showFoldersDialog = false },
         )
+    }
+}
+
+/**
+ * The fraction of a row's width a swipe must cross to commit (Phase
+ * 3.5, D2): a short drag springs back — committing takes a deliberate
+ * swipe, never an accidental nudge.
+ */
+private const val SWIPE_COMMIT_FRACTION = 0.35f
+
+/**
+ * Phase 3.5 (D2): the swipe reveal. It is confined to the row's own
+ * bounds (the dismiss box composes its background at matchParentSize),
+ * clipped to the card's corner radius, and it NAMES its action — an
+ * icon plus a short label in a colour pair distinct per action,
+ * aligned to the side the swipe is opening. The pre-3.5 reveal was a
+ * bare icon floating in an oversized block that read as a UI error.
+ */
+@Composable
+private fun SwipeReveal(
+    targetValue: SwipeToDismissBoxValue,
+    startKind: SwipeKind?,
+    endKind: SwipeKind?,
+    pinned: Boolean,
+) {
+    val kind = when (targetValue) {
+        SwipeToDismissBoxValue.StartToEnd -> startKind
+        SwipeToDismissBoxValue.EndToStart -> endKind
+        SwipeToDismissBoxValue.Settled -> null
+    }
+    val colors = MaterialTheme.colorScheme
+    val (background, foreground) = when (kind) {
+        SwipeKind.ARCHIVE -> colors.primaryContainer to colors.onPrimaryContainer
+        SwipeKind.TRASH -> colors.errorContainer to colors.onErrorContainer
+        SwipeKind.RESTORE -> colors.secondaryContainer to colors.onSecondaryContainer
+        SwipeKind.PIN -> colors.tertiaryContainer to colors.onTertiaryContainer
+        SwipeKind.DELETE_FOREVER -> colors.error to colors.onError
+        null -> Color.Transparent to Color.Transparent
+    }
+    Box(
+        Modifier.fillMaxSize()
+            .clip(RoundedCornerShape(12.dp))
+            .background(background)
+            .padding(horizontal = NotaSpacing.md),
+        contentAlignment = if (targetValue == SwipeToDismissBoxValue.EndToStart) {
+            Alignment.CenterEnd
+        } else {
+            Alignment.CenterStart
+        },
+    ) {
+        if (kind != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = when (kind) {
+                        SwipeKind.ARCHIVE -> Icons.Filled.Archive
+                        SwipeKind.TRASH -> Icons.Filled.Delete
+                        SwipeKind.RESTORE -> Icons.Filled.Restore
+                        SwipeKind.PIN -> Icons.Filled.PushPin
+                        SwipeKind.DELETE_FOREVER -> Icons.Filled.DeleteForever
+                    },
+                    contentDescription = null,
+                    tint = foreground,
+                )
+                Spacer(Modifier.size(NotaSpacing.sm))
+                Text(
+                    text = when (kind) {
+                        SwipeKind.ARCHIVE -> "Archive"
+                        SwipeKind.TRASH -> "Trash"
+                        SwipeKind.RESTORE -> "Restore"
+                        SwipeKind.PIN -> if (pinned) "Unpin" else "Pin"
+                        SwipeKind.DELETE_FOREVER -> "Delete forever"
+                    },
+                    color = foreground,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+        }
     }
 }
 
