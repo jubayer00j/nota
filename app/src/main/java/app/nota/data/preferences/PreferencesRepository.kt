@@ -248,21 +248,42 @@ class PreferencesRepository(context: Context) {
     // ---- Per-note lock biometric copies (Phase 2b) ----------------------
     // The on-device NEK copy a fingerprint prompt may release for one
     // locked note, sealed under the Android-Keystore device key (see
-    // NoteLockBiometricStore). Keyed per note as `notelock_bio_<noteId>`;
-    // device-local only — these values never enter Room or a backup.
+    // NoteLockBiometricStore). Device-local only — these values never
+    // enter Room or a backup.
+    //
+    // Phase 3a (Codex P2): keyed per ACCOUNT as well as per note —
+    // `notelock_bio_<accountId>_<noteId>`. The guest→account copy
+    // preserves note ids and lock records, so an unscoped key would
+    // let the two libraries' fingerprint copies clobber each other.
+    // Pre-3a copies live under the legacy `notelock_bio_<noteId>`
+    // key; those can only belong to the guest library (the only one
+    // that existed), so guest reads fall back to it and guest writes
+    // migrate it away. Account libraries never touch the legacy key.
 
-    private fun noteLockBioKey(noteId: String) =
+    private fun noteLockBioKey(accountId: String, noteId: String) =
+        stringPreferencesKey("notelock_bio_${accountId}_$noteId")
+
+    private fun legacyNoteLockBioKey(noteId: String) =
         stringPreferencesKey("notelock_bio_$noteId")
 
-    suspend fun getNoteLockBiometricCopy(noteId: String): String? =
-        dataStore.safeData.first()[noteLockBioKey(noteId)]
-
-    suspend fun setNoteLockBiometricCopy(noteId: String, packed: String) {
-        safeEdit { this[noteLockBioKey(noteId)] = packed }
+    suspend fun getNoteLockBiometricCopy(accountId: String, noteId: String): String? {
+        val prefs = dataStore.safeData.first()
+        return prefs[noteLockBioKey(accountId, noteId)]
+            ?: if (accountId == GUEST_ACCOUNT_ID) prefs[legacyNoteLockBioKey(noteId)] else null
     }
 
-    suspend fun removeNoteLockBiometricCopy(noteId: String) {
-        safeEdit { remove(noteLockBioKey(noteId)) }
+    suspend fun setNoteLockBiometricCopy(accountId: String, noteId: String, packed: String) {
+        safeEdit {
+            this[noteLockBioKey(accountId, noteId)] = packed
+            if (accountId == GUEST_ACCOUNT_ID) remove(legacyNoteLockBioKey(noteId))
+        }
+    }
+
+    suspend fun removeNoteLockBiometricCopy(accountId: String, noteId: String) {
+        safeEdit {
+            remove(noteLockBioKey(accountId, noteId))
+            if (accountId == GUEST_ACCOUNT_ID) remove(legacyNoteLockBioKey(noteId))
+        }
     }
 
     // ---- Phase 3a: guest→account move offer outcome, per uid --------
@@ -289,6 +310,9 @@ class PreferencesRepository(context: Context) {
         }
 
     private companion object {
+        /** Mirrors NotaDatabase.GUEST_ACCOUNT (kept literal so the
+         *  preferences layer stays free of a db dependency). */
+        const val GUEST_ACCOUNT_ID = "guest"
         const val TAG = "PreferencesRepository"
         val KEY_DYNAMIC_COLOUR = booleanPreferencesKey("dynamic_colour")
         val KEY_OLED_BLACK = booleanPreferencesKey("oled_black")

@@ -121,7 +121,7 @@ override fun sealCipherResult(): StepResult<Cipher> =
         // Built lazily so no DataStore/preferences machinery exists
         // while the backup restore under test runs.
         val lockRepo by lazy {
-            NoteLockRepository(notes, DatabaseProvider.forDatabase(context, db), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider()))
+            NoteLockRepository(notes, DatabaseProvider.forDatabase(context, db), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider(), DatabaseProvider.forDatabase(context, db)))
         }
     }
 
