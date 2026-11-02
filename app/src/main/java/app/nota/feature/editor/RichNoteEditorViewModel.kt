@@ -93,6 +93,36 @@ class RichNoteEditorViewModel(
     private val _lockError = MutableStateFlow<String?>(null)
     val lockError: StateFlow<String?> = _lockError
 
+    /**
+     * Phase 2.5 (F3): the active per-note lockout deadline (epoch
+     * millis) as last reported by the repository, or null when no
+     * backoff is in force. Previously the VM kept only the error STRING
+     * from a failed attempt and dropped `NoteUnlockResult.Error`'s
+     * `lockoutSeconds`, while the gate derived its countdown solely from
+     * the load-time note record (never refreshed after an attempt) — so
+     * a lockout imposed mid-session was invisible: the form stayed live
+     * and every correct password entered during the backoff was refused
+     * by the repository's lockout-first check with no visible wait. The
+     * gate now receives this state (and the refreshed record, below) so
+     * the remaining wait can be shown. F5 owns the visuals; this VM owns
+     * the state.
+     */
+    private val _lockoutUntilMillis = MutableStateFlow<Long?>(null)
+    val lockoutUntilMillis: StateFlow<Long?> = _lockoutUntilMillis
+
+    /**
+     * Phase 2.5 (F3): true while one unlock attempt is being verified.
+     * Submissions arriving while an attempt is in flight are dropped:
+     * one user action must produce at most one recorded attempt (a
+     * multi-second PBKDF2 verify on a slow device otherwise invites
+     * repeat submissions that stack up as separate failed attempts and
+     * can push the note into lockout), and two overlapping successes
+     * must never race in [startSession] (the second would zero the key
+     * the first session is decrypting with).
+     */
+    private val _unlockInProgress = MutableStateFlow(false)
+    val unlockInProgress: StateFlow<Boolean> = _unlockInProgress
+
     val hasSession: Boolean get() = sessionNek != null
 
     /** Registered by the screen: inserts text at the active editor's caret. */
@@ -148,29 +178,92 @@ class RichNoteEditorViewModel(
     /** One credential attempt from the gate. Canonical secret, as reported
      *  by PR-A's shared credential components. */
     fun unlockWithCredential(method: AppLockMethod, canonicalSecret: String) {
+        // Phase 2.5 (F3): one attempt in flight at a time — a repeat
+        // submission while a verify is running is dropped here, never
+        // queued as a second recorded attempt.
+        if (_unlockInProgress.value) return
         val current = _note.value ?: return
         viewModelScope.launch {
-            when (val result = noteLockRepository.verifyCredential(
-                current,
-                NoteLockMethod.fromAppLockMethod(method),
-                canonicalSecret,
-            )) {
-                is NoteUnlockResult.Ok -> startSession(result.nek)
-                is NoteUnlockResult.Error -> _lockError.value = result.message
+            _unlockInProgress.value = true
+            _lockError.value = null
+            try {
+                when (val result = noteLockRepository.verifyCredential(
+                    current,
+                    NoteLockMethod.fromAppLockMethod(method),
+                    canonicalSecret,
+                )) {
+                    is NoteUnlockResult.Ok -> {
+                        _lockoutUntilMillis.value = null
+                        // Publish the persisted record (attempts reset)
+                        // before the session starts, so any state the
+                        // gate still shows is the truth.
+                        refreshNote(current.id)
+                        startSession(result.nek)
+                    }
+                    is NoteUnlockResult.Error -> {
+                        _lockError.value = result.message
+                        _lockoutUntilMillis.value = result.lockoutSeconds?.let {
+                            System.currentTimeMillis() + it * 1_000L
+                        }
+                        // Phase 2.5 (F3): publish the persisted record —
+                        // its failedAttempts / lockoutUntil are what the
+                        // gate's countdown is driven from. Without this
+                        // refresh the gate kept rendering the load-time
+                        // record and a fresh lockout never engaged it.
+                        refreshNote(current.id)
+                    }
+                }
+            } finally {
+                _unlockInProgress.value = false
             }
         }
     }
 
-    /** Biometric success path: the prompt already ran (in the gate); the
-     *  repository only releases the device copy. */
-    fun unlockWithBiometric() {
+    /** Cipher for the gate's crypto prompt (Phase 2.5, F4). */
+    suspend fun biometricUnlockCipher(): javax.crypto.Cipher? {
+        val current = _note.value ?: return null
+        return noteLockRepository.biometricUnlockCipher(current)
+    }
+
+    /**
+     * Crypto-bound biometric path (Phase 2.5, F4): [authorisedCipher]
+     * is the cipher the gate's prompt authorised via its CryptoObject;
+     * the repository releases the NEK only when it decrypts the sealed
+     * device copy. The F3 outcome treatment applies unchanged: refresh
+     * the record after the attempt, surface any lockout deadline, and
+     * drop overlapping submissions.
+     */
+    fun unlockWithBiometric(authorisedCipher: javax.crypto.Cipher) {
+        if (_unlockInProgress.value) return
         val current = _note.value ?: return
         viewModelScope.launch {
-            when (val result = noteLockRepository.unlockWithBiometric(current)) {
-                is NoteUnlockResult.Ok -> startSession(result.nek)
-                is NoteUnlockResult.Error -> _lockError.value = result.message
+            _unlockInProgress.value = true
+            _lockError.value = null
+            try {
+                when (val result = noteLockRepository.unlockWithBiometric(current, authorisedCipher)) {
+                    is NoteUnlockResult.Ok -> {
+                        _lockoutUntilMillis.value = null
+                        refreshNote(current.id)
+                        startSession(result.nek)
+                    }
+                    is NoteUnlockResult.Error -> {
+                        _lockError.value = result.message
+                        _lockoutUntilMillis.value = result.lockoutSeconds?.let {
+                            System.currentTimeMillis() + it * 1_000L
+                        }
+                        refreshNote(current.id)
+                    }
+                }
+            } finally {
+                _unlockInProgress.value = false
             }
         }
+    }
+
+    /** Re-reads the note so [_note] (and everything the gate derives
+     *  from it) reflects what the lock repository just persisted. */
+    private suspend fun refreshNote(noteId: String) {
+        repository.getById(noteId)?.let { _note.value = it }
     }
 
     private suspend fun startSession(nek: ByteArray) {
@@ -239,6 +332,7 @@ class RichNoteEditorViewModel(
         method: AppLockMethod,
         canonicalSecret: String,
         enableBiometric: Boolean,
+        biometricCipher: javax.crypto.Cipher? = null,
         onDone: (String?) -> Unit,
     ) {
         val current = _note.value ?: return onDone("Note not loaded.")
@@ -249,6 +343,7 @@ class RichNoteEditorViewModel(
                     NoteLockMethod.fromAppLockMethod(method),
                     canonicalSecret,
                     enableBiometric,
+                    biometricCipher,
                 )
                 _note.value = locked
                 onDone(null)
@@ -285,11 +380,15 @@ class RichNoteEditorViewModel(
         }
     }
 
-    fun setLockBiometric(enabled: Boolean, onDone: (Boolean) -> Unit) {
+    fun setLockBiometric(
+        enabled: Boolean,
+        cipher: javax.crypto.Cipher? = null,
+        onDone: (Boolean) -> Unit,
+    ) {
         val current = _note.value ?: return onDone(false)
         val nek = sessionNek ?: return onDone(false)
         viewModelScope.launch {
-            val ok = noteLockRepository.setBiometric(current, nek, enabled)
+            val ok = noteLockRepository.setBiometric(current, nek, enabled, cipher)
             if (ok) _note.value = repository.getById(current.id)
             onDone(ok)
         }

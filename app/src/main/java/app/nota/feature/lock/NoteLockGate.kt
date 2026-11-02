@@ -45,10 +45,12 @@ private val GATE_METHOD_ORDER = listOf(AppLockMethod.PATTERN, AppLockMethod.PIN,
  * slots. No body text, no snippet and no attachment preview exists in
  * this composition.
  *
- * Fingerprint mirrors 1.x: the BiometricPrompt runs FIRST; only on its
- * success does the caller release the device copy via
- * NoteLockRepository.unlockWithBiometric (which performs no
- * authentication itself). During a lockout the inputs are disabled and
+ * Fingerprint (Phase 2.5, crypto-bound): the caller supplies a
+ * DECRYPT cipher over the sealed NEK copy via [biometricCipherProvider];
+ * that cipher IS the prompt's CryptoObject, and on success the SAME
+ * authorised cipher is handed to [onBiometricUnlock] - the repository
+ * releases the NEK only when the cipher actually decrypts the copy.
+ * There is no bare-boolean path. During a lockout the inputs are disabled and
  * a live countdown shows, driven by the record's persisted deadline.
  */
 @Composable
@@ -58,8 +60,20 @@ fun NoteLockGate(
     error: String?,
     onBack: () -> Unit,
     onSubmitCredential: (AppLockMethod, String) -> Unit,
-    onBiometricSuccess: () -> Unit,
+    biometricCipherProvider: suspend () -> javax.crypto.Cipher?,
+    onBiometricUnlock: (javax.crypto.Cipher) -> Unit,
     modifier: Modifier = Modifier,
+    // Phase 2.5 (F3): the lockout deadline as last reported by the
+    // repository for THIS session's attempts (epoch millis), and
+    // whether an attempt is currently being verified. The persisted
+    // record remains the primary deadline source; the explicit state
+    // covers the window before the refreshed record reaches this
+    // composition, so a lockout imposed by the latest attempt can never
+    // render as a live form with a static error line again. While an
+    // attempt is in flight the inputs are disabled — one user action,
+    // one recorded attempt.
+    lockoutUntilMillis: Long? = null,
+    unlockInProgress: Boolean = false,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { context as? FragmentActivity }
@@ -80,21 +94,35 @@ fun NoteLockGate(
         }
     }
 
-    // Lockout countdown, ticked locally from the persisted deadline.
+    // Lockout countdown, ticked locally from the effective deadline:
+    // the later of the persisted record's deadline and the deadline the
+    // ViewModel reported for the latest attempt (Phase 2.5, F3).
+    val effectiveLockoutUntil = maxOf(record.lockoutUntil ?: 0L, lockoutUntilMillis ?: 0L)
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(record.lockoutUntil) {
+    LaunchedEffect(effectiveLockoutUntil) {
         nowMillis = System.currentTimeMillis()
-        val until = record.lockoutUntil ?: return@LaunchedEffect
-        while (System.currentTimeMillis() < until) {
+        if (effectiveLockoutUntil <= 0L) return@LaunchedEffect
+        while (System.currentTimeMillis() < effectiveLockoutUntil) {
             delay(250)
             nowMillis = System.currentTimeMillis()
         }
     }
-    val lockoutUntil = record.lockoutUntil ?: 0L
+    val lockoutUntil = effectiveLockoutUntil
     val lockedOut = lockoutUntil > nowMillis
     val lockoutSeconds = ceil((lockoutUntil - nowMillis) / 1000.0).toInt().coerceAtLeast(0)
 
     val biometricReady = record.biometric && activity != null && isBiometricAvailable(context)
+
+    // Prefetch the DECRYPT cipher for the prompt (suspend: it reads
+    // the sealed copy's IV from DataStore). A fresh cipher is needed
+    // per prompt; if the user cancels and retries, the effect key
+    // (formResetKey) re-runs and fetches a new one.
+    var biometricCipher by remember(record, formResetKey) {
+        mutableStateOf<javax.crypto.Cipher?>(null)
+    }
+    LaunchedEffect(record, formResetKey) {
+        if (record.biometric) biometricCipher = biometricCipherProvider()
+    }
 
     Column(modifier.fillMaxSize().padding(NotaSpacing.lg)) {
         IconButton(onClick = onBack) {
@@ -142,6 +170,11 @@ fun NoteLockGate(
                     resetKey = formResetKey,
                     patternError = patternError,
                     onPatternTooShort = { patternError = true },
+                    // Phase 2.5 (F3): no new submissions while a verify
+                    // is running (the ViewModel also drops them; this
+                    // keeps the pad/field from accepting a second entry
+                    // that would look like it was ignored).
+                    enabled = !unlockInProgress,
                 )
                 if (error != null) {
                     Spacer(Modifier.height(NotaSpacing.sm))
@@ -155,13 +188,17 @@ fun NoteLockGate(
             if (biometricReady && !lockedOut) {
                 Spacer(Modifier.height(NotaSpacing.lg))
                 OutlinedButton(
+                    enabled = !unlockInProgress,
                     onClick = {
-                        activity?.let {
-                            showBiometricPrompt(
-                                it,
+                        val host = activity
+                        val cipher = biometricCipher
+                        if (host != null && cipher != null) {
+                            showBiometricCryptoPrompt(
+                                host,
+                                cipher,
                                 title = "Unlock note",
                                 subtitle = noteTitle.ifBlank { "Untitled" },
-                                onSuccess = onBiometricSuccess,
+                                onAuthenticated = onBiometricUnlock,
                                 onError = { /* credential form stays available */ },
                             )
                         }
