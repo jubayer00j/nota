@@ -53,9 +53,15 @@ import org.robolectric.shadows.ShadowLooper
  * Phase 3.6 (G1) — UI-level regression tests for the rebuilt block
  * drag. Drives the REAL [RichNoteEditorScreen] (the
  * NotesSwipeGhostUiTest pattern): a long press ON THE BLOCK ITSELF
- * — file, table and image — then a drag, and the PERSISTED document
- * order is asserted from Room. The 3.5 rail-only drag is not what is
- * exercised here: the touch starts on the block's own content.
+ * — file, table and image — then a drag past a neighbouring BLOCK,
+ * and the PERSISTED document order is asserted from Room. The 3.5
+ * rail-only drag is not what is exercised here: the touch starts on
+ * the block's own content.
+ *
+ * Travel distances are measured between block nodes on purpose:
+ * the rich text editor does not publish its content in the
+ * semantics tree, so paragraph nodes cannot be located — block
+ * neighbours (a file name, a table cell, an image label) can.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -253,27 +259,26 @@ class EditorBlockDragUiTest {
     }
 
     @Test
-    fun dragFileBlock_downPastParagraph_reordersAndPersists() {
+    fun dragFileBlock_downPastTable_reordersAndPersists() {
         val note = runBlocking {
             repository.createRichNote(
                 title = "Drag File",
-                contentHtml = "<p>Alpha opening paragraph</p>" +
-                    "<div data-nota-file=\"att-drag\" data-name=\"drag-report.pdf\" " +
+                contentHtml = "<div data-nota-file=\"att-drag\" data-name=\"drag-report.pdf\" " +
                     "data-mime=\"application/pdf\"></div>" +
-                    "<p>Bravo middle paragraph</p>" +
+                    "<table><tr><td>CellA</td><td>CellB</td></tr>" +
+                    "<tr><td>CellC</td><td>CellD</td></tr></table>" +
                     "<p>Charlie closing paragraph</p>",
             )
         }
         composeEditor(note.id)
         val from = boundsOf("drag-report.pdf")
-        val to = boundsOf("Bravo middle paragraph")
+        val to = boundsOf("CellA")
         val dy = (to.center.y - from.center.y) + 30f
         longPressDrag("drag-report.pdf", dy)
         awaitOrder(
             note.id,
             listOf(
-                "text:Alpha openin",
-                "text:Bravo middle",
+                "table",
                 "file:drag-report.pdf",
                 "text:Charlie clos",
             ),
@@ -281,12 +286,12 @@ class EditorBlockDragUiTest {
     }
 
     @Test
-    fun dragTableBlock_upPastParagraph_reordersAndPersists() {
+    fun dragTableBlock_upPastFile_reordersAndPersists() {
         val note = runBlocking {
             repository.createRichNote(
                 title = "Drag Table",
-                contentHtml = "<p>Alpha opening paragraph</p>" +
-                    "<p>Bravo middle paragraph</p>" +
+                contentHtml = "<div data-nota-file=\"att-drag\" data-name=\"drag-report.pdf\" " +
+                    "data-mime=\"application/pdf\"></div>" +
                     "<table><tr><td>CellA</td><td>CellB</td></tr>" +
                     "<tr><td>CellC</td><td>CellD</td></tr></table>" +
                     "<p>Charlie closing paragraph</p>",
@@ -294,28 +299,27 @@ class EditorBlockDragUiTest {
         }
         composeEditor(note.id)
         val from = boundsOf("CellA")
-        val to = boundsOf("Bravo middle paragraph")
+        val to = boundsOf("drag-report.pdf")
         val dy = (to.center.y - from.center.y) - 30f
         longPressDrag("CellA", dy)
         awaitOrder(
             note.id,
             listOf(
-                "text:Alpha openin",
                 "table",
-                "text:Bravo middle",
+                "file:drag-report.pdf",
                 "text:Charlie clos",
             ),
         )
     }
 
     @Test
-    fun dragImageBlock_downPastParagraph_reordersAndPersists() {
+    fun dragImageBlock_downPastFile_reordersAndPersists() {
         val note = runBlocking {
             repository.createRichNote(
                 title = "Drag Image",
-                contentHtml = "<p>Alpha opening paragraph</p>" +
-                    "<p><img src=\"nota-attachment://img-drag\" alt=\"Drag image\"></p>" +
-                    "<p>Bravo middle paragraph</p>" +
+                contentHtml = "<p><img src=\"nota-attachment://img-drag\" alt=\"Drag image\"></p>" +
+                    "<div data-nota-file=\"att-drag\" data-name=\"drag-report.pdf\" " +
+                    "data-mime=\"application/pdf\"></div>" +
                     "<p>Charlie closing paragraph</p>",
             )
         }
@@ -323,14 +327,13 @@ class EditorBlockDragUiTest {
         // The image card's header label carries the alt text; the
         // long press lands on the block itself.
         val from = boundsOf("Drag image")
-        val to = boundsOf("Bravo middle paragraph")
+        val to = boundsOf("drag-report.pdf")
         val dy = (to.center.y - from.center.y) + 30f
         longPressDrag("Drag image", dy)
         awaitOrder(
             note.id,
             listOf(
-                "text:Alpha openin",
-                "text:Bravo middle",
+                "file:drag-report.pdf",
                 "image:Drag image",
                 "text:Charlie clos",
             ),

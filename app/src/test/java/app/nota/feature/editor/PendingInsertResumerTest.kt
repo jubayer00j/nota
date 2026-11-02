@@ -166,13 +166,30 @@ class PendingInsertResumerTest {
     }
 
     @Test
-    fun target_indexOnABlock_neverSplitsIt() {
-        // The staged index now holds a block (document changed
-        // structurally); the anchor finds nothing either — unresolved,
-        // the caller falls back to the ordinary caret insert.
+    fun target_indexOnABlock_anchorStillFindsTheSegment() {
+        // The staged index now holds a block (the document changed
+        // structurally since staging); the anchor still identifies
+        // the target segment — the index is never used to split a
+        // block, but a surviving anchor match wins outright.
         val target = resolveInsertTargetIndex(
             record(segmentIndex = 1, segmentAnchor = "Bravo middle paragraph"),
             candidates,
+        )
+        assertEquals(2, target)
+    }
+
+    @Test
+    fun target_indexOnABlockAndAnchorGone_isUnresolved() {
+        // Index holds a block AND the anchored text is gone:
+        // unresolved — the caller falls back to the ordinary caret
+        // insert rather than splitting a block.
+        val target = resolveInsertTargetIndex(
+            record(segmentIndex = 1, segmentAnchor = "Bravo middle paragraph"),
+            listOf(
+                true to "Alpha opening",
+                false to "",
+                true to "Charlie closing",
+            ),
         )
         assertNull(target)
     }

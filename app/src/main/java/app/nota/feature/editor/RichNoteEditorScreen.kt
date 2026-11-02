@@ -884,13 +884,19 @@ fun RichNoteEditorScreen(
                     }
                 },
                 actions = {
-                    if (editing) {
-                        IconButton(onClick = { exitToRead() }) {
-                            Icon(Icons.Filled.Check, contentDescription = "Done editing")
-                        }
-                    } else {
-                        IconButton(onClick = { enterEdit(null, null) }) {
-                            Icon(Icons.Filled.Edit, contentDescription = "Edit note")
+                    // Phase 3.6 (G3): while the per-note lock gate is
+                    // up there is no note to read or edit yet — the
+                    // mode actions appear only once the gate passes.
+                    val gated = current?.locked == true && !sessionActive
+                    if (!gated) {
+                        if (editing) {
+                            IconButton(onClick = { exitToRead() }) {
+                                Icon(Icons.Filled.Check, contentDescription = "Done editing")
+                            }
+                        } else {
+                            IconButton(onClick = { enterEdit(null, null) }) {
+                                Icon(Icons.Filled.Edit, contentDescription = "Edit note")
+                            }
                         }
                     }
                     IconButton(onClick = { menuExpanded = true }) {
