@@ -416,7 +416,22 @@ fun NotesScreen(
                                     SwipeToDismissBoxValue.EndToStart -> endKind
                                     SwipeToDismissBoxValue.Settled -> null
                                 }
-                                if (kind != null) performSwipe(kind, note)
+                                if (kind != null) {
+                                    performSwipe(kind, note)
+                                    if (kind == SwipeKind.PIN) {
+                                        // The note STAYS in the list, so
+                                        // its dismiss state must swing
+                                        // back to Settled. Left
+                                        // dismissed, the row would sit
+                                        // parked at the dismissed offset
+                                        // with gestures disabled (the
+                                        // box only enables them while
+                                        // Settled) — a ghost of the D1
+                                        // family on the pin path.
+                                        // (Codex, PR #18.)
+                                        scope.launch { dismissState.reset() }
+                                    }
+                                }
                             },
                             backgroundContent = {
                                 SwipeReveal(

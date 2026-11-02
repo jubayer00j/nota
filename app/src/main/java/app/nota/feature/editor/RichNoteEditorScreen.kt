@@ -374,6 +374,20 @@ fun RichNoteEditorScreen(
             val blockIndex = segments.indexOfFirst { it.id == blockUi.id }
             focusId = segments.drop(blockIndex + 1)
                 .firstOrNull { it.segment is TextSegment || it.segment is QuoteSegment }?.id
+            if (focusId == null) {
+                // The block is followed by another block (or nothing
+                // editable): give the caret a home directly after the
+                // inserted block instead of skipping past the
+                // intervening block to a later text segment, so
+                // typing continues between the two blocks. The fresh
+                // segment is empty mid-document text — it serialises
+                // to nothing until typed in. (Codex, PR #18.)
+                val caretUi = UiSegment(newUiId(), TextSegment(""))
+                segments = ensureTrailing(
+                    segments.toMutableList().also { it.add(blockIndex + 1, caretUi) },
+                )
+                focusId = caretUi.id
+            }
         }
         if (focusId != null) {
             activeSegmentId = focusId
@@ -414,8 +428,20 @@ fun RichNoteEditorScreen(
             visible.firstOrNull { it.key == neighbour.id }
         }
         if (next != null && centre > next.offset + next.size / 2f) {
-            segments = segments.moved(from, from + 1)
-            dragOffsetPx -= next.size + spacingPx
+            // Never swap past the trailing caret segment: an empty
+            // text tail is not content to pass but the Phase 1.5
+            // guarantee itself — a block stopped above it is already
+            // the last content. (Codex, PR #18.)
+            val nextIsTailCaret = from + 1 == segments.lastIndex &&
+                (segments[from + 1].segment as? TextSegment)
+                    ?.let { NoteDocument.isEmptyTextSegment(it) } == true
+            if (!nextIsTailCaret) {
+                segments = segments.moved(from, from + 1)
+                // A block swapped below a real final text segment
+                // lands last; restore the caret tail below it.
+                segments = ensureTrailing(segments)
+                dragOffsetPx -= next.size + spacingPx
+            }
         }
     }
 

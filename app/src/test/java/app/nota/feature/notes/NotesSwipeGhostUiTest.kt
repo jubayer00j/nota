@@ -17,6 +17,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.preferences.SwipeAction
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.ui.theme.NotaTheme
@@ -68,6 +69,7 @@ class NotesSwipeGhostUiTest {
 
     private lateinit var provider: DatabaseProvider
     private lateinit var repository: NoteRepository
+    private lateinit var preferences: PreferencesRepository
     private lateinit var viewModel: NotesViewModel
     private val openedIds = mutableListOf<String>()
 
@@ -88,25 +90,19 @@ class NotesSwipeGhostUiTest {
             .build()
         provider = DatabaseProvider.forDatabase(context, db)
         repository = NoteRepository(provider)
+        preferences = PreferencesRepository(context)
         viewModel = NotesViewModel(
             repository,
             LibraryRepository(provider),
             AttachmentStore(context, provider),
             provider,
-            PreferencesRepository(context),
+            preferences,
         )
         runBlocking {
             db.noteDao().upsert(note("alpha", "Ghost alpha", updatedAt = 2_000))
             db.noteDao().upsert(note("beta", "Ghost beta", updatedAt = 1_000))
         }
-        composeRule.setContent {
-            NotaTheme {
-                NotesScreen(
-                    onOpenNote = { openedIds += it },
-                    viewModel = viewModel,
-                )
-            }
-        }
+        composeScreen()
         // The first Room emission rides the (paused) main looper; a
         // bare waitForIdle can return before it lands, so poll.
         awaitTrue("initial notes displayed") {
@@ -116,6 +112,17 @@ class NotesSwipeGhostUiTest {
                 true
             } catch (e: AssertionError) {
                 false
+            }
+        }
+    }
+
+    private fun composeScreen() {
+        composeRule.setContent {
+            NotaTheme {
+                NotesScreen(
+                    onOpenNote = { openedIds += it },
+                    viewModel = viewModel,
+                )
             }
         }
     }
@@ -221,5 +228,48 @@ class NotesSwipeGhostUiTest {
         composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
         composeRule.onNodeWithText("Ghost alpha").performClick()
         assertEquals(listOf("alpha"), openedIds)
+    }
+
+    /** Codex round (PR #18): a PIN swipe keeps the note in the list,
+     *  so its dismiss state must swing back to Settled — left
+     *  dismissed, the row stays parked at the dismissed offset with
+     *  gestures disabled (the box only enables them while Settled):
+     *  a ghost of the D1 family on the pin path. The row must come
+     *  back to rest, fully displayed, and stay swipeable. */
+    @Test
+    fun pinSwipe_rowSwingsBackAndStaysSwipeable() {
+        runBlocking { preferences.setSwipeRightAction(SwipeAction.PIN) }
+        try {
+            composeScreen()
+            awaitTrue("pin mapping live") {
+                viewModel.swipePreferences.value.right == SwipeAction.PIN
+            }
+            awaitTrue("notes displayed under pin mapping") {
+                try {
+                    composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+            composeRule.onNodeWithText("Ghost alpha").performTouchInput { swipeRight() }
+            awaitTrue("alpha pinned") {
+                runBlocking { repository.getById("alpha")?.pinned == true }
+            }
+            awaitTrue("row back at rest after pin") {
+                try {
+                    composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+            composeRule.onNodeWithText("Ghost alpha").performTouchInput { swipeRight() }
+            awaitTrue("alpha unpinned by a second swipe") {
+                runBlocking { repository.getById("alpha")?.pinned == false }
+            }
+        } finally {
+            runBlocking { preferences.setSwipeRightAction(SwipeAction.ARCHIVE) }
+        }
     }
 }
