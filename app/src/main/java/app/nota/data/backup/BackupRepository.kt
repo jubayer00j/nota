@@ -277,7 +277,7 @@ class BackupRepository(
      * content hash, so sync treats the bytes as changed and heals
      * them from the remote copy on the next cycle.
      */
-    suspend fun attachmentContentHashes(data: ExportData): Map<String, String> {
+    suspend fun attachmentContentHashes(data: BackupWriter.ExportData): Map<String, String> {
         val dao = provider.current.attachmentDao()
         val out = LinkedHashMap<String, String>()
         for (meta in data.attachments) {
