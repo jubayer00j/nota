@@ -338,6 +338,7 @@ class DriveRepositoryTest {
         // …so the existing unlock flow brings this device in, and the
         // next backup proceeds — still encrypted under the same key.
         assertTrue(drive.unlockEncryption("elsewhere-pass"))
+        drive.clearTransientState() // drop the stale Paused before re-awaiting
         drive.startBackup()
         awaitDriveDone()
         val uploaded = java.io.File(context.cacheDir, "adopted-upload.bin")
