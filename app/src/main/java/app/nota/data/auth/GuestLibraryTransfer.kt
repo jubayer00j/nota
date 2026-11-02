@@ -1,9 +1,12 @@
 package app.nota.data.auth
 
+import android.content.Context
 import androidx.room.withTransaction
 import app.nota.data.backup.rebuildLibraryIndexes
+import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
+import java.io.File
 import kotlinx.coroutines.flow.first
 
 /** What a guest→account copy moved (user-visible summary counts). */
@@ -33,10 +36,19 @@ data class TransferCounts(
  *   overwriting anything the account already has. Existing account
  *   rows always win; nothing in the account is ever replaced by the
  *   guest copy.
- * - **Attachment binaries need no copying.** Files live in the shared
- *   filesDir/attachments/<noteId>/ root keyed by the same note ids
- *   the copy preserves — the account rows point at the very files the
- *   guest rows point at.
+ * - **Attachment binaries are copied to account-local paths**
+ *   (Phase 3a, Codex P1). Files live under filesDir/attachments/, but
+ *   they are NOT immutable: per-note lock/unlock rewrites them in
+ *   place (raw bytes ↔ AES-GCM envelope), and attachment deletion
+ *   removes them. If the account row pointed at the guest's file,
+ *   locking a note in one library would silently corrupt the other's
+ *   copy of that attachment — the guest library must stay intact in
+ *   substance, not just in rows. So each copied attachment's bytes
+ *   are duplicated under `attachments/<noteId>~<account>/…` and the
+ *   account row points there; the two libraries' files then evolve
+ *   independently. (The cross-account reconcile sweep already keeps
+ *   every path any account's rows reference, so the copies are safe
+ *   from housekeeping.)
  * - **Indexes are rebuilt, not copied.** FTS rows and backlink edges
  *   are derived state; the shared [rebuildLibraryIndexes] re-derives
  *   them for the target library (locked notes keep their title-only
@@ -46,8 +58,10 @@ data class TransferCounts(
  *   treat them as a separate payload partition.
  */
 class GuestLibraryTransfer(
+    context: Context,
     private val provider: DatabaseProvider,
 ) {
+    private val filesDir: File = context.filesDir
     /** Notes in the guest library (the offer's gate). Reads the guest
      *  database directly when an account is active. */
     suspend fun guestNoteCount(): Int {
@@ -85,6 +99,16 @@ class GuestLibraryTransfer(
             val sourceReminders = source.reminderDao().getAll()
             val sourceVersions = source.noteVersionDao().getAll()
             val sourceSearches = source.savedSearchDao().observeAll().first()
+
+            // Phase 1.5: duplicate the attachment BINARIES that will
+            // actually be inserted, under account-local paths (see
+            // the class doc, Codex P1) — file IO stays outside the
+            // write transaction; the in-transaction insert-if-absent
+            // check remains the authority.
+            val existingAttachmentIds = target.attachmentDao().getAll().map { it.id }.toSet()
+            val copiedAttachments = sourceAttachments
+                .filter { it.id !in existingAttachmentIds }
+                .map { accountLocalCopy(it, provider.accountId.value) }
 
             // Phase 2: insert-if-absent into the target, one
             // transaction, target DAOs only.
@@ -124,7 +148,7 @@ class GuestLibraryTransfer(
                     }
                 }
                 val attachmentDao = target.attachmentDao()
-                for (attachment in sourceAttachments) {
+                for (attachment in copiedAttachments) {
                     if (attachmentDao.getById(attachment.id) == null) {
                         attachmentDao.upsert(attachment)
                         attachments++
@@ -158,6 +182,39 @@ class GuestLibraryTransfer(
             provider.closeAdditional(source)
         }
     }
+
+    /**
+     * Duplicates one attachment's binary under an account-local path
+     * and returns the row pointing at the copy. A missing source file
+     * (a row whose binary is already gone) copies as-is — there is
+     * nothing on disk for the two libraries to fight over. A failed
+     * duplication falls back to the shared path for that one
+     * attachment rather than failing the whole library copy.
+     */
+    private fun accountLocalCopy(
+        source: AttachmentEntity,
+        targetAccountId: String,
+    ): AttachmentEntity {
+        val sourceFile = File(filesDir, source.localPath)
+        if (!sourceFile.isFile) return source
+        val storedName = source.localPath.substringAfterLast('/')
+        val newPath = "attachments/${source.noteId}~${accountPathSuffix(targetAccountId)}/$storedName"
+        val dest = File(filesDir, newPath)
+        return try {
+            dest.parentFile?.mkdirs()
+            sourceFile.inputStream().use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            source.copy(localPath = newPath)
+        } catch (e: Exception) {
+            source
+        }
+    }
+
+    private fun accountPathSuffix(accountId: String): String =
+        accountId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+            .take(48)
+            .ifEmpty { "account" }
 }
 
 /**

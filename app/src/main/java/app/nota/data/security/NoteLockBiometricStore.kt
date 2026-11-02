@@ -216,7 +216,14 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
 class NoteLockBiometricStore(
     private val preferences: PreferencesRepository,
     private val keyProvider: NoteLockDeviceKeyProvider,
+    private val provider: app.nota.data.db.DatabaseProvider,
 ) {
+    /** The account whose library is active — copies are stored per
+     *  account (Phase 3a, Codex P2), resolved at call time so an
+     *  account switch can never read or clobber another library's
+     *  fingerprint copy for the same note id. */
+    private fun accountId(): String = provider.accountId.value
+
     /** Cipher for an ENABLING prompt (seal direction). */
     fun sealCipherResult(): StepResult<Cipher> = keyProvider.sealCipherResult()
 
@@ -230,10 +237,10 @@ class NoteLockBiometricStore(
         } catch (e: Exception) {
             return false
         }
-        preferences.setNoteLockBiometricCopy(noteId, packed)
+        preferences.setNoteLockBiometricCopy(accountId(), noteId, packed)
         // safeEdit swallows IO failures by design, so confirm the copy
         // actually landed before reporting success.
-        return preferences.getNoteLockBiometricCopy(noteId) == packed
+        return preferences.getNoteLockBiometricCopy(accountId(), noteId) == packed
     }
 
     /**
@@ -243,7 +250,7 @@ class NoteLockBiometricStore(
      */
     suspend fun openCipherResult(noteId: String): StepResult<Cipher> {
         val packed = try {
-            preferences.getNoteLockBiometricCopy(noteId)
+            preferences.getNoteLockBiometricCopy(accountId(), noteId)
         } catch (e: Exception) {
             return StepResult.Failed(BiometricStep.TOKEN_READ, stepReason(e))
         } ?: return StepResult.Failed(
@@ -260,7 +267,7 @@ class NoteLockBiometricStore(
      */
     suspend fun readCopy(noteId: String, cipher: Cipher): ByteArray? {
         val packed = try {
-            preferences.getNoteLockBiometricCopy(noteId)
+            preferences.getNoteLockBiometricCopy(accountId(), noteId)
         } catch (e: Exception) {
             null
         } ?: return null
@@ -278,6 +285,6 @@ class NoteLockBiometricStore(
     }
 
     suspend fun removeCopy(noteId: String) {
-        preferences.removeNoteLockBiometricCopy(noteId)
+        preferences.removeNoteLockBiometricCopy(accountId(), noteId)
     }
 }

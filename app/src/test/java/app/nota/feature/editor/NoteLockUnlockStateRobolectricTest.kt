@@ -137,7 +137,7 @@ override fun sealCipherResult(): StepResult<Cipher> =
             .build()
         notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
         store = AttachmentStore(context, DatabaseProvider.forDatabase(context, db))
-        val biometricStore = NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider())
+        val biometricStore = NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider(), DatabaseProvider.forDatabase(context, db))
         lockRepo = NoteLockRepository(notes, DatabaseProvider.forDatabase(context, db), store, biometricStore)
     }
 

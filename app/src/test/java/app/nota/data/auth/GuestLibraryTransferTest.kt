@@ -41,7 +41,7 @@ class GuestLibraryTransferTest {
             context.deleteDatabase(NotaDatabase.databaseName(account))
         }
         provider = DatabaseProvider(context, NotaDatabase.GUEST_ACCOUNT)
-        transfer = GuestLibraryTransfer(provider)
+        transfer = GuestLibraryTransfer(context, provider)
     }
 
     @After
@@ -79,6 +79,12 @@ class GuestLibraryTransferTest {
                 createdAt = 5L,
             ),
         )
+        // The binary itself, at the guest's path.
+        val guestFile = java.io.File(
+            RuntimeEnvironment.getApplication().filesDir, "attachments/n1/a1-photo.jpg",
+        )
+        guestFile.parentFile?.mkdirs()
+        guestFile.writeBytes("fake-jpeg-bytes".toByteArray())
     }
 
     @Test
@@ -113,6 +119,22 @@ class GuestLibraryTransferTest {
                 .filter { ref -> ref.noteId == "n1" }.map { it.tagId },
         )
         assertEquals("a1", account.attachmentDao().getById("a1")?.id)
+
+        // Codex P1: the account's attachment is an INDEPENDENT copy —
+        // its own path under the account suffix, same bytes; the
+        // guest's path and file are untouched, so later lock/unlock
+        // or deletion in either library cannot corrupt the other.
+        val filesDir = RuntimeEnvironment.getApplication().filesDir
+        val accountAttachment = account.attachmentDao().getById("a1")!!
+        assertTrue(accountAttachment.localPath.startsWith("attachments/n1~uid-transfer/"))
+        assertEquals(
+            "fake-jpeg-bytes",
+            java.io.File(filesDir, accountAttachment.localPath).readText(),
+        )
+        assertEquals(
+            "fake-jpeg-bytes",
+            java.io.File(filesDir, "attachments/n1/a1-photo.jpg").readText(),
+        )
 
         // Search finds the copied note by title (FTS rebuilt, not copied).
         val hits = account.noteDao().searchFts("\"First\"")

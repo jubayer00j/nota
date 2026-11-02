@@ -62,13 +62,13 @@ val appModule = module {
     // Phase 2b per-note lock: Keystore device-key provider + biometric
     // copy store + the lock repository (Koin singles).
     single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }
-    single { NoteLockBiometricStore(get(), get()) }
+    single { NoteLockBiometricStore(get(), get(), get()) }
     single { NoteLockRepository(get(), get(), get(), get()) }
     // Phase 2c backup/restore engine (local ZIP + NOMAENC1 + crossover).
     single { BackupRepository(androidContext(), get(), get(), get()) }
     // Phase 3a accounts: identity (Firebase Auth, identity only) +
     // the guest→account library copy.
-    single { GuestLibraryTransfer(get()) }
+    single { GuestLibraryTransfer(get(), get()) }
     single { AuthManager(get(), get(), get()) }
     // Phase 3b Google Drive: authorization (drive.file only), the
     // REST gateway, and the app-scoped operations coordinator.
