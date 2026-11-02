@@ -371,22 +371,27 @@ fun RichNoteEditorScreen(
         rebuilt += segments.subList(activeIndex + 1, segments.size)
         segments = ensureTrailing(rebuilt)
         if (focusId == null) {
+            // No right half (the caret sat at the end of the text).
+            // The caret belongs DIRECTLY after the inserted block:
+            // if the segment immediately after it is text/quote,
+            // focus that; otherwise the next content is another
+            // block, so create a caret segment between the two
+            // blocks rather than letting typing resume at some
+            // later text segment (the trailing tail always exists,
+            // so a plain "next text anywhere" lookup would skip
+            // past the intervening block). The fresh segment is
+            // empty mid-document text — it serialises to nothing
+            // until typed in. (Codex, PR #18, two rounds.)
             val blockIndex = segments.indexOfFirst { it.id == blockUi.id }
-            focusId = segments.drop(blockIndex + 1)
-                .firstOrNull { it.segment is TextSegment || it.segment is QuoteSegment }?.id
-            if (focusId == null) {
-                // The block is followed by another block (or nothing
-                // editable): give the caret a home directly after the
-                // inserted block instead of skipping past the
-                // intervening block to a later text segment, so
-                // typing continues between the two blocks. The fresh
-                // segment is empty mid-document text — it serialises
-                // to nothing until typed in. (Codex, PR #18.)
+            val next = segments.getOrNull(blockIndex + 1)
+            focusId = if (next?.segment is TextSegment || next?.segment is QuoteSegment) {
+                next.id
+            } else {
                 val caretUi = UiSegment(newUiId(), TextSegment(""))
                 segments = ensureTrailing(
                     segments.toMutableList().also { it.add(blockIndex + 1, caretUi) },
                 )
-                focusId = caretUi.id
+                caretUi.id
             }
         }
         if (focusId != null) {
