@@ -11,14 +11,23 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Device-key access for the per-note biometric copy (Phase 2b), behind an
- * interface so JVM/Robolectric tests can inject a raw-key provider
- * (AndroidKeyStore under Robolectric is unreliable). The operations are
- * encrypt/decrypt — never raw key bytes — because AndroidKeyStore keys
- * are non-exportable by design.
+ * Device-key access for the per-note biometric copy (Phase 2b,
+ * crypto-bound in Phase 2.5/F4), behind an interface so
+ * JVM/Robolectric tests can inject a raw-key provider
+ * (AndroidKeyStore under Robolectric is unreliable, and
+ * auth-required keys cannot be exercised there at all).
  *
- * Sealed form is b64( iv(12) || ct ) with the GCM tag appended, the same
- * packing as a credential slot's wrappedKey.
+ * Sealed form is b64( iv(12) || ct ) with the GCM tag appended, the
+ * same packing as a credential slot's wrappedKey.
+ *
+ * Phase 2.5 change: the production key is now USER-AUTHENTICATION
+ * REQUIRED, so there is no usable bare encrypt/decrypt any more —
+ * sealing and opening both run through ciphers that BiometricPrompt
+ * authorises via a CryptoObject ([sealCipher] / [openCipher]).
+ * [encrypt]/[decrypt] remain on the interface ONLY as the test-fake
+ * seam and a legacy probe; the production provider implements them
+ * against the auth-required key, where they fail (return null)
+ * without an authorised prompt — by design.
  */
 interface NoteLockDeviceKeyProvider {
     /** Seals [plain] under the device key; null on any failure. */
@@ -26,14 +35,27 @@ interface NoteLockDeviceKeyProvider {
 
     /** Opens a sealed copy; null on any failure (never throws). */
     fun decrypt(packedBase64: String): ByteArray?
+
+    /** ENCRYPT_MODE cipher to be authorised by a biometric prompt. */
+    fun sealCipher(): Cipher?
+
+    /** DECRYPT_MODE cipher for [packedBase64], to be authorised by a prompt. */
+    fun openCipher(packedBase64: String): Cipher?
 }
 
 /**
  * Production provider: an AES-256-GCM key in the Android Keystore
- * (alias `nota.notelock.devicekey`) with NO user-authentication
- * requirement on the key itself — exactly like 1.x, a successful
- * BiometricPrompt shown by the caller is the gate; the key merely keeps
- * the copy from being readable as plain stored text.
+ * with `setUserAuthenticationRequired(true)` and
+ * `setInvalidatedByBiometricEnrollment(true)`.
+ *
+ * The alias is NEW (`nota.notelock.devicekey.v2`): Phase 2b copies
+ * were sealed under the v1 non-auth key (`nota.notelock.devicekey`).
+ * Those copies CANNOT be opened by an authorised cipher (they were
+ * never auth-bound), so they are orphaned by this upgrade — the
+ * record's credential slots are untouched, the user unlocks once
+ * with their backup credential and re-enables fingerprint, which
+ * seals a fresh v2 copy. That one-time re-enable is the honest cost
+ * of moving from a boolean gate to a crypto-bound one.
  */
 class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
 
@@ -43,6 +65,8 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
         val packed = cipher.iv + cipher.doFinal(plain)
         Base64.getEncoder().encodeToString(packed)
     } catch (e: Exception) {
+        // Includes UserNotAuthenticatedException: without a prompt-
+        // authorised cipher this MUST fail under the v2 key.
         null
     }
 
@@ -63,6 +87,31 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
         null
     }
 
+    override fun sealCipher(): Cipher? = try {
+        Cipher.getInstance(TRANSFORMATION).apply {
+            init(Cipher.ENCRYPT_MODE, deviceKey())
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    override fun openCipher(packedBase64: String): Cipher? = try {
+        val packed = Base64.getDecoder().decode(packedBase64)
+        if (packed.size <= 12) {
+            null
+        } else {
+            Cipher.getInstance(TRANSFORMATION).apply {
+                init(
+                    Cipher.DECRYPT_MODE,
+                    deviceKey(),
+                    GCMParameterSpec(128, packed.copyOfRange(0, 12)),
+                )
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
     private fun deviceKey(): SecretKey {
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (keyStore.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
@@ -75,53 +124,95 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
-                // No setUserAuthenticationRequired: the biometric PROMPT
-                // is the gate (1.x posture), the key must stay usable
-                // immediately after it.
+                .setUserAuthenticationRequired(true)
+                .setInvalidatedByBiometricEnrollment(true)
                 .build(),
         )
         return generator.generateKey()
     }
 
     companion object {
-        const val ALIAS = "nota.notelock.devicekey"
+        const val ALIAS = "nota.notelock.devicekey.v2"
+        /** Phase 2b alias — orphaned by the crypto-binding upgrade. */
+        const val LEGACY_ALIAS = "nota.notelock.devicekey"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
 }
 
 /**
- * The on-device NEK copy a successful fingerprint prompt may release
- * (Phase 2b) — modelled EXACTLY as 1.x `note-lock-crypto.ts`'s biometric
- * copy: the copy itself is the NEK sealed under a per-device key, it
- * lives only on this device (DataStore, keyed `notelock_bio_<noteId>`),
- * and it NEVER enters Room or backup data. A backup credential slot is
+ * The on-device NEK copy a crypto-bound fingerprint prompt may
+ * release (Phase 2b, reworked Phase 2.5) — the copy itself is the
+ * NEK sealed under the per-device auth-required key, it lives only
+ * on this device (DataStore, keyed `notelock_bio_<noteId>`), and it
+ * NEVER enters Room or backup data. A backup credential slot is
  * always required alongside it.
  *
- * Any failure reading the copy returns null (the caller falls back to a
- * credential) — this store never crashes the unlock path.
+ * Unlock discipline (the Phase 2.5 fix): previously the flow was
+ * "prompt returns success → [readCopy] decrypts separately" — a bare
+ * boolean gate in front of a freely usable key. Now the sealed NEK
+ * cipher IS the prompt's CryptoObject: [openCipher] builds the
+ * DECRYPT cipher, the prompt authorises it, and [readCopy] completes
+ * the decryption with that authorised cipher. No authorised cipher,
+ * no NEK — a spoofed prompt success releases nothing.
+ *
+ * Any failure reading the copy returns null (the caller falls back
+ * to a credential) — this store never crashes the unlock path.
  */
 class NoteLockBiometricStore(
     private val preferences: PreferencesRepository,
     private val keyProvider: NoteLockDeviceKeyProvider,
 ) {
-    /** Stores the device copy; false when sealing/persisting failed. */
-    suspend fun storeCopy(noteId: String, nek: ByteArray): Boolean {
-        val packed = keyProvider.encrypt(nek) ?: return false
+    /** Cipher for an ENABLING prompt (seal direction). */
+    fun sealCipher(): Cipher? = keyProvider.sealCipher()
+
+    /**
+     * Stores the device copy BY COMPLETING the seal with the
+     * prompt-authorised [cipher]; false when sealing/persisting failed.
+     */
+    suspend fun storeCopy(noteId: String, nek: ByteArray, cipher: Cipher): Boolean {
+        val packed = try {
+            Base64.getEncoder().encodeToString(cipher.iv + cipher.doFinal(nek))
+        } catch (e: Exception) {
+            return false
+        }
         preferences.setNoteLockBiometricCopy(noteId, packed)
         // safeEdit swallows IO failures by design, so confirm the copy
-        // actually landed before reporting success (1.x mirrors this:
-        // record.biometric = whether the copy actually stored).
+        // actually landed before reporting success.
         return preferences.getNoteLockBiometricCopy(noteId) == packed
     }
 
-    /** Reads the device copy; null when absent or unreadable. */
-    suspend fun readCopy(noteId: String): ByteArray? {
+    /** Cipher for an UNLOCK prompt for [noteId]; null when no copy exists. */
+    suspend fun openCipher(noteId: String): Cipher? {
         val packed = try {
             preferences.getNoteLockBiometricCopy(noteId)
         } catch (e: Exception) {
             null
         } ?: return null
-        return keyProvider.decrypt(packed)
+        return keyProvider.openCipher(packed)
+    }
+
+    /**
+     * Reads the device copy BY COMPLETING the decryption with the
+     * prompt-authorised [cipher]; null when absent or unreadable.
+     * The GCM tag check inside doFinal is the unlock proof.
+     */
+    suspend fun readCopy(noteId: String, cipher: Cipher): ByteArray? {
+        val packed = try {
+            preferences.getNoteLockBiometricCopy(noteId)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        val raw = try {
+            Base64.getDecoder().decode(packed)
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
+        if (raw.size <= 12) return null
+        return try {
+            cipher.doFinal(raw.copyOfRange(12, raw.size))
+        } catch (e: Exception) {
+            null
+        }
     }
 
     suspend fun removeCopy(noteId: String) {

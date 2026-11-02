@@ -47,6 +47,7 @@ sealed interface UnlockResult {
  */
 class AppLockManager(
     private val repository: PreferencesRepository,
+    private val biometricStore: AppLockBiometricStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -123,16 +124,40 @@ class AppLockManager(
         }
     }
 
-    /** Biometric success gate: unlocks without touching attempt counters. */
-    fun unlockWithBiometric() {
+    /**
+     * CRYPTO-BOUND biometric unlock (Phase 2.5, replacing the old
+     * bare-boolean `unlockWithBiometric()`): [authorisedCipher] is the
+     * cipher BiometricPrompt authorised via its CryptoObject, obtained
+     * from [AppLockBiometricStore.openCipher]. The app unlocks ONLY
+     * when that cipher actually decrypts the sealed token
+     * ([AppLockBiometricStore.verifyToken]) — a prompt success without
+     * a working crypto result never reaches here as a proof, and a
+     * cipher that cannot decrypt the token changes nothing.
+     * Returns true when the app is now unlocked.
+     */
+    fun unlockWithBiometric(authorisedCipher: javax.crypto.Cipher): Boolean {
         val current = _settings.value
-        if (!current.isEnabled || !current.biometricEnabled) return
-        if (System.currentTimeMillis() < current.lockoutUntil) return
+        if (!current.isEnabled || !current.biometricEnabled) return false
+        if (System.currentTimeMillis() < current.lockoutUntil) return false
+        if (!biometricStore.verifyToken(authorisedCipher)) return false
         _isLocked.value = false
         backgroundedAtMillis = null
         scope.launch {
             attemptMutex.withLock { repository.setAppLockFailedAttempts(0, 0L) }
         }
+        return true
+    }
+
+    /**
+     * Crypto-bound biometric check for Settings re-authorisation:
+     * same token proof as [unlockWithBiometric], but never unlocks
+     * the app and never mutates the attempt counters.
+     */
+    fun verifyBiometricForSettings(authorisedCipher: javax.crypto.Cipher): Boolean {
+        val current = _settings.value
+        if (!current.isEnabled || !current.biometricEnabled) return false
+        if (System.currentTimeMillis() < current.lockoutUntil) return false
+        return biometricStore.verifyToken(authorisedCipher)
     }
 
     /**
@@ -225,6 +250,7 @@ class AppLockManager(
         val remaining = _settings.value.enabledMethods - method
         if (remaining.isEmpty()) {
             repository.setAppLockBiometricEnabled(false)
+            scope.launch { biometricStore.clear() }
             _isLocked.value = false
         }
     }
@@ -237,6 +263,9 @@ class AppLockManager(
 
     suspend fun setBiometricEnabled(enabled: Boolean) {
         repository.setAppLockBiometricEnabled(enabled)
+        // Disabling fingerprint must destroy its proof material too:
+        // a stale sealed token must never outlive the toggle.
+        if (!enabled) biometricStore.clear()
     }
 
     suspend fun setLockTimeoutSeconds(seconds: Int) {

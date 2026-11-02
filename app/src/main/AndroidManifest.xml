@@ -1,6 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Phase 2.5 (F4): biometric permissions, declared explicitly.
+         USE_BIOMETRIC is the API 28+ permission; USE_FINGERPRINT is
+         the API 23-27 one the framework FingerprintManager probe and
+         the AndroidX FingerprintManagerCompat path require - without
+         it, hasEnrolledFingerprints/isHardwareDetected fail on
+         API 27. androidx.biometric merges its own copies, but Nota
+         declares them itself so the merged manifest is auditable
+         and cannot silently lose them in a library change. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission
+        android:name="android.permission.USE_FINGERPRINT"
+        android:maxSdkVersion="27" />
+    <uses-feature
+        android:name="android.hardware.fingerprint"
+        android:required="false" />
+
     <application
         android:name="app.nota.NotaApplication"
         android:allowBackup="true"

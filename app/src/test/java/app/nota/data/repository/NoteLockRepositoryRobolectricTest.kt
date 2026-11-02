@@ -70,6 +70,28 @@ class NoteLockRepositoryRobolectricTest {
         } catch (e: Exception) {
             null
         }
+
+        // Phase 2.5 cipher factories: the fake key needs no user
+        // authentication, so these are plain ciphers over the same
+        // raw key (the production auth-required behaviour is
+        // device-only - Robolectric cannot exercise it).
+        override fun sealCipher(): Cipher =
+            Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
+            }
+
+        override fun openCipher(packedBase64: String): Cipher? = try {
+            val packed = Base64.getDecoder().decode(packedBase64)
+            Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(
+                    Cipher.DECRYPT_MODE,
+                    SecretKeySpec(key, "AES"),
+                    GCMParameterSpec(128, packed.copyOfRange(0, 12)),
+                )
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private lateinit var db: NotaDatabase
@@ -131,6 +153,7 @@ class NoteLockRepositoryRobolectricTest {
             NoteLockMethod.PIN,
             NoteLockCrypto.canonicalPin("135790"),
             enableBiometric = true,
+            biometricCipher = biometricStore.sealCipher(),
         )
         assertTrue(locked.locked)
         assertEquals("", locked.plainText)
@@ -189,7 +212,7 @@ class NoteLockRepositoryRobolectricTest {
         assertTrue(notes.searchNotes("zebra").isEmpty())
 
         // ---- Biometric copy unlocks with the same key.
-        val bio = lockRepo.unlockWithBiometric(resealed)
+        val bio = lockRepo.unlockWithBiometric(resealed, lockRepo.biometricUnlockCipher(resealed)!!)
         assertTrue(bio is NoteUnlockResult.Ok)
         assertArrayEquals(nek, (bio as NoteUnlockResult.Ok).nek)
 
@@ -205,7 +228,7 @@ class NoteLockRepositoryRobolectricTest {
         assertFalse(restoredRow.encrypted)
         assertArrayEquals(payload, store.fileFor(restoredRow).readBytes())
         // The device copy is gone with the lock.
-        assertNull(biometricStore.readCopy(note.id))
+        assertNull(biometricStore.openCipher(note.id))
         nek.fill(0)
     }
 
@@ -244,14 +267,14 @@ class NoteLockRepositoryRobolectricTest {
 
         // Biometric toggling round-trips through the device copy.
         val stored = notes.getById(note.id)!!
-        assertTrue(lockRepo.setBiometric(stored, nek, true))
+        assertTrue(lockRepo.setBiometric(stored, nek, true, biometricStore.sealCipher()))
         assertNotEquals(
             null,
             NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!.biometric
                 .takeIf { it },
         )
         assertTrue(lockRepo.setBiometric(notes.getById(note.id)!!, nek, false))
-        assertNull(biometricStore.readCopy(note.id))
+        assertNull(biometricStore.openCipher(note.id))
         nek.fill(0)
     }
 

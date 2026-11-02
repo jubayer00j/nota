@@ -28,13 +28,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.fragment.app.FragmentActivity
+import app.nota.data.security.AppLockBiometricStore
 import app.nota.data.security.AppLockManager
 import app.nota.data.security.AppLockMethod
 import app.nota.data.security.AppLockSettings
 import app.nota.feature.lock.CredentialEntryForm
 import app.nota.feature.lock.CredentialSetupForm
-import app.nota.feature.lock.isBiometricAvailable
-import app.nota.feature.lock.showBiometricPrompt
+import app.nota.feature.lock.biometricAvailability
+import app.nota.feature.lock.showBiometricCryptoPrompt
 import app.nota.ui.theme.NotaSpacing
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
@@ -53,12 +54,16 @@ import org.koin.compose.koinInject
 @Composable
 fun SecuritySection(
     appLockManager: AppLockManager = koinInject(),
+    biometricStore: AppLockBiometricStore = koinInject(),
 ) {
     val settings by appLockManager.settings.collectAsState()
     val context = LocalContext.current
     val activity = remember(context) { context as? FragmentActivity }
     val scope = rememberCoroutineScope()
-    val biometricAvailable = remember(context) { isBiometricAvailable(context) }
+    // Phase 2.5: the ONE authoritative availability check (enum, so
+    // Settings copy reflects the real sensor state on API 27 too).
+    val bioAvailability = remember(context) { biometricAvailability(context) }
+    val biometricAvailable = bioAvailability.isAvailable
 
     var verifyOpen by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -90,19 +95,41 @@ fun SecuritySection(
         action?.invoke()
     }
 
-    fun promptBiometricThen(onSuccess: () -> Unit) {
-        val host = activity
-        if (host == null) {
-            onSuccess()
-            return
-        }
-        showBiometricPrompt(
+    // Phase 2.5 crypto-bound flows: ENABLING seals a fresh token
+    // through the prompt (encrypt cipher); re-authorisation verifies
+    // by decrypting that token (decrypt cipher). No bare booleans.
+    fun promptBiometricSeal(onSealed: () -> Unit) {
+        val host = activity ?: return
+        val cipher = biometricStore.sealCipher() ?: return
+        showBiometricCryptoPrompt(
             host,
+            cipher,
             title = "Confirm it's you",
             negativeButtonText = "Cancel",
-            onSuccess = onSuccess,
+            onAuthenticated = { authorised ->
+                scope.launch {
+                    if (biometricStore.sealToken(authorised)) onSealed()
+                }
+            },
             onError = { /* setting unchanged */ },
         )
+    }
+
+    fun promptBiometricVerify(onSuccess: () -> Unit) {
+        val host = activity ?: return
+        scope.launch {
+            val cipher = biometricStore.openCipher() ?: return@launch
+            showBiometricCryptoPrompt(
+                host,
+                cipher,
+                title = "Verify it's you",
+                negativeButtonText = "Cancel",
+                onAuthenticated = { authorised ->
+                    if (appLockManager.verifyBiometricForSettings(authorised)) onSuccess()
+                },
+                onError = { /* stay in the dialog */ },
+            )
+        }
     }
 
     Column {
@@ -176,12 +203,7 @@ fun SecuritySection(
                 Column(Modifier.weight(1f)) {
                     Text("Fingerprint unlock", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        when {
-                            !biometricAvailable ->
-                                "No fingerprint or face unlock available on this device"
-                            settings.biometricEnabled -> "Unlock with your fingerprint or face"
-                            else -> "Also unlock with your fingerprint or face"
-                        },
+                        bioAvailability.settingsSubtitle(settings.biometricEnabled),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -194,7 +216,7 @@ fun SecuritySection(
                             // Enabling requires an OS biometric success
                             // (1.x posture), on top of re-authorisation.
                             requestAuthorized {
-                                promptBiometricThen {
+                                promptBiometricSeal {
                                     scope.launch { appLockManager.setBiometricEnabled(true) }
                                 }
                             }
@@ -313,7 +335,7 @@ fun SecuritySection(
             confirmButton = {
                 TextButton(onClick = {
                     offerBiometricAfterSetup = false
-                    promptBiometricThen {
+                    promptBiometricSeal {
                         scope.launch { appLockManager.setBiometricEnabled(true) }
                     }
                 }) { Text("Add fingerprint") }
@@ -368,13 +390,7 @@ fun SecuritySection(
                     if (settings.biometricEnabled && biometricAvailable && activity != null) {
                         Spacer(Modifier.height(NotaSpacing.sm))
                         TextButton(onClick = {
-                            showBiometricPrompt(
-                                activity,
-                                title = "Verify it's you",
-                                negativeButtonText = "Cancel",
-                                onSuccess = { onVerified() },
-                                onError = { /* stay in the dialog */ },
-                            )
+                            promptBiometricVerify { onVerified() }
                         }) { Text("Use fingerprint instead") }
                     }
                 }

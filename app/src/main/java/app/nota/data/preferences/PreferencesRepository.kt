@@ -190,12 +190,30 @@ class PreferencesRepository(context: Context) {
             remove(KEY_LOCK_PIN_SALT); remove(KEY_LOCK_PIN_HASH)
             remove(KEY_LOCK_PATTERN_SALT); remove(KEY_LOCK_PATTERN_HASH)
             remove(KEY_LOCK_BIOMETRIC)
+            remove(KEY_LOCK_BIO_TOKEN)
             remove(KEY_LOCK_FAILED_ATTEMPTS); remove(KEY_LOCK_LOCKOUT_UNTIL)
         }
     }
 
     suspend fun setAppLockBiometricEnabled(enabled: Boolean) {
         safeEdit { this[KEY_LOCK_BIOMETRIC] = enabled }
+    }
+
+    // ---- App Lock biometric token (Phase 2.5) ---------------------------
+    // The sealed random token the crypto-bound fingerprint unlock must
+    // decrypt (see AppLockBiometricStore). Device-local only; this value
+    // is a Keystore-sealed blob, useless off this device, and it never
+    // enters a backup (backups read Room, not this store).
+
+    suspend fun getAppLockBiometricToken(): String? =
+        dataStore.safeData.first()[KEY_LOCK_BIO_TOKEN]
+
+    suspend fun setAppLockBiometricToken(packed: String) {
+        safeEdit { this[KEY_LOCK_BIO_TOKEN] = packed }
+    }
+
+    suspend fun removeAppLockBiometricToken() {
+        safeEdit { remove(KEY_LOCK_BIO_TOKEN) }
     }
 
     suspend fun setAppLockFailedAttempts(failedAttempts: Int, lockoutUntil: Long) {
@@ -247,6 +265,7 @@ class PreferencesRepository(context: Context) {
         val KEY_LOCK_PATTERN_SALT = stringPreferencesKey("app_lock_pattern_salt")
         val KEY_LOCK_PATTERN_HASH = stringPreferencesKey("app_lock_pattern_hash")
         val KEY_LOCK_BIOMETRIC = booleanPreferencesKey("app_lock_biometric")
+        val KEY_LOCK_BIO_TOKEN = stringPreferencesKey("app_lock_bio_token")
         val KEY_LOCK_FAILED_ATTEMPTS = intPreferencesKey("app_lock_failed_attempts")
         val KEY_LOCK_LOCKOUT_UNTIL = longPreferencesKey("app_lock_lockout_until")
         val KEY_LOCK_TIMEOUT_SECONDS = intPreferencesKey("app_lock_timeout_seconds")
