@@ -302,12 +302,33 @@ class NoteLockUnlockStateRobolectricTest {
             // when the looper idles forward). idleFor drives that
             // scheduler clock; advanceBy is kept alongside for the
             // uptime clock.
+            // DIAGNOSTIC (coordinator, temporary): probe the clock
+            // around the advance so the next CI run shows which API
+            // actually moves System.currentTimeMillis() here.
+            val deadlineBeforeAdvance =
+                NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!.lockoutUntil
+            val nowBeforeAdvance = System.currentTimeMillis()
             ShadowSystemClock.advanceBy(Duration.ofSeconds(31))
+            val nowAfterAdvanceBy = System.currentTimeMillis()
             shadowOf(Looper.getMainLooper()).idleFor(31, TimeUnit.SECONDS)
+            val nowAfterIdleFor = System.currentTimeMillis()
 
             // The correct PIN opens on the FIRST try after the backoff.
             vm.unlockWithCredential(AppLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"))
-            awaitCondition("session started after backoff") { vm.sessionActive.value }
+            // DIAGNOSTIC (coordinator, temporary): on failure, dump
+            // the clock probes and the repository's actual answer.
+            awaitCondition("final attempt started") { vm.unlockInProgress.value }
+            awaitCondition("final attempt finished") { !vm.unlockInProgress.value }
+            val probeRecord = NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!
+            assertTrue(
+                "session must start after backoff; lockError=${vm.lockError.value}, " +
+                    "deadlineBefore=$deadlineBeforeAdvance, nowBefore=$nowBeforeAdvance, " +
+                    "nowAfterAdvanceBy=$nowAfterAdvanceBy, nowAfterIdleFor=$nowAfterIdleFor, " +
+                    "nowAtAssert=${System.currentTimeMillis()}, " +
+                    "persisted failedAttempts=${probeRecord.failedAttempts}, " +
+                    "persisted lockoutUntil=${probeRecord.lockoutUntil}",
+                vm.sessionActive.value,
+            )
             val afterOpen = NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!
             assertEquals(0, afterOpen.failedAttempts)
             assertNull(afterOpen.lockoutUntil)
