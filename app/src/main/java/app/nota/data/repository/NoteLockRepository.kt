@@ -12,6 +12,7 @@ import app.nota.data.security.NoteLockRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import javax.crypto.Cipher
 import kotlinx.coroutines.withContext
 
 /** Outcome of one unlock attempt (1.x `UnlockResult`). */
@@ -93,6 +94,7 @@ class NoteLockRepository(
         method: NoteLockMethod,
         canonicalSecret: String,
         enableBiometric: Boolean = false,
+        biometricCipher: Cipher? = null,
     ): NoteEntity = mutationMutex.withLock {
         val note = noteRepository.getById(noteId) ?: throw IllegalStateException("Note not found.")
         check(!note.locked && note.lockRecordJson == null) { "This note is already locked." }
@@ -129,7 +131,13 @@ class NoteLockRepository(
                     lockedAt = System.currentTimeMillis(),
                 )
                 if (enableBiometric) {
-                    record = record.copy(biometric = biometricStore.storeCopy(noteId, nek))
+                    // Phase 2.5: sealing requires the prompt-authorised
+                    // cipher; without one the note still locks, with the
+                    // credential only (record.biometric stays false).
+                    record = record.copy(
+                        biometric = biometricCipher != null &&
+                            biometricStore.storeCopy(noteId, nek, biometricCipher),
+                    )
                 }
                 val locked = note.copy(
                     contentHtml = encryptedContent,
@@ -215,12 +223,32 @@ class NoteLockRepository(
     }
 
     /**
-     * Releases the note key from the on-device fingerprint copy (1.x
-     * `unlockNoteWithBiometricCopy`). Callers must have completed a
-     * successful native biometric prompt first — this performs no
-     * authentication itself.
+     * Cipher for a biometric UNLOCK prompt for [note] (Phase 2.5):
+     * the DECRYPT cipher over the sealed NEK copy, to be handed to
+     * BiometricPrompt as its CryptoObject. Null when fingerprint
+     * unlock is not enabled for the note or no copy exists.
      */
-    suspend fun unlockWithBiometric(note: NoteEntity): NoteUnlockResult = attemptMutex.withLock {
+    suspend fun biometricUnlockCipher(note: NoteEntity): Cipher? {
+        val lock = recordFor(note) ?: return null
+        if (!lock.biometric) return null
+        if (lock.lockoutSeconds() > 0) return null
+        return biometricStore.openCipher(note.id)
+    }
+
+    /** Cipher for a biometric SEAL prompt (enabling fingerprint). */
+    fun biometricSealCipher(): Cipher? = biometricStore.sealCipher()
+
+    /**
+     * Releases the note key from the on-device fingerprint copy
+     * (Phase 2.5 crypto-bound form of 1.x
+     * `unlockNoteWithBiometricCopy`). [authorisedCipher] is the
+     * cipher the biometric prompt authorised via its CryptoObject
+     * (from [biometricUnlockCipher]); the NEK is released ONLY when
+     * that cipher actually decrypts the sealed copy — the GCM tag
+     * verification inside the store is the proof. A prompt success
+     * without a working crypto result unlocks nothing.
+     */
+    suspend fun unlockWithBiometric(note: NoteEntity, authorisedCipher: Cipher): NoteUnlockResult = attemptMutex.withLock {
         val fresh = noteRepository.getById(note.id) ?: return@withLock NoteUnlockResult.Error("Note not found.")
         val lock = recordFor(fresh)
         if (lock?.biometric != true) {
@@ -233,7 +261,7 @@ class NoteLockRepository(
                 lockoutSeconds = lockout,
             )
         }
-        val nek = biometricStore.readCopy(note.id)
+        val nek = biometricStore.readCopy(note.id, authorisedCipher)
             ?: return@withLock NoteUnlockResult.Error(
                 "Fingerprint unlock isn't available on this device for this note. Use your backup credential.",
             )
@@ -382,12 +410,22 @@ class NoteLockRepository(
         return true
     }
 
-    /** Enables/disables fingerprint unlock for a locked note (1.x `setNoteLockBiometric`). */
-    suspend fun setBiometric(note: NoteEntity, nek: ByteArray, enabled: Boolean): Boolean {
+    /**
+     * Enables/disables fingerprint unlock for a locked note (1.x
+     * `setNoteLockBiometric`). Enabling requires the prompt-authorised
+     * seal [cipher] (Phase 2.5) — without it, enabling fails and the
+     * record is left unchanged.
+     */
+    suspend fun setBiometric(
+        note: NoteEntity,
+        nek: ByteArray,
+        enabled: Boolean,
+        cipher: Cipher? = null,
+    ): Boolean {
         val fresh = noteRepository.getById(note.id) ?: return false
         val lock = recordFor(fresh) ?: return false
         return if (enabled) {
-            if (!biometricStore.storeCopy(note.id, nek)) {
+            if (cipher == null || !biometricStore.storeCopy(note.id, nek, cipher)) {
                 false
             } else {
                 persistRecord(fresh, lock.copy(biometric = true))

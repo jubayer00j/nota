@@ -4,7 +4,10 @@ import app.nota.data.attachments.AttachmentStore
 import app.nota.data.backup.BackupRepository
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.security.AndroidKeystoreAppLockKeyProvider
 import app.nota.data.security.AndroidKeystoreNoteLockKeyProvider
+import app.nota.data.security.AppLockBiometricStore
+import app.nota.data.security.AppLockDeviceKeyProvider
 import app.nota.data.security.AppLockManager
 import app.nota.data.security.NoteLockBiometricStore
 import app.nota.data.security.NoteLockDeviceKeyProvider
@@ -43,7 +46,11 @@ val appModule = module {
     single { AttachmentStore(androidContext(), get()) }
     single { TemplateRepository(androidContext()) }
     single { PreferencesRepository(androidContext()) }
-    single { AppLockManager(get()) }
+    // Phase 2.5: App Lock biometric is crypto-bound - the manager owns
+    // a sealed-token store over an auth-required Keystore key.
+    single<AppLockDeviceKeyProvider> { AndroidKeystoreAppLockKeyProvider() }
+    single { AppLockBiometricStore(get(), get()) }
+    single { AppLockManager(get(), get()) }
     // Phase 2b per-note lock: Keystore device-key provider + biometric
     // copy store + the lock repository (Koin singles).
     single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }

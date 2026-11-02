@@ -129,6 +129,30 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun nestedTaskListInsideRegularListIsPreservedVerbatim() {
+        // A task list nested inside a regular bullet item, in the
+        // shape that reaches the normaliser: the nested list is a
+        // task list by its <ul data-type="taskList"> attribute
+        // (its items are plain <li> — with canonical
+        // data-type="taskItem" items the OUTER list is classified
+        // as a task list by parse's isTaskList heuristic before
+        // normalisation is ever consulted). The OUTER list is
+        // normalised to the bare-item dialect, but the nested task
+        // list must survive byte-for-byte — its items' <div><p>
+        // scaffolding is not the editor-hostile shape
+        // normalisation exists to remove. (Codex P2, Phase 2.5.)
+        val taskList = "<ul data-type=\"taskList\">" +
+            "<li><div><p>Revise optics</p></div></li>" +
+            "<li><div><p>Revise thermo</p></div></li></ul>"
+        val html = "<ul><li><p>Shopping</p>$taskList</li><li><p>Dinner</p></li></ul>"
+        val reserialised = NoteDocument.serialize(NoteDocument.parse(html))
+        assertEquals(
+            "<ul><li>Shopping$taskList</li><li>Dinner</li></ul>",
+            reserialised,
+        )
+    }
+
+    @Test
     fun unknownBlocksArePreservedVerbatim() {
         val weird = "<div class=\"custom-widget\" data-x=\"1\"><span>hi</span></div>"
         val segments = NoteDocument.parse("<p>a</p>$weird<p>b</p>")
@@ -158,13 +182,22 @@ class NoteDocumentTest {
 
     @Test
     fun everydayShapesStayTextSegments() {
-        // The library-lossless core must NOT be segmented.
+        // The library-lossless core must NOT be segmented. Tiptap's
+        // <li><p>…</p></li> list dialect is normalised to the bare-item
+        // shape on the way in (Phase 2.5 fix F1: the library's setHtml
+        // drops a list whose items wrap their content in <p>), so the
+        // serialised form differs from the 1.x input exactly there —
+        // everything else is byte-for-byte.
         val html = "<h2>Head</h2><p>one</p><ul><li><p>a</p></li><li><p>b</p></li></ul>" +
             "<ol><li><p>first</p></li></ol><p>tail</p>"
         val segments = NoteDocument.parse(html)
         assertEquals(1, segments.size)
         assertTrue(segments[0] is TextSegment)
-        assertEquals(html, NoteDocument.serialize(segments))
+        assertEquals(
+            "<h2>Head</h2><p>one</p><ul><li>a</li><li>b</li></ul>" +
+                "<ol><li>first</li></ol><p>tail</p>",
+            NoteDocument.serialize(segments),
+        )
     }
 
     @Test

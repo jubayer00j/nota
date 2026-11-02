@@ -26,6 +26,17 @@ import kotlin.math.roundToInt
  * it again yields the same segments, and canonical inputs (this file's
  * own serialised forms) round-trip byte-for-byte. Cell/item content HTML
  * is preserved verbatim inside table and task-list segments.
+ *
+ * One dialect is normalised on the way in (Phase 2.5 fix F1): Tiptap —
+ * the 1.x editor — wraps every list item's content in a `<p>`
+ * (`<li><p>Alpha</p></li>`), a shape the rich-text library's setHtml
+ * cannot represent: its parser promotes the item's paragraph out of the
+ * list and drops the `<ul>`/`<ol>` entirely, so the editor's first
+ * autosave permanently rewrote a restored 1.x note's lists as plain
+ * paragraphs. List blocks are therefore rewritten to the bare-item
+ * shape the library round-trips losslessly (`<li>Alpha</li>` — also
+ * the shape Nota's own editor emits) before any text segment reaches
+ * the editor. See [normalizeListBlock].
  */
 sealed interface DocSegment
 
@@ -159,7 +170,7 @@ object NoteDocument {
                         if (isTaskList(tag.attrs, inner)) {
                             flushText(); out += TaskListSegment(parseTaskItems(inner))
                         } else {
-                            text.append(whole)
+                            text.append(normalizeListBlock(whole))
                         }
                         i = close.second
                     }
@@ -170,7 +181,9 @@ object NoteDocument {
                         text.append(html.substring(lt, tag.end)); i = tag.end
                     } else {
                         flushText()
-                        out += QuoteSegment(html.substring(tag.end, close.first).trim())
+                        out += QuoteSegment(
+                            normalizeListsInFragment(html.substring(tag.end, close.first).trim()),
+                        )
                         i = close.second
                     }
                 }
@@ -307,6 +320,229 @@ object NoteDocument {
             out += imageSegmentFrom(imgTag)
             idx = imgTag.end
         }
+    }
+
+    // ------------------------------------------------- list dialect guard
+
+    /**
+     * Rewrites one `<ul>`/`<ol>` block to the bare-item dialect the
+     * rich-text library round-trips losslessly (Phase 2.5 fix F1, see
+     * the class doc): the root tag (attributes included — `start`,
+     * `type`, …) is preserved verbatim, each `<li>` is normalised by
+     * [normalizeListItem], stray nested lists recurse, and anything
+     * else is copied verbatim. A block already in the bare dialect is
+     * returned byte-for-byte unchanged.
+     */
+    private fun normalizeListBlock(whole: String): String {
+        val root = readTag(whole, 0) ?: return whole
+        if (root.name != "ul" && root.name != "ol") return whole
+        val close = findClose(whole, root.end, root.name) ?: return whole
+        val inner = whole.substring(root.end, close.first)
+        return buildString {
+            append(whole.substring(0, root.end))
+            append(normalizeListItems(inner))
+            append(whole.substring(close.first, close.second))
+        }
+    }
+
+    /** The direct children of a `<ul>`/`<ol>`: every `<li>` is
+     *  normalised, stray nested lists recurse, other markup is copied
+     *  verbatim. Whitespace-only text between items is insignificant
+     *  in list markup (Tiptap emits none) and is dropped. */
+    private fun normalizeListItems(inner: String): String {
+        val out = StringBuilder()
+        var i = 0
+        while (i < inner.length) {
+            val lt = inner.indexOf('<', i)
+            if (lt < 0) {
+                val rest = inner.substring(i)
+                if (rest.isNotBlank()) out.append(rest)
+                break
+            }
+            val between = inner.substring(i, lt)
+            if (between.isNotBlank()) out.append(between)
+            val tag = readTag(inner, lt) ?: run {
+                out.append(inner.substring(lt))
+                break
+            }
+            when {
+                tag.closing -> {
+                    out.append(inner.substring(lt, tag.end)); i = tag.end
+                }
+                tag.name == "li" -> {
+                    val close = findClose(inner, tag.end, "li")
+                    if (close == null) {
+                        out.append(inner.substring(lt, tag.end)); i = tag.end
+                    } else {
+                        out.append(inner.substring(lt, tag.end))
+                        out.append(normalizeListItem(inner.substring(tag.end, close.first)))
+                        out.append(inner.substring(close.first, close.second))
+                        i = close.second
+                    }
+                }
+                tag.name == "ul" || tag.name == "ol" -> {
+                    val close = findClose(inner, tag.end, tag.name)
+                    if (close == null) {
+                        out.append(inner.substring(lt, tag.end)); i = tag.end
+                    } else {
+                        val whole = inner.substring(lt, close.second)
+                        // A nested TASK list is preserved verbatim,
+                        // exactly like a top-level one (Codex P2,
+                        // Phase 2.5): its items' <div><p> scaffolding
+                        // must not be unwrapped by normalisation.
+                        out.append(
+                            if (isTaskList(tag.attrs, inner.substring(tag.end, close.first))) {
+                                whole
+                            } else {
+                                normalizeListBlock(whole)
+                            },
+                        )
+                        i = close.second
+                    }
+                }
+                else -> {
+                    out.append(inner.substring(lt, tag.end)); i = tag.end
+                }
+            }
+        }
+        return out.toString()
+    }
+
+    /**
+     * One list item's content with its `<p>` children unwrapped — the
+     * actual dialect fix. Paragraphs become their inner HTML (several
+     * in a row are joined by `<br>`, the bare dialect's line break),
+     * nested lists are normalised recursively, and all other content
+     * (inline markup, text) is preserved verbatim. An item with no
+     * `<p>` child is returned untouched, so Nota-native items — and
+     * the guard's byte-for-byte stability for canonical input — are
+     * unaffected.
+     */
+    private fun normalizeListItem(inner: String): String {
+        // Chunk kinds: 0 = raw span, 1 = paragraph, 2 = nested list.
+        val chunks = mutableListOf<Pair<Int, String>>()
+        val raw = StringBuilder()
+        fun flushRaw() {
+            if (raw.isNotEmpty()) {
+                chunks += 0 to raw.toString()
+                raw.clear()
+            }
+        }
+        var i = 0
+        while (i < inner.length) {
+            val lt = inner.indexOf('<', i)
+            if (lt < 0) {
+                raw.append(inner.substring(i))
+                break
+            }
+            raw.append(inner.substring(i, lt))
+            val tag = readTag(inner, lt) ?: run {
+                raw.append('<')
+                i = lt + 1
+                continue
+            }
+            when {
+                !tag.closing && tag.name == "p" -> {
+                    val close = findClose(inner, tag.end, "p")
+                    if (close == null) {
+                        raw.append(inner.substring(lt, tag.end)); i = tag.end
+                    } else {
+                        flushRaw()
+                        chunks += 1 to inner.substring(tag.end, close.first)
+                        i = close.second
+                    }
+                }
+                !tag.closing && (tag.name == "ul" || tag.name == "ol") -> {
+                    val close = findClose(inner, tag.end, tag.name)
+                    if (close == null) {
+                        raw.append(inner.substring(lt, tag.end)); i = tag.end
+                    } else {
+                        flushRaw()
+                        val whole = inner.substring(lt, close.second)
+                        // Nested TASK lists stay verbatim (see
+                        // normalizeListItems) — never unwrapped.
+                        chunks += 2 to if (
+                            isTaskList(tag.attrs, inner.substring(tag.end, close.first))
+                        ) {
+                            whole
+                        } else {
+                            normalizeListBlock(whole)
+                        }
+                        i = close.second
+                    }
+                }
+                else -> {
+                    raw.append(inner.substring(lt, tag.end)); i = tag.end
+                }
+            }
+        }
+        flushRaw()
+        if (chunks.none { it.first == 1 }) return inner
+        val out = StringBuilder()
+        var prevPara = false
+        for ((kind, html) in chunks) {
+            when (kind) {
+                1 -> {
+                    if (prevPara) out.append("<br>")
+                    out.append(html)
+                    prevPara = true
+                }
+                2 -> {
+                    out.append(html)
+                    prevPara = false
+                }
+                else -> {
+                    // Whitespace between block chunks is insignificant.
+                    if (html.isNotBlank()) {
+                        out.append(html)
+                        prevPara = false
+                    }
+                }
+            }
+        }
+        return out.toString().trim()
+    }
+
+    /**
+     * Applies [normalizeListBlock] to every non-task list inside an
+     * HTML fragment. Quote bodies reach the editor as rich text too,
+     * so their lists need the same guard; task lists are left verbatim
+     * (they are segmented and modelled separately in [parse]).
+     */
+    private fun normalizeListsInFragment(html: String): String {
+        if (!html.contains("<ul", ignoreCase = true) &&
+            !html.contains("<ol", ignoreCase = true)
+        ) {
+            return html
+        }
+        val out = StringBuilder()
+        var i = 0
+        while (i < html.length) {
+            val lt = html.indexOf('<', i)
+            if (lt < 0) {
+                out.append(html.substring(i))
+                break
+            }
+            val tag = readTag(html, lt)
+            if (tag == null || tag.closing || (tag.name != "ul" && tag.name != "ol")) {
+                val end = if (tag == null) lt + 1 else tag.end
+                out.append(html.substring(i, end))
+                i = end
+                continue
+            }
+            out.append(html.substring(i, lt))
+            val close = findClose(html, tag.end, tag.name)
+            if (close == null) {
+                out.append(html.substring(lt, tag.end))
+                i = tag.end
+                continue
+            }
+            val whole = html.substring(lt, close.second)
+            val inner = html.substring(tag.end, close.first)
+            out.append(if (isTaskList(tag.attrs, inner)) whole else normalizeListBlock(whole))
+            i = close.second
+        }
+        return out.toString()
     }
 
     // ------------------------------------------------------------ serialize

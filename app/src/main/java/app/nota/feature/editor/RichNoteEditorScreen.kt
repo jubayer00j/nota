@@ -173,6 +173,9 @@ fun RichNoteEditorScreen(
     val sessionActive by viewModel.sessionActive.collectAsState()
     val sessionHtml by viewModel.sessionHtml.collectAsState()
     val lockError by viewModel.lockError.collectAsState()
+    // Phase 2.5 (F3): live lockout deadline + in-flight flag for the gate.
+    val lockoutUntilMillis by viewModel.lockoutUntilMillis.collectAsState()
+    val unlockInProgress by viewModel.unlockInProgress.collectAsState()
     var showLockDialog by remember { mutableStateOf(false) }
     var showManageLock by remember { mutableStateOf(false) }
     var lockDialogError by remember { mutableStateOf<String?>(null) }
@@ -483,8 +486,11 @@ fun RichNoteEditorScreen(
                     onSubmitCredential = { method, secret ->
                         viewModel.unlockWithCredential(method, secret)
                     },
-                    onBiometricSuccess = { viewModel.unlockWithBiometric() },
+                    biometricCipherProvider = { viewModel.biometricUnlockCipher() },
+                    onBiometricUnlock = { authorised -> viewModel.unlockWithBiometric(authorised) },
                     modifier = Modifier.padding(padding),
+                    lockoutUntilMillis = lockoutUntilMillis,
+                    unlockInProgress = unlockInProgress,
                 )
             } else {
                 Column(Modifier.fillMaxSize().padding(padding).padding(NotaSpacing.lg)) {
@@ -762,12 +768,12 @@ fun RichNoteEditorScreen(
         LockNoteDialog(
             error = lockDialogError,
             onDismiss = { showLockDialog = false },
-            onLock = { method, canonical, biometric ->
+            onLock = { method, canonical, biometric, cipher ->
                 // Flush pending edits through the normal persist first,
                 // so the seal covers the latest stored body; then lock
                 // and leave — reopening the note now shows the gate.
                 persistNow {
-                    viewModel.lockCurrentNote(method, canonical, biometric) { error ->
+                    viewModel.lockCurrentNote(method, canonical, biometric, cipher) { error ->
                         if (error == null) {
                             showLockDialog = false
                             onBack()
@@ -801,8 +807,8 @@ fun RichNoteEditorScreen(
                         }
                     }
                 },
-                onSetBiometric = { enabled ->
-                    viewModel.setLockBiometric(enabled) { ok ->
+                onSetBiometric = { enabled, cipher ->
+                    viewModel.setLockBiometric(enabled, cipher) { ok ->
                         manageFeedback = if (ok) {
                             null
                         } else {

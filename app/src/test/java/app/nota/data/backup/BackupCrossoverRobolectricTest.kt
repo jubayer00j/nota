@@ -61,6 +61,22 @@ class BackupCrossoverRobolectricTest {
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, packed.copyOfRange(0, 12)))
             cipher.doFinal(packed.copyOfRange(12, packed.size))
         } catch (e: Exception) { null }
+
+        // Phase 2.5 cipher factories (coordinator fix at assembly):
+        // F4 added these abstract members to NoteLockDeviceKeyProvider;
+        // this Phase-2 fake predates them. Same raw-key pattern as the
+        // repository test's fake (auth-required behaviour is
+        // device-only; Robolectric cannot exercise it).
+        override fun sealCipher(): Cipher =
+            Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
+            }
+        override fun openCipher(packedBase64: String): Cipher? = try {
+            val packed = Base64.getDecoder().decode(packedBase64)
+            Cipher.getInstance("AES/GCM/NoPadding").apply {
+                init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, packed.copyOfRange(0, 12)))
+            }
+        } catch (e: Exception) { null }
     }
 
     // PR-B fixture constants (NoteLockCryptoTest).
