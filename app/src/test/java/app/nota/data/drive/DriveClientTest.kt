@@ -52,7 +52,7 @@ class DriveClientTest {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val full = request.path ?: "/"
                 val recorded = Recorded(
-                    method = request.method,
+                    method = request.method ?: "GET",
                     path = full.substringBefore('?'),
                     rawQuery = full.substringAfter('?', "").ifEmpty { null },
                     body = request.body.readByteArray(),
