@@ -5,10 +5,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
-import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import app.nota.data.security.BiometricStep
+import app.nota.data.security.StepResult
 import javax.crypto.Cipher
 
 /**
@@ -41,6 +42,17 @@ import javax.crypto.Cipher
  * auth-required Keystore keys can only be released by a Class-3
  * authenticator. A WEAK-only face device is therefore honestly
  * "not available" for Nota's crypto flows.
+ *
+ * PHASE 2.7 EVIDENCE: the framework availability probe above passed
+ * on the same J7, but the 0.3.2 enable flow still failed at the
+ * AndroidX prompt with the on-screen step text "Fingerprint prompt:
+ * This device does not have a fingerprint sensor" — AndroidX's
+ * `ERROR_HW_NOT_PRESENT`. The sensor demonstrably exists and Noma
+ * uses it daily. Therefore AndroidX is now out of BOTH halves of
+ * the API < 28 loop: availability comes from the framework service,
+ * and the prompt executor is the framework fingerprint API (see
+ * [LegacyFingerprintPromptCoordinator]). AndroidX remains the
+ * executor only on API 28+, where its BiometricPrompt is native.
  */
 enum class BiometricAvailability {
     AVAILABLE,
@@ -142,10 +154,75 @@ fun biometricAvailability(context: Context): BiometricAvailability {
 fun isBiometricAvailable(context: Context): Boolean =
     biometricAvailability(context).isAvailable
 
+/** Which prompt implementation a device gets — SDK-gated, never mixed. */
+enum class BiometricPromptBackend {
+    ANDROIDX,
+    FRAMEWORK_FINGERPRINT,
+}
+
+/** Pure selection rule (unit-tested): API 28+ AndroidX, below it framework. */
+fun biometricPromptBackendForSdk(sdkInt: Int): BiometricPromptBackend =
+    if (sdkInt >= Build.VERSION_CODES.P) {
+        BiometricPromptBackend.ANDROIDX
+    } else {
+        BiometricPromptBackend.FRAMEWORK_FINGERPRINT
+    }
+
+fun biometricPromptBackend(): BiometricPromptBackend =
+    biometricPromptBackendForSdk(Build.VERSION.SDK_INT)
+
+/**
+ * The prompt executor seam (Phase 2.7). EVERY crypto-bound biometric
+ * call site in the app enters through [showBiometricCryptoPrompt],
+ * which delegates to exactly one executor for the running SDK:
+ *
+ * - API 28+: [AndroidXBiometricPromptExecutor] — unchanged.
+ * - API < 28: [FrameworkFingerprintPromptExecutor] — the framework
+ *   fingerprint API behind Nota's own dialog. AndroidX is not
+ *   consulted anywhere on this path.
+ *
+ * Both executors carry the caller's cipher as a CryptoObject and
+ * report prompt failures as typed [StepResult.Failed] values at
+ * [BiometricStep.PROMPT]. An executor success is never by itself an
+ * unlock: the caller must still complete the decrypt proof.
+ */
+interface BiometricPromptExecutor {
+    fun authenticate(
+        activity: FragmentActivity,
+        cipher: Cipher,
+        title: String,
+        subtitle: String?,
+        negativeButtonText: String,
+        onAuthenticated: (Cipher) -> Unit,
+        onError: (StepResult.Failed) -> Unit,
+    )
+}
+
+private fun promptFailure(reason: String): StepResult.Failed =
+    StepResult.Failed(BiometricStep.PROMPT, reason)
+
+/**
+ * AndroidX prompt error → typed failure (Phase 2.7, Codex P3).
+ * Cancellation-shaped AndroidX errors (user cancel, negative
+ * button, system cancel) normalise to the SAME "Cancelled" sentinel
+ * the framework path produces, so the call sites' suppression of
+ * intentional cancels works identically on both executors instead
+ * of leaking platform cancel strings as errors under the form.
+ */
+internal fun androidxPromptFailure(errorCode: Int, errString: CharSequence): StepResult.Failed =
+    if (errorCode == BiometricPrompt.ERROR_CANCELED ||
+        errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
+        errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON
+    ) {
+        promptFailure("Cancelled")
+    } else {
+        promptFailure(errString.toString())
+    }
+
 private fun buildPrompt(
     activity: FragmentActivity,
     onSucceeded: (BiometricPrompt.AuthenticationResult) -> Unit,
-    onError: (String) -> Unit,
+    onError: (StepResult.Failed) -> Unit,
 ): BiometricPrompt = BiometricPrompt(
     activity,
     ContextCompat.getMainExecutor(activity),
@@ -155,51 +232,91 @@ private fun buildPrompt(
         }
 
         override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-            onError(errString.toString())
+            onError(androidxPromptFailure(errorCode, errString))
         }
     },
 )
 
-/**
- * Plain (non-crypto) prompt — LEGACY, retained only for callers that
- * have not been migrated. New App Lock / per-note flows MUST use
- * [showBiometricCryptoPrompt]: a bare success boolean here is not
- * proof of anything (it can be hooked/spoofed) and Nota's biometric
- * unlocks are crypto-bound by design (Phase 2.5 requirement).
- */
-fun showBiometricPrompt(
-    activity: FragmentActivity,
-    title: String = "Unlock Nota",
-    subtitle: String? = null,
-    negativeButtonText: String = "Use PIN, password or pattern",
-    onSuccess: () -> Unit,
-    onError: (String) -> Unit,
-) {
-    val info = BiometricPrompt.PromptInfo.Builder()
-        .setTitle(title)
-        .setSubtitle(subtitle)
-        .setNegativeButtonText(negativeButtonText)
-        .setAllowedAuthenticators(BIOMETRIC_WEAK)
-        .build()
-    try {
-        buildPrompt(activity, { onSuccess() }, onError).authenticate(info)
-    } catch (e: IllegalStateException) {
-        onError(e.message ?: "Biometric prompt unavailable")
+/** API 28+ executor: AndroidX BiometricPrompt, BIOMETRIC_STRONG. */
+object AndroidXBiometricPromptExecutor : BiometricPromptExecutor {
+    override fun authenticate(
+        activity: FragmentActivity,
+        cipher: Cipher,
+        title: String,
+        subtitle: String?,
+        negativeButtonText: String,
+        onAuthenticated: (Cipher) -> Unit,
+        onError: (StepResult.Failed) -> Unit,
+    ) {
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setNegativeButtonText(negativeButtonText)
+            .setAllowedAuthenticators(BIOMETRIC_STRONG)
+            .build()
+        val prompt = buildPrompt(
+            activity,
+            { result ->
+                val authorised = result.cryptoObject?.cipher
+                if (authorised != null) {
+                    onAuthenticated(authorised)
+                } else {
+                    onError(promptFailure("Biometric result carried no crypto proof"))
+                }
+            },
+            onError,
+        )
+        try {
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+        } catch (e: IllegalStateException) {
+            onError(promptFailure(e.message ?: "Biometric prompt unavailable"))
+        } catch (e: IllegalArgumentException) {
+            onError(promptFailure(e.message ?: "Biometric prompt rejected"))
+        }
     }
 }
 
 /**
- * CRYPTO-BOUND prompt (Phase 2.5): [cipher] must come from an
- * auth-required Keystore key (AppLockBiometricStore /
- * NoteLockBiometricStore cipher factories). The prompt is shown with
- * `authenticate(info, CryptoObject(cipher))` and BIOMETRIC_STRONG.
+ * API < 28 executor: hands the request to the legacy prompt
+ * coordinator. [LegacyFingerprintPromptHost] (composed once at the
+ * MainActivity root) renders Nota's dialog and starts the actual
+ * framework authentication session; see LegacyFingerprintPrompt.kt.
+ */
+object FrameworkFingerprintPromptExecutor : BiometricPromptExecutor {
+    override fun authenticate(
+        activity: FragmentActivity,
+        cipher: Cipher,
+        title: String,
+        subtitle: String?,
+        negativeButtonText: String,
+        onAuthenticated: (Cipher) -> Unit,
+        onError: (StepResult.Failed) -> Unit,
+    ) {
+        LegacyFingerprintPromptCoordinator.begin(
+            cipher = cipher,
+            title = title,
+            subtitle = subtitle,
+            negativeButtonText = negativeButtonText,
+            onAuthenticated = onAuthenticated,
+            onError = onError,
+        )
+    }
+}
+
+/**
+ * CRYPTO-BOUND prompt entry point — the only biometric prompt API
+ * call sites use. [cipher] must come from an auth-required Keystore
+ * key (AppLockBiometricStore / NoteLockBiometricStore cipher
+ * factories). The selected executor shows the prompt with that
+ * cipher as its CryptoObject, and [onAuthenticated] receives the
+ * SAME cipher, now authorised by the authenticator.
  *
- * [onAuthenticated] receives the SAME cipher, now authorised by the
- * Keystore — the caller MUST complete the cryptographic operation
- * (decrypt the sealed token / sealed NEK copy) with it and treat
- * ONLY a successful doFinal as the unlock proof. If the result
+ * The caller MUST complete the cryptographic operation (decrypt the
+ * sealed token / sealed NEK copy) with the authorised cipher and
+ * treat ONLY a successful doFinal as the unlock proof. If a result
  * carries no crypto object, [onError] fires instead: a prompt
  * success without a crypto result must never unlock anything.
+ * There is deliberately no non-crypto prompt variant.
  */
 fun showBiometricCryptoPrompt(
     activity: FragmentActivity,
@@ -208,31 +325,19 @@ fun showBiometricCryptoPrompt(
     subtitle: String? = null,
     negativeButtonText: String = "Use PIN, password or pattern",
     onAuthenticated: (Cipher) -> Unit,
-    onError: (String) -> Unit,
+    onError: (StepResult.Failed) -> Unit,
 ) {
-    val info = BiometricPrompt.PromptInfo.Builder()
-        .setTitle(title)
-        .setSubtitle(subtitle)
-        .setNegativeButtonText(negativeButtonText)
-        .setAllowedAuthenticators(BIOMETRIC_STRONG)
-        .build()
-    val prompt = buildPrompt(
-        activity,
-        { result ->
-            val authorised = result.cryptoObject?.cipher
-            if (authorised != null) {
-                onAuthenticated(authorised)
-            } else {
-                onError("Biometric result carried no crypto proof")
-            }
-        },
-        onError,
-    )
-    try {
-        prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
-    } catch (e: IllegalStateException) {
-        onError(e.message ?: "Biometric prompt unavailable")
-    } catch (e: IllegalArgumentException) {
-        onError(e.message ?: "Biometric prompt rejected")
+    val executor: BiometricPromptExecutor = when (biometricPromptBackend()) {
+        BiometricPromptBackend.ANDROIDX -> AndroidXBiometricPromptExecutor
+        BiometricPromptBackend.FRAMEWORK_FINGERPRINT -> FrameworkFingerprintPromptExecutor
     }
+    executor.authenticate(
+        activity = activity,
+        cipher = cipher,
+        title = title,
+        subtitle = subtitle,
+        negativeButtonText = negativeButtonText,
+        onAuthenticated = onAuthenticated,
+        onError = onError,
+    )
 }

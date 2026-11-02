@@ -34,8 +34,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.3.2"
+        versionCode = 7
+        versionName = "0.3.3"
     }
 
     buildTypes {
@@ -121,6 +121,11 @@ dependencies {
     // and ProcessLifecycleOwner (background/foreground re-lock tracking).
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.lifecycle.process)
+
+    // Phase 2.7: direct framework fingerprint bridge for API < 28
+    // (the module compiles against API 36 because compileSdk 37
+    // removed the framework FingerprintManager stubs).
+    implementation(project(":legacyfingerprint"))
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

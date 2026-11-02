@@ -208,7 +208,11 @@ fun NoteLockGate(
                                     title = "Unlock note",
                                     subtitle = noteTitle.ifBlank { "Untitled" },
                                     onAuthenticated = onBiometricUnlock,
-                                    onError = { /* credential form stays available */ },
+                                    onError = { failure ->
+                                        if (failure.reason != "Cancelled") {
+                                            bioError = failure.userMessage
+                                        }
+                                    },
                                 )
                             }
                             null -> bioError = "Fingerprint is still preparing — try again in a moment."
