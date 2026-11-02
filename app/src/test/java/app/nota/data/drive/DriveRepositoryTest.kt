@@ -89,6 +89,10 @@ class DriveRepositoryTest {
         }
         provider = DatabaseProvider(context, NotaDatabase.GUEST_ACCOUNT)
         prefs = PreferencesRepository(context)
+        // DataStore state is shared across test methods in the class
+        // sandbox: one test's encryption record must never leak into
+        // the next test's "encryption off" world.
+        runBlocking { prefs.clearDriveState(uid) }
         backups = BackupRepository(
             context,
             provider,

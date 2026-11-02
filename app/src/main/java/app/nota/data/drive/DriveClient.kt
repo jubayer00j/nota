@@ -5,7 +5,6 @@ import java.time.Instant
 import java.time.OffsetDateTime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -135,7 +134,9 @@ class DriveClient(
             val body = MultipartBody.Builder()
                 .setType("multipart/related".toMediaType())
                 .addPart(
-                    Headers.headersOf("Content-Type", "application/json; charset=UTF-8"),
+                    // OkHttp 5 takes a part's Content-Type from its
+                    // body, never from explicit part headers (it throws
+                    // "Unexpected header: Content-Type" otherwise).
                     metadata.toString().toRequestBody(JSON_MEDIA),
                 )
                 .addPart(file.asRequestBody(ZIP_MEDIA))
