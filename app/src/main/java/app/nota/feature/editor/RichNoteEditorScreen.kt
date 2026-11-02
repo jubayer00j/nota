@@ -6,8 +6,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,6 +52,7 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -59,6 +62,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -89,6 +93,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -206,6 +211,11 @@ fun RichNoteEditorScreen(
     val bringIntoView = remember { BringIntoViewRequester() }
     // Phase 1.5 fix 2: focus target for "tap below the last block".
     val trailingFocusRequester = remember { FocusRequester() }
+    // Phase 2.8 (E1): when a below-content tap grows a separate
+    // padding segment (document ends in a list), the new segment's
+    // editor only exists after recomposition — focus + caret are
+    // applied by the effect below once it has composed.
+    var pendingPaddingFocusId by remember { mutableStateOf<String?>(null) }
 
     val current = note
     // Phase 2b: a locked note initialises from the SESSION's decrypted
@@ -282,6 +292,27 @@ fun RichNoteEditorScreen(
         )
     }
 
+    /**
+     * Phase 2.8 (E1): after a below-content tap grows the document,
+     * settle the list so the tapped region — the caret sits at its top
+     * edge, in the last segment — rests mid-viewport instead of below
+     * the fold or behind the keyboard.
+     */
+    fun scrollTailIntoView() {
+        // Item indices: title, meta, the segments, then below-blocks.
+        val tailIndex = segments.size + 2
+        val viewportPx = listState.layoutInfo.viewportSize.height
+        if (viewportPx <= 0) return
+        scope.launch {
+            runCatching {
+                listState.animateScrollToItem(
+                    tailIndex,
+                    (viewportPx * 0.45f).roundToInt(),
+                )
+            }
+        }
+    }
+
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
 
     // Dictation seam (Phase 5): the active editor's insert-at-caret.
@@ -314,6 +345,19 @@ fun RichNoteEditorScreen(
         if (activeSegmentId != null) {
             runCatching { bringIntoView.bringIntoView() }
         }
+    }
+
+    // Phase 2.8 (E1): focus the padding segment a below-content tap
+    // just appended, with the caret in its last paragraph.
+    LaunchedEffect(pendingPaddingFocusId) {
+        val id = pendingPaddingFocusId ?: return@LaunchedEffect
+        val ui = segments.firstOrNull { it.id == id }
+        if (ui != null) {
+            val st = richStateFor(ui)
+            st.selection = TextRange(st.annotatedString.text.length)
+            runCatching { trailingFocusRequester.requestFocus() }
+        }
+        pendingPaddingFocusId = null
     }
 
     BackHandler { persistNow(onBack) }
@@ -559,25 +603,75 @@ fun RichNoteEditorScreen(
                     )
                 }
                 if (segments.lastOrNull()?.segment is TextSegment) {
-                    // Phase 1.5 fix 2: the empty area below the last block
-                    // is a tap target that drops the caret at the very end
-                    // of the document, in the trailing text segment.
+                    // Phase 1.5 fix 2 + Phase 2.8 (E1): the empty area
+                    // below the last block is the tap-anywhere surface.
+                    // It fills the rest of the viewport, and a tap
+                    // places the caret at the tapped visual row: the
+                    // document grows with empty paragraphs up to that
+                    // row (see TapBelowContent.kt). A tap in the first
+                    // row band keeps the Phase 1.5 behaviour — caret at
+                    // the very end of the document.
                     item(key = "below-blocks") {
+                        val density = LocalDensity.current
+                        val layoutInfo = listState.layoutInfo
+                        val tailInfo = layoutInfo.visibleItemsInfo
+                            .firstOrNull { it.key == "below-blocks" }
+                        val tailHeight = if (
+                            tailInfo != null && layoutInfo.viewportSize.height > 0
+                        ) {
+                            val remainingPx =
+                                layoutInfo.viewportSize.height - tailInfo.offset
+                            with(density) {
+                                remainingPx.coerceIn(
+                                    96.dp.roundToPx(),
+                                    layoutInfo.viewportSize.height,
+                                ).toDp()
+                            }
+                        } else {
+                            96.dp
+                        }
                         Box(
-                            Modifier.fillMaxWidth().height(96.dp).clickable {
-                                val ui = segments.last()
-                                val state = richStateFor(ui)
-                                activeSegmentId = ui.id
-                                // The trailing editor is composed next to
-                                // this item, but if it has just scrolled
-                                // out of the LazyColumn window the
-                                // requester may be unattached — never
-                                // crash the tap; the editor itself (56dp
-                                // min height) remains directly tappable.
-                                runCatching { trailingFocusRequester.requestFocus() }
-                                state.selection =
-                                    TextRange(state.annotatedString.text.length)
-                            },
+                            Modifier.fillMaxWidth().height(tailHeight)
+                                .pointerInput(segments) {
+                                    detectTapGestures { offset ->
+                                        val ui = segments.lastOrNull()
+                                            ?: return@detectTapGestures
+                                        val state = richStateFor(ui)
+                                        activeSegmentId = ui.id
+                                        runCatching {
+                                            trailingFocusRequester.requestFocus()
+                                        }
+                                        val rows = tapRowsBelowContent(
+                                            tapYInTailPx = offset.y,
+                                            gapAboveTailPx = with(density) {
+                                                NotaSpacing.sm.toPx()
+                                            },
+                                            lineHeightPx = with(density) {
+                                                NotaEditorBody.lineHeight.toPx()
+                                            },
+                                        )
+                                        if (rows <= 0) {
+                                            state.placeCaretBelowContent(0)
+                                            return@detectTapGestures
+                                        }
+                                        if (state.placeCaretBelowContent(rows)) {
+                                            scrollTailIntoView()
+                                        } else {
+                                            // The document ends inside a
+                                            // list: the padding must be
+                                            // its own text segment below
+                                            // the list, not list items.
+                                            val padding = UiSegment(
+                                                newUiId(),
+                                                TextSegment(paddingSegmentHtml(rows)),
+                                            )
+                                            segments = segments + padding
+                                            activeSegmentId = padding.id
+                                            pendingPaddingFocusId = padding.id
+                                            scrollTailIntoView()
+                                        }
+                                    }
+                                },
                         )
                     }
                 }
@@ -1299,6 +1393,50 @@ private fun AttachmentsSection(
     }
 }
 
+/** The one highlight colour the toolbar applies (Phase 1c swatch). */
+private const val HIGHLIGHT_ARGB = 0xFFFFEB3B
+private val HIGHLIGHT_COLOR = Color(HIGHLIGHT_ARGB)
+
+/**
+ * Phase 2.8 (E2): selected treatment for the toolbar's icon buttons —
+ * a primaryContainer pill (theme-derived, so it reads on light, dark
+ * and OLED schemes alike); unselected keeps the stock appearance.
+ */
+@Composable
+private fun toolbarIconColors(selected: Boolean) =
+    if (selected) {
+        IconButtonDefaults.iconButtonColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        )
+    } else {
+        IconButtonDefaults.iconButtonColors()
+    }
+
+/** A colour swatch; the selected one wears a primary ring. */
+@Composable
+private fun Swatch(argb: Long, selected: Boolean) {
+    Box(
+        Modifier.size(26.dp).then(
+            if (selected) {
+                Modifier.border(
+                    2.dp,
+                    MaterialTheme.colorScheme.primary,
+                    RoundedCornerShape(6.dp),
+                )
+            } else {
+                Modifier
+            },
+        ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier.size(18.dp)
+                .background(Color(argb), RoundedCornerShape(4.dp)),
+        )
+    }
+}
+
 @OptIn(ExperimentalRichTextApi::class)
 @Composable
 private fun EditorToolbar(
@@ -1312,35 +1450,62 @@ private fun EditorToolbar(
     onInsertBlock: (DocSegment) -> Unit,
 ) {
     val enabled = state != null
+    // Phase 2.8 (E2): the live formatting picture at the caret/
+    // selection, derived from the editor state itself — moving the
+    // caret into bold text lights Bold without any click (see
+    // ToolbarState.kt). Null state -> nothing selected, all disabled.
+    val format = state?.toolbarFormatState()
     Row(
         modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
             .padding(horizontal = NotaSpacing.xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ToolbarButton("B", enabled, bold = true) {
+        ToolbarButton("B", enabled, selected = format?.bold == true, bold = true) {
             state?.toggleSpanStyle(SpanStyle(fontWeight = FontWeight.Bold))
         }
-        ToolbarButton("I", enabled, italic = true) {
+        ToolbarButton("I", enabled, selected = format?.italic == true, italic = true) {
             state?.toggleSpanStyle(SpanStyle(fontStyle = FontStyle.Italic))
         }
-        ToolbarButton("U", enabled, underline = true) {
+        ToolbarButton("U", enabled, selected = format?.underline == true, underline = true) {
             state?.toggleSpanStyle(SpanStyle(textDecoration = TextDecoration.Underline))
         }
-        ToolbarButton("S", enabled, strike = true) {
+        ToolbarButton("S", enabled, selected = format?.strikethrough == true, strike = true) {
             state?.toggleSpanStyle(SpanStyle(textDecoration = TextDecoration.LineThrough))
         }
-        ToolbarButton("code", enabled) { state?.toggleCodeSpan() }
-        ToolbarButton("H1", enabled) { state?.setHeadingStyle(HeadingStyle.H1) }
-        ToolbarButton("H2", enabled) { state?.setHeadingStyle(HeadingStyle.H2) }
-        ToolbarButton("H3", enabled) { state?.setHeadingStyle(HeadingStyle.H3) }
-        ToolbarButton("¶", enabled) { state?.setHeadingStyle(HeadingStyle.Normal) }
-        IconButton(onClick = { state?.toggleUnorderedList() }, enabled = enabled) {
+        ToolbarButton("code", enabled, selected = format?.code == true) {
+            state?.toggleCodeSpan()
+        }
+        ToolbarButton("H1", enabled, selected = format?.heading == HeadingStyle.H1) {
+            state?.setHeadingStyle(HeadingStyle.H1)
+        }
+        ToolbarButton("H2", enabled, selected = format?.heading == HeadingStyle.H2) {
+            state?.setHeadingStyle(HeadingStyle.H2)
+        }
+        ToolbarButton("H3", enabled, selected = format?.heading == HeadingStyle.H3) {
+            state?.setHeadingStyle(HeadingStyle.H3)
+        }
+        ToolbarButton("¶", enabled, selected = format?.heading == HeadingStyle.Normal) {
+            state?.setHeadingStyle(HeadingStyle.Normal)
+        }
+        IconButton(
+            onClick = { state?.toggleUnorderedList() },
+            enabled = enabled,
+            colors = toolbarIconColors(format?.unorderedList == true),
+        ) {
             Icon(Icons.AutoMirrored.Filled.FormatListBulleted, contentDescription = "Bullet list")
         }
-        IconButton(onClick = { state?.toggleOrderedList() }, enabled = enabled) {
+        IconButton(
+            onClick = { state?.toggleOrderedList() },
+            enabled = enabled,
+            colors = toolbarIconColors(format?.orderedList == true),
+        ) {
             Icon(Icons.Filled.FormatListNumbered, contentDescription = "Numbered list")
         }
-        IconButton(onClick = onLinkRequest, enabled = enabled) {
+        IconButton(
+            onClick = onLinkRequest,
+            enabled = enabled,
+            colors = toolbarIconColors(format?.link == true),
+        ) {
             Icon(Icons.Filled.Link, contentDescription = "Insert link")
         }
         listOf(0xFFC0392B, 0xFF1D6FB8, 0xFF1E7D4F).forEach { argb ->
@@ -1348,22 +1513,16 @@ private fun EditorToolbar(
                 onClick = { state?.toggleSpanStyle(SpanStyle(color = Color(argb))) },
                 enabled = enabled,
             ) {
-                Box(
-                    Modifier.size(18.dp)
-                        .background(Color(argb), RoundedCornerShape(4.dp)),
-                )
+                Swatch(argb, selected = format?.textColor == Color(argb))
             }
         }
         IconButton(
             onClick = {
-                state?.toggleSpanStyle(SpanStyle(background = Color(0xFFFFEB3B)))
+                state?.toggleSpanStyle(SpanStyle(background = HIGHLIGHT_COLOR))
             },
             enabled = enabled,
         ) {
-            Box(
-                Modifier.size(18.dp)
-                    .background(Color(0xFFFFEB3B), RoundedCornerShape(4.dp)),
-            )
+            Swatch(HIGHLIGHT_ARGB, selected = format?.highlightColor == HIGHLIGHT_COLOR)
         }
         Box {
             IconButton(onClick = { onInsertMenuChange(true) }) {
@@ -1427,13 +1586,28 @@ private fun EditorToolbar(
 private fun ToolbarButton(
     label: String,
     enabled: Boolean,
+    selected: Boolean = false,
     bold: Boolean = false,
     italic: Boolean = false,
     underline: Boolean = false,
     strike: Boolean = false,
     onClick: () -> Unit,
 ) {
-    TextButton(onClick = onClick, enabled = enabled) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        // Phase 2.8 (E2): the selected treatment — a filled
+        // primaryContainer pill in the pine & paper system, visible
+        // on light, dark and OLED schemes.
+        colors = if (selected) {
+            ButtonDefaults.textButtonColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+        } else {
+            ButtonDefaults.textButtonColors()
+        },
+    ) {
         Text(
             label,
             fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,

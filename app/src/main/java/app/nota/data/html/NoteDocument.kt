@@ -650,9 +650,143 @@ object NoteDocument {
      * is never persisted, so repeated open→save cycles cannot accumulate
      * empty paragraphs. Only TRAILING empty text segments are removed —
      * an empty text segment in the middle of a document is left alone.
+     *
+     * Phase 2.8 (E1) extends the same rule one level down: tap-anywhere
+     * caret placement grows the LAST text segment with scratch empty
+     * paragraphs, so the final text segment also has its trailing empty
+     * paragraphs trimmed (see [trimTrailingEmptyParagraphs]). Empty
+     * paragraphs in the middle of a segment — real spacing the user
+     * typed into — are untouched, exactly like middle segments.
      */
-    fun stripTrailingEmptyTextSegments(segments: List<DocSegment>): List<DocSegment> =
-        segments.dropLastWhile { isEmptyTextSegment(it) }
+    fun stripTrailingEmptyTextSegments(segments: List<DocSegment>): List<DocSegment> {
+        val dropped = segments.dropLastWhile { isEmptyTextSegment(it) }
+        val last = dropped.lastOrNull() as? TextSegment ?: return dropped
+        val trimmedHtml = trimTrailingEmptyParagraphs(last.html)
+        if (trimmedHtml == last.html) return dropped
+        // The trim cannot legitimately empty the segment: a segment
+        // whose blocks are ALL empty paragraphs was already dropped
+        // above (emptiness there is judged on the whole segment), and
+        // a segment holding structure keeps that structure. The blank
+        // guard is belt-and-braces for hand-built segment lists.
+        if (trimmedHtml.isBlank()) return dropped.dropLast(1)
+        return dropped.dropLast(1) + TextSegment(trimmedHtml)
+    }
+
+    /** Tags whose empty instances are caret scratch, never content. */
+    private val TRIMMABLE_PARAGRAPH_TAGS = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6")
+
+    /** HTML void elements: no close tag, a chunk by themselves. */
+    private val VOID_TAGS = setOf(
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    )
+
+    /** Embedded structure that makes even a textually blank block user
+     *  content (the same test [isEmptyTextSegment] applies). */
+    private val STRUCTURE_RE = Regex("(?i)<(img|hr|table|ul|ol|input)[\\s>/]")
+
+    /**
+     * Removes trailing empty paragraphs (`<p></p>`, `<p><br></p>`,
+     * `<p>&nbsp;</p>`, empty headings) from the END of one text
+     * segment's HTML — the scratch padding the tap-anywhere caret
+     * (Phase 2.8 E1) appends below the last line. Stops at the first
+     * block with visible text or embedded structure, so spacing the
+     * user actually typed into (empty paragraphs with content below
+     * them) is preserved byte-for-byte, as is everything before it.
+     */
+    fun trimTrailingEmptyParagraphs(html: String): String {
+        if (html.isBlank()) return html
+        val chunks = topLevelChunks(html)
+        var kept = chunks.size
+        while (kept > 0) {
+            val range = chunks[kept - 1]
+            val chunk = html.substring(range.first, range.last + 1)
+            val droppable = chunk.isBlank() || isEmptyParagraphChunk(chunk)
+            if (!droppable) break
+            kept--
+        }
+        if (kept == chunks.size) return html
+        val cut = if (kept == 0) 0 else chunks[kept - 1].last + 1
+        return html.substring(0, cut)
+    }
+
+    /** True when [chunk] is exactly one empty paragraph-level element. */
+    private fun isEmptyParagraphChunk(chunk: String): Boolean {
+        val tag = readTag(chunk, 0) ?: return false
+        if (tag.closing || tag.name !in TRIMMABLE_PARAGRAPH_TAGS) return false
+        val close = findClose(chunk, tag.end, tag.name) ?: return false
+        if (close.second != chunk.length) return false
+        val inner = chunk.substring(tag.end, close.first)
+        if (STRUCTURE_RE.containsMatchIn(inner)) return false
+        val text = PlainTextCodec.htmlToText(inner)
+            .replace("&nbsp;", " ").replace('\u00A0', ' ')
+        return text.isBlank()
+    }
+
+    /**
+     * Splits [html] into its top-level chunks: text runs and whole
+     * elements (open tag through matching close, tracking nesting
+     * depth generically). Void and self-closing elements are chunks by
+     * themselves; a stray `<` that does not open a tag is a one-char
+     * chunk. Chunks tile the input exactly, so reassembly is lossless.
+     */
+    private fun topLevelChunks(html: String): List<IntRange> {
+        val chunks = mutableListOf<IntRange>()
+        val n = html.length
+        var i = 0
+        while (i < n) {
+            if (html[i] != '<') {
+                var j = html.indexOf('<', i)
+                if (j < 0) j = n
+                chunks += i until j
+                i = j
+                continue
+            }
+            val tag = readTag(html, i)
+            if (tag == null) {
+                chunks += i until i + 1
+                i += 1
+                continue
+            }
+            val selfClosing = tag.closing ||
+                tag.attrs.trimEnd().endsWith("/") || tag.name in VOID_TAGS
+            if (selfClosing) {
+                chunks += i until tag.end
+                i = tag.end
+                continue
+            }
+            var depth = 1
+            var j = tag.end
+            var end = n
+            while (j < n) {
+                val lt = html.indexOf('<', j)
+                if (lt < 0) {
+                    j = n
+                    break
+                }
+                val inner = readTag(html, lt)
+                if (inner == null) {
+                    j = lt + 1
+                    continue
+                }
+                val innerSelfClosing = inner.attrs.trimEnd().endsWith("/") ||
+                    inner.name in VOID_TAGS
+                if (inner.closing) {
+                    depth--
+                    if (depth == 0) {
+                        end = inner.end
+                        break
+                    }
+                } else if (!innerSelfClosing) {
+                    depth++
+                }
+                j = inner.end
+            }
+            chunks += i until end
+            i = end
+        }
+        return chunks
+    }
 
     private fun serializeTable(table: TableSegment): String = buildString {
         append("<table><tbody>")
