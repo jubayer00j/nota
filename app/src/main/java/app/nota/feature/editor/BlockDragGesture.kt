@@ -1,9 +1,10 @@
 package app.nota.feature.editor
 
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
-import androidx.compose.ui.input.pointer.changedToCanceled
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import kotlinx.coroutines.CancellationException
@@ -58,7 +59,10 @@ fun Modifier.longPressBlockDrag(
                         return@withTimeoutOrNull
                     }
                     val change = event.changes.firstOrNull { it.id == down.id }
-                    if (change == null || change.changedToUp() || change.changedToCanceled()) {
+                    // A framework cancel surfaces as an up in
+                    // current Compose — either way the press ended
+                    // without becoming a drag.
+                    if (change == null || change.changedToUp()) {
                         aborted = true
                         return@withTimeoutOrNull
                     }
@@ -94,24 +98,16 @@ fun Modifier.longPressBlockDrag(
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull { it.id == down.id } ?: continue
-                when {
-                    change.changedToUp() -> {
-                        change.consume()
-                        onDragEnd()
-                        break
-                    }
-                    change.changedToCanceled() -> {
-                        onDragCancel()
-                        break
-                    }
-                    else -> {
-                        val dy = change.position.y - lastY
-                        lastY = change.position.y
-                        if (dy != 0f) {
-                            change.consume()
-                            onDrag(dy)
-                        }
-                    }
+                if (change.changedToUp()) {
+                    change.consume()
+                    onDragEnd()
+                    break
+                }
+                val dy = change.position.y - lastY
+                lastY = change.position.y
+                if (dy != 0f) {
+                    change.consume()
+                    onDrag(dy)
                 }
             }
         } catch (e: CancellationException) {
