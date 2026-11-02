@@ -218,6 +218,32 @@ class BackupRepository(
         file.outputStream().buffered().use { exportTo(it, passphrase) }
     }
 
+    /**
+     * Keyed export (Phase 3b): seals under a caller-held BMK + header
+     * instead of a fresh per-file key — the Drive encryption model
+     * (one long-lived BMK wrapped once at setup; the device key makes
+     * unattended backups possible). Byte-identical envelope to the
+     * passphrase form; only the key's provenance differs.
+     */
+    suspend fun exportToKeyed(out: OutputStream, bmk: ByteArray, header: BackupCrypto.Header) =
+        withContext(Dispatchers.IO) {
+            val data = collectExport()
+            val filesById = attachmentDao.getAll().associate { att -> att.id to attachmentStore.fileFor(att) }
+            val writer = BackupWriter { meta -> filesById[meta.id] }
+            val tmp = File(cacheDir(), "backup-export-${System.nanoTime()}.zip")
+            try {
+                tmp.outputStream().buffered().use { writer.write(data, it) }
+                BackupCrypto.seal(tmp, bmk, header, out)
+                out.flush()
+            } finally {
+                tmp.delete()
+            }
+        }
+
+    suspend fun exportToFileKeyed(file: File, bmk: ByteArray, header: BackupCrypto.Header) {
+        file.outputStream().buffered().use { exportToKeyed(it, bmk, header) }
+    }
+
     // ------------------------------------------------------------ restore
 
     /** Copies a picked source (SAF URI stream) into a cacheDir temp file,
@@ -236,6 +262,11 @@ class BackupRepository(
     suspend fun readBackup(source: File, passphrase: String?): BackupReader.Handle =
         withContext(Dispatchers.IO) { reader.read(source, passphrase) }
 
+    /** Device-key read (Phase 3b): opens an encrypted archive with a
+     *  held BMK (the Drive encryption device key) — no passphrase. */
+    suspend fun readBackupWithBmk(source: File, bmk: ByteArray): BackupReader.Handle =
+        withContext(Dispatchers.IO) { reader.readWithBmk(source, bmk) }
+
     /** read + apply + cleanup; nothing is written before this is called
      *  with a fully-read handle, and apply is only invoked by the caller
      *  after the user picks a mode. */
@@ -250,6 +281,25 @@ class BackupRepository(
 
     suspend fun applyBackup(handle: BackupReader.Handle, mode: RestoreMode): MergeCounts =
         withContext(Dispatchers.IO) {
+            // ---- Owner gate (Phase 3b): an archive that names a
+            // DIFFERENT account as owner is never applied while
+            // signed in — 1.x refuses other accounts' archives on
+            // the Drive path, and the same rule now guards every
+            // apply (local or Drive) before a single row is written.
+            // Guest archives (ownerId null) and guest mode (no uid
+            // to compare against) are unaffected — the exact 2c
+            // behaviour Jubayer's crossover restore proved.
+            val ownerId = handle.manifest.ownerId
+            val accountId = provider.accountId.value
+            if (ownerId != null &&
+                accountId != NotaDatabase.GUEST_ACCOUNT &&
+                ownerId != accountId
+            ) {
+                throw BackupError(
+                    "This backup belongs to a different account, so it wasn't restored.",
+                )
+            }
+
             // ---- Partition templates out of the note payload.
             val templateNotes = handle.notes.filter { it.isTemplate }
             val payloadNotes = handle.notes.filter { !it.isTemplate }

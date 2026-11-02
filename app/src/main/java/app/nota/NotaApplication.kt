@@ -66,5 +66,20 @@ class NotaApplication : Application() {
                 koin.get<NoteRepository>().backfillLinksIfNeeded()
             }
         }
+        // Phase 3b: reconcile the scheduled-Drive-backup work with the
+        // persisted mode (WorkManager itself persists across reboots;
+        // this covers mode/interval changes made while the process
+        // was dead and first-run enrolment).
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                val preferences = koin.get<app.nota.data.preferences.PreferencesRepository>()
+                app.nota.data.drive.DriveBackupScheduler.sync(
+                    this@NotaApplication,
+                    preferences.driveBackupModeNow(),
+                    preferences.driveBackupIntervalHoursNow(),
+                )
+            }
+        }
     }
 }
