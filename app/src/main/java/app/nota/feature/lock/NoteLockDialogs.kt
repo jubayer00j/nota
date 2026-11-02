@@ -1,5 +1,6 @@
 package app.nota.feature.lock
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
@@ -22,11 +24,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.fragment.app.FragmentActivity
 import app.nota.data.security.AppLockMethod
+import app.nota.data.security.NoteLockBiometricStore
+import org.koin.compose.koinInject
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
+import app.nota.ui.components.NotaBrandLockup
 import app.nota.ui.theme.NotaSpacing
 
 /** The unmissable 1.x warning, shared by setup and management. */
@@ -35,18 +46,60 @@ private const val NO_RECOVERY_WARNING =
         "Nota cannot reset it for you."
 
 /**
+ * Phase 2.5 dialog header: the shared brand lockup (same mark +
+ * wordmark as the Notes header and the lock screen) above the
+ * dialog title, so every lock surface opens with the same identity.
+ */
+@Composable
+private fun LockDialogHeader(title: String) {
+    NotaBrandLockup(markSize = 24.dp)
+    Spacer(Modifier.height(NotaSpacing.sm))
+    Text(title, style = MaterialTheme.typography.titleLarge)
+    Spacer(Modifier.height(NotaSpacing.sm))
+    // The no-recovery warning as a tinted panel (Phase 2.5): same
+    // words as 1.x, impossible to skim past.
+    Text(
+        NO_RECOVERY_WARNING,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(NotaSpacing.sm),
+    )
+}
+
+/** Error/feedback line in the shared lock visual language. */
+@Composable
+private fun LockDialogError(text: String) {
+    Spacer(Modifier.height(NotaSpacing.sm))
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+    )
+}
+
+/**
  * Lock setup (Phase 2b): method choice → set → confirm (PR-A's shared
  * [CredentialSetupForm]) → optional fingerprint toggle when available.
  * Nothing is persisted until the setup form completes, so abandoning
  * the dialog can never leave a note half-locked.
+ *
+ * Phase 2.5: brand-consistent header + warning panel; all callback
+ * signatures and state plumbing unchanged. (No countdown here: this
+ * dialog has no unlock-attempt flow and receives no lockout
+ * deadline — the per-note countdown lives on the unlock gate.)
  */
 @Composable
 fun LockNoteDialog(
     error: String?,
     onDismiss: () -> Unit,
-    onLock: (AppLockMethod, String, Boolean) -> Unit,
+    onLock: (AppLockMethod, String, Boolean, javax.crypto.Cipher?) -> Unit,
+    biometricStore: NoteLockBiometricStore = koinInject(),
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context as? FragmentActivity }
     val biometricAvailable = remember(context) { isBiometricAvailable(context) }
     var method by remember { mutableStateOf(AppLockMethod.PASSWORD) }
     var useBiometric by remember { mutableStateOf(false) }
@@ -56,13 +109,7 @@ fun LockNoteDialog(
                 Modifier.verticalScroll(rememberScrollState()).padding(NotaSpacing.md),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text("Lock note", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(NotaSpacing.sm))
-                Text(
-                    NO_RECOVERY_WARNING,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                LockDialogHeader("Lock note")
                 Spacer(Modifier.height(NotaSpacing.md))
                 Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
                     AppLockMethod.entries.forEach { candidate ->
@@ -96,16 +143,34 @@ fun LockNoteDialog(
                 Spacer(Modifier.height(NotaSpacing.sm))
                 CredentialSetupForm(
                     method = method,
-                    onComplete = { canonical -> onLock(method, canonical, useBiometric) },
+                    onComplete = { canonical ->
+                        // Phase 2.5: when fingerprint is requested, the
+                        // seal cipher must be authorised by a prompt
+                        // BEFORE the lock runs - the authorised cipher
+                        // is threaded into lockNote and completes the
+                        // NEK seal there. Cancelling the prompt locks
+                        // with the credential only.
+                        val host = activity
+                        val cipher = if (useBiometric) biometricStore.sealCipher() else null
+                        if (useBiometric && host != null && cipher != null) {
+                            showBiometricCryptoPrompt(
+                                host,
+                                cipher,
+                                title = "Confirm fingerprint unlock",
+                                negativeButtonText = "Lock without fingerprint",
+                                onAuthenticated = { authorised ->
+                                    onLock(method, canonical, true, authorised)
+                                },
+                                onError = { onLock(method, canonical, false, null) },
+                            )
+                        } else {
+                            onLock(method, canonical, false, null)
+                        }
+                    },
                     onCancel = onDismiss,
                 )
                 if (error != null) {
-                    Spacer(Modifier.height(NotaSpacing.sm))
-                    Text(
-                        error,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    LockDialogError(error)
                 }
             }
         }
@@ -117,6 +182,9 @@ fun LockNoteDialog(
  * (the caller gates it), mirroring 1.x: add/replace a credential, remove
  * a credential (the last slot is refused), fingerprint on/off, and
  * Remove lock (decrypts the note back to plaintext).
+ *
+ * Phase 2.5: same brand header + warning panel as setup; signatures
+ * and behaviour unchanged.
  */
 @Composable
 fun ManageLockDialog(
@@ -125,10 +193,12 @@ fun ManageLockDialog(
     onDismiss: () -> Unit,
     onSetSlot: (AppLockMethod, String) -> Unit,
     onRemoveSlot: (AppLockMethod) -> Unit,
-    onSetBiometric: (Boolean) -> Unit,
+    onSetBiometric: (Boolean, javax.crypto.Cipher?) -> Unit,
+    biometricStore: NoteLockBiometricStore = koinInject(),
     onRemoveLock: () -> Unit,
 ) {
     val context = LocalContext.current
+    val activity = remember(context) { context as? FragmentActivity }
     val biometricAvailable = remember(context) { isBiometricAvailable(context) }
     var editingMethod by remember { mutableStateOf<AppLockMethod?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
@@ -137,13 +207,7 @@ fun ManageLockDialog(
             Column(
                 Modifier.verticalScroll(rememberScrollState()).padding(NotaSpacing.md),
             ) {
-                Text("Manage lock", style = MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(NotaSpacing.sm))
-                Text(
-                    NO_RECOVERY_WARNING,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+                LockDialogHeader("Manage lock")
                 Spacer(Modifier.height(NotaSpacing.md))
                 Text("Credentials", style = MaterialTheme.typography.titleSmall)
                 NoteLockMethod.entries.forEach { method ->
@@ -209,7 +273,27 @@ fun ManageLockDialog(
                     }
                     Switch(
                         checked = record.biometric,
-                        onCheckedChange = { onSetBiometric(it) },
+                        onCheckedChange = { wantEnabled ->
+                            // Phase 2.5: enabling seals the NEK copy
+                            // through a prompt-authorised cipher;
+                            // disabling needs no proof.
+                            val host = activity
+                            val cipher = if (wantEnabled) biometricStore.sealCipher() else null
+                            if (wantEnabled && host != null && cipher != null) {
+                                showBiometricCryptoPrompt(
+                                    host,
+                                    cipher,
+                                    title = "Confirm fingerprint unlock",
+                                    negativeButtonText = "Cancel",
+                                    onAuthenticated = { authorised ->
+                                        onSetBiometric(true, authorised)
+                                    },
+                                    onError = { /* stays off */ },
+                                )
+                            } else if (!wantEnabled) {
+                                onSetBiometric(false, null)
+                            }
+                        },
                         enabled = biometricAvailable || record.biometric,
                     )
                 }
@@ -231,12 +315,7 @@ fun ManageLockDialog(
                     }
                 }
                 if (feedback != null) {
-                    Spacer(Modifier.height(NotaSpacing.sm))
-                    Text(
-                        feedback,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error,
-                    )
+                    LockDialogError(feedback)
                 }
                 Spacer(Modifier.height(NotaSpacing.sm))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
