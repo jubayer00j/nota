@@ -150,6 +150,10 @@ dependencies {
     // the real list composable, not the data layer.
     testImplementation(platform(libs.androidx.compose.bom))
     testImplementation(libs.androidx.compose.ui.test.junit4)
+    // Declares ComponentActivity in the debug manifest merge, which is
+    // what Robolectric resolves activities against — without it the
+    // compose test rule cannot launch its host activity in unit tests.
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     // Phase 3a accounts: Firebase Auth (identity ONLY — notes never
     // leave the device except in the user's own Drive archive), and
