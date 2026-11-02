@@ -292,7 +292,21 @@ class NoteLockUnlockStateRobolectricTest {
 
             // The correct PIN opens on the FIRST try after the backoff.
             vm.unlockWithCredential(AppLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"))
-            awaitCondition("session started after backoff") { vm.sessionActive.value }
+            // DIAGNOSTIC (coordinator, temporary): sequence on the
+            // attempt's start/finish and, if no session starts, fail
+            // with the full published state instead of a bare timeout,
+            // so the repository's actual answer is visible in CI.
+            awaitCondition("final attempt started") { vm.unlockInProgress.value }
+            awaitCondition("final attempt finished") { !vm.unlockInProgress.value }
+            val finalRecord = NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!
+            assertTrue(
+                "session must start after backoff; lockError=${vm.lockError.value}, " +
+                    "vmLockoutUntil=${vm.lockoutUntilMillis.value}, " +
+                    "now=${System.currentTimeMillis()}, " +
+                    "persisted failedAttempts=${finalRecord.failedAttempts}, " +
+                    "persisted lockoutUntil=${finalRecord.lockoutUntil}",
+                vm.sessionActive.value,
+            )
             val afterOpen = NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!
             assertEquals(0, afterOpen.failedAttempts)
             assertNull(afterOpen.lockoutUntil)
