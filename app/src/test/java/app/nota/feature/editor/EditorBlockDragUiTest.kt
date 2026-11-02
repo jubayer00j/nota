@@ -213,6 +213,20 @@ class EditorBlockDragUiTest {
     private fun boundsOf(text: String) =
         composeRule.onNodeWithText(text).fetchSemanticsNode().boundsInRoot
 
+    private fun boundsOfDescription(description: String) =
+        composeRule.onNodeWithContentDescription(description)
+            .fetchSemanticsNode().boundsInRoot
+
+    /**
+     * A block's vertical centre, estimated from its topmost and
+     * bottommost findable nodes. The swap math is centre-to-centre,
+     * so measuring between two blocks' LABELS (both near their
+     * blocks' tops) under-travels by half the height difference —
+     * the first version of these tests did exactly that and the
+     * dragged centre stopped short of the neighbour's centre.
+     */
+    private fun blockCentreY(top: Float, bottom: Float) = (top + bottom) / 2f
+
     /**
      * Long-press-drag on the node showing [text]: the finger holds
      * past the long-press timeout (the first small move carries the
@@ -271,10 +285,18 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        val from = boundsOf("drag-report.pdf")
-        val to = boundsOf("CellA")
-        val dy = (to.center.y - from.center.y) + 30f
-        longPressDrag("drag-report.pdf", dy)
+        // Block centres from each block's extreme nodes: the file
+        // card runs name → mime → error line; the table runs its
+        // first cell → its footer row.
+        val fileCentre = blockCentreY(
+            boundsOf("drag-report.pdf").top,
+            boundsOf("Attachment not found on this device").bottom,
+        )
+        val tableCentre = blockCentreY(
+            boundsOf("CellA").top,
+            boundsOf("+ Row").bottom,
+        )
+        longPressDrag("drag-report.pdf", tableCentre - fileCentre + 24f)
         awaitOrder(
             note.id,
             listOf(
@@ -298,10 +320,21 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        val from = boundsOf("CellA")
-        val to = boundsOf("drag-report.pdf")
-        val dy = (to.center.y - from.center.y) - 30f
-        longPressDrag("CellA", dy)
+        val fileCentre = blockCentreY(
+            boundsOf("drag-report.pdf").top,
+            boundsOf("Attachment not found on this device").bottom,
+        )
+        val tableCentre = blockCentreY(
+            boundsOf("CellA").top,
+            boundsOf("+ Row").bottom,
+        )
+        // The drag starts on the table's FOOTER text, not a cell:
+        // a long press inside a text-field cell wakes the platform
+        // text magnifier, which crashes under Robolectric (null
+        // Surface) before the block drag can complete. The footer
+        // is part of the same block — the long press lands on the
+        // block itself either way.
+        longPressDrag("+ Row", fileCentre - tableCentre - 24f)
         awaitOrder(
             note.id,
             listOf(
@@ -324,12 +357,19 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        // The image card's header label carries the alt text; the
-        // long press lands on the block itself.
-        val from = boundsOf("Drag image")
-        val to = boundsOf("drag-report.pdf")
-        val dy = (to.center.y - from.center.y) + 30f
-        longPressDrag("Drag image", dy)
+        // The image block runs header label → image area (the
+        // content-description node); the file card as in the other
+        // tests. The long press lands on the header label — the
+        // block itself.
+        val imageCentre = blockCentreY(
+            boundsOf("Drag image").top,
+            boundsOfDescription("Drag image").bottom,
+        )
+        val fileCentre = blockCentreY(
+            boundsOf("drag-report.pdf").top,
+            boundsOf("Attachment not found on this device").bottom,
+        )
+        longPressDrag("Drag image", fileCentre - imageCentre + 24f)
         awaitOrder(
             note.id,
             listOf(
