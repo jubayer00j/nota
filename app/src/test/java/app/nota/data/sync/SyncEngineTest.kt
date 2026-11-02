@@ -343,7 +343,7 @@ class SyncEngineTest {
         // owned by the copy — no stray clone on the winner note.
         assertEquals(2, outcome.merged.attachments.size)
         assertEquals(
-            listOf("n1"),
+            listOf("a1"),
             outcome.merged.attachments.filter { it.noteId == "n1" }.map { it.id },
         )
         val clone = outcome.merged.attachments.first { it.noteId == copy.id }
