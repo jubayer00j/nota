@@ -532,15 +532,7 @@ class DriveRepositoryTest {
             notes = emptyList(),
             attachments = emptyList(),
             tombstones = listOf(
-                // A realistic deletion instant: the entity timestamps in
-                // these fixtures are tiny synthetics compared only with
-                // each other, but tombstones are ALSO judged against
-                // wall-clock now by the 90-day retention purge — an
-                // epoch-relative deletedAt would be purged as ancient
-                // before the merge ever saw it.
-                app.nota.data.backup.BxTombstone(
-                    "note", "n-1", System.currentTimeMillis(), "other-device",
-                ),
+                app.nota.data.backup.BxTombstone("note", "n-1", 500L, "other-device"),
             ),
         )
         val zipFile = java.io.File(context.cacheDir, "roundtrip.zip")
@@ -569,7 +561,15 @@ class DriveRepositoryTest {
             uid,
             emptyList(),
             tombstones = listOf(
-                app.nota.data.backup.BxTombstone("note", "n-1", 500L, "other-device"),
+                // A realistic deletion instant: the entity timestamps
+                // in these fixtures are tiny synthetics compared only
+                // with each other, but tombstones are ALSO judged
+                // against wall-clock now by the 90-day retention
+                // purge — an epoch-relative deletedAt would be purged
+                // as ancient before the merge ever saw it.
+                app.nota.data.backup.BxTombstone(
+                    "note", "n-1", System.currentTimeMillis(), "other-device",
+                ),
             ),
         )
         assertTrue("cycle2: ${drive.syncStatus.value}", drive.runSyncCycle())
