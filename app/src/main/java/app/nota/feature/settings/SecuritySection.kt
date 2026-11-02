@@ -16,6 +16,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +33,7 @@ import app.nota.data.security.AppLockBiometricStore
 import app.nota.data.security.AppLockManager
 import app.nota.data.security.AppLockMethod
 import app.nota.data.security.AppLockSettings
+import app.nota.data.security.StepResult
 import app.nota.feature.lock.CredentialEntryForm
 import app.nota.feature.lock.CredentialSetupForm
 import app.nota.feature.lock.biometricAvailability
@@ -95,40 +97,75 @@ fun SecuritySection(
         action?.invoke()
     }
 
+    // Phase 2.6 (Fix A): EVERY failure in the fingerprint flows lands
+    // in bioError and is rendered under the Fingerprint row — key
+    // generation, cipher setup, sealing, saving, prompt errors. In
+    // 0.3.1 these were silent nulls / unchecked booleans, and the
+    // toggle simply never turned on, with nothing to screenshot.
+    var bioError by remember { mutableStateOf<String?>(null) }
+    // An ON toggle backed by a token that no longer opens (device
+    // key invalidated, record corrupt) must SAY so, not sit green.
+    var bioTokenBroken by remember { mutableStateOf(false) }
+    LaunchedEffect(settings.biometricEnabled) {
+        bioTokenBroken = settings.biometricEnabled && !biometricStore.tokenUsable()
+    }
+
     // Phase 2.5 crypto-bound flows: ENABLING seals a fresh token
     // through the prompt (encrypt cipher); re-authorisation verifies
     // by decrypting that token (decrypt cipher). No bare booleans.
+    // Phase 2.6: typed StepResults end to end — see bioError above.
     fun promptBiometricSeal(onSealed: () -> Unit) {
-        val host = activity ?: return
-        val cipher = biometricStore.sealCipher() ?: return
-        showBiometricCryptoPrompt(
-            host,
-            cipher,
-            title = "Confirm it's you",
-            negativeButtonText = "Cancel",
-            onAuthenticated = { authorised ->
-                scope.launch {
-                    if (biometricStore.sealToken(authorised)) onSealed()
-                }
-            },
-            onError = { /* setting unchanged */ },
-        )
+        val host = activity
+        if (host == null) {
+            bioError = "Fingerprint prompt isn't available on this screen."
+            return
+        }
+        when (val cipherResult = biometricStore.sealCipherResult()) {
+            is StepResult.Failed -> bioError = cipherResult.userMessage
+            is StepResult.Ok -> showBiometricCryptoPrompt(
+                host,
+                cipherResult.value,
+                title = "Confirm it's you",
+                negativeButtonText = "Cancel",
+                onAuthenticated = { authorised ->
+                    scope.launch {
+                        when (val sealed = biometricStore.sealToken(authorised)) {
+                            is StepResult.Failed -> bioError = sealed.userMessage
+                            is StepResult.Ok -> {
+                                bioError = null
+                                onSealed()
+                            }
+                        }
+                    }
+                },
+                onError = { message -> bioError = "Fingerprint prompt: $message" },
+            )
+        }
     }
 
     fun promptBiometricVerify(onSuccess: () -> Unit) {
-        val host = activity ?: return
+        val host = activity
+        if (host == null) {
+            verifyFeedback = "Fingerprint prompt isn't available on this screen."
+            return
+        }
         scope.launch {
-            val cipher = biometricStore.openCipher() ?: return@launch
-            showBiometricCryptoPrompt(
-                host,
-                cipher,
-                title = "Verify it's you",
-                negativeButtonText = "Cancel",
-                onAuthenticated = { authorised ->
-                    if (appLockManager.verifyBiometricForSettings(authorised)) onSuccess()
-                },
-                onError = { /* stay in the dialog */ },
-            )
+            when (val cipherResult = biometricStore.openCipherResult()) {
+                is StepResult.Failed -> verifyFeedback = cipherResult.userMessage
+                is StepResult.Ok -> showBiometricCryptoPrompt(
+                    host,
+                    cipherResult.value,
+                    title = "Verify it's you",
+                    negativeButtonText = "Cancel",
+                    onAuthenticated = { authorised ->
+                        when (val verified = appLockManager.verifyBiometricForSettings(authorised)) {
+                            is StepResult.Failed -> verifyFeedback = verified.userMessage
+                            is StepResult.Ok -> onSuccess()
+                        }
+                    },
+                    onError = { message -> verifyFeedback = "Fingerprint prompt: $message" },
+                )
+            }
         }
     }
 
@@ -212,6 +249,7 @@ fun SecuritySection(
                     checked = settings.biometricEnabled,
                     enabled = biometricAvailable,
                     onCheckedChange = { wantEnabled ->
+                        bioError = null
                         if (wantEnabled) {
                             // Enabling requires an OS biometric success
                             // (1.x posture), on top of re-authorisation.
@@ -226,6 +264,28 @@ fun SecuritySection(
                             }
                         }
                     },
+                )
+            }
+
+            // Phase 2.6 (Fix A): the fingerprint row's failure
+            // surface. A dead token behind an ON toggle and any
+            // failed enable step render HERE, in words — the 0.3.1
+            // behaviour (toggle off, zero explanation) is banned.
+            if (settings.biometricEnabled && bioTokenBroken) {
+                Text(
+                    "Fingerprint is on, but its sealed key can't be read on this " +
+                        "device anymore — turn it off and on again to re-enable it.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(bottom = NotaSpacing.sm),
+                )
+            }
+            if (bioError != null) {
+                Text(
+                    bioError!!,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(bottom = NotaSpacing.sm),
                 )
             }
 

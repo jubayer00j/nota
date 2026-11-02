@@ -219,9 +219,14 @@ class RichNoteEditorViewModel(
         }
     }
 
-    /** Cipher for the gate's crypto prompt (Phase 2.5, F4). */
-    suspend fun biometricUnlockCipher(): javax.crypto.Cipher? {
-        val current = _note.value ?: return null
+    /** Cipher for the gate's crypto prompt (Phase 2.5, F4).
+     *  Phase 2.6: typed — the gate surfaces the failure reason. */
+    suspend fun biometricUnlockCipher(): app.nota.data.security.StepResult<javax.crypto.Cipher> {
+        val current = _note.value
+            ?: return app.nota.data.security.StepResult.Failed(
+                app.nota.data.security.BiometricStep.TOKEN_READ,
+                "note isn't loaded",
+            )
         return noteLockRepository.biometricUnlockCipher(current)
     }
 

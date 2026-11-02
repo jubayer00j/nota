@@ -5,7 +5,9 @@ import app.nota.data.db.AttachmentDao
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.NoteDocument
+import app.nota.data.security.BiometricStep
 import app.nota.data.security.LockPerf
+import app.nota.data.security.StepResult
 import app.nota.data.security.NoteLockBiometricStore
 import app.nota.data.security.NoteLockCrypto
 import app.nota.data.security.NoteLockMethod
@@ -228,18 +230,28 @@ class NoteLockRepository(
     /**
      * Cipher for a biometric UNLOCK prompt for [note] (Phase 2.5):
      * the DECRYPT cipher over the sealed NEK copy, to be handed to
-     * BiometricPrompt as its CryptoObject. Null when fingerprint
-     * unlock is not enabled for the note or no copy exists.
+     * BiometricPrompt as its CryptoObject. Phase 2.6: typed — the
+     * gate shows the failure reason when fingerprint unlock is not
+     * enabled for the note, no copy exists, or the device key is
+     * dead, instead of a button that silently does nothing.
      */
-    suspend fun biometricUnlockCipher(note: NoteEntity): Cipher? {
-        val lock = recordFor(note) ?: return null
-        if (!lock.biometric) return null
-        if (lock.lockoutSeconds() > 0) return null
-        return biometricStore.openCipher(note.id)
+    suspend fun biometricUnlockCipher(note: NoteEntity): StepResult<Cipher> {
+        val lock = recordFor(note)
+            ?: return StepResult.Failed(BiometricStep.TOKEN_READ, "this note has no lock record")
+        if (!lock.biometric) {
+            return StepResult.Failed(
+                BiometricStep.TOKEN_READ,
+                "fingerprint unlock isn't enabled for this note",
+            )
+        }
+        if (lock.lockoutSeconds() > 0) {
+            return StepResult.Failed(BiometricStep.DECRYPT, "note is in a temporary lockout")
+        }
+        return biometricStore.openCipherResult(note.id)
     }
 
     /** Cipher for a biometric SEAL prompt (enabling fingerprint). */
-    fun biometricSealCipher(): Cipher? = biometricStore.sealCipher()
+    fun biometricSealCipher(): StepResult<Cipher> = biometricStore.sealCipherResult()
 
     /**
      * Releases the note key from the on-device fingerprint copy

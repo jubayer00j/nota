@@ -44,6 +44,7 @@ import androidx.fragment.app.FragmentActivity
 import app.nota.data.security.AppLockBiometricStore
 import app.nota.data.security.AppLockManager
 import app.nota.data.security.AppLockMethod
+import app.nota.data.security.StepResult
 import app.nota.data.security.UnlockResult
 import app.nota.ui.components.NotaBrandLockup
 import app.nota.ui.theme.NotaSpacing
@@ -115,29 +116,30 @@ fun LockScreen(
     // Phase 2.5 (F4, coordinator re-point of the F5 design): the ONE
     // biometric entry point for this screen — the auto-prompt effect
     // and the fingerprint disc both go through here. Crypto-bound:
-    // the cipher comes from AppLockBiometricStore.openCipher()
+    // the cipher comes from AppLockBiometricStore.openCipherResult()
     // (suspend); the prompt authorises it via CryptoObject, and
     // AppLockManager unlocks ONLY when that cipher decrypts the
     // sealed token. There is no bare-boolean path.
+    // Phase 2.6 (Fix A): both steps are typed — a failure (dead key,
+    // corrupt token, failed decrypt) lands in `feedback` with its
+    // step + reason instead of a generic or silent refusal.
     fun showCryptoBiometric() {
         val host = activity ?: return
         scope.launch {
-            val cipher = biometricStore.openCipher()
-            if (cipher == null) {
-                feedback = "Fingerprint needs re-enabling — unlock with your credential, " +
-                    "then turn Fingerprint unlock off and on again in Settings."
-                return@launch
+            when (val opened = biometricStore.openCipherResult()) {
+                is StepResult.Failed -> feedback = opened.userMessage
+                is StepResult.Ok -> showBiometricCryptoPrompt(
+                    host,
+                    opened.value,
+                    onAuthenticated = { authorised ->
+                        when (val unlocked = manager.unlockWithBiometric(authorised)) {
+                            is StepResult.Failed -> feedback = unlocked.userMessage
+                            is StepResult.Ok -> Unit // MainActivity swaps to the nav shell.
+                        }
+                    },
+                    onError = { /* credential form stays available */ },
+                )
             }
-            showBiometricCryptoPrompt(
-                host,
-                cipher,
-                onAuthenticated = { authorised ->
-                    if (!manager.unlockWithBiometric(authorised)) {
-                        feedback = "Fingerprint could not be verified — use your credential."
-                    }
-                },
-                onError = { /* credential form stays available */ },
-            )
         }
     }
 

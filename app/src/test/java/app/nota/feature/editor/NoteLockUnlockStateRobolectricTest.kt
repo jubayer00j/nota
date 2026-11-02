@@ -10,7 +10,9 @@ import app.nota.data.repository.NoteUnlockResult
 import app.nota.data.security.AppLockMethod
 import app.nota.data.security.NoteLockBiometricStore
 import app.nota.data.security.NoteLockCrypto
+import app.nota.data.security.BiometricStep
 import app.nota.data.security.NoteLockDeviceKeyProvider
+import app.nota.data.security.StepResult
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
 import app.nota.data.templates.TemplateRepository
@@ -95,27 +97,29 @@ class NoteLockUnlockStateRobolectricTest {
             null
         }
 
-        // Phase 2.5 cipher factories (coordinator fix at assembly):
-        // F4 added these abstract members to NoteLockDeviceKeyProvider;
-        // this fake predates them. Same raw-key pattern as the
-        // repository test's fake — the production auth-required
-        // behaviour is device-only, Robolectric cannot exercise it.
-        override fun sealCipher(): Cipher =
-            Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
-            }
+        // Phase 2.6 cipher factories: typed StepResults; the fake key needs no user
+        // authentication, so these are plain ciphers over the same raw key
+        // (the production auth-required behaviour is device-only).
+override fun sealCipherResult(): StepResult<Cipher> =
+            StepResult.Ok(
+                Cipher.getInstance("AES/GCM/NoPadding").apply {
+                    init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
+                },
+            )
 
-        override fun openCipher(packedBase64: String): Cipher? = try {
+        override fun openCipherResult(packedBase64: String): StepResult<Cipher> = try {
             val packed = Base64.getDecoder().decode(packedBase64)
-            Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(
-                    Cipher.DECRYPT_MODE,
-                    SecretKeySpec(key, "AES"),
-                    GCMParameterSpec(128, packed.copyOfRange(0, 12)),
-                )
-            }
+            StepResult.Ok(
+                Cipher.getInstance("AES/GCM/NoPadding").apply {
+                    init(
+                        Cipher.DECRYPT_MODE,
+                        SecretKeySpec(key, "AES"),
+                        GCMParameterSpec(128, packed.copyOfRange(0, 12)),
+                    )
+                },
+            )
         } catch (e: Exception) {
-            null
+            StepResult.Failed(BiometricStep.CIPHER_INIT, "fake provider: " + e.javaClass.simpleName)
         }
     }
 

@@ -23,11 +23,17 @@ import javax.crypto.spec.GCMParameterSpec
  * Phase 2.5 change: the production key is now USER-AUTHENTICATION
  * REQUIRED, so there is no usable bare encrypt/decrypt any more —
  * sealing and opening both run through ciphers that BiometricPrompt
- * authorises via a CryptoObject ([sealCipher] / [openCipher]).
+ * authorises via a CryptoObject ([sealCipherResult] /
+ * [openCipherResult]).
  * [encrypt]/[decrypt] remain on the interface ONLY as the test-fake
  * seam and a legacy probe; the production provider implements them
  * against the auth-required key, where they fail (return null)
  * without an authorised prompt — by design.
+ *
+ * Phase 2.6 (Fix A): the cipher factories return [StepResult] —
+ * the same silent-null failure that killed App Lock fingerprint
+ * enabling lived here too, and a failed step must carry its reason
+ * to the surface that asked for it.
  */
 interface NoteLockDeviceKeyProvider {
     /** Seals [plain] under the device key; null on any failure. */
@@ -37,25 +43,28 @@ interface NoteLockDeviceKeyProvider {
     fun decrypt(packedBase64: String): ByteArray?
 
     /** ENCRYPT_MODE cipher to be authorised by a biometric prompt. */
-    fun sealCipher(): Cipher?
+    fun sealCipherResult(): StepResult<Cipher>
 
     /** DECRYPT_MODE cipher for [packedBase64], to be authorised by a prompt. */
-    fun openCipher(packedBase64: String): Cipher?
+    fun openCipherResult(packedBase64: String): StepResult<Cipher>
 }
 
 /**
  * Production provider: an AES-256-GCM key in the Android Keystore
- * with `setUserAuthenticationRequired(true)` and
- * `setInvalidatedByBiometricEnrollment(true)`.
+ * with `setUserAuthenticationRequired(true)`.
  *
- * The alias is NEW (`nota.notelock.devicekey.v2`): Phase 2b copies
- * were sealed under the v1 non-auth key (`nota.notelock.devicekey`).
- * Those copies CANNOT be opened by an authorised cipher (they were
- * never auth-bound), so they are orphaned by this upgrade — the
- * record's credential slots are untouched, the user unlocks once
- * with their backup credential and re-enables fingerprint, which
- * seals a fresh v2 copy. That one-time re-enable is the honest cost
- * of moving from a boolean gate to a crypto-bound one.
+ * The alias is NEW (`nota.notelock.devicekey.v3`): the v2 key
+ * (Phase 2.5) was generated WITH
+ * `setInvalidatedByBiometricEnrollment(true)`, which on Samsung's
+ * API-27 keystore leaves keys permanently invalidated from birth —
+ * the same defect that killed App Lock fingerprint enabling in
+ * 0.3.1 (see AndroidKeystoreAppLockKeyProvider's doc for the named
+ * tradeoff of dropping the flag). v2-sealed copies cannot be
+ * opened by a v3 cipher, so they are orphaned by this upgrade —
+ * the record's credential slots are untouched, the user unlocks
+ * once with their backup credential and re-enables fingerprint,
+ * which seals a fresh v3 copy. (Phase 2b copies were already
+ * orphaned the same way by the v2 upgrade.)
  */
 class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
 
@@ -66,7 +75,7 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
         Base64.getEncoder().encodeToString(packed)
     } catch (e: Exception) {
         // Includes UserNotAuthenticatedException: without a prompt-
-        // authorised cipher this MUST fail under the v2 key.
+        // authorised cipher this MUST fail under the auth-required key.
         null
     }
 
@@ -87,52 +96,98 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
         null
     }
 
-    override fun sealCipher(): Cipher? = try {
-        Cipher.getInstance(TRANSFORMATION).apply {
-            init(Cipher.ENCRYPT_MODE, deviceKey())
+    override fun sealCipherResult(): StepResult<Cipher> {
+        val key = when (val loaded = loadKey()) {
+            is StepResult.Ok -> loaded.value
+            is StepResult.Failed -> return loaded
         }
-    } catch (e: Exception) {
-        null
-    }
-
-    override fun openCipher(packedBase64: String): Cipher? = try {
-        val packed = Base64.getDecoder().decode(packedBase64)
-        if (packed.size <= 12) {
-            null
-        } else {
-            Cipher.getInstance(TRANSFORMATION).apply {
-                init(
-                    Cipher.DECRYPT_MODE,
-                    deviceKey(),
-                    GCMParameterSpec(128, packed.copyOfRange(0, 12)),
-                )
-            }
-        }
-    } catch (e: Exception) {
-        null
-    }
-
-    private fun deviceKey(): SecretKey {
-        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (keyStore.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(
-            KeyGenParameterSpec.Builder(
-                ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        return try {
+            StepResult.Ok(
+                Cipher.getInstance(TRANSFORMATION).apply {
+                    init(Cipher.ENCRYPT_MODE, key)
+                },
             )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
-                .setUserAuthenticationRequired(true)
-                .setInvalidatedByBiometricEnrollment(true)
-                .build(),
-        )
-        return generator.generateKey()
+        } catch (e: Exception) {
+            StepResult.Failed(BiometricStep.CIPHER_INIT, stepReason(e))
+        }
+    }
+
+    override fun openCipherResult(packedBase64: String): StepResult<Cipher> {
+        val packed = try {
+            Base64.getDecoder().decode(packedBase64)
+        } catch (e: IllegalArgumentException) {
+            return StepResult.Failed(BiometricStep.TOKEN_READ, "stored copy is not valid Base64")
+        }
+        if (packed.size <= 12) {
+            return StepResult.Failed(BiometricStep.TOKEN_READ, "stored copy is truncated")
+        }
+        val key = when (val loaded = loadKey()) {
+            is StepResult.Ok -> loaded.value
+            is StepResult.Failed -> return loaded
+        }
+        return try {
+            StepResult.Ok(
+                Cipher.getInstance(TRANSFORMATION).apply {
+                    init(
+                        Cipher.DECRYPT_MODE,
+                        key,
+                        GCMParameterSpec(128, packed.copyOfRange(0, 12)),
+                    )
+                },
+            )
+        } catch (e: Exception) {
+            StepResult.Failed(BiometricStep.CIPHER_INIT, stepReason(e))
+        }
+    }
+
+    /** The raw key for the legacy encrypt/decrypt probe paths. */
+    private fun deviceKey(): SecretKey =
+        when (val loaded = loadKey()) {
+            is StepResult.Ok -> loaded.value
+            is StepResult.Failed -> throw IllegalStateException(loaded.reason)
+        }
+
+    private fun loadKey(): StepResult<SecretKey> {
+        val keyStore = try {
+            KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        } catch (e: Exception) {
+            return StepResult.Failed(BiometricStep.KEY_GENERATION, stepReason(e))
+        }
+        try {
+            (keyStore.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let {
+                return StepResult.Ok(it.secretKey)
+            }
+        } catch (e: Exception) {
+            return StepResult.Failed(BiometricStep.KEY_GENERATION, stepReason(e))
+        }
+        return try {
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setKeySize(256)
+                    .setUserAuthenticationRequired(true)
+                    // Deliberately NO setInvalidatedByBiometricEnrollment:
+                    // see the class doc — on Samsung API-27 firmware the
+                    // flag poisons the key at birth.
+                    .build(),
+            )
+            StepResult.Ok(generator.generateKey())
+        } catch (e: Exception) {
+            StepResult.Failed(BiometricStep.KEY_GENERATION, stepReason(e))
+        }
     }
 
     companion object {
-        const val ALIAS = "nota.notelock.devicekey.v2"
+        const val ALIAS = "nota.notelock.devicekey.v3"
+
+        /** Phase 2.5 alias — orphaned in 2.6 (see class doc). */
+        const val PRIOR_ALIAS = "nota.notelock.devicekey.v2"
+
         /** Phase 2b alias — orphaned by the crypto-binding upgrade. */
         const val LEGACY_ALIAS = "nota.notelock.devicekey"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
@@ -150,7 +205,7 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
  * Unlock discipline (the Phase 2.5 fix): previously the flow was
  * "prompt returns success → [readCopy] decrypts separately" — a bare
  * boolean gate in front of a freely usable key. Now the sealed NEK
- * cipher IS the prompt's CryptoObject: [openCipher] builds the
+ * cipher IS the prompt's CryptoObject: [openCipherResult] builds the
  * DECRYPT cipher, the prompt authorises it, and [readCopy] completes
  * the decryption with that authorised cipher. No authorised cipher,
  * no NEK — a spoofed prompt success releases nothing.
@@ -163,7 +218,7 @@ class NoteLockBiometricStore(
     private val keyProvider: NoteLockDeviceKeyProvider,
 ) {
     /** Cipher for an ENABLING prompt (seal direction). */
-    fun sealCipher(): Cipher? = keyProvider.sealCipher()
+    fun sealCipherResult(): StepResult<Cipher> = keyProvider.sealCipherResult()
 
     /**
      * Stores the device copy BY COMPLETING the seal with the
@@ -181,14 +236,21 @@ class NoteLockBiometricStore(
         return preferences.getNoteLockBiometricCopy(noteId) == packed
     }
 
-    /** Cipher for an UNLOCK prompt for [noteId]; null when no copy exists. */
-    suspend fun openCipher(noteId: String): Cipher? {
+    /**
+     * Cipher for an UNLOCK prompt for [noteId] (Phase 2.6: typed —
+     * a missing copy and a dead key are different failures and the
+     * gate shows which one happened).
+     */
+    suspend fun openCipherResult(noteId: String): StepResult<Cipher> {
         val packed = try {
             preferences.getNoteLockBiometricCopy(noteId)
         } catch (e: Exception) {
-            null
-        } ?: return null
-        return keyProvider.openCipher(packed)
+            return StepResult.Failed(BiometricStep.TOKEN_READ, stepReason(e))
+        } ?: return StepResult.Failed(
+            BiometricStep.TOKEN_READ,
+            "no fingerprint copy is stored for this note",
+        )
+        return keyProvider.openCipherResult(packed)
     }
 
     /**
