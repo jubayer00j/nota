@@ -1,10 +1,12 @@
 package app.nota.data.drive
 
-import com.sun.net.httpserver.HttpServer
 import java.io.File
-import java.net.InetSocketAddress
 import java.net.URLDecoder
 import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -18,10 +20,11 @@ import org.robolectric.RuntimeEnvironment
 
 /**
  * Drive REST client behaviour (Phase 3b) against a local stub server
- * (the JDK's built-in HttpServer — no extra test dependency): folder
- * find-or-create, the canonical-file rule end to end, meta/download/
- * upload request shapes. The semantics mirror 1.x's drive.ts, which
- * is what makes the shared "Noma Backup.zip" crossover work.
+ * (MockWebServer — the JDK's com.sun.net.httpserver isn't on the
+ * Android unit-test classpath): folder find-or-create, the
+ * canonical-file rule end to end, meta/download/upload request
+ * shapes. The semantics mirror 1.x's drive.ts, which is what makes
+ * the shared "Noma Backup.zip" crossover work.
  */
 @RunWith(RobolectricTestRunner::class)
 class DriveClientTest {
@@ -37,38 +40,40 @@ class DriveClientTest {
         val bodyText: String get() = String(body, Charsets.ISO_8859_1)
     }
 
-    private lateinit var server: HttpServer
+    private lateinit var server: MockWebServer
     private lateinit var client: DriveClient
     private val requests = mutableListOf<Recorded>()
     private var responder: (Recorded) -> Pair<Int, String> = { 200 to "{}" }
 
     @Before
     fun setUp() {
-        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/") { exchange ->
-            val body = exchange.requestBody.readBytes()
-            val recorded = Recorded(
-                exchange.requestMethod,
-                exchange.requestURI.path,
-                exchange.requestURI.rawQuery,
-                body,
-                exchange.requestHeaders.getFirst("Content-Type"),
-            )
-            requests += recorded
-            val (code, response) = responder(recorded)
-            val bytes = response.toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.set("Content-Type", "application/json")
-            exchange.sendResponseHeaders(code, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
+        server = MockWebServer()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val full = request.path ?: "/"
+                val recorded = Recorded(
+                    method = request.method,
+                    path = full.substringBefore('?'),
+                    rawQuery = full.substringAfter('?', "").ifEmpty { null },
+                    body = request.body.readByteArray(),
+                    contentType = request.headers["Content-Type"],
+                )
+                requests += recorded
+                val (code, response) = responder(recorded)
+                return MockResponse()
+                    .setResponseCode(code)
+                    .setHeader("Content-Type", "application/json")
+                    .setBody(response)
+            }
         }
         server.start()
-        val base = "http://127.0.0.1:${server.address.port}"
+        val base = server.url("/").toString().trimEnd('/')
         client = DriveClient(apiBase = "$base/drive/v3", uploadBase = "$base/upload/drive/v3")
     }
 
     @After
     fun tearDown() {
-        server.stop(0)
+        server.shutdown()
     }
 
     private fun metaJson(

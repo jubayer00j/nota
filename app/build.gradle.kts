@@ -40,7 +40,7 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
+        versionCode = 12
         versionName = "0.4.0"
     }
 
@@ -143,6 +143,7 @@ dependencies {
     implementation(project(":legacyfingerprint"))
 
     testImplementation(libs.junit)
+    testImplementation(libs.mockwebserver)
     testImplementation(libs.robolectric)
 
     // Phase 3a accounts: Firebase Auth (identity ONLY — notes never
