@@ -385,7 +385,18 @@ object NoteDocument {
                     if (close == null) {
                         out.append(inner.substring(lt, tag.end)); i = tag.end
                     } else {
-                        out.append(normalizeListBlock(inner.substring(lt, close.second)))
+                        val whole = inner.substring(lt, close.second)
+                        // A nested TASK list is preserved verbatim,
+                        // exactly like a top-level one (Codex P2,
+                        // Phase 2.5): its items' <div><p> scaffolding
+                        // must not be unwrapped by normalisation.
+                        out.append(
+                            if (isTaskList(tag.attrs, inner.substring(tag.end, close.first))) {
+                                whole
+                            } else {
+                                normalizeListBlock(whole)
+                            },
+                        )
                         i = close.second
                     }
                 }
@@ -447,7 +458,16 @@ object NoteDocument {
                         raw.append(inner.substring(lt, tag.end)); i = tag.end
                     } else {
                         flushRaw()
-                        chunks += 2 to normalizeListBlock(inner.substring(lt, close.second))
+                        val whole = inner.substring(lt, close.second)
+                        // Nested TASK lists stay verbatim (see
+                        // normalizeListItems) — never unwrapped.
+                        chunks += 2 to if (
+                            isTaskList(tag.attrs, inner.substring(tag.end, close.first))
+                        ) {
+                            whole
+                        } else {
+                            normalizeListBlock(whole)
+                        }
                         i = close.second
                     }
                 }
