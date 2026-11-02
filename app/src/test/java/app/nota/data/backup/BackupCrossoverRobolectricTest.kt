@@ -2,6 +2,7 @@ package app.nota.data.backup
 
 import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.NoteLockRepository
@@ -113,14 +114,14 @@ override fun sealCipherResult(): StepResult<Cipher> =
 
     private inner class Stack(val db: NotaDatabase) {
         val context = RuntimeEnvironment.getApplication()
-        val notes = NoteRepository(db, db.noteDao(), db.noteFtsDao(), db.folderDao(), db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao())
-        val store = AttachmentStore(context, db.attachmentDao())
+        val notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
+        val store = AttachmentStore(context, DatabaseProvider.forDatabase(context, db))
         val templates = TemplateRepository(context)
-        val backup = BackupRepository(context, db, templates, store)
+        val backup = BackupRepository(context, DatabaseProvider.forDatabase(context, db), templates, store)
         // Built lazily so no DataStore/preferences machinery exists
         // while the backup restore under test runs.
         val lockRepo by lazy {
-            NoteLockRepository(notes, db.attachmentDao(), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider()))
+            NoteLockRepository(notes, DatabaseProvider.forDatabase(context, db), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider()))
         }
     }
 

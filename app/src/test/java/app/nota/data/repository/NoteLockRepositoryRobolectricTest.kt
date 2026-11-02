@@ -3,6 +3,7 @@ package app.nota.data.repository
 import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.NoteLockBiometricStore
@@ -111,13 +112,10 @@ override fun sealCipherResult(): StepResult<Cipher> =
         db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        notes = NoteRepository(
-            db, db.noteDao(), db.noteFtsDao(), db.folderDao(),
-            db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao(),
-        )
-        store = AttachmentStore(context, db.attachmentDao())
+        notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
+        store = AttachmentStore(context, DatabaseProvider.forDatabase(context, db))
         biometricStore = NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider())
-        lockRepo = NoteLockRepository(notes, db.attachmentDao(), store, biometricStore)
+        lockRepo = NoteLockRepository(notes, DatabaseProvider.forDatabase(context, db), store, biometricStore)
     }
 
     @After

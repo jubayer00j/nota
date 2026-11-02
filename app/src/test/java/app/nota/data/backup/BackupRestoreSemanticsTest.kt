@@ -4,6 +4,7 @@ import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.templates.TemplateRepository
 import java.io.File
@@ -49,8 +50,8 @@ class BackupRestoreSemanticsTest {
 
     private inner class Stack(val db: NotaDatabase) {
         val context = RuntimeEnvironment.getApplication()
-        val store = AttachmentStore(context, db.attachmentDao())
-        val backup = BackupRepository(context, db, TemplateRepository(context), store)
+        val store = AttachmentStore(context, DatabaseProvider.forDatabase(context, db))
+        val backup = BackupRepository(context, DatabaseProvider.forDatabase(context, db), TemplateRepository(context), store)
     }
 
     private fun newStack(): Stack {

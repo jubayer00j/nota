@@ -2,8 +2,8 @@ package app.nota.feature.today
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NoteEntity
-import app.nota.data.db.ReminderDao
 import app.nota.data.db.ReminderEntity
 import app.nota.data.repository.NoteRepository
 import java.time.LocalDate
@@ -24,12 +24,15 @@ data class TodayUiState(
 
 class TodayViewModel(
     private val repository: NoteRepository,
-    reminderDao: ReminderDao,
+    provider: DatabaseProvider,
 ) : ViewModel() {
 
     val uiState: StateFlow<TodayUiState> = combine(
         repository.observeActive(),
-        reminderDao.observeEnabled(),
+        // Phase 3a: resolved from the active account's database at
+        // ViewModel creation; the shell is keyed by account, so this
+        // ViewModel is recreated on every account switch.
+        provider.current.reminderDao().observeEnabled(),
     ) { notes, reminders ->
         val zone = ZoneId.systemDefault()
         val startOfToday = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()

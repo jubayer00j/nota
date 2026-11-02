@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.withTransaction
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteFtsEntity
@@ -46,10 +47,14 @@ import kotlinx.coroutines.withContext
  */
 class BackupRepository(
     private val context: Context,
-    private val db: NotaDatabase,
+    private val provider: DatabaseProvider,
     private val templateRepository: TemplateRepository,
     private val attachmentStore: AttachmentStore,
 ) {
+    // Phase 3a: the database is the ACTIVE account's, resolved per
+    // call through the provider — a backup/restore always targets the
+    // library the user is looking at, never a captured one.
+    private val db: NotaDatabase get() = provider.current
     private val noteDao get() = db.noteDao()
     private val folderDao get() = db.folderDao()
     private val tagDao get() = db.tagDao()
@@ -156,9 +161,18 @@ class BackupRepository(
         return BackupWriter.ExportData(
             manifest = BackupManifest(
                 backupFormatVersion = 2,
-                ownerId = null,
-                libraryId = NotaDatabase.databaseName(NotaDatabase.GUEST_ACCOUNT),
-                nomaVersion = "0.3.0",
+                // Phase 3a: the manifest now names its owner + library
+                // truthfully (1.x parity): a signed-in export carries
+                // the account uid as ownerId (1.x readers reject other
+                // accounts' archives on the Drive path), a guest export
+                // stays ownerless; libraryId is the ACTIVE database
+                // name. Guest exports before 3a wrote ownerId=null and
+                // the guest libraryId — those archives still read fine
+                // (the reader never gates local restores on owner).
+                ownerId = provider.accountId.value
+                    .takeIf { it != NotaDatabase.GUEST_ACCOUNT },
+                libraryId = NotaDatabase.databaseName(provider.accountId.value),
+                nomaVersion = "0.4.0",
                 createdAt = iso,
                 noteCount = allNotes.size,
                 folderCount = bxFolders.size,
@@ -267,9 +281,18 @@ class BackupRepository(
             }
 
             if (mode == RestoreMode.REPLACE) {
-                // Wipe ALL attachment files before any new file lands and
-                // before rows are cleared, so no orphan survives.
-                File(context.filesDir, "attachments").deleteRecursively()
+                // Wipe THIS account's attachment files before any new
+                // file lands and before rows are cleared, so no orphan
+                // survives. Phase 3a: the attachments/ root is shared
+                // by every account database on the device — the old
+                // wholesale deleteRecursively() would have destroyed
+                // OTHER accounts' binaries (whose rows reconcile then
+                // drops as file-missing). Only files the active
+                // account's rows point at are deleted here; payload
+                // files land after the transaction.
+                for (att in existingAttachments.values) {
+                    attachmentStore.fileFor(att).delete()
+                }
             }
             // Attachment FILES are written after the row transaction
             // (below): a failed transaction then leaves no orphan files,
@@ -406,7 +429,12 @@ class BackupRepository(
             }
 
             rebuildFtsAndLinks()
-            val rec = attachmentStore.reconcile { attachmentDao.getAll() }
+            // The reconcile's file sweep must spare other accounts'
+            // binaries (shared attachments/ root — see AttachmentStore).
+            attachmentStore.reconcile(
+                allProvider = { attachmentDao.getAll() },
+                extraKnownPaths = { provider.allAttachmentLocalPaths() },
+            )
             counts
         }
 
@@ -559,38 +587,10 @@ class BackupRepository(
         return deleted
     }
 
-    /** Full-library FTS + backlink rebuild after a restore. Clearing
-     *  note_links first is required: NoteRepository.backfillLinksIfNeeded
-     *  only runs when the table is empty, and a merge can leave edges
-     *  pointing at notes whose titles the payload just changed — a full
-     *  clear + re-extraction keeps every edge truthful. Locked notes get
-     *  title-only FTS rows and no edges (the PR-B invariants). */
-    private suspend fun rebuildFtsAndLinks() {
-        val allNotes = noteDao.getAll()
-        db.withTransaction {
-            ftsDao.deleteAll()
-            linkDao.deleteAll()
-            for (note in allNotes) {
-                if (note.trashedAt != null) continue
-                ftsDao.insert(
-                    NoteFtsEntity(
-                        noteId = note.id,
-                        title = note.title,
-                        plainText = if (note.locked) "" else note.plainText,
-                    ),
-                )
-            }
-            for (note in allNotes) {
-                if (note.locked || note.trashedAt != null) continue
-                val titles = NoteDocument.backlinkTitles(note.plainText)
-                for (title in titles) {
-                    val target = noteDao.getByTitle(title) ?: continue
-                    if (target.id == note.id || target.locked) continue
-                    linkDao.insertAll(listOf(NoteLinkEntity(sourceId = note.id, targetId = target.id)))
-                }
-            }
-        }
-    }
+    /** Delegates to the shared [rebuildLibraryIndexes] (also used by
+     *  the Phase 3a guest→account copy, which rebuilds the target
+     *  library's indexes after its row copy). */
+    private suspend fun rebuildFtsAndLinks() = rebuildLibraryIndexes(db)
 
     companion object {
         fun wordCount(plainText: String): Int =
@@ -665,3 +665,43 @@ private fun BxReminder.toEntity(): ReminderEntity = ReminderEntity(
     enabled = status == "pending",
     createdAt = createdAt,
 )
+
+/**
+ * Full-library FTS + backlink rebuild for [db]. Clearing note_links
+ * first is required: NoteRepository.backfillLinksIfNeeded only runs
+ * when the table is empty, and a merge/copy can leave edges pointing
+ * at notes whose titles just changed — a full clear + re-extraction
+ * keeps every edge truthful. Locked notes get title-only FTS rows and
+ * no edges (the per-note-lock invariants). Shared by restore
+ * ([BackupRepository.applyBackup]) and the Phase 3a guest→account
+ * copy ([app.nota.data.auth.GuestLibraryTransfer]).
+ */
+suspend fun rebuildLibraryIndexes(db: NotaDatabase) {
+    val noteDao = db.noteDao()
+    val ftsDao = db.noteFtsDao()
+    val linkDao = db.noteLinkDao()
+    val allNotes = noteDao.getAll()
+    db.withTransaction {
+        ftsDao.deleteAll()
+        linkDao.deleteAll()
+        for (note in allNotes) {
+            if (note.trashedAt != null) continue
+            ftsDao.insert(
+                NoteFtsEntity(
+                    noteId = note.id,
+                    title = note.title,
+                    plainText = if (note.locked) "" else note.plainText,
+                ),
+            )
+        }
+        for (note in allNotes) {
+            if (note.locked || note.trashedAt != null) continue
+            val titles = NoteDocument.backlinkTitles(note.plainText)
+            for (title in titles) {
+                val target = noteDao.getByTitle(title) ?: continue
+                if (target.id == note.id || target.locked) continue
+                linkDao.insertAll(listOf(NoteLinkEntity(sourceId = note.id, targetId = target.id)))
+            }
+        }
+    }
+}

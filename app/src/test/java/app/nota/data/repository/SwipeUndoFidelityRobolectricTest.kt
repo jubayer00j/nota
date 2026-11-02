@@ -3,6 +3,7 @@ package app.nota.data.repository
 import androidx.room.Room
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.ReminderEntity
 import kotlinx.coroutines.runBlocking
@@ -43,10 +44,7 @@ class SwipeUndoFidelityRobolectricTest {
         db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        repository = NoteRepository(
-            db, db.noteDao(), db.noteFtsDao(), db.folderDao(),
-            db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao(),
-        )
+        repository = NoteRepository(DatabaseProvider.forDatabase(context, db))
     }
 
     @After

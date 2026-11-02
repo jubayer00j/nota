@@ -201,6 +201,10 @@ interface NoteVersionDao {
     @Query("SELECT * FROM note_versions WHERE noteId = :noteId ORDER BY createdAt DESC")
     fun observeForNote(noteId: String): Flow<List<NoteVersionEntity>>
 
+    /** Phase 3a: bulk read for the guest→account library copy. */
+    @Query("SELECT * FROM note_versions")
+    suspend fun getAll(): List<NoteVersionEntity>
+
     @Insert
     suspend fun insert(version: NoteVersionEntity)
 }

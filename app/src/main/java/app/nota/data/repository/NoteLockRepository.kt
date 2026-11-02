@@ -1,8 +1,8 @@
 package app.nota.data.repository
 
 import app.nota.data.attachments.AttachmentStore
-import app.nota.data.db.AttachmentDao
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.NoteDocument
 import app.nota.data.security.BiometricStep
@@ -60,10 +60,13 @@ data class DecryptedNoteData(
  */
 class NoteLockRepository(
     private val noteRepository: NoteRepository,
-    private val attachmentDao: AttachmentDao,
+    private val provider: DatabaseProvider,
     private val attachmentStore: AttachmentStore,
     private val biometricStore: NoteLockBiometricStore,
 ) {
+    // Phase 3a: resolved per call through the provider — the active
+    // database changes with the signed-in account.
+    private val attachmentDao get() = provider.current.attachmentDao()
     /** Serialises unlock attempts so the persisted failed-attempt
      *  counter can never lose an increment to a concurrent submission. */
     private val attemptMutex = Mutex()

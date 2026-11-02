@@ -1,10 +1,7 @@
 package app.nota.data.repository
 
-import app.nota.data.db.FolderDao
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
-import app.nota.data.db.NoteDao
-import app.nota.data.db.NotaDatabase
-import app.nota.data.db.TagDao
 import app.nota.data.db.TagEntity
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
@@ -13,13 +10,16 @@ import kotlinx.coroutines.flow.Flow
  * Folder/tag library management (Phase 1b). Deleting a folder relies on the
  * notes.folderId foreign key's SET_NULL action, so its notes survive,
  * unfiled. Deleting a tag cascades its note_tags links only.
+ *
+ * Phase 3a: DAOs resolve through [DatabaseProvider] at call time (see
+ * NoteRepository's note) — never captured.
  */
 class LibraryRepository(
-    @Suppress("unused") private val db: NotaDatabase,
-    private val folderDao: FolderDao,
-    private val tagDao: TagDao,
-    @Suppress("unused") private val noteDao: NoteDao,
+    private val provider: DatabaseProvider,
 ) {
+    private val db get() = provider.current
+    private val folderDao get() = db.folderDao()
+    private val tagDao get() = db.tagDao()
     fun observeFolders(): Flow<List<FolderEntity>> = folderDao.observeAll()
     fun observeTags(): Flow<List<TagEntity>> = tagDao.observeAll()
 
