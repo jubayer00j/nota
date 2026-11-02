@@ -282,6 +282,133 @@ class PreferencesRepository(context: Context) {
         safeEdit { this[guestMoveKey(uid)] = outcome }
     }
 
+    // ---- Phase 3b: Google Drive --------------------------------------
+    // Device-local Drive state. NONE of this is ever backed up or
+    // synced (settings never sync — spec §4.4 / 1.x D4): the backup
+    // mode + interval are this device's choices; the connection grant
+    // flag and the backup-encryption record are keyed per account uid
+    // (guest cannot connect Drive at all).
+
+    /** This device's copy of an account's backup-encryption setup
+     *  (1.x D3): [salt]/[iterations]/[wrappedKey] are the NOMAENC1
+     *  header wrap parameters (presence of the record = encryption
+     *  enabled for the account); [deviceKeyBase64] is the BMK this
+     *  device holds for unattended backups, or null when the key was
+     *  removed from this device (backups then pause until unlock). */
+    data class DriveEncryptionRecord(
+        val salt: String,
+        val iterations: Int,
+        val wrappedKey: String,
+        val deviceKeyBase64: String?,
+    )
+
+    val driveBackupMode: Flow<String> = dataStore.safeData.map { prefs ->
+        prefs[KEY_DRIVE_BACKUP_MODE] ?: DRIVE_MODE_OFF
+    }
+
+    val driveBackupIntervalHours: Flow<Int> = dataStore.safeData.map { prefs ->
+        prefs[KEY_DRIVE_BACKUP_INTERVAL_HOURS] ?: 24
+    }
+
+    suspend fun setDriveBackupMode(mode: String) {
+        safeEdit { this[KEY_DRIVE_BACKUP_MODE] = mode }
+    }
+
+    suspend fun setDriveBackupIntervalHours(hours: Int) {
+        safeEdit { this[KEY_DRIVE_BACKUP_INTERVAL_HOURS] = hours }
+    }
+
+    suspend fun driveBackupModeNow(): String = driveBackupMode.first()
+
+    suspend fun driveBackupIntervalHoursNow(): Int = driveBackupIntervalHours.first()
+
+    private fun driveGrantKey(uid: String) = booleanPreferencesKey("drive_grant_$uid")
+    private fun driveEncSaltKey(uid: String) = stringPreferencesKey("drive_enc_${uid}_salt")
+    private fun driveEncIterationsKey(uid: String) = intPreferencesKey("drive_enc_${uid}_iterations")
+    private fun driveEncWrappedKey(uid: String) = stringPreferencesKey("drive_enc_${uid}_wrapped")
+    private fun driveEncDeviceKeyKey(uid: String) = stringPreferencesKey("drive_enc_${uid}_devicekey")
+    private fun driveLastBackupAtKey(uid: String) = longPreferencesKey("drive_last_backup_at_$uid")
+    private fun driveLastResultKey(uid: String) = stringPreferencesKey("drive_last_result_$uid")
+
+    suspend fun getDriveGrant(uid: String): Boolean =
+        dataStore.safeData.first()[driveGrantKey(uid)] ?: false
+
+    suspend fun setDriveGrant(uid: String, granted: Boolean) {
+        safeEdit {
+            if (granted) this[driveGrantKey(uid)] = true else remove(driveGrantKey(uid))
+        }
+    }
+
+    suspend fun getDriveEncryptionRecord(uid: String): DriveEncryptionRecord? {
+        val prefs = dataStore.safeData.first()
+        val salt = prefs[driveEncSaltKey(uid)] ?: return null
+        val wrapped = prefs[driveEncWrappedKey(uid)] ?: return null
+        return DriveEncryptionRecord(
+            salt = salt,
+            iterations = prefs[driveEncIterationsKey(uid)] ?: 600_000,
+            wrappedKey = wrapped,
+            deviceKeyBase64 = prefs[driveEncDeviceKeyKey(uid)],
+        )
+    }
+
+    suspend fun setDriveEncryptionRecord(uid: String, record: DriveEncryptionRecord) {
+        safeEdit {
+            this[driveEncSaltKey(uid)] = record.salt
+            this[driveEncIterationsKey(uid)] = record.iterations
+            this[driveEncWrappedKey(uid)] = record.wrappedKey
+            if (record.deviceKeyBase64 != null) {
+                this[driveEncDeviceKeyKey(uid)] = record.deviceKeyBase64
+            } else {
+                remove(driveEncDeviceKeyKey(uid))
+            }
+        }
+    }
+
+    /** Removes only the held device key (1.x "Remove key from this
+     *  device"): the record (and thus encryption) stays, backups pause. */
+    suspend fun removeDriveDeviceKey(uid: String) {
+        safeEdit { remove(driveEncDeviceKeyKey(uid)) }
+    }
+
+    /** Removes the encryption record only (turn-off): grant + status
+     *  stay; the current cloud backup remains encrypted until the
+     *  next (plaintext) backup replaces it — 1.x's fleet semantics. */
+    suspend fun clearDriveEncryptionRecord(uid: String) {
+        safeEdit {
+            remove(driveEncSaltKey(uid))
+            remove(driveEncIterationsKey(uid))
+            remove(driveEncWrappedKey(uid))
+            remove(driveEncDeviceKeyKey(uid))
+        }
+    }
+
+    /** Clears the whole Drive footprint for an account: grant flag,
+     *  encryption record, status (1.x lesson — no credential material
+     *  outlives the connection or the sign-in it belongs to). */
+    suspend fun clearDriveState(uid: String) {
+        safeEdit {
+            remove(driveGrantKey(uid))
+            remove(driveEncSaltKey(uid))
+            remove(driveEncIterationsKey(uid))
+            remove(driveEncWrappedKey(uid))
+            remove(driveEncDeviceKeyKey(uid))
+            remove(driveLastBackupAtKey(uid))
+            remove(driveLastResultKey(uid))
+        }
+    }
+
+    suspend fun getDriveLastBackup(uid: String): Pair<Long, String?> {
+        val prefs = dataStore.safeData.first()
+        return (prefs[driveLastBackupAtKey(uid)] ?: 0L) to prefs[driveLastResultKey(uid)]
+    }
+
+    suspend fun setDriveLastBackup(uid: String, atMillis: Long, result: String) {
+        safeEdit {
+            this[driveLastBackupAtKey(uid)] = atMillis
+            this[driveLastResultKey(uid)] = result
+        }
+    }
+
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
     private val DataStore<Preferences>.safeData: Flow<Preferences>
         get() = data.catch { exception ->
@@ -305,5 +432,11 @@ class PreferencesRepository(context: Context) {
         val KEY_LOCK_FAILED_ATTEMPTS = intPreferencesKey("app_lock_failed_attempts")
         val KEY_LOCK_LOCKOUT_UNTIL = longPreferencesKey("app_lock_lockout_until")
         val KEY_LOCK_TIMEOUT_SECONDS = intPreferencesKey("app_lock_timeout_seconds")
+        val KEY_DRIVE_BACKUP_MODE = stringPreferencesKey("drive_backup_mode")
+        val KEY_DRIVE_BACKUP_INTERVAL_HOURS = intPreferencesKey("drive_backup_interval_hours")
+
+        const val DRIVE_MODE_OFF = "off"
+        const val DRIVE_MODE_SCHEDULED = "scheduled"
+        const val DRIVE_MODE_SYNC = "sync"
     }
 }

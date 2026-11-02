@@ -69,46 +69,58 @@ object BackupCrypto {
      * the envelope JSON whose `ct` is the AES-256-GCM ciphertext of the
      * ZIP, Base64-encoded unbroken and streamed (cipher update chunks feed
      * a carry-aware encoder — see [StreamingBase64Encoder]).
+     *
+     * This passphrase form generates a FRESH BMK per archive (manual
+     * exports — every file stands alone). The keyed form below
+     * ([seal] with an explicit BMK + header) is the Drive path, where
+     * one long-lived BMK is wrapped once at encryption setup and the
+     * device holds it for unattended backups (1.x D2/D4).
      */
     fun seal(zipFile: File, passphrase: String, out: OutputStream) {
         val bmk = generateBmk()
         try {
-            val header = createHeader(passphrase, bmk)
-            val headerBytes = header.toJson().toByteArray(Charsets.UTF_8)
-            out.write(MAGIC.toByteArray(Charsets.US_ASCII))
-            out.write(
-                byteArrayOf(
-                    (headerBytes.size ushr 24).toByte(), (headerBytes.size ushr 16).toByte(),
-                    (headerBytes.size ushr 8).toByte(), headerBytes.size.toByte(),
-                ),
-            )
-            out.write(headerBytes)
-
-            val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
-            out.write(
-                ("{\"nomaEnc\":1,\"iv\":\"" + Base64.getEncoder().encodeToString(iv) + "\",\"ct\":\"")
-                    .toByteArray(Charsets.US_ASCII),
-            )
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(bmk, "AES"), GCMParameterSpec(128, iv))
-            val encoder = StreamingBase64Encoder(out)
-            zipFile.inputStream().buffered().use { input ->
-                val buf = ByteArray(BUFFER)
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    val enc = cipher.update(buf, 0, n)
-                    if (enc != null && enc.isNotEmpty()) encoder.write(enc)
-                }
-                val tail = cipher.doFinal()
-                if (tail.isNotEmpty()) encoder.write(tail)
-            }
-            encoder.finish()
-            out.write("\"}".toByteArray(Charsets.US_ASCII))
-            out.flush()
+            seal(zipFile, bmk, createHeader(passphrase, bmk), out)
         } finally {
             bmk.fill(0)
         }
+    }
+
+    /** Keyed seal: encrypts [zipFile] under the given [bmk], writing
+     *  [header] (the wrap of that same BMK) as the file header. The
+     *  caller keeps ownership of [bmk] (it is NOT zeroed here). */
+    fun seal(zipFile: File, bmk: ByteArray, header: Header, out: OutputStream) {
+        val headerBytes = header.toJson().toByteArray(Charsets.UTF_8)
+        out.write(MAGIC.toByteArray(Charsets.US_ASCII))
+        out.write(
+            byteArrayOf(
+                (headerBytes.size ushr 24).toByte(), (headerBytes.size ushr 16).toByte(),
+                (headerBytes.size ushr 8).toByte(), headerBytes.size.toByte(),
+            ),
+        )
+        out.write(headerBytes)
+
+        val iv = ByteArray(12).also { SecureRandom().nextBytes(it) }
+        out.write(
+            ("{\"nomaEnc\":1,\"iv\":\"" + Base64.getEncoder().encodeToString(iv) + "\",\"ct\":\"")
+                .toByteArray(Charsets.US_ASCII),
+        )
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(bmk, "AES"), GCMParameterSpec(128, iv))
+        val encoder = StreamingBase64Encoder(out)
+        zipFile.inputStream().buffered().use { input ->
+            val buf = ByteArray(BUFFER)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                val enc = cipher.update(buf, 0, n)
+                if (enc != null && enc.isNotEmpty()) encoder.write(enc)
+            }
+            val tail = cipher.doFinal()
+            if (tail.isNotEmpty()) encoder.write(tail)
+        }
+        encoder.finish()
+        out.write("\"}".toByteArray(Charsets.US_ASCII))
+        out.flush()
     }
 
     // ------------------------------------------------------------- open
@@ -153,6 +165,36 @@ object BackupCrypto {
      */
     fun openEnvelope(input: InputStream, passphrase: String?): Pair<ByteArray, OpenedEnvelope> {
         val buffered = if (input is BufferedInputStream) input else BufferedInputStream(input)
+        val header = readHeader(buffered)
+        if (passphrase == null) throw BackupKeyNeededError(KEY_NEEDED)
+        val bmk = unwrapBmk(header, passphrase) ?: throw BackupUnlockError(INCORRECT)
+        val envelope = try {
+            scanEnvelopePrefix(buffered, header)
+        } catch (e: Exception) {
+            bmk.fill(0)
+            throw e
+        }
+        return bmk to envelope
+    }
+
+    /**
+     * The device-key open (Phase 3b, mirroring 1.x `readBackupZip(file,
+     * key)`): parses the same prefix but unwraps nothing — the caller
+     * already holds the BMK (the Drive encryption device key). A BMK
+     * that doesn't belong to this archive fails later, at
+     * [decryptTo]'s GCM tag check, with the same typed
+     * [BackupUnlockError] — never a silent bad read.
+     */
+    fun openEnvelopeWithBmk(input: InputStream, bmk: ByteArray): OpenedEnvelope {
+        val buffered = if (input is BufferedInputStream) input else BufferedInputStream(input)
+        val header = readHeader(buffered)
+        return scanEnvelopePrefix(buffered, header)
+    }
+
+    /** Reads + validates the fixed header (length + JSON + the KDF
+     *  bounds a crafted header must not exceed — see the iteration
+     *  bound: legitimate archives always carry the 600k password slot). */
+    private fun readHeader(buffered: BufferedInputStream): Header {
         val lenBytes = ByteArray(4)
         readFully(buffered, lenBytes)
         val headerLen = ((lenBytes[0].toInt() and 0xFF) shl 24) or
@@ -178,18 +220,21 @@ object BackupCrypto {
         // Bound the KDF parameters BEFORE deriving anything (Codex
         // review): a crafted header could otherwise name an iteration
         // count near Int.MAX_VALUE and tie up the worker for hours.
-        // Legitimate archives always carry the 600k password slot.
         if (header.iterations !in 1..2_000_000 ||
             header.salt.length > 128 || header.wrappedKey.length > 512
         ) {
             throw BackupUnlockError(DAMAGED)
         }
-        if (passphrase == null) throw BackupKeyNeededError(KEY_NEEDED)
-        val bmk = unwrapBmk(header, passphrase) ?: throw BackupUnlockError(INCORRECT)
+        return header
+    }
 
-        // Scan the envelope JSON prefix incrementally: fields in writer
-        // order (nomaEnc, iv, ct). Only iv is materialised (12 bytes);
-        // the ct payload is never buffered.
+    /** Scans the envelope JSON prefix incrementally: fields in writer
+     *  order (nomaEnc, iv, ct). Only iv is materialised (12 bytes);
+     *  the ct payload is never buffered. */
+    private fun scanEnvelopePrefix(
+        buffered: BufferedInputStream,
+        header: Header,
+    ): OpenedEnvelope {
         val reader = buffered.reader(Charsets.US_ASCII)
         val iv = try {
             expect(reader, "{\"nomaEnc\":1,\"iv\":\"")
@@ -199,13 +244,11 @@ object BackupCrypto {
             expect(reader, ",\"ct\":\"")
             decoded
         } catch (e: BackupUnlockError) {
-            bmk.fill(0)
             throw e
         } catch (e: Exception) {
-            bmk.fill(0)
             throw BackupUnlockError(DAMAGED)
         }
-        return bmk to OpenedEnvelope(header, iv, CtStream(ForwardingInputStream(reader)))
+        return OpenedEnvelope(header, iv, CtStream(ForwardingInputStream(reader)))
     }
 
     /**

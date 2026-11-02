@@ -51,7 +51,36 @@ class BackupReader(private val workDir: File) {
         }
     }
 
-    fun read(source: File, passphrase: String?): Handle {
+    fun read(source: File, passphrase: String?): Handle =
+        readCore(source) { input ->
+            val (bmk, envelope) = BackupCrypto.openEnvelope(input, passphrase)
+            // The unwrapped BMK is born inside the crypto layer for
+            // this call only — zero it as soon as decryption is done.
+            OpenedForRead(bmk, envelope, zeroBmkAfter = true)
+        }
+
+    /**
+     * Device-key read (Phase 3b): the caller holds the archive's BMK
+     * (the Drive encryption record's device key). The BMK is NOT
+     * zeroed or owned by the reader — it outlives this call in the
+     * record. A wrong key fails at the GCM tag check inside
+     * [BackupCrypto.decryptTo] with a typed [BackupUnlockError].
+     */
+    fun readWithBmk(source: File, bmk: ByteArray): Handle =
+        readCore(source) { input ->
+            OpenedForRead(bmk, BackupCrypto.openEnvelopeWithBmk(input, bmk), zeroBmkAfter = false)
+        }
+
+    private class OpenedForRead(
+        val bmk: ByteArray,
+        val envelope: BackupCrypto.OpenedEnvelope,
+        val zeroBmkAfter: Boolean,
+    )
+
+    private fun readCore(
+        source: File,
+        open: (InputStream) -> OpenedForRead,
+    ): Handle {
         val stagingDir = File(workDir, "backup-staging-${System.nanoTime()}")
         stagingDir.mkdirs()
         var decryptedZip: File? = null
@@ -84,13 +113,13 @@ class BackupReader(private val workDir: File) {
                             if (n <= 0) break
                             skipped += n
                         }
-                        val (bmk, envelope) = BackupCrypto.openEnvelope(input, passphrase)
+                        val opened = open(input)
                         try {
                             tmp.outputStream().buffered().use { out ->
-                                BackupCrypto.decryptTo(envelope, bmk, out)
+                                BackupCrypto.decryptTo(opened.envelope, opened.bmk, out)
                             }
                         } finally {
-                            bmk.fill(0)
+                            if (opened.zeroBmkAfter) opened.bmk.fill(0)
                         }
                     }
                 } catch (e: Exception) {
