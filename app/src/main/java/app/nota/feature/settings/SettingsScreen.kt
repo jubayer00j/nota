@@ -37,6 +37,7 @@ fun SettingsScreen(
     onOpenDesignSystem: () -> Unit = {},
     onOpenEditorSpike: () -> Unit = {},
     onOpenTemplates: () -> Unit = {},
+    onOpenSignIn: () -> Unit = {},
     preferencesRepository: PreferencesRepository = koinInject(),
 ) {
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
@@ -105,6 +106,10 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
+        AccountSection(onOpenSignIn = onOpenSignIn)
+        HorizontalDivider()
+        Spacer(Modifier.height(NotaSpacing.sm))
+
         Text(
             "Writing",
             style = MaterialTheme.typography.titleMedium,
@@ -120,7 +125,7 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.md))
         Text(
-            "AI features · Data · Account · About — arrive with their phases.",
+            "AI features · Data · About — arrive with their phases.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

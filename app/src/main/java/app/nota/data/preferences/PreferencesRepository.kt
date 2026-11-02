@@ -265,6 +265,23 @@ class PreferencesRepository(context: Context) {
         safeEdit { remove(noteLockBioKey(noteId)) }
     }
 
+    // ---- Phase 3a: guest→account move offer outcome, per uid --------
+    // Written the first time the user answers the "bring your guest
+    // notes into this account?" offer for an account ("copied" or
+    // "declined"); its presence is what stops the offer re-appearing
+    // on every sign-in for that account. Device-local, never backed
+    // up (this store is not part of any backup payload).
+
+    private fun guestMoveKey(uid: String) =
+        stringPreferencesKey("guest_move_offer_$uid")
+
+    suspend fun getGuestMoveOutcome(uid: String): String? =
+        dataStore.safeData.first()[guestMoveKey(uid)]
+
+    suspend fun setGuestMoveOutcome(uid: String, outcome: String) {
+        safeEdit { this[guestMoveKey(uid)] = outcome }
+    }
+
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
     private val DataStore<Preferences>.safeData: Flow<Preferences>
         get() = data.catch { exception ->
