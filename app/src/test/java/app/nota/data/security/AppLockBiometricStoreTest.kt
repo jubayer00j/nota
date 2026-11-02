@@ -45,7 +45,10 @@ class AppLockBiometricStoreTest {
     /** Raw-key provider: plain AES-256-GCM ciphers, no auth gate. */
     private class RawKeyProvider(
         private val key: ByteArray = ByteArray(32) { (0x30 + it).toByte() },
+        private val alias: String = "rawkey-v1",
     ) : AppLockDeviceKeyProvider {
+        override fun keyAlias(): String = alias
+
         override fun sealCipherResult(): StepResult<Cipher> = StepResult.Ok(
             Cipher.getInstance("AES/GCM/NoPadding").apply {
                 init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
@@ -70,6 +73,8 @@ class AppLockBiometricStoreTest {
 
     /** A provider whose named step always fails (the J7 shape). */
     private class FailingProvider(private val step: BiometricStep) : AppLockDeviceKeyProvider {
+        override fun keyAlias(): String = "failing-v1"
+
         override fun sealCipherResult(): StepResult<Cipher> =
             StepResult.Failed(step, "KeyPermanentlyInvalidatedException: fake")
 
@@ -185,6 +190,40 @@ class AppLockBiometricStoreTest {
         val opened = store.openCipherResult()
         assertTrue(opened is StepResult.Failed)
         assertEquals(BiometricStep.TOKEN_READ, (opened as StepResult.Failed).step)
+    }
+
+    @Test
+    fun tokenSealedUnderRotatedKey_isNotUsable_evenThoughCipherInitialises() = runBlocking {
+        // Codex (PR #11): seal under alias v1, then rotate the
+        // provider to v2 (same raw key bytes here, so the decrypt
+        // cipher still INITIALISES — a pure init probe would call
+        // this token usable while its real decrypt is doomed under
+        // a genuinely different rotated key). The persisted alias
+        // is what exposes the staleness without an authentication.
+        val storeV1 = storeWith(RawKeyProvider(alias = "rawkey-v1"))
+        storeV1.clear()
+        assertTrue(enable(storeV1) is StepResult.Ok)
+        assertTrue(storeV1.tokenUsable())
+
+        val storeV2 = storeWith(RawKeyProvider(alias = "rawkey-v2"))
+        assertTrue(storeV2.openCipherResult() is StepResult.Ok) // init still works
+        assertFalse(storeV2.tokenUsable()) // ...but the token is stale
+    }
+
+    @Test
+    fun legacyTokenWithoutRecordedAlias_isNotUsable() = runBlocking {
+        // Pre-2.6 installs carry a token with NO alias row: stale by
+        // the same rule, so Settings shows the re-enable state.
+        val donor = storeWith(RawKeyProvider())
+        donor.clear()
+        assertTrue(enable(donor) is StepResult.Ok)
+        val token = preferences.getAppLockBiometricToken()!!
+        donor.clear()
+        preferences.setAppLockBiometricToken(token) // token only, no alias
+
+        val store = storeWith(RawKeyProvider())
+        assertTrue(store.openCipherResult() is StepResult.Ok)
+        assertFalse(store.tokenUsable())
     }
 
     @Test

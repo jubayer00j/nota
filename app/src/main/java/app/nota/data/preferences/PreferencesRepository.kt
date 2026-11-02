@@ -213,7 +213,25 @@ class PreferencesRepository(context: Context) {
     }
 
     suspend fun removeAppLockBiometricToken() {
-        safeEdit { remove(KEY_LOCK_BIO_TOKEN) }
+        safeEdit {
+            remove(KEY_LOCK_BIO_TOKEN)
+            remove(KEY_LOCK_BIO_TOKEN_ALIAS)
+        }
+    }
+
+    // Phase 2.6 (Codex, PR #11): the alias of the device key the
+    // stored token was sealed under. A token whose alias no longer
+    // matches the provider's current alias was sealed under a
+    // rotated-away key: its decrypt cipher still INITIALISES, but
+    // the authenticated decrypt can never succeed — the token is
+    // stale and Settings must say so (re-enable) instead of showing
+    // a green toggle. Tokens sealed before 2.6 have no alias and
+    // are stale by the same rule.
+    suspend fun getAppLockBiometricTokenAlias(): String? =
+        dataStore.safeData.first()[KEY_LOCK_BIO_TOKEN_ALIAS]
+
+    suspend fun setAppLockBiometricTokenAlias(alias: String) {
+        safeEdit { this[KEY_LOCK_BIO_TOKEN_ALIAS] = alias }
     }
 
     suspend fun setAppLockFailedAttempts(failedAttempts: Int, lockoutUntil: Long) {
@@ -266,6 +284,7 @@ class PreferencesRepository(context: Context) {
         val KEY_LOCK_PATTERN_HASH = stringPreferencesKey("app_lock_pattern_hash")
         val KEY_LOCK_BIOMETRIC = booleanPreferencesKey("app_lock_biometric")
         val KEY_LOCK_BIO_TOKEN = stringPreferencesKey("app_lock_bio_token")
+        val KEY_LOCK_BIO_TOKEN_ALIAS = stringPreferencesKey("app_lock_bio_token_alias")
         val KEY_LOCK_FAILED_ATTEMPTS = intPreferencesKey("app_lock_failed_attempts")
         val KEY_LOCK_LOCKOUT_UNTIL = longPreferencesKey("app_lock_lockout_until")
         val KEY_LOCK_TIMEOUT_SECONDS = intPreferencesKey("app_lock_timeout_seconds")

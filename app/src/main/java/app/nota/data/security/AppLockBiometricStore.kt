@@ -25,6 +25,14 @@ import javax.crypto.spec.GCMParameterSpec
  * all the way to the Settings row.
  */
 interface AppLockDeviceKeyProvider {
+    /**
+     * Alias of the device key this provider seals under. Persisted
+     * alongside the sealed token so a token sealed under a
+     * rotated-away key is detectable WITHOUT an authentication
+     * (its cipher would initialise fine but never decrypt).
+     */
+    fun keyAlias(): String
+
     /** ENCRYPT_MODE cipher over the auth-required device key. */
     fun sealCipherResult(): StepResult<Cipher>
 
@@ -64,6 +72,8 @@ interface AppLockDeviceKeyProvider {
  *   — the CryptoObject binding is unchanged.
  */
 class AndroidKeystoreAppLockKeyProvider : AppLockDeviceKeyProvider {
+
+    override fun keyAlias(): String = ALIAS
 
     override fun sealCipherResult(): StepResult<Cipher> {
         val key = when (val loaded = loadOrGenerateKey()) {
@@ -205,6 +215,13 @@ class AppLockBiometricStore(
      */
     suspend fun tokenUsable(): Boolean {
         val packed = preferences.getAppLockBiometricToken() ?: return false
+        // Sealed under a rotated-away key (or pre-2.6, when no alias
+        // was recorded)? The cipher would still initialise under the
+        // CURRENT key, but the authenticated decrypt can never
+        // succeed — stale, not usable (Codex, PR #11).
+        if (preferences.getAppLockBiometricTokenAlias() != keyProvider.keyAlias()) {
+            return false
+        }
         return keyProvider.openCipherResult(packed) is StepResult.Ok
     }
 
@@ -245,10 +262,22 @@ class AppLockBiometricStore(
             token.fill(0)
         }
         preferences.setAppLockBiometricToken(packed)
-        return if (preferences.getAppLockBiometricToken() == packed) {
+        if (preferences.getAppLockBiometricToken() != packed) {
+            return StepResult.Failed(
+                BiometricStep.PERSIST,
+                "the sealed token did not read back from storage",
+            )
+        }
+        // Record WHICH key sealed it, so a later alias rotation is
+        // detectable without an authentication (see tokenUsable).
+        preferences.setAppLockBiometricTokenAlias(keyProvider.keyAlias())
+        return if (preferences.getAppLockBiometricTokenAlias() == keyProvider.keyAlias()) {
             StepResult.Ok(Unit)
         } else {
-            StepResult.Failed(BiometricStep.PERSIST, "the sealed token did not read back from storage")
+            StepResult.Failed(
+                BiometricStep.PERSIST,
+                "the sealed token's key alias did not read back from storage",
+            )
         }
     }
 
