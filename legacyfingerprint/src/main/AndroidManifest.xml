@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The framework fingerprint API's permission. The app module
+         declares the same permission (maxSdkVersion 27); declaring
+         it here too keeps this module self-describing and merges
+         cleanly. -->
+    <uses-permission
+        android:name="android.permission.USE_FINGERPRINT"
+        android:maxSdkVersion="27" />
+
+</manifest>

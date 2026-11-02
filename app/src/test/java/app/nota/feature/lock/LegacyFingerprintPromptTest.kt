@@ -95,6 +95,22 @@ class LegacyFingerprintPromptStateMachineTest {
     }
 
     @Test
+    fun androidxPromptFailure_cancellationsNormaliseToTheSharedSentinel() {
+        // BiometricPrompt.ERROR_CANCELED / ERROR_USER_CANCELED /
+        // ERROR_NEGATIVE_BUTTON (5 / 10 / 13): intentional cancels
+        // must land on the same "Cancelled" sentinel the framework
+        // path produces, so LockScreen / NoteLockGate suppress them
+        // identically on both executors (Phase 2.7, Codex P3).
+        assertEquals("Cancelled", androidxPromptFailure(5, "Authentication cancelled").reason)
+        assertEquals("Cancelled", androidxPromptFailure(10, "Cancel").reason)
+        assertEquals("Cancelled", androidxPromptFailure(13, "Use PIN").reason)
+        // A real error keeps the platform message.
+        val lockout = androidxPromptFailure(7, "Too many attempts")
+        assertEquals(BiometricStep.PROMPT, lockout.step)
+        assertEquals("Too many attempts", lockout.reason)
+    }
+
+    @Test
     fun helpMapping_guidesTheNextTouch() {
         assertTrue(legacyFingerprintHelpMessage(1, null).contains("part of your fingerprint"))
         assertTrue(legacyFingerprintHelpMessage(2, null).contains("more firmly"))

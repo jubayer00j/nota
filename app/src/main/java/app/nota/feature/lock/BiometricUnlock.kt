@@ -201,6 +201,24 @@ interface BiometricPromptExecutor {
 private fun promptFailure(reason: String): StepResult.Failed =
     StepResult.Failed(BiometricStep.PROMPT, reason)
 
+/**
+ * AndroidX prompt error → typed failure (Phase 2.7, Codex P3).
+ * Cancellation-shaped AndroidX errors (user cancel, negative
+ * button, system cancel) normalise to the SAME "Cancelled" sentinel
+ * the framework path produces, so the call sites' suppression of
+ * intentional cancels works identically on both executors instead
+ * of leaking platform cancel strings as errors under the form.
+ */
+internal fun androidxPromptFailure(errorCode: Int, errString: CharSequence): StepResult.Failed =
+    if (errorCode == BiometricPrompt.ERROR_CANCELED ||
+        errorCode == BiometricPrompt.ERROR_USER_CANCELED ||
+        errorCode == BiometricPrompt.ERROR_NEGATIVE_BUTTON
+    ) {
+        promptFailure("Cancelled")
+    } else {
+        promptFailure(errString.toString())
+    }
+
 private fun buildPrompt(
     activity: FragmentActivity,
     onSucceeded: (BiometricPrompt.AuthenticationResult) -> Unit,
@@ -214,7 +232,7 @@ private fun buildPrompt(
         }
 
         override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-            onError(promptFailure(errString.toString()))
+            onError(androidxPromptFailure(errorCode, errString))
         }
     },
 )

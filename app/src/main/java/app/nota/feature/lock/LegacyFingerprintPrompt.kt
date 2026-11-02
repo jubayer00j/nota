@@ -30,11 +30,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.core.hardware.fingerprint.FingerprintManagerCompat
-import androidx.core.os.CancellationSignal
+import android.os.CancellationSignal
 import app.nota.data.security.BiometricStep
 import app.nota.data.security.StepResult
 import app.nota.data.security.stepReason
+import app.nota.legacyfingerprint.LegacyFingerprint
 import app.nota.ui.components.NotaBrandLockup
 import app.nota.ui.theme.NotaSpacing
 import javax.crypto.Cipher
@@ -393,51 +393,53 @@ object LegacyFingerprintPromptCoordinator {
 }
 
 /**
- * One framework authentication session for one request. The
- * FingerprintManagerCompat bridge invokes the framework
- * FingerprintManager's authenticate with a CryptoObject wrapping
- * the request's cipher — the same framework API the 1.x plugin
- * drives on API 27 — while keeping AndroidX's BiometricPrompt
- * (the layer that returned ERROR_HW_NOT_PRESENT) entirely out.
+ * One framework authentication session for one request. The actual
+ * framework call lives in the :legacyfingerprint module
+ * ([LegacyFingerprint]) — a direct FingerprintManager.authenticate
+ * with a CryptoObject wrapping the request's cipher.
+ *
+ * Why not androidx.core's FingerprintManagerCompat (the first
+ * implementation of this session)? Codex's P1 on PR #12, verified
+ * by disassembling the published Core 1.18.0 AAR — the version this
+ * project's dependency set resolves: both compat authenticate
+ * overloads are single-`return` no-ops and the Api23Impl delegation
+ * class no longer exists, so a compat session would never start a
+ * scan. The direct framework call is the only working route.
  */
 internal class LegacyFingerprintAuthenticationSession(
     private val request: LegacyFingerprintPromptRequest,
 ) {
-    private val cancellationSignal = CancellationSignal()
+    private var cancellationSignal: CancellationSignal? = null
 
     fun start(context: Context) {
-        LegacyFingerprintPromptCoordinator.attachSession(request) {
-            cancellationSignal.cancel()
-        }
+        // The request may already have been cancelled/finished
+        // before this effect ran; never start hardware for it.
+        if (request.finished) return
         try {
-            FingerprintManagerCompat.from(context).authenticate(
-                FingerprintManagerCompat.CryptoObject(request.cipher),
-                0,
-                cancellationSignal,
-                object : FingerprintManagerCompat.AuthenticationCallback() {
-                    override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+            val signal = LegacyFingerprint.authenticate(
+                context,
+                request.cipher,
+                object : LegacyFingerprint.Callback {
+                    override fun onError(errorCode: Int, message: CharSequence) {
                         LegacyFingerprintPromptCoordinator.authenticationError(
                             request,
-                            legacyFingerprintPromptFailure(errorCode, errString),
+                            legacyFingerprintPromptFailure(errorCode, message),
                         )
                     }
 
-                    override fun onAuthenticationHelp(helpCode: Int, helpString: CharSequence) {
+                    override fun onHelp(helpCode: Int, message: CharSequence) {
                         if (helpCode == 0) return
                         LegacyFingerprintPromptCoordinator.authenticationHelp(
                             request,
-                            legacyFingerprintHelpMessage(helpCode, helpString),
+                            legacyFingerprintHelpMessage(helpCode, message),
                         )
                     }
 
-                    override fun onAuthenticationSucceeded(
-                        result: FingerprintManagerCompat.AuthenticationResult,
-                    ) {
-                        val authorised = result.cryptoObject?.cipher
-                        if (authorised != null) {
+                    override fun onSucceeded(cipher: Cipher?) {
+                        if (cipher != null) {
                             LegacyFingerprintPromptCoordinator.authenticationSucceeded(
                                 request,
-                                authorised,
+                                cipher,
                             )
                         } else {
                             LegacyFingerprintPromptCoordinator.authenticationError(
@@ -450,12 +452,23 @@ internal class LegacyFingerprintAuthenticationSession(
                         }
                     }
 
-                    override fun onAuthenticationFailed() {
+                    override fun onFailed() {
                         LegacyFingerprintPromptCoordinator.authenticationFailed(request)
                     }
                 },
                 Handler(Looper.getMainLooper()),
             )
+            if (signal == null) {
+                LegacyFingerprintPromptCoordinator.authenticationError(
+                    request,
+                    legacyFingerprintPromptFailure(FINGERPRINT_ERROR_HW_NOT_PRESENT, null),
+                )
+            } else {
+                cancellationSignal = signal
+                LegacyFingerprintPromptCoordinator.attachSession(request) {
+                    signal.cancel()
+                }
+            }
         } catch (e: Exception) {
             LegacyFingerprintPromptCoordinator.authenticationError(
                 request,

@@ -122,6 +122,11 @@ dependencies {
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.lifecycle.process)
 
+    // Phase 2.7: direct framework fingerprint bridge for API < 28
+    // (the module compiles against API 36 because compileSdk 37
+    // removed the framework FingerprintManager stubs).
+    implementation(project(":legacyfingerprint"))
+
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
 }
