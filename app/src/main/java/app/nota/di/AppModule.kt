@@ -68,7 +68,7 @@ val appModule = module {
     single { BackupRepository(androidContext(), get(), get(), get()) }
     // Phase 3a accounts: identity (Firebase Auth, identity only) +
     // the guest→account library copy.
-    single { GuestLibraryTransfer(get(), get()) }
+    single { GuestLibraryTransfer(get(), get(), get()) }
     single { AuthManager(get(), get(), get()) }
     // Phase 3b Google Drive: authorization (drive.file only), the
     // REST gateway, and the app-scoped operations coordinator.

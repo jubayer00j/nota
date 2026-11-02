@@ -180,10 +180,22 @@ class AuthManager(
     }
 
     /** The user's "bring my guest notes in" tap. Copy only — the
-     *  guest library stays exactly as it was (see GuestLibraryTransfer). */
+     *  guest library stays exactly as it was (see GuestLibraryTransfer).
+     *  A failed copy (e.g. an attachment binary that can't be
+     *  duplicated) aborts before anything is written: no outcome is
+     *  recorded, so the offer can be retried — from here on a later
+     *  sign-in, or right away from Settings → Account. */
     suspend fun acceptGuestMove() {
         val uid = _guestMoveOffer.value ?: return
-        val counts = transfer.copyGuestIntoCurrentAccount()
+        val counts = runCatching { transfer.copyGuestIntoCurrentAccount() }
+            .getOrElse {
+                _guestMoveOffer.value = null
+                _guestMoveResult.value =
+                    "The copy couldn't finish, so nothing was brought in and your " +
+                        "guest library is unchanged. You can try again from " +
+                        "Settings → Account."
+                return
+            }
         preferences.setGuestMoveOutcome(uid, GuestMovePolicy.OUTCOME_COPIED)
         _guestMoveOffer.value = null
         _guestMoveResult.value = if (counts.isEmpty) {
