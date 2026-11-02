@@ -53,6 +53,7 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -72,6 +73,7 @@ import app.nota.ui.theme.NotaSpacing
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 
@@ -102,11 +104,38 @@ fun NotesScreen(
     val scope = rememberCoroutineScope()
     var showFoldersDialog by remember { mutableStateOf(false) }
 
+    // Phase 2.9 (J3): undo is BATCHED. A single SnackbarHostState
+    // carries ONE snackbar: a second swipe dismisses the first
+    // snackbar, whose showSnackbar then returns Dismissed — so the
+    // old per-swipe coroutine silently lost every earlier note's
+    // Undo (swipe-archive one note, swipe-delete another, tap Undo:
+    // only the delete came back; the archived note stayed gone).
+    // The repository round-trip itself is exact (pinned by
+    // SwipeUndoFidelityRobolectricTest) — the loss was here.
+    //
+    // Now every snapshot taken while an undo window is live queues
+    // in [pendingUndo] (added BEFORE the previous snackbar job is
+    // cancelled, so no interleaving can drop one), and the single
+    // surviving snackbar coroutine resolves the whole batch.
+    // Resolution applies the snapshots in REVERSE swipe order
+    // (Codex, PR #14): the same note can be swiped twice in one
+    // window (archive it, then restore it from Archived), and only
+    // reverse order leaves each note at its EARLIEST snapshot —
+    // the state before the whole batch, which is what Undo means.
+    // Dismiss/timeout just clears the queue.
+    val pendingUndo = remember { mutableStateListOf<NoteEntity>() }
+    var undoJob by remember { mutableStateOf<Job?>(null) }
+
     fun swipeWithUndo(note: NoteEntity, message: String, action: () -> Unit) {
         action()
-        scope.launch {
+        pendingUndo += note
+        undoJob?.cancel()
+        undoJob = scope.launch {
             val result = snackbarHostState.showSnackbar(message = message, actionLabel = "Undo")
-            if (result == SnackbarResult.ActionPerformed) viewModel.upsert(note)
+            if (result == SnackbarResult.ActionPerformed) {
+                pendingUndo.asReversed().forEach { viewModel.upsert(it) }
+            }
+            pendingUndo.clear()
         }
     }
 

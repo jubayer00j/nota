@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Password
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -80,10 +81,10 @@ import kotlin.math.roundToInt
  * ([LockoutCountdown]) so every surface speaks the same way.
  */
 
-private const val PATTERN_MIN_POINTS = 4
-private const val PIN_MIN_LENGTH = 4
-private const val PIN_MAX_LENGTH = 6
-private const val PASSWORD_MIN_LENGTH = 8
+internal const val PATTERN_MIN_POINTS = 4
+internal const val PIN_MIN_LENGTH = 4
+internal const val PIN_MAX_LENGTH = 6
+internal const val PASSWORD_MIN_LENGTH = 8
 
 /** Attempts allowed before the first lockout pause (AppLockCrypto). */
 internal const val LOCKOUT_THRESHOLD = 5
@@ -491,6 +492,16 @@ fun CredentialEntryForm(
 // Setup/change form: enter → confirm, per method. Nothing is persisted
 // until the confirm step matches, so abandoning the flow mid-way can
 // never leave App Lock half-enabled. Reports the CANONICAL secret.
+//
+// Phase 2.9 (J1): the enter/confirm decisions live in
+// [CredentialSetupFlow] (unit-tested) — a wrong confirmation now keeps
+// the first entry and asks only for the confirmation again, instead
+// of restarting the whole flow. And once a match completes, [busy]
+// (owned by the caller, who runs the save derivation) disables every
+// input and shows progress: in 0.3.4 the save's derivation window had
+// NO feedback at all — the inputs had already cleared themselves on
+// submit, so a correct setup looked exactly like a silent rejection
+// and invited re-entries that stacked duplicate derivations.
 // ---------------------------------------------------------------------
 @Composable
 fun CredentialSetupForm(
@@ -498,15 +509,48 @@ fun CredentialSetupForm(
     onComplete: (String) -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    busy: Boolean = false,
 ) {
+    val flow = remember(method) { CredentialSetupFlow(method) }
+    var step by remember(method) { mutableStateOf(flow.step) }
     var error by remember(method) { mutableStateOf<String?>(null) }
     var resetKey by remember(method) { mutableStateOf(0) }
+    // Completion fires exactly once: after a match the caller needs a
+    // derivation's worth of time to save, and a second submit in that
+    // window must be impossible, not merely ignored downstream.
+    var completionFired by remember(method) { mutableStateOf(false) }
+    val inputEnabled = !busy && !completionFired
     // Phase 2.5: the shared shake, fired whenever a fresh error lands
     // (mismatch / too short), matching the lock screen's feedback.
     var shakeKey by remember(method) { mutableIntStateOf(0) }
     LaunchedEffect(error) {
         if (error != null) shakeKey++
     }
+
+    fun handleOutcome(outcome: CredentialSetupFlow.Outcome) {
+        when (outcome) {
+            is CredentialSetupFlow.Outcome.AdvancedToConfirm -> {
+                error = null
+                step = flow.step
+                resetKey++
+            }
+            is CredentialSetupFlow.Outcome.Completed -> {
+                if (!completionFired) {
+                    completionFired = true
+                    error = null
+                    step = flow.step
+                    onComplete(outcome.canonicalSecret)
+                }
+            }
+            is CredentialSetupFlow.Outcome.Rejected -> {
+                // The flow kept its step (and, on CONFIRM, the first
+                // entry): clear only the current input and SAY why.
+                error = outcome.message
+                resetKey++
+            }
+        }
+    }
+
     Column(
         modifier.padding(NotaSpacing.md),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -524,8 +568,7 @@ fun CredentialSetupForm(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 when (method) {
                     AppLockMethod.PASSWORD -> {
-                        var first by remember(method) { mutableStateOf<String?>(null) }
-                        if (first == null) {
+                        if (step == CredentialSetupFlow.Step.ENTER_FIRST) {
                             Text(
                                 "At least $PASSWORD_MIN_LENGTH characters.",
                                 style = MaterialTheme.typography.bodyMedium,
@@ -533,18 +576,12 @@ fun CredentialSetupForm(
                             )
                             Spacer(Modifier.height(NotaSpacing.sm))
                             PasswordInput(
-                                onSubmit = { value ->
-                                    if (value.length < PASSWORD_MIN_LENGTH) {
-                                        error = "Password must be at least $PASSWORD_MIN_LENGTH characters."
-                                    } else {
-                                        error = null
-                                        first = value
-                                    }
-                                },
+                                onSubmit = { value -> handleOutcome(flow.submitPassword(value)) },
                                 submitLabel = "Continue",
                                 resetKey = resetKey,
                                 label = "New password",
                                 error = error != null,
+                                enabled = inputEnabled,
                             )
                         } else {
                             Text(
@@ -554,26 +591,18 @@ fun CredentialSetupForm(
                             )
                             Spacer(Modifier.height(NotaSpacing.sm))
                             PasswordInput(
-                                onSubmit = { value ->
-                                    if (value == first) {
-                                        onComplete(AppLockCrypto.canonicalPassword(value))
-                                    } else {
-                                        error = "Passwords do not match. Start again."
-                                        first = null
-                                        resetKey++
-                                    }
-                                },
+                                onSubmit = { value -> handleOutcome(flow.submitPassword(value)) },
                                 submitLabel = "Save password",
                                 resetKey = resetKey,
                                 label = "Confirm password",
                                 error = error != null,
+                                enabled = inputEnabled,
                             )
                         }
                     }
                     AppLockMethod.PIN -> {
-                        var first by remember(method) { mutableStateOf<String?>(null) }
                         Text(
-                            if (first == null) {
+                            if (step == CredentialSetupFlow.Step.ENTER_FIRST) {
                                 "Choose a $PIN_MIN_LENGTH–$PIN_MAX_LENGTH digit PIN."
                             } else {
                                 "Enter the PIN again to confirm."
@@ -583,29 +612,20 @@ fun CredentialSetupForm(
                         )
                         Spacer(Modifier.height(NotaSpacing.sm))
                         PinPadInput(
-                            onSubmit = { value ->
-                                val firstEntry = first
-                                if (firstEntry == null) {
-                                    error = null
-                                    first = value
-                                    resetKey++
-                                } else if (value == firstEntry) {
-                                    onComplete(AppLockCrypto.canonicalPin(value))
-                                } else {
-                                    error = "PINs do not match. Start again."
-                                    first = null
-                                    resetKey++
-                                }
+                            onSubmit = { value -> handleOutcome(flow.submitPin(value)) },
+                            submitLabel = if (step == CredentialSetupFlow.Step.ENTER_FIRST) {
+                                "Continue"
+                            } else {
+                                "Save PIN"
                             },
-                            submitLabel = if (first == null) "Continue" else "Save PIN",
                             resetKey = resetKey,
                             error = error != null,
+                            enabled = inputEnabled,
                         )
                     }
                     AppLockMethod.PATTERN -> {
-                        var first by remember(method) { mutableStateOf<List<Int>?>(null) }
                         Text(
-                            if (first == null) {
+                            if (step == CredentialSetupFlow.Step.ENTER_FIRST) {
                                 "Connect at least $PATTERN_MIN_POINTS dots."
                             } else {
                                 "Draw the pattern again to confirm."
@@ -615,29 +635,10 @@ fun CredentialSetupForm(
                         )
                         Spacer(Modifier.height(NotaSpacing.sm))
                         PatternGridInput(
-                            onComplete = { points ->
-                                val firstPoints = first
-                                when {
-                                    points.size < PATTERN_MIN_POINTS -> {
-                                        error = "Pattern must connect at least $PATTERN_MIN_POINTS dots."
-                                        resetKey++
-                                    }
-                                    firstPoints == null -> {
-                                        error = null
-                                        first = points
-                                        resetKey++
-                                    }
-                                    points == firstPoints ->
-                                        onComplete(AppLockCrypto.canonicalPattern(points))
-                                    else -> {
-                                        error = "Patterns do not match. Start again."
-                                        first = null
-                                        resetKey++
-                                    }
-                                }
-                            },
+                            onComplete = { points -> handleOutcome(flow.submitPattern(points)) },
                             error = error != null,
                             resetKey = resetKey,
+                            enabled = inputEnabled,
                         )
                     }
                 }
@@ -652,7 +653,19 @@ fun CredentialSetupForm(
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
             )
         }
+        if (busy) {
+            // Phase 2.9 (J1): the save IS happening — say so, with a
+            // spinner, for exactly as long as the derivation takes.
+            Spacer(Modifier.height(NotaSpacing.sm))
+            CircularProgressIndicator()
+            Spacer(Modifier.height(NotaSpacing.xs))
+            Text(
+                "Saving…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(Modifier.height(NotaSpacing.sm))
-        TextButton(onClick = onCancel) { Text("Cancel") }
+        TextButton(onClick = onCancel, enabled = !busy) { Text("Cancel") }
     }
 }

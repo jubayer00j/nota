@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
@@ -71,11 +72,28 @@ fun SecuritySection(
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var verifyFeedback by remember { mutableStateOf<String?>(null) }
     var verifyResetKey by remember { mutableStateOf(0) }
+    // Phase 2.9 (J1): a credential save / re-auth verify runs a
+    // full-cost PBKDF2 derivation — seconds on a J7-class device.
+    // These flags cover that window: the dialogs show progress and
+    // refuse further submits, so exactly ONE derivation runs per
+    // step. In 0.3.4 the window was silent and re-tappable, which
+    // read as a rejection and stacked duplicate derivations.
+    var setupBusy by remember { mutableStateOf(false) }
+    var verifyBusy by remember { mutableStateOf(false) }
+    // A failed save re-arms the setup form (fresh instance via
+    // setupEpoch) with the failure shown — never a dead dialog.
+    var setupError by remember { mutableStateOf<String?>(null) }
+    var setupEpoch by remember { mutableStateOf(0) }
     var verifyMethod by remember {
         mutableStateOf(AppLockMethod.PASSWORD)
     }
     var chooseMethodOpen by remember { mutableStateOf(false) }
     var setupMethod by remember { mutableStateOf<AppLockMethod?>(null) }
+    LaunchedEffect(setupMethod) {
+        // A fresh dialog opening starts clean; a failure DURING this
+        // opening keeps its message (setupMethod doesn't change then).
+        if (setupMethod != null) setupError = null
+    }
     var offerBiometricAfterSetup by remember { mutableStateOf(false) }
     var timeoutMenuOpen by remember { mutableStateOf(false) }
 
@@ -361,22 +379,59 @@ fun SecuritySection(
     // ---- Setup / change dialog ----------------------------------------
     val activeSetupMethod = setupMethod
     if (activeSetupMethod != null) {
-        Dialog(onDismissRequest = { setupMethod = null }) {
+        Dialog(onDismissRequest = { if (!setupBusy) setupMethod = null }) {
             Surface(shape = RoundedCornerShape(16.dp)) {
-                CredentialSetupForm(
-                    method = activeSetupMethod,
-                    onComplete = { canonicalSecret ->
-                        val wasEnabled = settings.isEnabled
-                        scope.launch {
-                            appLockManager.setCredential(activeSetupMethod, canonicalSecret)
-                            setupMethod = null
-                            if (!wasEnabled && biometricAvailable && !settings.biometricEnabled) {
-                                offerBiometricAfterSetup = true
-                            }
-                        }
-                    },
-                    onCancel = { setupMethod = null },
-                )
+                Column {
+                    androidx.compose.runtime.key(setupEpoch) {
+                        CredentialSetupForm(
+                            method = activeSetupMethod,
+                            busy = setupBusy,
+                            onComplete = { canonicalSecret ->
+                                // Phase 2.9 (J1): one save at a time. The form
+                                // already fires completion once; this guard is
+                                // the second lock on the same door, and
+                                // setupBusy drives the form's progress state
+                                // for the whole derivation.
+                                if (!setupBusy) {
+                                    setupBusy = true
+                                    setupError = null
+                                    val wasEnabled = settings.isEnabled
+                                    scope.launch {
+                                        try {
+                                            appLockManager.setCredential(activeSetupMethod, canonicalSecret)
+                                            setupMethod = null
+                                            if (!wasEnabled && biometricAvailable && !settings.biometricEnabled) {
+                                                offerBiometricAfterSetup = true
+                                            }
+                                        } catch (e: Exception) {
+                                            // The save failed: say so and
+                                            // re-arm a fresh form instead of
+                                            // leaving a completed-but-unsaved
+                                            // dialog on screen.
+                                            setupError = "Couldn't save the ${activeSetupMethod.label.lowercase()} — please try again."
+                                            setupEpoch++
+                                        } finally {
+                                            setupBusy = false
+                                        }
+                                    }
+                                }
+                            },
+                            onCancel = { setupMethod = null },
+                        )
+                    }
+                    if (setupError != null) {
+                        Text(
+                            setupError!!,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(
+                                start = NotaSpacing.md,
+                                end = NotaSpacing.md,
+                                bottom = NotaSpacing.md,
+                            ),
+                        )
+                    }
+                }
             }
         }
     }
@@ -424,21 +479,37 @@ fun SecuritySection(
                             verifyFeedback = null
                         },
                         onSubmit = { method, secret ->
-                            scope.launch {
-                                if (appLockManager.verifyForSettings(method, secret)) {
-                                    onVerified()
-                                } else {
-                                    verifyFeedback = "Incorrect — try again"
-                                    verifyResetKey++
+                            // Phase 2.9 (J1): one verification at a
+                            // time — repeat taps during the derivation
+                            // used to stack further derivations and
+                            // reset the inputs mid-flight.
+                            if (!verifyBusy) {
+                                verifyBusy = true
+                                scope.launch {
+                                    try {
+                                        if (appLockManager.verifyForSettings(method, secret)) {
+                                            onVerified()
+                                        } else {
+                                            verifyFeedback = "Incorrect — try again"
+                                            verifyResetKey++
+                                        }
+                                    } finally {
+                                        verifyBusy = false
+                                    }
                                 }
                             }
                         },
                         submitLabel = "Verify",
                         resetKey = verifyResetKey,
+                        enabled = !verifyBusy,
                         onPatternTooShort = {
                             verifyFeedback = "Pattern too short — connect at least 4 dots"
                         },
                     )
+                    if (verifyBusy) {
+                        Spacer(Modifier.height(NotaSpacing.sm))
+                        CircularProgressIndicator()
+                    }
                     if (verifyFeedback != null) {
                         Spacer(Modifier.height(NotaSpacing.sm))
                         Text(
@@ -449,9 +520,12 @@ fun SecuritySection(
                     }
                     if (settings.biometricEnabled && biometricAvailable && activity != null) {
                         Spacer(Modifier.height(NotaSpacing.sm))
-                        TextButton(onClick = {
-                            promptBiometricVerify { onVerified() }
-                        }) { Text("Use fingerprint instead") }
+                        TextButton(
+                            onClick = {
+                                promptBiometricVerify { onVerified() }
+                            },
+                            enabled = !verifyBusy,
+                        ) { Text("Use fingerprint instead") }
                     }
                 }
             },
