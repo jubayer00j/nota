@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Phase 3a: accounts (Firebase Auth), the account avatar, and
+         (3b/3c) Google Drive. No other network use: notes never leave
+         the device except inside the user's own Drive archive. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Phase 2.5 (F4): biometric permissions, declared explicitly.
          USE_BIOMETRIC is the API 28+ permission; USE_FINGERPRINT is
          the API 23-27 one the framework FingerprintManager probe and

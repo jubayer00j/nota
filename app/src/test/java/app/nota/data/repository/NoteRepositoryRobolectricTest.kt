@@ -1,6 +1,7 @@
 package app.nota.data.repository
 
 import androidx.room.Room
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import kotlinx.coroutines.flow.first
@@ -34,10 +35,7 @@ class NoteRepositoryRobolectricTest {
         db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        repository = NoteRepository(
-            db, db.noteDao(), db.noteFtsDao(), db.folderDao(),
-            db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao(),
-        )
+        repository = NoteRepository(DatabaseProvider.forDatabase(context, db))
     }
 
     @After

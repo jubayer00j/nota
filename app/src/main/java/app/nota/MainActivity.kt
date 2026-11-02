@@ -16,12 +16,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AppLockManager
 import app.nota.feature.lock.LegacyFingerprintPromptHost
@@ -45,6 +47,7 @@ class MainActivity : FragmentActivity() {
     // before any activity is created, so this can never resolve too early.
     private val preferencesRepository: PreferencesRepository by inject()
     private val appLockManager: AppLockManager by inject()
+    private val databaseProvider: DatabaseProvider by inject()
 
     /**
      * Recents masking (Phase 2a, Codex PR #7 P1): the system captures the
@@ -132,7 +135,20 @@ class MainActivity : FragmentActivity() {
                         )
                     }
                     lockSettings.isEnabled && isLocked -> LockScreen()
-                    else -> NotaNavShell(startOnToday = startOnToday)
+                    else -> {
+                        // Phase 3a: the shell is KEYED by account. A
+                        // sign-in/out swaps the active database (see
+                        // DatabaseProvider); keying disposes every
+                        // ViewModel + flow collector in the old shell
+                        // and composes a fresh one against the new
+                        // account's database, so nothing from the
+                        // previous library can linger on screen.
+                        val accountId by databaseProvider.accountId
+                            .collectAsState()
+                        key(accountId) {
+                            NotaNavShell(startOnToday = startOnToday)
+                        }
+                    }
                 }
                 // Phase 2.7: the legacy (API < 28) fingerprint
                 // prompt's Compose host — composed once at the root

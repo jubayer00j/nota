@@ -9,6 +9,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import app.nota.data.db.AttachmentDao
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.db.DatabaseProvider
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -29,8 +30,12 @@ import kotlinx.coroutines.withContext
  */
 class AttachmentStore(
     private val context: Context,
-    private val attachmentDao: AttachmentDao,
+    private val provider: DatabaseProvider,
 ) {
+    // Phase 3a: the DAO resolves through the provider per call — the
+    // active database changes with the signed-in account, and a
+    // captured DAO would write rows into the previous account's DB.
+    private val attachmentDao: AttachmentDao get() = provider.current.attachmentDao()
     /**
      * Serialises imports against [reconcile] (and deletes): an import
      * writes its file BEFORE its Room row exists, so an unsynchronised
@@ -243,13 +248,26 @@ class AttachmentStore(
      */
     suspend fun reconcile(
         allProvider: suspend () -> List<AttachmentEntity>,
+        extraKnownPaths: suspend () -> Set<String> = { emptySet() },
     ): Pair<Int, Int> =
-        fileMutex.withLock { reconcileLocked(allProvider()) }
+        fileMutex.withLock { reconcileLocked(allProvider(), extraKnownPaths()) }
 
-    private suspend fun reconcileLocked(all: List<AttachmentEntity>): Pair<Int, Int> = withContext(Dispatchers.IO) {
+    private suspend fun reconcileLocked(
+        all: List<AttachmentEntity>,
+        extraKnownPaths: Set<String>,
+    ): Pair<Int, Int> = withContext(Dispatchers.IO) {
         var filesRemoved = 0
         var rowsRemoved = 0
-        val knownPaths = all.map { it.localPath }.toSet()
+        // Phase 3a: the attachments/ root is SHARED by every account
+        // database on the device (files are keyed by globally-unique
+        // note ids). The file sweep's keep-set is therefore the active
+        // account's rows PLUS every other account's rows (the caller
+        // supplies them via DatabaseProvider.allAttachmentLocalPaths):
+        // without them, opening the app as guest would delete a
+        // signed-in account's binaries as "orphans", and vice versa.
+        // Row removal below still only ever touches the ACTIVE
+        // account's rows ([all]).
+        val knownPaths = all.map { it.localPath }.toSet() + extraKnownPaths
         if (root.exists()) {
             root.walkTopDown().filter { it.isFile }.forEach { file ->
                 val relative = file.relativeTo(context.filesDir).path

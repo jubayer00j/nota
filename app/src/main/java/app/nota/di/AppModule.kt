@@ -1,7 +1,10 @@
 package app.nota.di
 
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.auth.AuthManager
+import app.nota.data.auth.GuestLibraryTransfer
 import app.nota.data.backup.BackupRepository
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AndroidKeystoreAppLockKeyProvider
@@ -21,28 +24,33 @@ import app.nota.feature.notes.NotesViewModel
 import app.nota.feature.search.SearchViewModel
 import app.nota.feature.templates.TemplatesViewModel
 import app.nota.feature.today.TodayViewModel
+import com.google.firebase.auth.FirebaseAuth
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
 
 /**
+ * The account the process should open on (Phase 3a): Firebase Auth
+ * persists its session across restarts, so a signed-in user cold-
+ * starts straight into their own database — never a flash of the
+ * guest library. Falls back to guest when Firebase has no session
+ * (or is unavailable in a broken build).
+ */
+private fun seededAccountId(): String =
+    runCatching { FirebaseAuth.getInstance().currentUser?.uid }
+        .getOrNull() ?: NotaDatabase.GUEST_ACCOUNT
+
+/**
  * Koin wiring (spec §2 — Koin over Hilt for a solo project).
- * Phase 0 opens the guest database; per-account switching arrives with
- * identity in a later phase.
+ * Phase 3a: the whole data layer hangs off [DatabaseProvider] — the
+ * active account's database — instead of a single guest database.
+ * Repositories resolve DAOs through it per call, so an account
+ * switch needs no graph rebuild.
  */
 val appModule = module {
-    single { NotaDatabase.build(androidContext(), NotaDatabase.GUEST_ACCOUNT) }
-    single { get<NotaDatabase>().noteDao() }
-    single { get<NotaDatabase>().folderDao() }
-    single { get<NotaDatabase>().tagDao() }
-    single { get<NotaDatabase>().attachmentDao() }
-    single { get<NotaDatabase>().reminderDao() }
-    single { get<NotaDatabase>().noteVersionDao() }
-    single { get<NotaDatabase>().noteFtsDao() }
-    single { get<NotaDatabase>().savedSearchDao() }
-    single { get<NotaDatabase>().noteLinkDao() }
-    single { NoteRepository(get(), get(), get(), get(), get(), get(), get(), get()) }
-    single { LibraryRepository(get(), get(), get(), get()) }
+    single { DatabaseProvider(androidContext(), initialAccountId = seededAccountId()) }
+    single { NoteRepository(get()) }
+    single { LibraryRepository(get()) }
     single { AttachmentStore(androidContext(), get()) }
     single { TemplateRepository(androidContext()) }
     single { PreferencesRepository(androidContext()) }
@@ -54,10 +62,14 @@ val appModule = module {
     // Phase 2b per-note lock: Keystore device-key provider + biometric
     // copy store + the lock repository (Koin singles).
     single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }
-    single { NoteLockBiometricStore(get(), get()) }
+    single { NoteLockBiometricStore(get(), get(), get()) }
     single { NoteLockRepository(get(), get(), get(), get()) }
     // Phase 2c backup/restore engine (local ZIP + NOMAENC1 + crossover).
     single { BackupRepository(androidContext(), get(), get(), get()) }
+    // Phase 3a accounts: identity (Firebase Auth, identity only) +
+    // the guest→account library copy.
+    single { GuestLibraryTransfer(get(), get(), get()) }
+    single { AuthManager(get(), get(), get()) }
     viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }

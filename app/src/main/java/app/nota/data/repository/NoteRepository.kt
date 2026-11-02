@@ -1,21 +1,15 @@
 package app.nota.data.repository
 
 import androidx.room.withTransaction
-import app.nota.data.db.AttachmentDao
 import app.nota.data.db.AttachmentEntity
-import app.nota.data.db.FolderDao
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
-import app.nota.data.db.NoteDao
 import app.nota.data.db.NoteEntity
-import app.nota.data.db.NoteFtsDao
 import app.nota.data.db.NoteFtsEntity
-import app.nota.data.db.NoteLinkDao
 import app.nota.data.db.NoteLinkEntity
 import app.nota.data.db.NoteTagCrossRef
 import app.nota.data.db.NotaDatabase
-import app.nota.data.db.SavedSearchDao
 import app.nota.data.db.SavedSearchEntity
-import app.nota.data.db.TagDao
 import app.nota.data.db.TagEntity
 import app.nota.data.html.NoteDocument
 import app.nota.data.text.PlainTextCodec
@@ -27,17 +21,23 @@ import kotlinx.coroutines.flow.Flow
  * Every upsert/delete keeps the FTS4 index in sync inside the same transaction.
  * Phase 1b grows it into the notes core: create/update helpers, state ops,
  * tag assignment, daily notes and saved searches.
+ *
+ * Phase 3a: DAOs are resolved through [DatabaseProvider] at call time,
+ * never captured — the active database changes with the signed-in
+ * account, and a captured DAO would keep reading the previous
+ * account's library after a switch.
  */
 class NoteRepository(
-    private val db: NotaDatabase,
-    private val noteDao: NoteDao,
-    private val ftsDao: NoteFtsDao,
-    private val folderDao: FolderDao,
-    private val tagDao: TagDao,
-    private val attachmentDao: AttachmentDao,
-    private val savedSearchDao: SavedSearchDao,
-    private val noteLinkDao: NoteLinkDao,
+    private val provider: DatabaseProvider,
 ) {
+    private val db: NotaDatabase get() = provider.current
+    private val noteDao get() = db.noteDao()
+    private val ftsDao get() = db.noteFtsDao()
+    private val folderDao get() = db.folderDao()
+    private val tagDao get() = db.tagDao()
+    private val attachmentDao get() = db.attachmentDao()
+    private val savedSearchDao get() = db.savedSearchDao()
+    private val noteLinkDao get() = db.noteLinkDao()
     // --- Observation -------------------------------------------------------
     fun observeActive(): Flow<List<NoteEntity>> = noteDao.observeActive()
     fun observeArchived(): Flow<List<NoteEntity>> = noteDao.observeArchived()

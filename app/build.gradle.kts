@@ -11,6 +11,12 @@ plugins {
     // requires a device/emulator session with a generator target, so no
     // profile is bundled yet and none is hand-written.
     alias(libs.plugins.androidx.baselineprofile)
+    // Phase 3a: Firebase (identity only — spec §2). The plugin reads
+    // app/google-services.json, which is NEVER committed (Noma
+    // precedent): .gitignore excludes it, CI materialises it from the
+    // GOOGLE_SERVICES_JSON_BASE64 secret, and local builds use the
+    // parked copy placed next to this file by hand.
+    alias(libs.plugins.google.services)
 }
 
 // Release signing is NOT configured here: CI passes AGP injected-signing
@@ -34,8 +40,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.3.5"
+        versionCode = 10
+        versionName = "0.4.0"
     }
 
     buildTypes {
@@ -116,6 +122,11 @@ dependencies {
     // Phase 1b: note-card cover images from local attachment files only —
     // coil-compose without any network fetcher module.
     implementation(libs.coil.compose)
+    // Phase 3a: the account avatar is the one remote image Nota loads
+    // (the signed-in user's Google profile photo) — Coil needs its
+    // network fetcher for http(s) models; note attachments stay
+    // local files as before.
+    implementation(libs.coil.network.okhttp)
 
     // Phase 2a App Lock: BiometricPrompt (fingerprint convenience gate)
     // and ProcessLifecycleOwner (background/foreground re-lock tracking).
@@ -129,4 +140,13 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
+
+    // Phase 3a accounts: Firebase Auth (identity ONLY — notes never
+    // leave the device except in the user's own Drive archive), and
+    // Credential Manager for the Google sign-in flow (spec §2).
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services.auth)
+    implementation(libs.googleid)
 }

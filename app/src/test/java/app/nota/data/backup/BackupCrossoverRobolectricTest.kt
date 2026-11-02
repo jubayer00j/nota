@@ -2,6 +2,7 @@ package app.nota.data.backup
 
 import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.NoteLockRepository
@@ -113,21 +114,32 @@ override fun sealCipherResult(): StepResult<Cipher> =
 
     private inner class Stack(val db: NotaDatabase) {
         val context = RuntimeEnvironment.getApplication()
-        val notes = NoteRepository(db, db.noteDao(), db.noteFtsDao(), db.folderDao(), db.tagDao(), db.attachmentDao(), db.savedSearchDao(), db.noteLinkDao())
-        val store = AttachmentStore(context, db.attachmentDao())
+        val notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
+        val store = AttachmentStore(context, DatabaseProvider.forDatabase(context, db))
         val templates = TemplateRepository(context)
-        val backup = BackupRepository(context, db, templates, store)
+        val backup = BackupRepository(context, DatabaseProvider.forDatabase(context, db), templates, store)
         // Built lazily so no DataStore/preferences machinery exists
         // while the backup restore under test runs.
         val lockRepo by lazy {
-            NoteLockRepository(notes, db.attachmentDao(), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider()))
+            NoteLockRepository(notes, DatabaseProvider.forDatabase(context, db), store, NoteLockBiometricStore(PreferencesRepository(context), RawKeyProvider(), DatabaseProvider.forDatabase(context, db)))
         }
     }
 
+    private var stackSeq = 0
+
     private fun newStack(): Stack {
         val context = RuntimeEnvironment.getApplication()
-        val db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
-            .allowMainThreadQueries().build()
+        // File-backed under a discoverable account name, NOT in-memory:
+        // NotaApplication's startup orphan sweep reconciles the shared
+        // attachments/ root against every account database on disk
+        // (Phase 3a keep-set). An in-memory library is invisible to
+        // that sweep, so its freshly restored files could be swept as
+        // orphans mid-test — a race that stayed hidden until Phase 3a's
+        // test growth shifted the timing. A named file DB makes the
+        // sweep's keep-set cover this library in either ordering.
+        val accountId = "crossover-${++stackSeq}"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val db = NotaDatabase.build(context, accountId)
         dbs += db
         return Stack(db)
     }
@@ -344,7 +356,7 @@ override fun sealCipherResult(): StepResult<Cipher> =
             }
             val manifest = JSONObject(entryText("manifest.json"))
             assertEquals(2, manifest.getInt("backupFormatVersion"))
-            assertEquals("0.3.0", manifest.getString("nomaVersion"))
+            assertEquals("0.4.0", manifest.getString("nomaVersion"))
             assertEquals("nota_guest", manifest.getString("libraryId"))
             // Locked note round-trips byte-identically.
             val lockedJson = JSONObject(entryText("notes/note-locked-1.json"))

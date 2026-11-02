@@ -2,6 +2,8 @@ package app.nota
 
 import android.app.Application
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.auth.AuthManager
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.repository.NoteRepository
 import app.nota.di.appModule
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +26,15 @@ class NotaApplication : Application() {
                 modules(appModule)
             }
         }
+        // Phase 3a: settle cold-start identity before anything renders
+        // — the AuthManager aligns its session state and the active
+        // database with Firebase's persisted user (the provider was
+        // already seeded with that uid in the DI graph; initialise()
+        // is the belt-and-braces alignment + listener registration).
+        runCatching {
+            org.koin.core.context.GlobalContext.get()
+                .get<AuthManager>().initialise()
+        }
         // Attachment orphan reconciliation (spec §7): sweep files no Room
         // row points at and drop rows whose file vanished. Fire-and-forget
         // on IO at process start; the store itself is idempotent.
@@ -32,9 +43,17 @@ class NotaApplication : Application() {
                 val koin = org.koin.core.context.GlobalContext.get()
                 val repository = koin.get<NoteRepository>()
                 val store = koin.get<AttachmentStore>()
+                val provider = koin.get<DatabaseProvider>()
                 // Provider form: the snapshot is taken inside the
                 // store's file mutex, not before it (Codex re-review N3).
-                store.reconcile { repository.observeAttachments().first() }
+                // Phase 3a: the sweep's keep-set spans EVERY account
+                // database on the device — the attachments/ root is
+                // shared, and another account's binaries are not
+                // orphans (see AttachmentStore.reconcile).
+                store.reconcile(
+                    allProvider = { repository.observeAttachments().first() },
+                    extraKnownPaths = { provider.allAttachmentLocalPaths() },
+                )
             }
         }
         // Backlink backfill (Codex fix G5b): the v2->v3 migration created

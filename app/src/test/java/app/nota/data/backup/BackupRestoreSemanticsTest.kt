@@ -4,6 +4,7 @@ import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.templates.TemplateRepository
 import java.io.File
@@ -49,14 +50,21 @@ class BackupRestoreSemanticsTest {
 
     private inner class Stack(val db: NotaDatabase) {
         val context = RuntimeEnvironment.getApplication()
-        val store = AttachmentStore(context, db.attachmentDao())
-        val backup = BackupRepository(context, db, TemplateRepository(context), store)
+        val store = AttachmentStore(context, DatabaseProvider.forDatabase(context, db))
+        val backup = BackupRepository(context, DatabaseProvider.forDatabase(context, db), TemplateRepository(context), store)
     }
+
+    private var stackSeq = 0
 
     private fun newStack(): Stack {
         val context = RuntimeEnvironment.getApplication()
-        val db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
-            .allowMainThreadQueries().build()
+        // File-backed under a discoverable account name (see
+        // BackupCrossoverRobolectricTest): the app startup orphan
+        // sweep must see this library's rows or it can sweep freshly
+        // restored attachment files mid-test.
+        val accountId = "semantics-${++stackSeq}"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val db = NotaDatabase.build(context, accountId)
         dbs += db
         return Stack(db)
     }

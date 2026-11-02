@@ -13,3 +13,7 @@ captures
 *.keystore
 *.jks
 keystore.properties
+# Firebase client config — NEVER commit (Noma precedent). CI writes it
+# from the GOOGLE_SERVICES_JSON_BASE64 secret; local builds use a
+# hand-placed copy.
+google-services.json
