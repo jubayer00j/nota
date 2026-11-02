@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -89,6 +90,12 @@ fun LockScreen(
     var patternError by remember { mutableStateOf(false) }
     var shakeKey by remember { mutableIntStateOf(0) }
     var formResetKey by remember { mutableIntStateOf(0) }
+    // Phase 2.6 (Fix B): one verification in flight at a time. A
+    // repeat submission while a verify is running is DROPPED here,
+    // never queued behind the manager's mutex to become a second
+    // derivation — and the form disables + shows progress so the
+    // wait is visible instead of feeling like a hang.
+    var verifying by remember { mutableStateOf(false) }
 
     // Lockout countdown, ticked locally from the persisted deadline.
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -148,21 +155,27 @@ fun LockScreen(
     }
 
     fun submit(method: AppLockMethod, canonicalSecret: String) {
+        if (verifying) return
+        verifying = true
         scope.launch {
-            when (manager.attemptUnlock(method, canonicalSecret)) {
-                UnlockResult.Success -> Unit // MainActivity swaps to the nav shell.
-                UnlockResult.Wrong -> {
-                    feedback = "Incorrect — try again"
-                    patternError = true
-                    shakeKey++
-                    formResetKey++
+            try {
+                when (manager.attemptUnlock(method, canonicalSecret)) {
+                    UnlockResult.Success -> Unit // MainActivity swaps to the nav shell.
+                    UnlockResult.Wrong -> {
+                        feedback = "Incorrect — try again"
+                        patternError = true
+                        shakeKey++
+                        formResetKey++
+                    }
+                    is UnlockResult.LockedOut -> {
+                        feedback = null
+                        patternError = true
+                        shakeKey++
+                        formResetKey++
+                    }
                 }
-                is UnlockResult.LockedOut -> {
-                    feedback = null
-                    patternError = true
-                    shakeKey++
-                    formResetKey++
-                }
+            } finally {
+                verifying = false
             }
         }
     }
@@ -214,12 +227,20 @@ fun LockScreen(
                             resetKey = formResetKey,
                             patternError = patternError,
                             error = feedback != null || patternError,
+                            enabled = !verifying,
                             onPatternTooShort = {
                                 feedback = "Pattern too short — connect at least 4 dots"
                                 patternError = true
                                 shakeKey++
                             },
                         )
+                        if (verifying) {
+                            Spacer(Modifier.height(NotaSpacing.sm))
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
                         if (feedback != null) {
                             Spacer(Modifier.height(NotaSpacing.sm))
                             Text(

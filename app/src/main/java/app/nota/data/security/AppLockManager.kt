@@ -183,13 +183,16 @@ class AppLockManager(
         val now = System.currentTimeMillis()
         if (now < current.lockoutUntil) return UnlockResult.LockedOut(current.lockoutUntil)
         val credential = current.credentialFor(method) ?: return UnlockResult.Wrong
+        val iterations = AppLockCrypto.iterationsFor(method)
         val ok = withContext(Dispatchers.Default) {
-            AppLockCrypto.verify(
-                canonicalSecret,
-                credential.salt,
-                credential.hash,
-                AppLockCrypto.iterationsFor(method),
-            )
+            LockPerf.measure("app-lock verify", iterations) {
+                AppLockCrypto.verify(
+                    canonicalSecret,
+                    credential.salt,
+                    credential.hash,
+                    iterations,
+                )
+            }
         }
         return if (ok) {
             repository.setAppLockFailedAttempts(0, 0L)
@@ -213,13 +216,16 @@ class AppLockManager(
         val current = _settings.value
         if (System.currentTimeMillis() < current.lockoutUntil) return false
         val credential = current.credentialFor(method) ?: return false
+        val iterations = AppLockCrypto.iterationsFor(method)
         return withContext(Dispatchers.Default) {
-            AppLockCrypto.verify(
-                canonicalSecret,
-                credential.salt,
-                credential.hash,
-                AppLockCrypto.iterationsFor(method),
-            )
+            LockPerf.measure("app-lock settings verify", iterations) {
+                AppLockCrypto.verify(
+                    canonicalSecret,
+                    credential.salt,
+                    credential.hash,
+                    iterations,
+                )
+            }
         }
     }
 

@@ -5,6 +5,7 @@ import app.nota.data.db.AttachmentDao
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.NoteDocument
+import app.nota.data.security.LockPerf
 import app.nota.data.security.NoteLockBiometricStore
 import app.nota.data.security.NoteLockCrypto
 import app.nota.data.security.NoteLockMethod
@@ -201,7 +202,9 @@ class NoteLockRepository(
             "${method.label} isn't set up for this note.",
         )
         val nek = withContext(Dispatchers.Default) {
-            NoteLockCrypto.unwrapNoteKey(slot, method, canonicalSecret)
+            LockPerf.measure("note-lock unwrap", slot.iterations) {
+                NoteLockCrypto.unwrapNoteKey(slot, method, canonicalSecret)
+            }
         }
         if (nek != null) {
             persistRecord(fresh, lock.withResetAttempts())
