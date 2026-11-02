@@ -18,7 +18,8 @@ import android.util.Log
  */
 object LockPerf {
 
-    private const val TAG = "NotaLockPerf"
+    @PublishedApi
+    internal const val TAG = "NotaLockPerf"
 
     /** Runs [block], logs its wall time under [operation], returns its result. */
     inline fun <T> measure(operation: String, iterations: Int, block: () -> T): T {
