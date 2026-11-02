@@ -435,6 +435,41 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun breakMarkerPaddingDoesNotPersist() {
+        // The rich editor's HTML dialect: trailing empty paragraphs
+        // serialise as bare <br> markers (probe-verified). This is
+        // the exact stored form of "tapped deep below Hello, left
+        // without typing" — it must trim to the content alone.
+        val working = listOf(TextSegment("<p>Hello</p><br><br>"))
+        assertEquals(
+            listOf(TextSegment("<p>Hello</p>")),
+            NoteDocument.stripTrailingEmptyTextSegments(working),
+        )
+        assertEquals(
+            "<p>Hello</p>",
+            NoteDocument.trimTrailingEmptyParagraphs("<p>Hello</p><br>"),
+        )
+        // Mixed forms (break markers after empty paragraphs) all go.
+        assertEquals(
+            "<p>Hello</p>",
+            NoteDocument.trimTrailingEmptyParagraphs("<p>Hello</p><p></p><br>"),
+        )
+    }
+
+    @Test
+    fun breakMarkersTypedBelowPersistAndInnerBreaksAreContent() {
+        // Typed below the padding: the <br> markers are mid-document
+        // spacing now — the exact fixed-point form the editor reloads.
+        val typed = listOf(TextSegment("<p>Hello</p><br><br><p>Deep</p>"))
+        assertEquals(typed, NoteDocument.stripTrailingEmptyTextSegments(typed))
+        // A <br> inside a paragraph is a line break, never padding.
+        val inner = "<p>line<br>more</p>"
+        assertEquals(inner, NoteDocument.trimTrailingEmptyParagraphs(inner))
+        val trailingInner = "<p>word<br></p>"
+        assertEquals(trailingInner, NoteDocument.trimTrailingEmptyParagraphs(trailingInner))
+    }
+
+    @Test
     fun tapPaddingAfterTrailingBlockIsDroppedWithItsSegment() {
         // The document ends in an image; the caret segment below it
         // holds only tap padding — segment-level strip takes it all.

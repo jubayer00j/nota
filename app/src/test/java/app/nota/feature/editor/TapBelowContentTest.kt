@@ -1,6 +1,7 @@
 package app.nota.feature.editor
 
 import com.mohamedrejeb.richeditor.annotation.ExperimentalRichTextApi
+import com.mohamedrejeb.richeditor.model.HeadingStyle
 import com.mohamedrejeb.richeditor.model.RichTextState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -11,14 +12,21 @@ import org.junit.Test
  * Phase 2.8 (E1) — tap-anywhere caret placement: the row math and the
  * in-state growth, exercised against the real rich editor state the
  * same way the spike round-trip tests do.
+ *
+ * Dialect note (probe-verified against the shipped library build):
+ * this editor joins paragraphs with a single SPACE in its raw text —
+ * there are no '\n' separators — and serialises trailing empty
+ * paragraphs as bare `<br>` markers in HTML. The fixtures below use
+ * single words per paragraph, so splitting the raw text on the
+ * separator recovers the paragraphs exactly.
  */
 @OptIn(ExperimentalRichTextApi::class)
 class TapBelowContentTest {
 
     private fun stateWith(html: String) = RichTextState().apply { setHtml(html) }
 
-    private fun linesOf(state: RichTextState): List<String> =
-        state.annotatedString.text.split('\n')
+    private fun paragraphsOf(state: RichTextState): List<String> =
+        state.annotatedString.text.split(' ')
 
     @Test
     fun rowMathBands() {
@@ -49,24 +57,38 @@ class TapBelowContentTest {
     fun growsParagraphsAndLandsCaretInTheLast() {
         val state = stateWith("<p>Hello</p>")
         assertTrue(state.placeCaretBelowContent(3))
-        val lines = linesOf(state)
-        assertEquals(4, lines.size)
-        assertEquals("Hello", lines[0])
-        assertTrue(lines.drop(1).all { it.isEmpty() })
-        // Caret: collapsed, at the start of the last (new) paragraph.
+        assertEquals(listOf("Hello", "", "", ""), paragraphsOf(state))
+        // Caret: collapsed, at the very end — the start of the last
+        // (new, empty) paragraph.
         assertEquals(state.annotatedString.text.length, state.selection.start)
         assertEquals(state.selection.start, state.selection.end)
-        // The growth is real paragraphs in the HTML, not a visual trick.
-        assertEquals(3, Regex("<p></p>").findAll(state.toHtml()).count())
+        // The growth is real paragraphs in the HTML (the editor's
+        // trailing-empty dialect: bare <br> markers), not a visual trick.
+        assertEquals("<p>Hello</p><br><br>", state.toHtml())
+    }
+
+    @Test
+    fun typingIntoTheGrownParagraphKeepsTheSpacing() {
+        val state = stateWith("<p>Hello</p>")
+        assertTrue(state.placeCaretBelowContent(3))
+        state.addTextAfterSelection("Deep")
+        assertEquals(listOf("Hello", "", "", "Deep"), paragraphsOf(state))
+        val html = state.toHtml()
+        assertEquals("<p>Hello</p><br><br><p>Deep</p>", html)
+        // Save/load is a fixed point: the spacing above the typed
+        // text is real document spacing and survives the round trip.
+        val reloaded = stateWith(html)
+        assertEquals(state.annotatedString.text, reloaded.annotatedString.text)
+        assertEquals(html, reloaded.toHtml())
     }
 
     @Test
     fun blankDocumentGrowsFromItsSingleEmptyLine() {
         val state = RichTextState()
         assertTrue(state.placeCaretBelowContent(3))
-        val lines = linesOf(state)
-        assertEquals(4, lines.size)
-        assertTrue(lines.all { it.isEmpty() })
+        val paragraphs = paragraphsOf(state)
+        assertEquals(4, paragraphs.size)
+        assertTrue(paragraphs.all { it.isEmpty() })
         assertEquals(state.annotatedString.text.length, state.selection.start)
     }
 
@@ -74,7 +96,7 @@ class TapBelowContentTest {
     fun growthIsCapped() {
         val state = stateWith("<p>Hello</p>")
         assertTrue(state.placeCaretBelowContent(MAX_TAP_GROW_PARAGRAPHS + 40))
-        assertEquals(MAX_TAP_GROW_PARAGRAPHS, linesOf(state).size - 1)
+        assertEquals(MAX_TAP_GROW_PARAGRAPHS, paragraphsOf(state).size - 1)
     }
 
     @Test
@@ -93,17 +115,22 @@ class TapBelowContentTest {
     fun headingEndedDocumentGrowsBelowTheHeading() {
         val state = stateWith("<h1>Title</h1>")
         assertTrue(state.placeCaretBelowContent(1))
-        assertEquals(2, linesOf(state).size)
+        assertEquals(listOf("Title", ""), paragraphsOf(state))
         assertEquals(state.annotatedString.text.length, state.selection.start)
-        assertTrue(state.toHtml().contains("<h1"))
+        assertEquals("<h1>Title</h1><br>", state.toHtml())
+        // The grown paragraph is a normal paragraph (the library
+        // exits the heading on Enter, like typing would).
+        assertEquals(HeadingStyle.Normal, state.currentHeadingStyle)
     }
 
     @Test
-    fun paddingSegmentHtmlShapeAndCap() {
-        assertEquals("<p></p><p></p>", paddingSegmentHtml(2))
+    fun paddingSegmentShapeAndCap() {
+        assertEquals("<p></p><p></p><p></p>", paddingSegmentHtml(2))
+        assertEquals("<p></p>", paddingSegmentHtml(0))
+        val capped = paddingSegmentHtml(MAX_TAP_GROW_PARAGRAPHS + 40)
         assertEquals(
-            MAX_TAP_GROW_PARAGRAPHS,
-            Regex("<p></p>").findAll(paddingSegmentHtml(MAX_TAP_GROW_PARAGRAPHS + 10)).count(),
+            MAX_TAP_GROW_PARAGRAPHS + 1,
+            Regex("<p></p>").findAll(capped).count(),
         )
     }
 }

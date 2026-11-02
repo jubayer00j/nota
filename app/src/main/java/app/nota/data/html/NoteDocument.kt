@@ -689,10 +689,15 @@ object NoteDocument {
      * Removes trailing empty paragraphs (`<p></p>`, `<p><br></p>`,
      * `<p>&nbsp;</p>`, empty headings) from the END of one text
      * segment's HTML — the scratch padding the tap-anywhere caret
-     * (Phase 2.8 E1) appends below the last line. Stops at the first
-     * block with visible text or embedded structure, so spacing the
-     * user actually typed into (empty paragraphs with content below
-     * them) is preserved byte-for-byte, as is everything before it.
+     * (Phase 2.8 E1) appends below the last line. The rich editor's
+     * HTML dialect serialises trailing empty paragraphs as bare
+     * `<br>` markers (`<p>Hello</p><br><br>` is "Hello" plus empty
+     * paragraphs), so a trailing top-level `<br>` is the same scratch
+     * and is trimmed too; a `<br>` inside a paragraph or followed by
+     * content is untouched. Stops at the first block with visible
+     * text or embedded structure, so spacing the user actually typed
+     * into (empty paragraphs with content below them) is preserved
+     * byte-for-byte, as is everything before it.
      */
     fun trimTrailingEmptyParagraphs(html: String): String {
         if (html.isBlank()) return html
@@ -701,13 +706,21 @@ object NoteDocument {
         while (kept > 0) {
             val range = chunks[kept - 1]
             val chunk = html.substring(range.first, range.last + 1)
-            val droppable = chunk.isBlank() || isEmptyParagraphChunk(chunk)
+            val droppable = chunk.isBlank() || isLineBreakChunk(chunk) ||
+                isEmptyParagraphChunk(chunk)
             if (!droppable) break
             kept--
         }
         if (kept == chunks.size) return html
         val cut = if (kept == 0) 0 else chunks[kept - 1].last + 1
         return html.substring(0, cut)
+    }
+
+    /** True when [chunk] is exactly one `<br>` element — the rich
+     *  editor's serialised form of a trailing empty paragraph. */
+    private fun isLineBreakChunk(chunk: String): Boolean {
+        val tag = readTag(chunk, 0) ?: return false
+        return !tag.closing && tag.name == "br" && tag.end == chunk.length
     }
 
     /** True when [chunk] is exactly one empty paragraph-level element. */
