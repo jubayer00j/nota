@@ -40,7 +40,7 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
+        versionCode = 11
         versionName = "0.4.0"
     }
 
@@ -127,6 +127,10 @@ dependencies {
     // network fetcher for http(s) models; note attachments stay
     // local files as before.
     implementation(libs.coil.network.okhttp)
+    // Phase 3b: Drive authorization (drive.file) + REST + scheduled work.
+    implementation(libs.play.services.auth)
+    implementation(libs.okhttp)
+    implementation(libs.androidx.work.runtime.ktx)
 
     // Phase 2a App Lock: BiometricPrompt (fingerprint convenience gate)
     // and ProcessLifecycleOwner (background/foreground re-lock tracking).

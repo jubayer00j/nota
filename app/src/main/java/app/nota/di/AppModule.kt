@@ -70,6 +70,21 @@ val appModule = module {
     // the guest→account library copy.
     single { GuestLibraryTransfer(get()) }
     single { AuthManager(get(), get(), get()) }
+    // Phase 3b Google Drive: authorization (drive.file only), the
+    // REST gateway, and the app-scoped operations coordinator.
+    single { app.nota.data.drive.DriveAuth(get()) }
+    single<app.nota.data.drive.DriveGateway> { app.nota.data.drive.DriveClient() }
+    single {
+        app.nota.data.drive.DriveRepository(
+            context = get(),
+            sessionProvider = { get<AuthManager>().session.value },
+            driveAuth = get(),
+            gateway = get(),
+            backups = get(),
+            prefs = get(),
+            pendingRestore = app.nota.data.backup.PendingRestoreStore.shared,
+        )
+    }
     viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
