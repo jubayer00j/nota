@@ -1,6 +1,5 @@
 package app.nota.feature.editor
 
-import android.os.Looper
 import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.NotaDatabase
@@ -15,9 +14,7 @@ import app.nota.data.security.NoteLockDeviceKeyProvider
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
 import app.nota.data.templates.TemplateRepository
-import java.time.Duration
 import java.util.Base64
-import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -33,10 +30,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowLooper
-import org.robolectric.shadows.ShadowSystemClock
 
 /**
  * Failing-first reproduction for the Phase 2.5 F3 device bug: "a locked
@@ -65,11 +60,12 @@ import org.robolectric.shadows.ShadowSystemClock
  * unlockWithCredential and NoteLockRepository), so it compiles
  * unchanged against main.
  *
- * Time: Robolectric shadows System.currentTimeMillis(), so the 30 s
- * backoff is elapsed on the shadow clock instead of a real wait —
- * via the main looper's scheduler (idleFor), which is what actually
- * drives the wall clock under the paused looper; a bare
- * ShadowSystemClock.advanceBy does not move it (proven in CI).
+ * Time: the 30 s backoff is not waited out in real time. The
+ * shadow wall clock in this Robolectric configuration does not
+ * advance (measured in CI: advanceBy +0 ms, idleFor +2 ms), so the
+ * elapsed-backoff state is staged by moving the persisted deadline
+ * into the past through the repository's own upsert; every
+ * production path from that state onward is the real one.
  * PBKDF2 budget: PIN slots (300k) throughout.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -293,42 +289,31 @@ class NoteLockUnlockStateRobolectricTest {
                 NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!.failedAttempts,
             )
 
-            // The legitimate backoff elapses (shadow clock: no real
-            // wait). NOTE: ShadowSystemClock.advanceBy alone does NOT
-            // move the wall clock the repository reads under
-            // Robolectric's paused looper (proven in CI: after a 31 s
-            // advanceBy the persisted deadline still had 29 s
-            // remaining — the paused scheduler's clock only advances
-            // when the looper idles forward). idleFor drives that
-            // scheduler clock; advanceBy is kept alongside for the
-            // uptime clock.
-            // DIAGNOSTIC (coordinator, temporary): probe the clock
-            // around the advance so the next CI run shows which API
-            // actually moves System.currentTimeMillis() here.
-            val deadlineBeforeAdvance =
-                NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!.lockoutUntil
-            val nowBeforeAdvance = System.currentTimeMillis()
-            ShadowSystemClock.advanceBy(Duration.ofSeconds(31))
-            val nowAfterAdvanceBy = System.currentTimeMillis()
-            shadowOf(Looper.getMainLooper()).idleFor(31, TimeUnit.SECONDS)
-            val nowAfterIdleFor = System.currentTimeMillis()
+            // The legitimate backoff elapses. On device this is
+            // simply real time passing the persisted deadline. In
+            // this Robolectric configuration the shadow wall clock
+            // does not advance at all (measured in CI: a 31 s
+            // ShadowSystemClock.advanceBy moved
+            // System.currentTimeMillis() by 0 ms and a 31 s
+            // ShadowLooper.idleFor by 2 ms), so the elapsed state is
+            // staged by moving the PERSISTED deadline into the past
+            // through the same upsert the repository itself uses.
+            // Every production path from that state — fresh record
+            // read, lockout check, PBKDF2 verify, attempt reset,
+            // session start — is the real one.
+            val stagedEntity = notes.getById(note.id)!!
+            val stagedRecord = NoteLockRecord.parse(stagedEntity.lockRecordJson)!!
+            notes.upsert(
+                stagedEntity.copy(
+                    lockRecordJson = stagedRecord.copy(
+                        lockoutUntil = System.currentTimeMillis() - 1,
+                    ).toJson(),
+                ),
+            )
 
             // The correct PIN opens on the FIRST try after the backoff.
             vm.unlockWithCredential(AppLockMethod.PIN, NoteLockCrypto.canonicalPin("135790"))
-            // DIAGNOSTIC (coordinator, temporary): on failure, dump
-            // the clock probes and the repository's actual answer.
-            awaitCondition("final attempt started") { vm.unlockInProgress.value }
-            awaitCondition("final attempt finished") { !vm.unlockInProgress.value }
-            val probeRecord = NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!
-            assertTrue(
-                "session must start after backoff; lockError=${vm.lockError.value}, " +
-                    "deadlineBefore=$deadlineBeforeAdvance, nowBefore=$nowBeforeAdvance, " +
-                    "nowAfterAdvanceBy=$nowAfterAdvanceBy, nowAfterIdleFor=$nowAfterIdleFor, " +
-                    "nowAtAssert=${System.currentTimeMillis()}, " +
-                    "persisted failedAttempts=${probeRecord.failedAttempts}, " +
-                    "persisted lockoutUntil=${probeRecord.lockoutUntil}",
-                vm.sessionActive.value,
-            )
+            awaitCondition("session started after backoff") { vm.sessionActive.value }
             val afterOpen = NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!
             assertEquals(0, afterOpen.failedAttempts)
             assertNull(afterOpen.lockoutUntil)
