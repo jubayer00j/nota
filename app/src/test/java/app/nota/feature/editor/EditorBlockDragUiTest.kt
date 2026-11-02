@@ -3,6 +3,8 @@ package app.nota.feature.editor
 import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -188,12 +190,10 @@ class EditorBlockDragUiTest {
     private fun dumpSemantics(): String {
         val out = mutableListOf<String>()
         fun walk(node: androidx.compose.ui.semantics.SemanticsNode) {
-            node.config.getOrNull(
-                androidx.compose.ui.semantics.SemanticsProperties.Text,
-            )?.forEach { out += "text:" + it.text.take(40) }
-            node.config.getOrNull(
-                androidx.compose.ui.semantics.SemanticsProperties.ContentDescription,
-            )?.forEach { out += "desc:" + it }
+            node.config.getOrNull(SemanticsProperties.Text)
+                ?.forEach { out += "text:" + it.text.take(40) }
+            node.config.getOrNull(SemanticsProperties.ContentDescription)
+                ?.forEach { out += "desc:" + it }
             node.children.forEach(::walk)
         }
         return try {
