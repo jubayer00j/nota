@@ -32,6 +32,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import app.nota.data.backup.PendingRestoreStore
+import app.nota.data.attachments.PendingInsertStore
+import app.nota.data.db.DatabaseProvider
+import app.nota.data.repository.NoteRepository
+import app.nota.feature.editor.PendingInsertResumer
 import app.nota.data.security.AppLockManager
 import app.nota.feature.ask.AskScreen
 import app.nota.feature.settings.UnlockRestoreResumer
@@ -71,6 +75,10 @@ fun NotaNavShell(
     appLockManager: AppLockManager = koinInject(),
     authManager: AuthManager = koinInject(),
     pendingRestoreStore: PendingRestoreStore = PendingRestoreStore.shared,
+    // Phase 3.6 (G2): the durable picker-insert record and its seams.
+    pendingInsertStore: PendingInsertStore = koinInject(),
+    databaseProvider: DatabaseProvider = koinInject(),
+    noteRepository: NoteRepository = koinInject(),
 ) {
     val navController = rememberNavController()
     val backStack by navController.currentBackStackEntryAsState()
@@ -96,6 +104,42 @@ fun NotaNavShell(
                 launchSingleTop = true
                 restoreState = true
             }
+        }
+    }
+    // Phase 3.6 (G2): a picker insert staged before the app locked /
+    // died routes the user back INTO its note once the shell is
+    // composed again — the 0.4.1 recording ended at the notes list
+    // with the file added but the note unopened. The resumer fires
+    // once per record per unlock and never when the user is already
+    // inside that note (the normal fast return consumes the record
+    // in the editor itself). A record from another account is stale
+    // by definition (its note lives in another library) and is
+    // retired, not routed; a record whose note no longer exists is
+    // retired too — the picked file stays in the library, nothing
+    // crashes, nothing is left staged.
+    val pendingInsert by pendingInsertStore.state.collectAsState()
+    val currentAccountId by databaseProvider.accountId.collectAsState()
+    val insertResumer = remember { PendingInsertResumer() }
+    val currentNoteId = if (currentRoute == NotaRoutes.NOTE_EDITOR) {
+        backStack?.arguments?.getString("noteId")
+    } else {
+        null
+    }
+    LaunchedEffect(isLocked, pendingInsert, currentAccountId, currentNoteId) {
+        val record = pendingInsert ?: return@LaunchedEffect
+        if (!isLocked && record.accountId != currentAccountId) {
+            pendingInsertStore.clearIf(record.id)
+            return@LaunchedEffect
+        }
+        val target = insertResumer.onState(
+            isLocked, record, currentAccountId, currentNoteId,
+        ) ?: return@LaunchedEffect
+        if (noteRepository.getById(target) != null) {
+            navController.navigate(NotaRoutes.noteEditor(target)) {
+                launchSingleTop = true
+            }
+        } else {
+            pendingInsertStore.clearIf(record.id)
         }
     }
     // Today has its own route but lives under the Notes bottom-bar item.

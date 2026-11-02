@@ -8,8 +8,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -105,6 +106,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import android.view.HapticFeedbackConstants
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextLayoutResult
+import app.nota.data.attachments.PendingInsertKind
+import app.nota.data.attachments.PendingInsertMode
+import app.nota.data.attachments.PendingInsertRecord
+import app.nota.data.attachments.PendingInsertStore
+import app.nota.data.db.DatabaseProvider
+import com.mohamedrejeb.richeditor.ui.BasicRichText
+import org.koin.compose.koinInject
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.ChartSegment
@@ -174,6 +188,10 @@ fun RichNoteEditorScreen(
     onBack: () -> Unit = {},
     onOpenNote: (String) -> Unit = {},
     viewModel: RichNoteEditorViewModel = koinViewModel(),
+    // Phase 3.6 (G2): the durable picker-insert record + the account
+    // seam, injected so UI tests can substitute a temp-dir store.
+    pendingInsertStore: PendingInsertStore = koinInject(),
+    databaseProvider: DatabaseProvider = koinInject(),
 ) {
     LaunchedEffect(noteId) { viewModel.load(noteId) }
     val note by viewModel.note.collectAsState()
@@ -226,7 +244,22 @@ fun RichNoteEditorScreen(
     // segment's id and its accumulated vertical translation.
     var dragSegmentId by remember { mutableStateOf<String?>(null) }
     var dragOffsetPx by remember { mutableFloatStateOf(0f) }
+    // Phase 3.6 (G1): layout heights of the segment rows, so the
+    // dragged block's slot can stay behind as the drop indicator.
+    val segmentHeights = remember { mutableStateMapOf<String, Int>() }
+    // Phase 3.6 (G4): true while a two-finger image pinch is live —
+    // the list must not scroll under it.
+    var imagePinchActive by remember { mutableStateOf(false) }
+    // Phase 3.6 (G3): read mode. A note opens for READING (Noma
+    // parity); editing is entered deliberately — tap on the body or
+    // the pencil — and ✓/back returns here, not out of the note. The
+    // mode is ephemeral UI state, never persisted. [editEntryTarget]
+    // is the (segmentId, caretOffset) a read-mode tap asked the edit
+    // mode to open with, applied once the editors compose.
+    var editing by remember { mutableStateOf(false) }
+    var editEntryTarget by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val density = LocalDensity.current
+    val view = LocalView.current
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -400,25 +433,32 @@ fun RichNoteEditorScreen(
         }
     }
 
+    /** Phase 3.6 (G1): a small tick when a dragged block locks into
+     *  a new slot — the landing is felt as well as seen. */
+    fun hapticTick() {
+        view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
+    }
+
     /**
-     * Phase 3.5 (D4): drag-reorder for block segments. The dragged
-     * block follows the finger via a graphicsLayer translation; when
-     * its centre crosses a neighbouring SEGMENT's centre the two swap
-     * in the working list and the accumulated translation is adjusted
-     * by the neighbour's height (+ the inter-segment spacing) so the
-     * block stays under the finger. Neighbours are located through
-     * the list's layout info by item key — title/meta/attachments
-     * rows, whose keys are not segment ids, can never be swap
-     * targets, so a block moves among segments only. There is no
-     * auto-scroll: a drag stays within the composed window (a
-     * deliberate scope call for this round).
+     * Phase 3.5 (D4) drag-reorder, Phase 3.6 (G1) refactor: evaluates
+     * ONE centre-crossing swap for the dragged block at its current
+     * accumulated translation and returns true when a swap happened.
+     * The dragged block follows the finger via a graphicsLayer
+     * translation; when its centre crosses a neighbouring SEGMENT's
+     * centre the two swap in the working list and the accumulated
+     * translation is adjusted by the neighbour's height (+ the
+     * inter-segment spacing) so the block stays under the finger.
+     * Neighbours are located through the list's layout info by item
+     * key — title/meta/attachments rows, whose keys are not segment
+     * ids, can never be swap targets, so a block moves among segments
+     * only. Called per finger move AND per auto-scroll step (G1), so
+     * a block can be walked the length of a long note.
      */
-    fun onBlockDrag(ui: UiSegment, dragAmountY: Float) {
-        dragOffsetPx += dragAmountY
+    fun evaluateBlockSwap(ui: UiSegment): Boolean {
         val from = segments.indexOfFirst { it.id == ui.id }
-        if (from < 0) return
+        if (from < 0) return false
         val visible = listState.layoutInfo.visibleItemsInfo
-        val info = visible.firstOrNull { it.key == ui.id } ?: return
+        val info = visible.firstOrNull { it.key == ui.id } ?: return false
         val centre = info.offset + dragOffsetPx + info.size / 2f
         val spacingPx = with(density) { NotaSpacing.sm.toPx() }
         val prev = segments.getOrNull(from - 1)?.let { neighbour ->
@@ -427,7 +467,7 @@ fun RichNoteEditorScreen(
         if (prev != null && centre < prev.offset + prev.size / 2f) {
             segments = segments.moved(from, from - 1)
             dragOffsetPx += prev.size + spacingPx
-            return
+            return true
         }
         val next = segments.getOrNull(from + 1)?.let { neighbour ->
             visible.firstOrNull { it.key == neighbour.id }
@@ -446,8 +486,73 @@ fun RichNoteEditorScreen(
                 // lands last; restore the caret tail below it.
                 segments = ensureTrailing(segments)
                 dragOffsetPx -= next.size + spacingPx
+                return true
             }
         }
+        return false
+    }
+
+    fun onBlockDrag(ui: UiSegment, dragAmountY: Float) {
+        dragOffsetPx += dragAmountY
+        if (evaluateBlockSwap(ui)) hapticTick()
+    }
+
+    // --- Phase 3.6 (G3): read ⇄ edit mode transitions ----------------
+
+    /** Enters edit mode; when [segmentId] names a text/quote segment,
+     *  the caret is placed at [caretOffset] inside it once the
+     *  editors compose (the read-mode tap's position, mapped through
+     *  the read renderer's own text layout). */
+    fun enterEdit(segmentId: String?, caretOffset: Int?) {
+        editing = true
+        if (segmentId != null) {
+            editEntryTarget = segmentId to (caretOffset ?: 0)
+        }
+    }
+
+    /** ✓ / back in edit mode: flush and return to reading the SAME
+     *  note — never out to the list. */
+    fun exitToRead() {
+        persistNow()
+        editing = false
+    }
+
+    /** Where the caret should go when a read-mode BLOCK is tapped:
+     *  the start of the next text/quote segment, else the end of the
+     *  previous one — the block itself holds no caret. */
+    fun entryTargetForBlock(blockId: String): Pair<String, Int>? {
+        val idx = segments.indexOfFirst { it.id == blockId }
+        if (idx < 0) return null
+        for (i in idx + 1 until segments.size) {
+            val s = segments[i].segment
+            if (s is TextSegment || s is QuoteSegment) return segments[i].id to 0
+        }
+        for (i in idx - 1 downTo 0) {
+            val s = segments[i].segment
+            if (s is TextSegment || s is QuoteSegment) {
+                val length = textStates[segments[i].id]
+                    ?.annotatedString?.text?.length ?: 0
+                return segments[i].id to length
+            }
+        }
+        return null
+    }
+
+    /** Retires a still-staged picker record for this note (Phase 3.6,
+     *  G2) — see [leaveNote]. */
+    fun retirePendingInsert() {
+        pendingInsertStore.peek()
+            ?.takeIf { it.noteId == noteId }
+            ?.let { pendingInsertStore.clearIf(it.id) }
+    }
+
+    /** Leaves the note. If a picker insert is still staged for this
+     *  note (its picker never returned a result — the durable record
+     *  outlived its usefulness the moment the user walks away), retire
+     *  it so a later launch doesn't route back into a finished visit. */
+    fun leaveNote() {
+        retirePendingInsert()
+        persistNow(onBack)
     }
 
     /**
@@ -531,50 +636,197 @@ fun RichNoteEditorScreen(
         pendingCaretFocusId = null
     }
 
-    BackHandler { persistNow(onBack) }
+    // Phase 3.6 (G3): a read-mode tap asked for edit mode at a
+    // specific caret — apply it once the editors have composed.
+    LaunchedEffect(editing, editEntryTarget) {
+        if (!editing) return@LaunchedEffect
+        val (segmentId, offset) = editEntryTarget ?: return@LaunchedEffect
+        val ui = segments.firstOrNull { it.id == segmentId }
+        if (ui != null) {
+            val st = richStateFor(ui)
+            st.selection = TextRange(
+                offset.coerceIn(0, st.annotatedString.text.length),
+            )
+            runCatching { segmentFocusRequesters[segmentId]?.requestFocus() }
+        }
+        editEntryTarget = null
+    }
+
+    // Phase 3.6 (G1): auto-scroll while a block drag rides the
+    // viewport's edge — the finger can hold still at the edge while
+    // the document walks beneath it, swap by swap. This removes the
+    // Phase 3.5 limitation (a drag stayed within the composed
+    // window). The step grows with how deep into the edge zone the
+    // dragged block's visual edge sits.
+    LaunchedEffect(dragSegmentId) {
+        val id = dragSegmentId ?: return@LaunchedEffect
+        val zonePx = with(density) { 72.dp.toPx() }
+        val maxStepPx = with(density) { 14.dp.toPx() }
+        while (true) {
+            delay(16)
+            if (dragSegmentId != id) break
+            val ui = segments.firstOrNull { it.id == id } ?: break
+            val info = listState.layoutInfo
+            val item = info.visibleItemsInfo.firstOrNull { it.key == id } ?: continue
+            val top = item.offset + dragOffsetPx
+            val bottom = top + item.size
+            val step = when {
+                top < info.viewportStartOffset + zonePx ->
+                    -maxStepPx * ((info.viewportStartOffset + zonePx - top) / zonePx)
+                        .coerceIn(0.25f, 1f)
+                bottom > info.viewportEndOffset - zonePx ->
+                    maxStepPx * ((bottom - (info.viewportEndOffset - zonePx)) / zonePx)
+                        .coerceIn(0.25f, 1f)
+                else -> 0f
+            }
+            if (step != 0f) {
+                listState.scrollBy(step)
+                if (evaluateBlockSwap(ui)) hapticTick()
+            }
+        }
+    }
+
+    // Phase 3.6 (G3): back in edit mode returns to reading the same
+    // note; back in read mode leaves to the list, as before.
+    BackHandler(enabled = editing) { exitToRead() }
+    BackHandler(enabled = !editing) { leaveNote() }
+
+    // --- Phase 3.6 (G2): picker inserts that survive leaving --------
+    //
+    // Pre-3.6 the pickers' intent lived in `remember` flags inside
+    // this composition. Both the app-lock swap (Lock-after =
+    // Immediately relocks when the picker backgrounds the app; the
+    // whole nav shell is destroyed, note route and all) and process
+    // death in the picker destroyed those flags AND the route back:
+    // the file landed in the note (on a later manual reopen, when the
+    // registry finally delivered the held result — import-only, the
+    // insert intent gone), but the user was left at the notes list.
+    // Now the intent is staged durably BEFORE launch and consumed
+    // from the record, not from composition memory.
+
+    /** Stages the durable record for a picker about to launch. The
+     *  working document is flushed first so the staged segment index
+     *  and anchor describe the stored content a rebuilt editor will
+     *  parse after a lock swap / process death. */
+    fun stagePendingInsert(kind: PendingInsertKind, mode: PendingInsertMode) {
+        persistNow()
+        val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
+        val activeUi = segments.getOrNull(activeIndex)
+        val activeSegment = activeUi?.segment
+        val textLike = activeSegment is TextSegment || activeSegment is QuoteSegment
+        val anchor: String
+        val caret: Int
+        if (mode == PendingInsertMode.INSERT_AT_CARET && activeUi != null && textLike) {
+            val state = textStates[activeUi.id]
+            anchor = (state?.annotatedString?.text ?: "").take(INSERT_ANCHOR_CHARS)
+            caret = state?.selection?.start ?: 0
+        } else {
+            anchor = ""
+            caret = 0
+        }
+        pendingInsertStore.stage(
+            PendingInsertRecord(
+                accountId = databaseProvider.accountId.value,
+                noteId = noteId,
+                kind = kind,
+                mode = mode,
+                segmentIndex = if (mode == PendingInsertMode.INSERT_AT_CARET) {
+                    activeIndex
+                } else {
+                    -1
+                },
+                segmentAnchor = anchor,
+                caretOffset = caret,
+            ),
+        )
+    }
+
+    /** Inserts [block] at the caret target a staged record saved:
+     *  resolve the target segment against the CURRENT list, put the
+     *  caret back where the user left it, then run the ordinary
+     *  Phase 3.5 caret split-insert. Unresolvable targets degrade to
+     *  the ordinary caret insert rather than losing the block. */
+    fun insertBlockAtRecordTarget(record: PendingInsertRecord, block: DocSegment) {
+        val candidates = segments.map { ui ->
+            val textLike = ui.segment is TextSegment || ui.segment is QuoteSegment
+            val text = textStates[ui.id]?.annotatedString?.text
+                ?: when (val s = ui.segment) {
+                    is TextSegment -> PlainTextCodec.htmlToText(s.html)
+                    is QuoteSegment -> PlainTextCodec.htmlToText(s.innerHtml)
+                    else -> ""
+                }
+            textLike to text
+        }
+        val targetIndex = resolveInsertTargetIndex(record, candidates)
+        val target = targetIndex?.let { segments.getOrNull(it) }
+        if (target == null) {
+            insertBlockAtCaret(block)
+            return
+        }
+        activeSegmentId = target.id
+        richStateFor(target).selection = TextRange(
+            record.caretOffset.coerceIn(
+                0,
+                textStates[target.id]?.annotatedString?.text?.length ?: 0,
+            ),
+        )
+        insertBlockAtCaret(block)
+    }
+
+    /** The single funnel every picker result passes through. The
+     *  staged record (never a composition flag) decides whether the
+     *  pick becomes a block at the saved caret; a cancel simply
+     *  retires the record — the user is already back in the note. */
+    fun handlePicked(kind: PendingInsertKind, uri: Uri?) {
+        val record = pendingInsertStore.peek()
+            ?.takeIf { it.noteId == noteId && it.kind == kind }
+        if (record != null) pendingInsertStore.clearIf(record.id)
+        if (uri == null) return
+        val insert = record?.mode == PendingInsertMode.INSERT_AT_CARET ||
+            (record == null && when (kind) {
+                PendingInsertKind.IMAGE -> insertImageOnPick
+                PendingInsertKind.FILE -> insertFileOnPick
+            })
+        when (kind) {
+            PendingInsertKind.IMAGE -> viewModel.importImage(uri) { attachment ->
+                insertImageOnPick = false
+                if (attachment != null && insert) {
+                    val block = ImageSegment(
+                        NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id,
+                        attachment.fileName,
+                    )
+                    // Phase 3.5 (D4): at the caret, not the note's end.
+                    if (record != null) {
+                        insertBlockAtRecordTarget(record, block)
+                    } else {
+                        insertBlockAtCaret(block)
+                    }
+                }
+            }
+            PendingInsertKind.FILE -> viewModel.importFile(uri) { attachment ->
+                insertFileOnPick = false
+                if (attachment != null && insert) {
+                    val block = FileSegment(
+                        attachmentId = attachment.id,
+                        fileName = attachment.fileName,
+                        mimeType = attachment.mimeType,
+                    )
+                    if (record != null) {
+                        insertBlockAtRecordTarget(record, block)
+                    } else {
+                        insertBlockAtCaret(block)
+                    }
+                }
+            }
+        }
+    }
 
     val imagePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
-    ) { uri: Uri? ->
-        if (uri != null) {
-            viewModel.importImage(uri) { attachment ->
-                if (attachment != null && insertImageOnPick) {
-                    // Phase 3.5 (D4): at the caret, not the note's end.
-                    insertBlockAtCaret(
-                        ImageSegment(
-                            NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id,
-                            attachment.fileName,
-                        ),
-                    )
-                }
-                insertImageOnPick = false
-            }
-        } else {
-            insertImageOnPick = false
-        }
-    }
+    ) { uri: Uri? -> handlePicked(PendingInsertKind.IMAGE, uri) }
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
-    ) { uri: Uri? ->
-        if (uri != null) {
-            viewModel.importFile(uri) { attachment ->
-                if (attachment != null && insertFileOnPick) {
-                    // Phase 3.5 (D4): the file becomes a document
-                    // block at the caret (FileSegment).
-                    insertBlockAtCaret(
-                        FileSegment(
-                            attachmentId = attachment.id,
-                            fileName = attachment.fileName,
-                            mimeType = attachment.mimeType,
-                        ),
-                    )
-                }
-                insertFileOnPick = false
-            }
-        } else {
-            insertFileOnPick = false
-        }
-    }
+    ) { uri: Uri? -> handlePicked(PendingInsertKind.FILE, uri) }
 
     // [[ backlink autocomplete state, derived from the active editor.
     val linkTrigger: Pair<Int, String>? = run {
@@ -622,13 +874,24 @@ fun RichNoteEditorScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = { persistNow(onBack) }) {
+                    // Phase 3.6 (G3): in edit mode the back arrow
+                    // returns to reading this note; in read mode it
+                    // leaves to the list.
+                    IconButton(
+                        onClick = { if (editing) exitToRead() else leaveNote() },
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
-                    IconButton(onClick = { persistNow(onBack) }) {
-                        Icon(Icons.Filled.Check, contentDescription = "Save and done")
+                    if (editing) {
+                        IconButton(onClick = { exitToRead() }) {
+                            Icon(Icons.Filled.Check, contentDescription = "Done editing")
+                        }
+                    } else {
+                        IconButton(onClick = { enterEdit(null, null) }) {
+                            Icon(Icons.Filled.Edit, contentDescription = "Edit note")
+                        }
                     }
                     IconButton(onClick = { menuExpanded = true }) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "More")
@@ -687,12 +950,20 @@ fun RichNoteEditorScreen(
                         DropdownMenuItem(
                             text = { Text("Archive") },
                             leadingIcon = { Icon(Icons.Filled.Archive, contentDescription = null) },
-                            onClick = { menuExpanded = false; persistNow { viewModel.archive(onBack) } },
+                            onClick = {
+                                menuExpanded = false
+                                retirePendingInsert()
+                                persistNow { viewModel.archive(onBack) }
+                            },
                         )
                         DropdownMenuItem(
                             text = { Text("Move to trash") },
                             leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
-                            onClick = { menuExpanded = false; persistNow { viewModel.delete(onBack) } },
+                            onClick = {
+                                menuExpanded = false
+                                retirePendingInsert()
+                                persistNow { viewModel.delete(onBack) }
+                            },
                         )
                     }
                 },
@@ -740,26 +1011,42 @@ fun RichNoteEditorScreen(
                 state = listState,
                 // Phase 3.5 (D4): while a block drag is live the list
                 // itself must not start scrolling under the gesture.
-                userScrollEnabled = dragSegmentId == null,
+                // Phase 3.6 (G4): the same while an image pinch is live.
+                // (Auto-scroll during a drag is programmatic scrollBy,
+                // which userScrollEnabled does not gate.)
+                userScrollEnabled = dragSegmentId == null && !imagePinchActive,
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 contentPadding = PaddingValues(NotaSpacing.md),
                 verticalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
             ) {
                 item(key = "title") {
                     Column {
-                        TextField(
-                            value = title,
-                            onValueChange = { title = it },
-                            placeholder = { Text("Title") },
-                            textStyle = MaterialTheme.typography.titleLarge,
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                            ),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                        if (editing) {
+                            TextField(
+                                value = title,
+                                onValueChange = { title = it },
+                                placeholder = { Text("Title") },
+                                textStyle = MaterialTheme.typography.titleLarge,
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                ),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            // Phase 3.6 (G3): the read-mode title is
+                            // text, not a field — tapping it is one of
+                            // the doors into edit mode.
+                            Text(
+                                title.ifBlank { "Untitled note" },
+                                style = MaterialTheme.typography.titleLarge,
+                                modifier = Modifier.fillMaxWidth()
+                                    .clickable { enterEdit(null, null) }
+                                    .padding(vertical = NotaSpacing.xs),
+                            )
+                        }
                         if (docStats.isNotEmpty()) {
                             Text(
                                 docStats,
@@ -770,50 +1057,115 @@ fun RichNoteEditorScreen(
                     }
                 }
                 item(key = "meta") {
-                    NoteMetaRow(
-                        folders = folders,
-                        folderId = folderId,
-                        onFolderSelected = { folderId = it },
-                        tags = parseTagsCsv(tagsCsv),
-                        onTagsChanged = { tagsCsv = it.joinToString(", ") },
-                    )
+                    if (editing) {
+                        NoteMetaRow(
+                            folders = folders,
+                            folderId = folderId,
+                            onFolderSelected = { folderId = it },
+                            tags = parseTagsCsv(tagsCsv),
+                            onTagsChanged = { tagsCsv = it.joinToString(", ") },
+                        )
+                    } else {
+                        // Phase 3.6 (G3): read mode shows the folder /
+                        // tags as plain context, no editors. The item
+                        // stays present so segment list indices (the
+                        // outline's scroll targets) are mode-stable.
+                        val folderName = folders.firstOrNull { it.id == folderId }?.name
+                        val tagList = parseTagsCsv(tagsCsv)
+                        if (folderName != null || tagList.isNotEmpty()) {
+                            Text(
+                                listOfNotNull(
+                                    folderName,
+                                    tagList.takeIf { it.isNotEmpty() }
+                                        ?.joinToString(" · ") { "#$it" },
+                                ).joinToString("  "),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
                 itemsIndexed(segments, key = { _, ui -> ui.id }) { index, ui ->
-                    // Phase 3.5 (D4): blocks (anything that is not a
-                    // text or quote segment) carry a drag handle; the
-                    // dragged row floats above its neighbours via
-                    // zIndex + a graphicsLayer translation.
-                    val isBlock = ui.segment !is TextSegment && ui.segment !is QuoteSegment
-                    Box(
-                        if (dragSegmentId == ui.id) {
-                            Modifier.zIndex(1f)
-                                .graphicsLayer { translationY = dragOffsetPx }
-                        } else {
-                            Modifier
-                        },
-                    ) {
-                        SegmentEditor(
+                    if (!editing) {
+                        // Phase 3.6 (G3): the read rendering of the
+                        // same segment — static rich text / blocks,
+                        // toggleable task checkboxes, tappable links;
+                        // a tap anywhere else is a door into edit mode.
+                        SegmentReadView(
                             ui = ui,
-                            isActive = ui.id == activeSegmentId,
-                            isTrailingCaret = index == segments.lastIndex &&
-                                ui.segment is TextSegment,
-                            trailingFocusRequester = trailingFocusRequester,
-                            focusRequester = segmentFocusRequesters
-                                .getOrPut(ui.id) { FocusRequester() },
                             stateFor = { richStateFor(ui) },
-                            onFocus = { activeSegmentId = ui.id },
+                            onTapText = { caret ->
+                                enterEdit(ui.id, caret)
+                            },
+                            onTapBlock = {
+                                val target = entryTargetForBlock(ui.id)
+                                enterEdit(target?.first, target?.second)
+                            },
                             onChange = { updateBlock(ui.id, it) },
-                            onRemove = { removeBlock(ui.id) },
                             attachments = attachments,
                             fileFor = { viewModel.attachmentFile(it) },
-                            bringIntoView = bringIntoView,
-                            dragHandleModifier = if (isBlock) {
-                                Modifier.pointerInput(ui.id) {
-                                    detectDragGesturesAfterLongPress(
+                        )
+                        return@itemsIndexed
+                    }
+                    // Phase 3.6 (G1): EVERY block type drags — and so
+                    // does a quote — by long-press on the block itself
+                    // (see BlockDragGesture.kt); only plain text
+                    // segments are exempt, because their long-press is
+                    // text selection. The 3.5 rail remains as the
+                    // visual affordance. While dragged, the block
+                    // floats (translation + elevation + alpha) and its
+                    // SLOT stays behind as the drop indicator: the
+                    // highlighted gap is exactly where it will land,
+                    // because swaps are live.
+                    val isDraggable = ui.segment !is TextSegment
+                    val isBlock = ui.segment !is TextSegment && ui.segment !is QuoteSegment
+                    val isDragged = dragSegmentId == ui.id
+                    Box(
+                        Modifier.onSizeChanged { segmentHeights[ui.id] = it.height },
+                    ) {
+                        if (isDragged) {
+                            val slotHeight = segmentHeights[ui.id]
+                            Box(
+                                Modifier.fillMaxWidth()
+                                    .then(
+                                        if (slotHeight != null) {
+                                            Modifier.height(
+                                                with(density) { slotHeight.toDp() },
+                                            )
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
+                                    .background(
+                                        MaterialTheme.colorScheme.primaryContainer
+                                            .copy(alpha = 0.55f),
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                    .border(
+                                        2.dp,
+                                        MaterialTheme.colorScheme.primary,
+                                        RoundedCornerShape(8.dp),
+                                    ),
+                            )
+                        }
+                        Box(
+                            (if (isDragged) {
+                                Modifier.zIndex(1f).graphicsLayer {
+                                    translationY = dragOffsetPx
+                                    alpha = 0.92f
+                                    shadowElevation = with(density) { 8.dp.toPx() }
+                                }
+                            } else {
+                                Modifier
+                            }).then(
+                                if (isDraggable) {
+                                    Modifier.longPressBlockDrag(
+                                        key = ui.id,
                                         onDragStart = {
                                             dragSegmentId = ui.id
                                             dragOffsetPx = 0f
                                         },
+                                        onDrag = { dy -> onBlockDrag(ui, dy) },
                                         onDragEnd = {
                                             dragSegmentId = null
                                             dragOffsetPx = 0f
@@ -823,16 +1175,34 @@ fun RichNoteEditorScreen(
                                             dragSegmentId = null
                                             dragOffsetPx = 0f
                                         },
-                                        onDrag = { change, dragAmount ->
-                                            change.consume()
-                                            onBlockDrag(ui, dragAmount.y)
-                                        },
                                     )
-                                }
-                            } else {
-                                null
-                            },
-                        )
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                        ) {
+                            SegmentEditor(
+                                ui = ui,
+                                isActive = ui.id == activeSegmentId,
+                                isTrailingCaret = index == segments.lastIndex &&
+                                    ui.segment is TextSegment,
+                                trailingFocusRequester = trailingFocusRequester,
+                                focusRequester = segmentFocusRequesters
+                                    .getOrPut(ui.id) { FocusRequester() },
+                                stateFor = { richStateFor(ui) },
+                                onFocus = { activeSegmentId = ui.id },
+                                onChange = { updateBlock(ui.id, it) },
+                                onRemove = { removeBlock(ui.id) },
+                                attachments = attachments,
+                                fileFor = { viewModel.attachmentFile(it) },
+                                bringIntoView = bringIntoView,
+                                onPinchingChange = { imagePinchActive = it },
+                                // The rail is the visual affordance
+                                // now; the drag gesture lives on the
+                                // whole block (container above).
+                                dragHandleModifier = if (isBlock) Modifier else null,
+                            )
+                        }
                     }
                 }
                 if (segments.lastOrNull()?.segment is TextSegment) {
@@ -845,6 +1215,30 @@ fun RichNoteEditorScreen(
                     // row band keeps the Phase 1.5 behaviour — caret at
                     // the very end of the document.
                     item(key = "below-blocks") {
+                        if (!editing) {
+                            // Phase 3.6 (G3): in read mode the empty
+                            // area below the content is a door into
+                            // edit mode, caret at the document's end.
+                            Box(
+                                Modifier.fillMaxWidth().height(96.dp)
+                                    .pointerInput(segments) {
+                                        detectTapGestures {
+                                            val lastText = segments.lastOrNull {
+                                                it.segment is TextSegment ||
+                                                    it.segment is QuoteSegment
+                                            }
+                                            if (lastText != null) {
+                                                val length = textStates[lastText.id]
+                                                    ?.annotatedString?.text?.length ?: 0
+                                                enterEdit(lastText.id, length)
+                                            } else {
+                                                enterEdit(null, null)
+                                            }
+                                        }
+                                    },
+                            )
+                            return@item
+                        }
                         val density = LocalDensity.current
                         val layoutInfo = listState.layoutInfo
                         val tailInfo = layoutInfo.visibleItemsInfo
@@ -916,14 +1310,29 @@ fun RichNoteEditorScreen(
                 item(key = "attachments") {
                     AttachmentsSection(
                         attachments = attachments,
+                        readOnly = !editing,
                         onAddImage = {
+                            // Phase 3.6 (G2): stage durably BEFORE the
+                            // picker opens — the return route and the
+                            // import intent must survive the lock swap
+                            // and process death alike.
+                            stagePendingInsert(
+                                PendingInsertKind.IMAGE,
+                                PendingInsertMode.IMPORT_ONLY,
+                            )
                             imagePicker.launch(
                                 PickVisualMediaRequest(
                                     ActivityResultContracts.PickVisualMedia.ImageOnly,
                                 ),
                             )
                         },
-                        onAddFile = { filePicker.launch(arrayOf("*/*")) },
+                        onAddFile = {
+                            stagePendingInsert(
+                                PendingInsertKind.FILE,
+                                PendingInsertMode.IMPORT_ONLY,
+                            )
+                            filePicker.launch(arrayOf("*/*"))
+                        },
                         onInsertImage = { attachment ->
                             // Phase 3.5 (D4): at the caret, not appended.
                             insertBlockAtCaret(
@@ -969,7 +1378,12 @@ fun RichNoteEditorScreen(
                                 modifier = Modifier.padding(top = NotaSpacing.sm),
                             )
                             linkedFrom.forEach { source ->
-                                TextButton(onClick = { persistNow { onOpenNote(source.id) } }) {
+                                TextButton(
+                                    onClick = {
+                                        retirePendingInsert()
+                                        persistNow { onOpenNote(source.id) }
+                                    },
+                                ) {
                                     Text(source.title.ifBlank { "Untitled note" })
                                 }
                             }
@@ -977,7 +1391,7 @@ fun RichNoteEditorScreen(
                     }
                 }
             }
-            if (linkSuggestions.isNotEmpty() && linkTrigger != null) {
+            if (editing && linkSuggestions.isNotEmpty() && linkTrigger != null) {
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
                         .padding(horizontal = NotaSpacing.sm),
@@ -998,24 +1412,36 @@ fun RichNoteEditorScreen(
                     }
                 }
             }
-            EditorToolbar(
-                state = activeState,
-                modifier = Modifier.alpha(chromeAlpha),
-                insertMenuExpanded = insertMenuExpanded,
-                onInsertMenuChange = { insertMenuExpanded = it },
-                onLinkRequest = { showLinkDialog = true },
-                onInsertImage = {
-                    insertImageOnPick = true
-                    imagePicker.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
-                onInsertFile = {
-                    insertFileOnPick = true
-                    filePicker.launch(arrayOf("*/*"))
-                },
-                onInsertBlock = { insertBlock(it) },
-            )
+            if (editing) {
+                EditorToolbar(
+                    state = activeState,
+                    modifier = Modifier.alpha(chromeAlpha),
+                    insertMenuExpanded = insertMenuExpanded,
+                    onInsertMenuChange = { insertMenuExpanded = it },
+                    onLinkRequest = { showLinkDialog = true },
+                    onInsertImage = {
+                        insertImageOnPick = true
+                        // Phase 3.6 (G2): the durable record is staged
+                        // before the picker opens (see handlePicked).
+                        stagePendingInsert(
+                            PendingInsertKind.IMAGE,
+                            PendingInsertMode.INSERT_AT_CARET,
+                        )
+                        imagePicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                    onInsertFile = {
+                        insertFileOnPick = true
+                        stagePendingInsert(
+                            PendingInsertKind.FILE,
+                            PendingInsertMode.INSERT_AT_CARET,
+                        )
+                        filePicker.launch(arrayOf("*/*"))
+                    },
+                    onInsertBlock = { insertBlock(it) },
+                )
+            }
         }
     }
 
@@ -1191,6 +1617,9 @@ private fun SegmentEditor(
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
     bringIntoView: BringIntoViewRequester,
+    // Phase 3.6 (G4): lets the screen suspend list scrolling while an
+    // image pinch is live.
+    onPinchingChange: (Boolean) -> Unit = {},
 ) {
     val focusModifier = Modifier.onFocusChanged { if (it.isFocused) onFocus() }
     val activeModifier = if (isActive) Modifier.bringIntoViewRequester(bringIntoView) else Modifier
@@ -1272,7 +1701,9 @@ private fun SegmentEditor(
                     when (segment) {
                         is TableSegment -> TableBlock(ui.id, segment, onChange, onRemove)
                         is TaskListSegment -> TaskListBlock(ui.id, segment, onChange, onRemove)
-                        is ImageSegment -> ImageBlock(segment, attachments, fileFor, onChange, onRemove)
+                        is ImageSegment -> ImageBlock(
+                            segment, attachments, fileFor, onChange, onRemove, onPinchingChange,
+                        )
                         is FileSegment -> FileBlock(segment, attachments, onRemove)
                         is ChartSegment -> BlockShell(onRemove) {
                             Text(
@@ -1304,6 +1735,274 @@ private fun SegmentEditor(
                         else -> Unit
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Phase 3.6 (G3): the READ rendering of one segment. Text and quotes
+ * render through the library's read-only [BasicRichText] over the
+ * SAME [RichTextState] the editor uses, so flipping modes is
+ * seamless and warm; its link taps stay live (the renderer consumes
+ * link taps itself — they never reach the tap-to-edit handler
+ * below). Task checkboxes stay toggleable (a toggle is a state
+ * change, not an edit session — Noma parity). Everything else is a
+ * static rendering.
+ *
+ * Taps: a text tap maps through the renderer's own [TextLayoutResult]
+ * to the exact caret offset edit mode should open with; a block tap
+ * asks the caller for the nearest caret ([onTapBlock]).
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun SegmentReadView(
+    ui: UiSegment,
+    stateFor: () -> RichTextState,
+    onTapText: (caretOffset: Int) -> Unit,
+    onTapBlock: () -> Unit,
+    onChange: (DocSegment) -> Unit,
+    attachments: List<AttachmentEntity>,
+    fileFor: (AttachmentEntity) -> java.io.File,
+) {
+    val readTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
+    when (val segment = ui.segment) {
+        is TextSegment -> {
+            var layout by remember(ui.id) { mutableStateOf<TextLayoutResult?>(null) }
+            BasicRichText(
+                state = stateFor(),
+                style = readTextStyle,
+                onTextLayout = { layout = it },
+                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { offset ->
+                        onTapText(
+                            layout?.getOffsetForPosition(offset)
+                                ?: stateFor().annotatedString.text.length,
+                        )
+                    }
+                },
+            )
+        }
+        is QuoteSegment -> {
+            var layout by remember(ui.id) { mutableStateOf<TextLayoutResult?>(null) }
+            Row(Modifier.fillMaxWidth()) {
+                Box(
+                    Modifier.width(3.dp).heightIn(min = 48.dp)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+                Spacer(Modifier.width(NotaSpacing.sm))
+                BasicRichText(
+                    state = stateFor(),
+                    style = readTextStyle,
+                    onTextLayout = { layout = it },
+                    modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
+                        detectTapGestures { offset ->
+                            onTapText(
+                                layout?.getOffsetForPosition(offset)
+                                    ?: stateFor().annotatedString.text.length,
+                            )
+                        }
+                    },
+                )
+            }
+        }
+        is TaskListSegment -> {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { onTapBlock() }
+                },
+            ) {
+                Column(Modifier.padding(NotaSpacing.sm)) {
+                    segment.items.forEachIndexed { index, item ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = item.checked,
+                                onCheckedChange = { checked ->
+                                    onChange(
+                                        TaskListSegment(
+                                            segment.items.mapIndexed { i, old ->
+                                                if (i == index) {
+                                                    old.copy(checked = checked)
+                                                } else {
+                                                    old
+                                                }
+                                            },
+                                        ),
+                                    )
+                                },
+                            )
+                            val itemState = remember(ui.id, index, item.contentHtml) {
+                                RichTextState().apply { setHtml(item.contentHtml) }
+                            }
+                            BasicRichText(
+                                state = itemState,
+                                style = readTextStyle,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        is TableSegment -> {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { onTapBlock() }
+                },
+            ) {
+                Column(Modifier.padding(NotaSpacing.sm)) {
+                    segment.rows.forEachIndexed { r, row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
+                            row.forEach { cell ->
+                                Text(
+                                    PlainTextCodec.htmlToText(cell),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = if (segment.headerRow && r == 0) {
+                                        FontWeight.Bold
+                                    } else {
+                                        FontWeight.Normal
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                        if (r < segment.rows.lastIndex) {
+                            Spacer(Modifier.height(NotaSpacing.xs))
+                        }
+                    }
+                }
+            }
+        }
+        is ImageSegment -> {
+            val attachment = if (segment.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)) {
+                attachments.firstOrNull {
+                    it.id == segment.src.removePrefix(NoteDocument.ATTACHMENT_SRC_PREFIX)
+                }
+            } else {
+                null
+            }
+            val model: Any? = when {
+                attachment != null -> fileFor(attachment)
+                segment.src.isNotBlank() -> segment.src
+                else -> null
+            }
+            Box(
+                Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { onTapBlock() }
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (model != null) {
+                    AsyncImage(
+                        model = model,
+                        contentDescription = segment.alt,
+                        modifier = Modifier
+                            .fillMaxWidth(segment.widthPercent / 100f)
+                            .heightIn(max = 320.dp),
+                    )
+                } else {
+                    Text(
+                        segment.alt.ifBlank { "Image" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        is FileSegment -> {
+            val attachment = attachments.firstOrNull { it.id == segment.attachmentId }
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { onTapBlock() }
+                },
+            ) {
+                Row(
+                    Modifier.padding(NotaSpacing.sm),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = null)
+                    Spacer(Modifier.width(NotaSpacing.sm))
+                    Column {
+                        Text(
+                            attachment?.fileName ?: segment.fileName,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        val meta = listOfNotNull(
+                            (attachment?.mimeType ?: segment.mimeType).ifBlank { null },
+                            attachment?.let { "${it.sizeBytes / 1024} KB" },
+                        ).joinToString(" · ")
+                        if (meta.isNotEmpty()) {
+                            Text(
+                                meta,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        is CodeSegment -> {
+            Box(
+                Modifier.fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant,
+                        RoundedCornerShape(8.dp),
+                    )
+                    .pointerInput(ui.id) { detectTapGestures { onTapBlock() } }
+                    .padding(NotaSpacing.sm),
+            ) {
+                Text(
+                    segment.text,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontFamily = FontFamily.Monospace,
+                    ),
+                )
+            }
+        }
+        DividerSegment -> {
+            Box(
+                Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { onTapBlock() }
+                }.padding(vertical = NotaSpacing.xs),
+            ) {
+                HorizontalDivider(Modifier.fillMaxWidth())
+            }
+        }
+        else -> {
+            // Chart / opaque segments: the same honest placeholder
+            // the edit mode shows — preserved exactly as stored.
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
+                    detectTapGestures { onTapBlock() }
+                },
+            ) {
+                Text(
+                    if (segment is ChartSegment) {
+                        "Chart — preserved as-is."
+                    } else {
+                        "Preserved block — kept exactly as stored."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(NotaSpacing.sm),
+                )
             }
         }
     }
@@ -1572,6 +2271,8 @@ private fun ImageBlock(
     fileFor: (AttachmentEntity) -> java.io.File,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
+    // Phase 3.6 (G4): suspends list scrolling while a pinch is live.
+    onPinchingChange: (Boolean) -> Unit = {},
 ) {
     val attachment = if (image.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)) {
         attachments.firstOrNull {
@@ -1584,6 +2285,10 @@ private fun ImageBlock(
     // sets the persisted display width (ImageSegment.widthPercent).
     var selected by remember { mutableStateOf(false) }
     var areaWidthPx by remember { mutableIntStateOf(0) }
+    // Phase 3.6 (G4): the live width while a pinch is in flight —
+    // rendered immediately, persisted only when the gesture ends.
+    var liveWidthPercent by remember(image.src) { mutableStateOf<Int?>(null) }
+    val displayWidthPercent = liveWidthPercent ?: image.widthPercent
     // The drag coroutine below is keyed by src only, so it must read the
     // LATEST segment through rememberUpdatedState — capturing `image`
     // directly would freeze the width at drag start and every delta
@@ -1632,8 +2337,83 @@ private fun ImageBlock(
                         model = model,
                         contentDescription = image.alt,
                         modifier = Modifier
-                            .fillMaxWidth(image.widthPercent / 100f)
-                            .heightIn(max = 320.dp),
+                            .fillMaxWidth(displayWidthPercent / 100f)
+                            .heightIn(max = 320.dp)
+                            // Phase 3.6 (G4): pinch to resize, like
+                            // the gallery — two fingers spread or
+                            // squeeze and the width follows the span
+                            // ratio (ImagePinchMath). The width is
+                            // committed through onChange on release,
+                            // persisting via the existing width="N%"
+                            // attribute. A gesture stream another
+                            // handler already claimed (a block drag's
+                            // long press consumes the first finger's
+                            // changes) never starts a pinch.
+                            .pointerInput(image.src) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    var pinching = false
+                                    var startSpan = 0f
+                                    var startPercent = 0
+                                    var liveWidth: Int? = null
+                                    try {
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            val pressed =
+                                                event.changes.filter { it.pressed }
+                                            if (pressed.isEmpty()) break
+                                            if (pressed.size >= 2) {
+                                                val span = (
+                                                    pressed[0].position -
+                                                        pressed[1].position
+                                                    ).getDistance()
+                                                if (!pinching) {
+                                                    if (pressed.any { it.isConsumed }) {
+                                                        // Someone else owns
+                                                        // this stream.
+                                                        break
+                                                    }
+                                                    pinching = true
+                                                    startSpan = span
+                                                    startPercent =
+                                                        currentImage.widthPercent
+                                                    onPinchingChange(true)
+                                                } else {
+                                                    pressed.forEach { it.consume() }
+                                                    val next = ImagePinchMath
+                                                        .widthPercent(
+                                                            startPercent,
+                                                            startSpan,
+                                                            span,
+                                                        )
+                                                    if (next != liveWidth) {
+                                                        liveWidth = next
+                                                        liveWidthPercent = next
+                                                    }
+                                                }
+                                            } else if (pinching) {
+                                                // Down to one finger: over.
+                                                break
+                                            }
+                                        }
+                                    } finally {
+                                        if (pinching) {
+                                            onPinchingChange(false)
+                                            val finalWidth = liveWidth
+                                            liveWidthPercent = null
+                                            if (finalWidth != null &&
+                                                finalWidth != currentImage.widthPercent
+                                            ) {
+                                                onChange(
+                                                    currentImage.copy(
+                                                        widthPercent = finalWidth,
+                                                    ),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            },
                     )
                 }
                 if (selected) {
@@ -1642,7 +2422,7 @@ private fun ImageBlock(
                         modifier = Modifier.fillMaxWidth().padding(top = NotaSpacing.xs),
                     ) {
                         Text(
-                            "Width ${image.widthPercent}% — drag to resize",
+                            "Width $displayWidthPercent% — pinch or drag to resize",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.weight(1f),
@@ -1694,6 +2474,9 @@ private fun AttachmentsSection(
     onInsertImage: (AttachmentEntity) -> Unit,
     onInsertFile: (AttachmentEntity) -> Unit,
     onDelete: (AttachmentEntity) -> Unit,
+    // Phase 3.6 (G3): read mode lists the attachments but offers no
+    // insert / add / delete actions — those are edits.
+    readOnly: Boolean = false,
 ) {
     Column(Modifier.padding(top = NotaSpacing.sm)) {
         Text("Attachments", style = MaterialTheme.typography.titleSmall)
@@ -1720,27 +2503,35 @@ private fun AttachmentsSection(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (attachment.mimeType.startsWith("image/")) {
-                    TextButton(onClick = { onInsertImage(attachment) }) { Text("Insert") }
-                } else {
-                    // Phase 3.5 (D4): files insert as document blocks
-                    // at the caret, like images.
-                    TextButton(onClick = { onInsertFile(attachment) }) { Text("Insert") }
-                }
-                IconButton(onClick = { onDelete(attachment) }) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Delete attachment")
+                if (!readOnly) {
+                    if (attachment.mimeType.startsWith("image/")) {
+                        TextButton(onClick = { onInsertImage(attachment) }) { Text("Insert") }
+                    } else {
+                        // Phase 3.5 (D4): files insert as document blocks
+                        // at the caret, like images.
+                        TextButton(onClick = { onInsertFile(attachment) }) { Text("Insert") }
+                    }
+                    IconButton(onClick = { onDelete(attachment) }) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Delete attachment")
+                    }
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
-            TextButton(onClick = onAddImage) { Text("Add image") }
-            TextButton(onClick = onAddFile) { Text("Add file") }
+        if (!readOnly) {
+            Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
+                TextButton(onClick = onAddImage) { Text("Add image") }
+                TextButton(onClick = onAddFile) { Text("Add file") }
+            }
         }
     }
 }
 
 /** The one highlight colour the toolbar applies (Phase 1c swatch). */
 private const val HIGHLIGHT_ARGB = 0xFFFFEB3B
+
+/** Phase 3.6 (G2): how much of the target segment's plain text a
+ *  staged picker record keeps as its identity anchor. */
+private const val INSERT_ANCHOR_CHARS = 60
 private val HIGHLIGHT_COLOR = Color(HIGHLIGHT_ARGB)
 
 /**
