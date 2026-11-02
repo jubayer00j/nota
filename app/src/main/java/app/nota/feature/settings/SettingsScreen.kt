@@ -2,6 +2,7 @@ package app.nota.feature.settings
 
 import android.os.Build
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -18,10 +21,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.preferences.SwipeAction
+import app.nota.feature.notes.label
 import app.nota.ui.theme.NotaSpacing
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
@@ -98,6 +106,37 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
+        // Phase 3.5 (D3): per-direction swipe actions for the main
+        // notes list. Persisted in preferences and applied by the
+        // list immediately (the ViewModel exposes them as a flow).
+        Text(
+            "Notes list",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        val swipeRight by preferencesRepository.swipeRightAction
+            .collectAsState(initial = SwipeAction.ARCHIVE)
+        val swipeLeft by preferencesRepository.swipeLeftAction
+            .collectAsState(initial = SwipeAction.TRASH)
+        SwipeActionRow(
+            title = "Swipe right",
+            action = swipeRight,
+            onSelect = { scope.launch { preferencesRepository.setSwipeRightAction(it) } },
+        )
+        SwipeActionRow(
+            title = "Swipe left",
+            action = swipeLeft,
+            onSelect = { scope.launch { preferencesRepository.setSwipeLeftAction(it) } },
+        )
+        Text(
+            "Applies to All notes, folders, tags and Favourites. " +
+                "Archived and Trash keep their own actions.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider()
+        Spacer(Modifier.height(NotaSpacing.sm))
+
         SecuritySection()
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
@@ -153,6 +192,27 @@ private fun SettingsSwitchRow(
             )
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+    }
+}
+
+/** Phase 3.5 (D3): a swipe-direction row; tapping opens the action menu. */
+@Composable
+private fun SwipeActionRow(
+    title: String,
+    action: SwipeAction,
+    onSelect: (SwipeAction) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        SettingsRow(title = title, subtitle = action.label(), onClick = { expanded = true })
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            SwipeAction.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text((if (option == action) "✓ " else "") + option.label()) },
+                    onClick = { onSelect(option); expanded = false },
+                )
+            }
+        }
     }
 }
 

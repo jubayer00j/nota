@@ -23,6 +23,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /**
+ * Phase 3.5 (D3): what a horizontal swipe on a note in the main notes
+ * list does. Stored by name in preferences; an unknown stored value
+ * degrades to the direction's default rather than failing the read.
+ */
+enum class SwipeAction { ARCHIVE, TRASH, PIN, OFF }
+
+/**
  * The single preferences DataStore delegate for the app. It must live at
  * top level and be instantiated once — multiple DataStore instances for
  * the same file throw at runtime.
@@ -96,6 +103,33 @@ class PreferencesRepository(context: Context) {
     suspend fun setStartOnToday(enabled: Boolean) {
         safeEdit { this[KEY_START_ON_TODAY] = enabled }
     }
+
+    // ---- Swipe actions (Phase 3.5, D3) -------------------------------
+    // Per-direction actions for the main notes list, chosen in
+    // Settings. Defaults are the pre-3.5 behaviour: right (start-to-
+    // end) archives, left (end-to-start) moves to trash. Device-local
+    // UI preference — like the appearance switches it never enters a
+    // backup (backups read Room, not this store).
+
+    val swipeRightAction: Flow<SwipeAction> = dataStore.safeData.map { prefs ->
+        prefs[KEY_SWIPE_RIGHT_ACTION].toSwipeAction(SwipeAction.ARCHIVE)
+    }
+
+    val swipeLeftAction: Flow<SwipeAction> = dataStore.safeData.map { prefs ->
+        prefs[KEY_SWIPE_LEFT_ACTION].toSwipeAction(SwipeAction.TRASH)
+    }
+
+    suspend fun setSwipeRightAction(action: SwipeAction) {
+        safeEdit { this[KEY_SWIPE_RIGHT_ACTION] = action.name }
+    }
+
+    suspend fun setSwipeLeftAction(action: SwipeAction) {
+        safeEdit { this[KEY_SWIPE_LEFT_ACTION] = action.name }
+    }
+
+    suspend fun swipeRightActionNow(): SwipeAction = swipeRightAction.first()
+
+    suspend fun swipeLeftActionNow(): SwipeAction = swipeLeftAction.first()
 
     // ---- App Lock (Phase 2a) -------------------------------------------
     // Per-method salt+hash slots (like 1.x's separate password/pattern
@@ -430,6 +464,9 @@ class PreferencesRepository(context: Context) {
         }
     }
 
+    private fun String?.toSwipeAction(default: SwipeAction): SwipeAction =
+        this?.let { runCatching { SwipeAction.valueOf(it) }.getOrNull() } ?: default
+
     /** A corrupt/unreadable preferences file degrades to defaults, not a crash. */
     private val DataStore<Preferences>.safeData: Flow<Preferences>
         get() = data.catch { exception ->
@@ -458,6 +495,8 @@ class PreferencesRepository(context: Context) {
         val KEY_LOCK_TIMEOUT_SECONDS = intPreferencesKey("app_lock_timeout_seconds")
         val KEY_DRIVE_BACKUP_MODE = stringPreferencesKey("drive_backup_mode")
         val KEY_DRIVE_BACKUP_INTERVAL_HOURS = intPreferencesKey("drive_backup_interval_hours")
+        val KEY_SWIPE_RIGHT_ACTION = stringPreferencesKey("swipe_right_action")
+        val KEY_SWIPE_LEFT_ACTION = stringPreferencesKey("swipe_left_action")
 
         const val DRIVE_MODE_OFF = "off"
         const val DRIVE_MODE_SCHEDULED = "scheduled"

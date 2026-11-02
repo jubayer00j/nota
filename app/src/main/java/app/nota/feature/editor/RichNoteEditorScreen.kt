@@ -9,6 +9,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -78,6 +79,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -91,6 +93,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -101,11 +104,13 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.DividerSegment
 import app.nota.data.html.DocSegment
+import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
 import app.nota.data.html.OpaqueSegment
@@ -141,6 +146,10 @@ import org.koin.androidx.compose.koinViewModel
 private data class UiSegment(val id: String, val segment: DocSegment)
 
 private fun newUiId(): String = UUID.randomUUID().toString()
+
+/** A copy of the list with the element at [from] moved to [to] (Phase 3.5, D4 drag reorder). */
+private fun <T> List<T>.moved(from: Int, to: Int): List<T> =
+    toMutableList().apply { add(to, removeAt(from)) }
 
 private fun escapeCellText(text: String): String = text
     .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -205,6 +214,19 @@ fun RichNoteEditorScreen(
     var showTemplateDialog by remember { mutableStateOf(false) }
     var templateName by remember { mutableStateOf("") }
     var insertImageOnPick by remember { mutableStateOf(false) }
+    // Phase 3.5 (D4): the toolbar's file action inserts the picked
+    // file AT THE CARET; the attachments section's Add file only
+    // imports (mirrors the image flags' split of duties).
+    var insertFileOnPick by remember { mutableStateOf(false) }
+    // Phase 3.5 (D4): after a caret split-insert, the segment after
+    // the block takes the caret at its start (applied once composed).
+    var pendingCaretFocusId by remember { mutableStateOf<String?>(null) }
+    val segmentFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+    // Phase 3.5 (D4): block drag-reorder state — the dragged
+    // segment's id and its accumulated vertical translation.
+    var dragSegmentId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetPx by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -293,6 +315,142 @@ fun RichNoteEditorScreen(
     }
 
     /**
+     * Phase 3.5 (D4): inserts [block] AT the caret of the active text
+     * or quote segment, splitting the segment there — the pre-3.5
+     * insert path always landed attachment blocks at the very end of
+     * the note. When the active segment is itself a block (or nothing
+     * is active, or its state was never created) this falls back to
+     * [insertBlock]'s after-the-active-segment placement. Empty split
+     * halves are dropped by the segment-type emptiness rules; the
+     * surviving left half keeps the active segment's id, with its
+     * live state re-seeded to exactly the left HTML; the caret lands
+     * at the start of the segment after the block (via
+     * [pendingCaretFocusId]).
+     */
+    fun insertBlockAtCaret(block: DocSegment) {
+        val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
+        val active = segments.getOrNull(activeIndex)
+        val activeSegment = active?.segment
+        val state = active?.let { textStates[it.id] }
+        if (active == null || state == null ||
+            (activeSegment !is TextSegment && activeSegment !is QuoteSegment)
+        ) {
+            insertBlock(block)
+            return
+        }
+        val isQuote = activeSegment is QuoteSegment
+        val split = splitHtmlAtCaret(state)
+        fun sideKept(html: String): Boolean = if (isQuote) {
+            PlainTextCodec.htmlToText(html).isNotBlank()
+        } else {
+            !NoteDocument.isEmptyTextSegment(TextSegment(html))
+        }
+        val blockUi = UiSegment(newUiId(), block)
+        val rebuilt = mutableListOf<UiSegment>()
+        rebuilt += segments.subList(0, activeIndex)
+        if (sideKept(split.leftHtml)) {
+            state.setHtml(split.leftHtml)
+            rebuilt += UiSegment(
+                active.id,
+                if (isQuote) QuoteSegment(split.leftHtml) else TextSegment(split.leftHtml),
+            )
+        } else {
+            textStates.remove(active.id)
+            segmentFocusRequesters.remove(active.id)
+        }
+        rebuilt += blockUi
+        var focusId: String? = null
+        if (sideKept(split.rightHtml)) {
+            val rightUi = UiSegment(
+                newUiId(),
+                if (isQuote) QuoteSegment(split.rightHtml) else TextSegment(split.rightHtml),
+            )
+            rebuilt += rightUi
+            focusId = rightUi.id
+        }
+        rebuilt += segments.subList(activeIndex + 1, segments.size)
+        segments = ensureTrailing(rebuilt)
+        if (focusId == null) {
+            // No right half (the caret sat at the end of the text).
+            // The caret belongs DIRECTLY after the inserted block:
+            // if the segment immediately after it is text/quote,
+            // focus that; otherwise the next content is another
+            // block, so create a caret segment between the two
+            // blocks rather than letting typing resume at some
+            // later text segment (the trailing tail always exists,
+            // so a plain "next text anywhere" lookup would skip
+            // past the intervening block). The fresh segment is
+            // empty mid-document text — it serialises to nothing
+            // until typed in. (Codex, PR #18, two rounds.)
+            val blockIndex = segments.indexOfFirst { it.id == blockUi.id }
+            val next = segments.getOrNull(blockIndex + 1)
+            focusId = if (next?.segment is TextSegment || next?.segment is QuoteSegment) {
+                next.id
+            } else {
+                val caretUi = UiSegment(newUiId(), TextSegment(""))
+                segments = ensureTrailing(
+                    segments.toMutableList().also { it.add(blockIndex + 1, caretUi) },
+                )
+                caretUi.id
+            }
+        }
+        if (focusId != null) {
+            activeSegmentId = focusId
+            pendingCaretFocusId = focusId
+        }
+    }
+
+    /**
+     * Phase 3.5 (D4): drag-reorder for block segments. The dragged
+     * block follows the finger via a graphicsLayer translation; when
+     * its centre crosses a neighbouring SEGMENT's centre the two swap
+     * in the working list and the accumulated translation is adjusted
+     * by the neighbour's height (+ the inter-segment spacing) so the
+     * block stays under the finger. Neighbours are located through
+     * the list's layout info by item key — title/meta/attachments
+     * rows, whose keys are not segment ids, can never be swap
+     * targets, so a block moves among segments only. There is no
+     * auto-scroll: a drag stays within the composed window (a
+     * deliberate scope call for this round).
+     */
+    fun onBlockDrag(ui: UiSegment, dragAmountY: Float) {
+        dragOffsetPx += dragAmountY
+        val from = segments.indexOfFirst { it.id == ui.id }
+        if (from < 0) return
+        val visible = listState.layoutInfo.visibleItemsInfo
+        val info = visible.firstOrNull { it.key == ui.id } ?: return
+        val centre = info.offset + dragOffsetPx + info.size / 2f
+        val spacingPx = with(density) { NotaSpacing.sm.toPx() }
+        val prev = segments.getOrNull(from - 1)?.let { neighbour ->
+            visible.firstOrNull { it.key == neighbour.id }
+        }
+        if (prev != null && centre < prev.offset + prev.size / 2f) {
+            segments = segments.moved(from, from - 1)
+            dragOffsetPx += prev.size + spacingPx
+            return
+        }
+        val next = segments.getOrNull(from + 1)?.let { neighbour ->
+            visible.firstOrNull { it.key == neighbour.id }
+        }
+        if (next != null && centre > next.offset + next.size / 2f) {
+            // Never swap past the trailing caret segment: an empty
+            // text tail is not content to pass but the Phase 1.5
+            // guarantee itself — a block stopped above it is already
+            // the last content. (Codex, PR #18.)
+            val nextIsTailCaret = from + 1 == segments.lastIndex &&
+                (segments[from + 1].segment as? TextSegment)
+                    ?.let { NoteDocument.isEmptyTextSegment(it) } == true
+            if (!nextIsTailCaret) {
+                segments = segments.moved(from, from + 1)
+                // A block swapped below a real final text segment
+                // lands last; restore the caret tail below it.
+                segments = ensureTrailing(segments)
+                dragOffsetPx -= next.size + spacingPx
+            }
+        }
+    }
+
+    /**
      * Phase 2.8 (E1): after a below-content tap grows the document,
      * settle the list so the tapped region — the caret sits at its top
      * edge, in the last segment — rests mid-viewport instead of below
@@ -360,6 +518,19 @@ fun RichNoteEditorScreen(
         pendingPaddingFocusId = null
     }
 
+    // Phase 3.5 (D4): after a caret split-insert, the caret goes to
+    // the start of the segment following the inserted block.
+    LaunchedEffect(pendingCaretFocusId) {
+        val id = pendingCaretFocusId ?: return@LaunchedEffect
+        val ui = segments.firstOrNull { it.id == id }
+        if (ui != null) {
+            val st = richStateFor(ui)
+            st.selection = TextRange(0)
+            runCatching { segmentFocusRequesters[id]?.requestFocus() }
+        }
+        pendingCaretFocusId = null
+    }
+
     BackHandler { persistNow(onBack) }
 
     val imagePicker = rememberLauncherForActivityResult(
@@ -368,7 +539,8 @@ fun RichNoteEditorScreen(
         if (uri != null) {
             viewModel.importImage(uri) { attachment ->
                 if (attachment != null && insertImageOnPick) {
-                    insertBlock(
+                    // Phase 3.5 (D4): at the caret, not the note's end.
+                    insertBlockAtCaret(
                         ImageSegment(
                             NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id,
                             attachment.fileName,
@@ -384,7 +556,24 @@ fun RichNoteEditorScreen(
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
-        if (uri != null) viewModel.importFile(uri) {}
+        if (uri != null) {
+            viewModel.importFile(uri) { attachment ->
+                if (attachment != null && insertFileOnPick) {
+                    // Phase 3.5 (D4): the file becomes a document
+                    // block at the caret (FileSegment).
+                    insertBlockAtCaret(
+                        FileSegment(
+                            attachmentId = attachment.id,
+                            fileName = attachment.fileName,
+                            mimeType = attachment.mimeType,
+                        ),
+                    )
+                }
+                insertFileOnPick = false
+            }
+        } else {
+            insertFileOnPick = false
+        }
     }
 
     // [[ backlink autocomplete state, derived from the active editor.
@@ -549,6 +738,9 @@ fun RichNoteEditorScreen(
         Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
             LazyColumn(
                 state = listState,
+                // Phase 3.5 (D4): while a block drag is live the list
+                // itself must not start scrolling under the gesture.
+                userScrollEnabled = dragSegmentId == null,
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 contentPadding = PaddingValues(NotaSpacing.md),
                 verticalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
@@ -587,20 +779,61 @@ fun RichNoteEditorScreen(
                     )
                 }
                 itemsIndexed(segments, key = { _, ui -> ui.id }) { index, ui ->
-                    SegmentEditor(
-                        ui = ui,
-                        isActive = ui.id == activeSegmentId,
-                        isTrailingCaret = index == segments.lastIndex &&
-                            ui.segment is TextSegment,
-                        trailingFocusRequester = trailingFocusRequester,
-                        stateFor = { richStateFor(ui) },
-                        onFocus = { activeSegmentId = ui.id },
-                        onChange = { updateBlock(ui.id, it) },
-                        onRemove = { removeBlock(ui.id) },
-                        attachments = attachments,
-                        fileFor = { viewModel.attachmentFile(it) },
-                        bringIntoView = bringIntoView,
-                    )
+                    // Phase 3.5 (D4): blocks (anything that is not a
+                    // text or quote segment) carry a drag handle; the
+                    // dragged row floats above its neighbours via
+                    // zIndex + a graphicsLayer translation.
+                    val isBlock = ui.segment !is TextSegment && ui.segment !is QuoteSegment
+                    Box(
+                        if (dragSegmentId == ui.id) {
+                            Modifier.zIndex(1f)
+                                .graphicsLayer { translationY = dragOffsetPx }
+                        } else {
+                            Modifier
+                        },
+                    ) {
+                        SegmentEditor(
+                            ui = ui,
+                            isActive = ui.id == activeSegmentId,
+                            isTrailingCaret = index == segments.lastIndex &&
+                                ui.segment is TextSegment,
+                            trailingFocusRequester = trailingFocusRequester,
+                            focusRequester = segmentFocusRequesters
+                                .getOrPut(ui.id) { FocusRequester() },
+                            stateFor = { richStateFor(ui) },
+                            onFocus = { activeSegmentId = ui.id },
+                            onChange = { updateBlock(ui.id, it) },
+                            onRemove = { removeBlock(ui.id) },
+                            attachments = attachments,
+                            fileFor = { viewModel.attachmentFile(it) },
+                            bringIntoView = bringIntoView,
+                            dragHandleModifier = if (isBlock) {
+                                Modifier.pointerInput(ui.id) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = {
+                                            dragSegmentId = ui.id
+                                            dragOffsetPx = 0f
+                                        },
+                                        onDragEnd = {
+                                            dragSegmentId = null
+                                            dragOffsetPx = 0f
+                                            persistNow()
+                                        },
+                                        onDragCancel = {
+                                            dragSegmentId = null
+                                            dragOffsetPx = 0f
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            onBlockDrag(ui, dragAmount.y)
+                                        },
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                        )
+                    }
                 }
                 if (segments.lastOrNull()?.segment is TextSegment) {
                     // Phase 1.5 fix 2 + Phase 2.8 (E1): the empty area
@@ -692,23 +925,35 @@ fun RichNoteEditorScreen(
                         },
                         onAddFile = { filePicker.launch(arrayOf("*/*")) },
                         onInsertImage = { attachment ->
-                            insertBlock(
+                            // Phase 3.5 (D4): at the caret, not appended.
+                            insertBlockAtCaret(
                                 ImageSegment(
                                     NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id,
                                     attachment.fileName,
                                 ),
                             )
                         },
+                        onInsertFile = { attachment ->
+                            insertBlockAtCaret(
+                                FileSegment(
+                                    attachmentId = attachment.id,
+                                    fileName = attachment.fileName,
+                                    mimeType = attachment.mimeType,
+                                ),
+                            )
+                        },
                         onDelete = { attachment ->
-                            // Drop any embedded image block for this
+                            // Drop any embedded block for this
                             // attachment from the working segments too
-                            // (Codex F7) so autosave cannot resurrect it;
+                            // (Codex F7; Phase 3.5 extends it to file
+                            // blocks) so autosave cannot resurrect it;
                             // the VM strips it from the stored document.
                             val targetSrc =
                                 NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
                             segments = ensureTrailing(
                                 segments.filterNot {
-                                    (it.segment as? ImageSegment)?.src == targetSrc
+                                    (it.segment as? ImageSegment)?.src == targetSrc ||
+                                        (it.segment as? FileSegment)?.attachmentId == attachment.id
                                 },
                             )
                             viewModel.deleteAttachment(attachment)
@@ -765,7 +1010,10 @@ fun RichNoteEditorScreen(
                         PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                     )
                 },
-                onInsertFile = { filePicker.launch(arrayOf("*/*")) },
+                onInsertFile = {
+                    insertFileOnPick = true
+                    filePicker.launch(arrayOf("*/*"))
+                },
                 onInsertBlock = { insertBlock(it) },
             )
         }
@@ -931,6 +1179,11 @@ private fun SegmentEditor(
     isActive: Boolean,
     isTrailingCaret: Boolean = false,
     trailingFocusRequester: FocusRequester? = null,
+    // Phase 3.5 (D4): per-segment focus requester (caret placement
+    // after a split-insert) and the block drag handle's gesture
+    // modifier (null for text/quote segments, which never drag).
+    focusRequester: FocusRequester? = null,
+    dragHandleModifier: Modifier? = null,
     stateFor: () -> RichTextState,
     onFocus: () -> Unit,
     onChange: (DocSegment) -> Unit,
@@ -955,6 +1208,9 @@ private fun SegmentEditor(
         is TextSegment -> {
             val state = stateFor()
             var editorModifier = Modifier.fillMaxWidth().then(focusModifier).then(activeModifier)
+            if (focusRequester != null) {
+                editorModifier = editorModifier.focusRequester(focusRequester)
+            }
             if (isTrailingCaret) {
                 // Phase 1.5 fix 2: the trailing caret segment is the tap
                 // target below the last block — give it a real height and
@@ -981,39 +1237,119 @@ private fun SegmentEditor(
                 BasicRichTextEditor(
                     state = state,
                     textStyle = editorTextStyle,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().then(
+                        if (focusRequester != null) {
+                            Modifier.focusRequester(focusRequester)
+                        } else {
+                            Modifier
+                        },
+                    ),
                 )
             }
         }
-        is TableSegment -> TableBlock(ui.id, segment, onChange, onRemove)
-        is TaskListSegment -> TaskListBlock(ui.id, segment, onChange, onRemove)
-        is ImageSegment -> ImageBlock(segment, attachments, fileFor, onChange, onRemove)
-        is ChartSegment -> BlockShell(onRemove) {
-            Text(
-                "Chart — preserved as-is. Chart editing arrives in a later phase.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        is CodeSegment -> OutlinedTextField(
-            value = segment.text,
-            onValueChange = { onChange(CodeSegment(it)) },
-            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-            modifier = Modifier.fillMaxWidth().then(focusModifier),
-            minLines = 2,
-        )
-        DividerSegment -> Row(verticalAlignment = Alignment.CenterVertically) {
-            HorizontalDivider(Modifier.weight(1f))
-            IconButton(onClick = onRemove) {
-                Icon(Icons.Filled.Close, contentDescription = "Remove divider")
+        else -> {
+            // Phase 3.5 (D4): every block gets a drag rail — an
+            // explicit handle that long-press-drags the block among
+            // the note's segments. It sits OUTSIDE the block card, so
+            // it never fights text selection (blocks hold none, apart
+            // from the code field, whose own gestures stay inside the
+            // card) or the image width handle inside the image card.
+            Row(Modifier.fillMaxWidth()) {
+                if (dragHandleModifier != null) {
+                    Box(
+                        dragHandleModifier.width(24.dp),
+                        contentAlignment = Alignment.TopCenter,
+                    ) {
+                        Icon(
+                            Icons.Filled.DragHandle,
+                            contentDescription = "Drag to move block",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = NotaSpacing.sm).size(20.dp),
+                        )
+                    }
+                }
+                Box(Modifier.weight(1f)) {
+                    when (segment) {
+                        is TableSegment -> TableBlock(ui.id, segment, onChange, onRemove)
+                        is TaskListSegment -> TaskListBlock(ui.id, segment, onChange, onRemove)
+                        is ImageSegment -> ImageBlock(segment, attachments, fileFor, onChange, onRemove)
+                        is FileSegment -> FileBlock(segment, attachments, onRemove)
+                        is ChartSegment -> BlockShell(onRemove) {
+                            Text(
+                                "Chart — preserved as-is. Chart editing arrives in a later phase.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        is CodeSegment -> OutlinedTextField(
+                            value = segment.text,
+                            onValueChange = { onChange(CodeSegment(it)) },
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.fillMaxWidth().then(focusModifier),
+                            minLines = 2,
+                        )
+                        DividerSegment -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            HorizontalDivider(Modifier.weight(1f))
+                            IconButton(onClick = onRemove) {
+                                Icon(Icons.Filled.Close, contentDescription = "Remove divider")
+                            }
+                        }
+                        is OpaqueSegment -> BlockShell(onRemove) {
+                            Text(
+                                "Preserved block — kept exactly as stored.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        else -> Unit
+                    }
+                }
             }
         }
-        is OpaqueSegment -> BlockShell(onRemove) {
-            Text(
-                "Preserved block — kept exactly as stored.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    }
+}
+
+/**
+ * Phase 3.5 (D4): an in-document file block. Name/size resolve live
+ * from the attachments table when the row exists (it is the source
+ * of truth); the segment's insert-time snapshot is the fallback, and
+ * a missing row is called out instead of rendering a dead block.
+ */
+@Composable
+private fun FileBlock(
+    file: FileSegment,
+    attachments: List<AttachmentEntity>,
+    onRemove: () -> Unit,
+) {
+    val attachment = attachments.firstOrNull { it.id == file.attachmentId }
+    BlockShell(onRemove = onRemove) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.AttachFile, contentDescription = null)
+            Spacer(Modifier.width(NotaSpacing.sm))
+            Column {
+                Text(
+                    attachment?.fileName ?: file.fileName,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                val meta = listOfNotNull(
+                    (attachment?.mimeType ?: file.mimeType).ifBlank { null },
+                    attachment?.let { "${it.sizeBytes / 1024} KB" },
+                ).joinToString(" · ")
+                if (meta.isNotEmpty()) {
+                    Text(
+                        meta,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (attachment == null) {
+                    Text(
+                        "Attachment not found on this device",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
         }
     }
 }
@@ -1356,6 +1692,7 @@ private fun AttachmentsSection(
     onAddImage: () -> Unit,
     onAddFile: () -> Unit,
     onInsertImage: (AttachmentEntity) -> Unit,
+    onInsertFile: (AttachmentEntity) -> Unit,
     onDelete: (AttachmentEntity) -> Unit,
 ) {
     Column(Modifier.padding(top = NotaSpacing.sm)) {
@@ -1385,6 +1722,10 @@ private fun AttachmentsSection(
                 }
                 if (attachment.mimeType.startsWith("image/")) {
                     TextButton(onClick = { onInsertImage(attachment) }) { Text("Insert") }
+                } else {
+                    // Phase 3.5 (D4): files insert as document blocks
+                    // at the caret, like images.
+                    TextButton(onClick = { onInsertFile(attachment) }) { Text("Insert") }
                 }
                 IconButton(onClick = { onDelete(attachment) }) {
                     Icon(Icons.Filled.Delete, contentDescription = "Delete attachment")

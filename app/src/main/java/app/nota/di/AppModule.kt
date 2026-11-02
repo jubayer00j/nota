@@ -88,7 +88,7 @@ val appModule = module {
             provider = get(),
         )
     }
-    viewModel { NotesViewModel(get(), get(), get()) }
+    viewModel { NotesViewModel(get(), get(), get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
     viewModel { TemplatesViewModel(get(), get()) }

@@ -4,18 +4,23 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteTagCrossRef
 import app.nota.data.db.TagEntity
+import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.domain.SmartFolderKey
 import app.nota.domain.SmartFolders
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -60,13 +65,40 @@ class NotesViewModel(
     private val repository: NoteRepository,
     private val library: LibraryRepository,
     private val attachmentStore: AttachmentStore,
+    private val provider: DatabaseProvider,
+    private val preferences: PreferencesRepository,
 ) : ViewModel() {
 
     private val filterFlow = MutableStateFlow<NotesFilter>(NotesFilter.All)
     private val sortFlow = MutableStateFlow(SortOrder.UpdatedDesc)
     private val selectionFlow = MutableStateFlow<Set<String>>(emptySet())
 
-    val uiState: StateFlow<NotesUiState> = combine(
+    /**
+     * Phase 3.5 (D1): the library chain is (re)built for every account
+     * the provider switches to. `repository.observe*()` resolves the
+     * provider's CURRENT database when the flow is CREATED, while every
+     * write resolves it per call — so the pre-3.5 shape (chain built
+     * once at construction) stranded the collector on the previous,
+     * by-then-CLOSED database after an account switch, and a swiped
+     * note — archived in the live database — never left the list: its
+     * row stayed composed at the dismissed offset as a tappable ghost
+     * (the Phase 3.5 recording). Rebinding per [DatabaseProvider.accountId]
+     * keeps observation on the same instance the writes land in,
+     * regardless of whether the shell above recreates this ViewModel.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val uiState: StateFlow<NotesUiState> = provider.accountId
+        .flatMapLatest { libraryState() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NotesUiState())
+
+    /** Phase 3.5 (D3): the user's swipe actions for the main list. */
+    val swipePreferences: StateFlow<SwipePreferences> = combine(
+        preferences.swipeRightAction,
+        preferences.swipeLeftAction,
+    ) { right, left -> SwipePreferences(right = right, left = left) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SwipePreferences())
+
+    private fun libraryState(): Flow<NotesUiState> = combine(
         repository.observeActive(),
         repository.observeArchived(),
         repository.observeTrashed(),
@@ -90,7 +122,6 @@ class NotesViewModel(
                 }
             }
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NotesUiState())
 
     private data class LibrarySnapshot(
         val active: List<NoteEntity>,
@@ -172,6 +203,8 @@ class NotesViewModel(
 
     // Single ops (swipe + editor shortcuts)
     fun archive(note: NoteEntity) { viewModelScope.launch { repository.setArchived(note, true) } }
+    /** Phase 3.5 (D3): the Pin swipe action (the batch bar has its own). */
+    fun setPinned(note: NoteEntity, pinned: Boolean) { viewModelScope.launch { repository.setPinned(note, pinned) } }
     fun trash(note: NoteEntity) { viewModelScope.launch { repository.trash(note) } }
     fun restore(note: NoteEntity) { viewModelScope.launch { repository.restore(note) } }
     fun upsert(note: NoteEntity) { viewModelScope.launch { repository.upsert(note) } }
