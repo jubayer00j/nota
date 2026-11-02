@@ -374,6 +374,77 @@ class NoteDocumentTest {
         assertTrue(!NoteDocument.isEmptyTextSegment(TextSegment("<p>x</p>")))
     }
 
+    // ------------------------------------------------ Phase 2.8 (E1)
+    // Tap-anywhere caret: scratch padding grown inside the last text
+    // segment is trimmed at paragraph level on save; spacing with
+    // content below it is real and persists.
+
+    @Test
+    fun tapPaddingInNonEmptyLastSegmentDoesNotPersist() {
+        // He taps deep below "Hello" and leaves without typing: the
+        // working segment carries the padding, the storage form must
+        // not — this is the case the Phase 1.5 segment-level strip
+        // could not see (the segment is not empty, it holds "Hello").
+        val working = listOf(TextSegment("<p>Hello</p><p></p><p></p><p></p>"))
+        assertEquals(
+            listOf(TextSegment("<p>Hello</p>")),
+            NoteDocument.stripTrailingEmptyTextSegments(working),
+        )
+    }
+
+    @Test
+    fun tapPaddingPersistsWhenTypedBelowIt() {
+        // Same padding, but he typed in the last paragraph: the
+        // empties above his text are real spacing now.
+        val working = listOf(TextSegment("<p>Hello</p><p></p><p></p><p>Deep</p>"))
+        assertEquals(working, NoteDocument.stripTrailingEmptyTextSegments(working))
+    }
+
+    @Test
+    fun paragraphTrimStopsAtListsAndStructure() {
+        // Padding after a list goes; the list itself is content.
+        val withList = listOf(TextSegment("<p>a</p><ul><li>x</li></ul><p></p>"))
+        assertEquals(
+            listOf(TextSegment("<p>a</p><ul><li>x</li></ul>")),
+            NoteDocument.stripTrailingEmptyTextSegments(withList),
+        )
+        val listOnly = listOf(TextSegment("<ul><li></li></ul>"))
+        assertEquals(listOnly, NoteDocument.stripTrailingEmptyTextSegments(listOnly))
+        // A paragraph holding an image is content even when its text
+        // is blank.
+        val withImage = "<p>a</p><p><img src=\"x\" alt=\"\"></p>"
+        assertEquals(withImage, NoteDocument.trimTrailingEmptyParagraphs(withImage))
+    }
+
+    @Test
+    fun paragraphTrimCoversHeadingsBrAndNbspForms() {
+        assertEquals(
+            "<p>a</p>",
+            NoteDocument.trimTrailingEmptyParagraphs("<p>a</p><h2></h2>"),
+        )
+        assertEquals(
+            "<p>a</p>",
+            NoteDocument.trimTrailingEmptyParagraphs("<p>a</p><p><br></p><p>&nbsp;</p>"),
+        )
+        // Middle empties with content after them are byte-stable.
+        val middle = "<p></p><p>a</p><p></p><p>b</p>"
+        assertEquals(middle, NoteDocument.trimTrailingEmptyParagraphs(middle))
+        // Nothing to trim: returned unchanged.
+        val plain = "<p>a</p>"
+        assertEquals(plain, NoteDocument.trimTrailingEmptyParagraphs(plain))
+    }
+
+    @Test
+    fun tapPaddingAfterTrailingBlockIsDroppedWithItsSegment() {
+        // The document ends in an image; the caret segment below it
+        // holds only tap padding — segment-level strip takes it all.
+        val working = listOf(ImageSegment("x"), TextSegment("<p></p><p></p>"))
+        assertEquals(
+            listOf(ImageSegment("x")),
+            NoteDocument.stripTrailingEmptyTextSegments(working),
+        )
+    }
+
     // ------------------------------------------------ Phase 1.5 fix 3
     // ImageSegment.widthPercent, serialised as width="N%".
 
