@@ -525,7 +525,12 @@ class DriveRepositoryTest {
                 noteCount = 0, folderCount = 0, tagCount = 0,
                 attachmentCount = 0, reminderCount = 0, deviceId = "other-device",
             ),
+            folders = emptyList(),
+            tags = emptyList(),
+            reminders = emptyList(),
+            syncSyncedAtIso = "2026-11-02T00:00:00Z",
             notes = emptyList(),
+            attachments = emptyList(),
             tombstones = listOf(
                 app.nota.data.backup.BxTombstone("note", "n-1", 500L, "other-device"),
             ),
