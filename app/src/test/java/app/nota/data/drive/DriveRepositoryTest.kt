@@ -48,6 +48,7 @@ class DriveRepositoryTest {
         var uploadedBytes: ByteArray? = null
         var uploadedExistingId: String? = "unset"
         var uploadGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        var clock = 1_000L
 
         override suspend fun findOrCreateFolder(token: String): String = "folder-1"
         override suspend fun findCanonicalBackup(token: String, folderId: String) = canonical
@@ -60,7 +61,10 @@ class DriveRepositoryTest {
             token: String,
             fileId: String,
             maxBytes: Int,
-        ): ByteArray = (downloadBytes ?: ByteArray(0)).copyOf(minOf(maxBytes, (downloadBytes ?: ByteArray(0)).size))
+        ): ByteArray {
+            val bytes = downloadBytes ?: ByteArray(0)
+            return bytes.copyOf(minOf(maxBytes, bytes.size))
+        }
 
         override suspend fun upload(
             token: String,
@@ -71,7 +75,17 @@ class DriveRepositoryTest {
             uploadGate?.await()
             uploadedBytes = file.readBytes()
             uploadedExistingId = existingId
-            return DriveFileMeta("file-1", "Noma Backup.zip", 0L, 0L, null, uploadedBytes!!.size.toLong())
+            val md5 = java.security.MessageDigest.getInstance("MD5")
+                .digest(uploadedBytes!!)
+                .joinToString("") { "%02x".format(it) }
+            clock += 1_000L
+            val meta = DriveFileMeta(
+                "file-1", "Noma Backup.zip", 0L, clock, md5,
+                uploadedBytes!!.size.toLong(),
+            )
+            canonical = meta
+            downloadBytes = uploadedBytes
+            return meta
         }
     }
 
@@ -117,6 +131,13 @@ class DriveRepositoryTest {
             backups = backups,
             prefs = prefs,
             pendingRestore = pendingRestore,
+            syncApplier = app.nota.data.sync.SyncApplier(
+                context,
+                provider,
+                AttachmentStore(context, provider),
+                TemplateRepository(context),
+            ),
+            provider = provider,
         )
         // Production parity: AuthManager switches the provider to the
         // signed-in account as part of sign-in — mirror that here so
@@ -307,12 +328,11 @@ class DriveRepositoryTest {
         }
         assertEquals(null, provider.current.noteDao().getById("n-other"))
     }
+
     // ---- Codex P1: never downgrade another device's encrypted archive
 
     @Test
     fun backupRefusesToOverwriteEncryptedArchive_andAdoptsItsHeader() = runBlocking {
-        // Another device sealed the shared archive under a passphrase
-        // this device has never seen; there is no local record.
         val zip = java.io.File(context.cacheDir, "elsewhere-plain.zip")
         zip.writeBytes("PK-elsewhere".toByteArray())
         val sealed = java.io.File(context.cacheDir, "elsewhere-sealed.bin")
@@ -332,11 +352,8 @@ class DriveRepositoryTest {
         }
         assertTrue((state as DriveRepository.State.Paused).message.contains("another device"))
         assertTrue("no upload may happen", gateway.uploadedBytes == null)
-        // The header was adopted as a keyless record…
         val adopted = prefs.getDriveEncryptionRecord(uid)
         assertTrue(adopted != null && adopted!!.deviceKeyBase64 == null)
-        // …so the existing unlock flow brings this device in, and the
-        // next backup proceeds — still encrypted under the same key.
         assertTrue(drive.unlockEncryption("elsewhere-pass"))
         drive.clearTransientState() // drop the stale Paused before re-awaiting
         drive.startBackup()
@@ -363,6 +380,205 @@ class DriveRepositoryTest {
         )
         gateway.uploadGate?.complete(Unit)
         awaitDriveDone()
+    }
+
+    // ------------------------------------------------------------ sync (Phase 3c)
+
+    /** Builds a remote archive by hand (another "device" of the SAME
+     *  or a different account) and points the fake gateway at it. */
+    private fun stageRemoteArchive(
+        owner: String?,
+        notes: List<app.nota.data.backup.BxNote>,
+        tombstones: List<app.nota.data.backup.BxTombstone> = emptyList(),
+    ) {
+        val data = app.nota.data.backup.BackupWriter.ExportData(
+            manifest = app.nota.data.backup.BackupManifest(
+                backupFormatVersion = 2,
+                ownerId = owner,
+                libraryId = "lib",
+                nomaVersion = "0.4.0",
+                createdAt = "2026-11-02T00:00:00Z",
+                noteCount = notes.size,
+                folderCount = 0,
+                tagCount = 0,
+                attachmentCount = 0,
+                reminderCount = 0,
+                deviceId = "other-device",
+            ),
+            folders = emptyList(),
+            tags = emptyList(),
+            reminders = emptyList(),
+            syncSyncedAtIso = "2026-11-02T00:00:00Z",
+            notes = notes,
+            attachments = emptyList(),
+            tombstones = tombstones,
+        )
+        val buffer = java.io.ByteArrayOutputStream()
+        app.nota.data.backup.BackupWriter { null }.write(data, buffer)
+        val bytes = buffer.toByteArray()
+        val md5 = java.security.MessageDigest.getInstance("MD5").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        gateway.clock += 5_000L
+        gateway.canonical = DriveFileMeta(
+            "file-1", "Noma Backup.zip", 0L, gateway.clock, md5, bytes.size.toLong(),
+        )
+        gateway.downloadBytes = bytes
+    }
+
+    private fun bxNote(id: String, title: String, updatedAt: Long) =
+        app.nota.data.backup.BxNote(
+            id = id,
+            title = title,
+            content = "<p>$title</p>",
+            createdAt = 10L,
+            updatedAt = updatedAt,
+            folderId = null,
+            tagIds = emptyList(),
+            pinned = false,
+            favorite = false,
+            archived = false,
+            deleted = false,
+            deletedAt = null,
+            reminderAt = null,
+            wordCount = 1,
+            dailyDate = null,
+            lockJson = null,
+            isTemplate = false,
+            dailyDefault = null,
+        )
+    @Test
+    fun sync_firstCycleUploads_secondCycleIsOwnEchoNoOp() = runBlocking {
+        seedNote("n-1", "Local")
+        assertTrue(drive.runSyncCycle())
+        assertTrue(drive.syncStatus.value is DriveRepository.SyncStatus.Synced)
+        assertTrue(gateway.uploadedBytes != null)
+        gateway.uploadedBytes = null
+        // The fake's canonical now describes OUR upload: meta matches
+        // the stored base, local content matches too → no download,
+        // no upload.
+        assertTrue(drive.runSyncCycle())
+        assertTrue(
+            "own echo must not re-upload",
+            gateway.uploadedBytes == null,
+        )
+    }
+
+    @Test
+    fun sync_remoteOnlyNoteDownloadsAndConvergedArchivePushes() = runBlocking {
+        seedNote("n-local", "Local")
+        assertTrue(drive.runSyncCycle())
+        // Another device adds a note to the shared archive.
+        stageRemoteArchive(uid, listOf(bxNote("n-remote", "From elsewhere", 50L)))
+        gateway.uploadedBytes = null
+        assertTrue(drive.runSyncCycle())
+        val titles = provider.current.noteDao().getAll().map { it.title }.toSet()
+        assertTrue(titles.contains("From elsewhere"))
+        assertTrue(titles.contains("Local"))
+        // The converged archive (both notes) was pushed back.
+        assertTrue(gateway.uploadedBytes != null)
+    }
+
+    @Test
+    fun sync_ownerMismatchRefusesWithoutTouchingLocal() = runBlocking {
+        seedNote("n-local", "Local")
+        stageRemoteArchive("uid-other", listOf(bxNote("n-x", "Alien", 50L)))
+        assertTrue(drive.runSyncCycle())
+        val status = drive.syncStatus.value
+        assertTrue(status is DriveRepository.SyncStatus.Failed)
+        assertTrue((status as DriveRepository.SyncStatus.Failed).message.contains("different account"))
+        val titles = provider.current.noteDao().getAll().map { it.title }
+        assertEquals(listOf("Local"), titles)
+        assertTrue(gateway.uploadedBytes == null)
+    }
+
+    @Test
+    fun sync_bothSidesEditMakesConflictCopy() = runBlocking {
+        seedNote("n-1", "Original")
+        assertTrue(drive.runSyncCycle())
+        // Local edit (newer) and a remote edit of the same note.
+        provider.current.noteDao().upsert(
+            NoteEntity(
+                id = "n-1", title = "Local edit", contentHtml = "<p>Local edit</p>",
+                plainText = "Local edit", createdAt = 10L, updatedAt = 90L,
+            ),
+        )
+        stageRemoteArchive(uid, listOf(bxNote("n-1", "Remote edit", 80L)))
+        assertTrue(drive.runSyncCycle())
+        val notes = provider.current.noteDao().getAll()
+        val kept = notes.first { it.id == "n-1" }
+        assertEquals("Local edit", kept.title)
+        val copy = notes.firstOrNull { it.title == "Remote edit (conflict copy)" }
+        assertTrue("loser kept as a conflict copy", copy != null)
+        val status = drive.syncStatus.value
+        assertTrue(status is DriveRepository.SyncStatus.Synced)
+        assertTrue(
+            (status as DriveRepository.SyncStatus.Synced).message.contains("conflict"),
+        )
+    }
+
+    @Test
+    fun sync_writerReader_tombstonesRoundTrip() {
+        val data = app.nota.data.backup.BackupWriter.ExportData(
+            manifest = app.nota.data.backup.BackupManifest(
+                backupFormatVersion = 2, ownerId = uid, libraryId = "lib",
+                nomaVersion = "0.4.0", createdAt = "2026-11-02T00:00:00Z",
+                noteCount = 0, folderCount = 0, tagCount = 0,
+                attachmentCount = 0, reminderCount = 0, deviceId = "other-device",
+            ),
+            folders = emptyList(),
+            tags = emptyList(),
+            reminders = emptyList(),
+            syncSyncedAtIso = "2026-11-02T00:00:00Z",
+            notes = emptyList(),
+            attachments = emptyList(),
+            tombstones = listOf(
+                app.nota.data.backup.BxTombstone("note", "n-1", 500L, "other-device"),
+            ),
+        )
+        val zipFile = java.io.File(context.cacheDir, "roundtrip.zip")
+        java.io.FileOutputStream(zipFile).use { out ->
+            app.nota.data.backup.BackupWriter { null }.write(data, out)
+        }
+        val syncJson = java.util.zip.ZipFile(zipFile).use { zip ->
+            zip.getEntry("sync.json")?.let { entry ->
+                zip.getInputStream(entry).readBytes().decodeToString()
+            }
+        }
+        assertTrue("sync.json missing tombstone: $syncJson", syncJson?.contains("n-1") == true)
+        val handle = app.nota.data.backup.BackupReader(context.cacheDir).read(zipFile, null)
+        assertEquals(
+            "reader dropped tombstones; sync.json=$syncJson",
+            listOf("n-1"), handle.tombstones.map { it.id },
+        )
+        handle.close()
+    }
+
+    @Test
+    fun sync_remoteTombstoneDeletesLocalNote() = runBlocking {
+        seedNote("n-1", "Doomed")
+        assertTrue("cycle1: ${drive.syncStatus.value}", drive.runSyncCycle())
+        stageRemoteArchive(
+            uid,
+            emptyList(),
+            tombstones = listOf(
+                // A realistic deletion instant: the entity timestamps
+                // in these fixtures are tiny synthetics compared only
+                // with each other, but tombstones are ALSO judged
+                // against wall-clock now by the 90-day retention
+                // purge — an epoch-relative deletedAt would be purged
+                // as ancient before the merge ever saw it.
+                app.nota.data.backup.BxTombstone(
+                    "note", "n-1", System.currentTimeMillis(), "other-device",
+                ),
+            ),
+        )
+        assertTrue("cycle2: ${drive.syncStatus.value}", drive.runSyncCycle())
+        val tombstones = app.nota.data.sync.SyncStore(provider.current).tombstones()
+        assertTrue(
+            "status=${drive.syncStatus.value} storedTombstones=$tombstones " +
+                "notes=${provider.current.noteDao().getAll().map { it.id }}",
+            provider.current.noteDao().getAll().isEmpty(),
+        )
     }
 
 }

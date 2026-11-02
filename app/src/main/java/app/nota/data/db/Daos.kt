@@ -261,3 +261,28 @@ interface NoteLinkDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertAll(links: List<NoteLinkEntity>)
 }
+
+/**
+ * Sync bookkeeping DAO (Phase 3c): tombstones + the key-value sync
+ * state, both in the per-account database (see the entities' docs).
+ */
+@Dao
+interface SyncDao {
+    @Query("SELECT * FROM tombstones")
+    suspend fun getTombstones(): List<TombstoneEntity>
+
+    @Upsert
+    suspend fun upsertTombstone(tombstone: TombstoneEntity)
+
+    @Query("DELETE FROM tombstones")
+    suspend fun deleteAllTombstones()
+
+    @Query("DELETE FROM tombstones WHERE deletedAt < :cutoffMillis")
+    suspend fun purgeTombstonesOlderThan(cutoffMillis: Long)
+
+    @Query("SELECT value FROM sync_meta WHERE key = :key")
+    suspend fun getMetaValue(key: String): String?
+
+    @Upsert
+    suspend fun putMeta(meta: SyncMetaEntity)
+}

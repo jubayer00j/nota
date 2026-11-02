@@ -158,6 +158,11 @@ class BackupRepository(
             )
         }
         val iso = Instant.ofEpochMilli(nowMillis).toString()
+        // Phase 3c: archives carry this device's id (manifest +
+        // sync.json, as 1.x's do) and the account's sync tombstones,
+        // so a Drive archive doubles as the sync carrier and a plain
+        // restore from one still propagates deletions in Merge mode.
+        val syncStore = app.nota.data.sync.SyncStore(db)
         return BackupWriter.ExportData(
             manifest = BackupManifest(
                 backupFormatVersion = 2,
@@ -179,7 +184,7 @@ class BackupRepository(
                 tagCount = bxTags.size,
                 attachmentCount = bxAttachments.size,
                 reminderCount = bxReminders.size,
-                deviceId = null,
+                deviceId = syncStore.ensureDeviceId(),
             ),
             folders = bxFolders,
             tags = bxTags,
@@ -187,6 +192,7 @@ class BackupRepository(
             syncSyncedAtIso = iso,
             notes = allNotes,
             attachments = bxAttachments,
+            tombstones = syncStore.tombstones(),
         )
     }
 
@@ -264,6 +270,28 @@ class BackupRepository(
 
     /** Device-key read (Phase 3b): opens an encrypted archive with a
      *  held BMK (the Drive encryption device key) — no passphrase. */
+    /**
+     * SHA-256 (hex) of each attachment's on-disk bytes in the ACTIVE
+     * library, keyed by attachment id (Phase 3c sync content hashes).
+     * A missing file maps to "" — its hash then differs from any real
+     * content hash, so sync treats the bytes as changed and heals
+     * them from the remote copy on the next cycle.
+     */
+    suspend fun attachmentContentHashes(data: BackupWriter.ExportData): Map<String, String> {
+        val dao = provider.current.attachmentDao()
+        val out = LinkedHashMap<String, String>()
+        for (meta in data.attachments) {
+            val row = dao.getById(meta.id)
+            out[meta.id] = if (row != null) {
+                val file = attachmentStore.fileFor(row)
+                if (file.isFile) app.nota.data.sync.EntityHash.sha256Hex(file) else ""
+            } else {
+                ""
+            }
+        }
+        return out
+    }
+
     suspend fun readBackupWithBmk(source: File, bmk: ByteArray): BackupReader.Handle =
         withContext(Dispatchers.IO) { reader.readWithBmk(source, bmk) }
 
@@ -677,11 +705,11 @@ private fun String.toNotaImageScheme(): String =
 private fun String.toOneXImageScheme(): String =
     replace("src=\"nota-attachment://", "src=\"noma-attachment://")
 
-private fun BxFolder.toEntity(): FolderEntity = FolderEntity(
+internal fun BxFolder.toEntity(): FolderEntity = FolderEntity(
     id = id, name = name, parentId = parentId, createdAt = createdAt, updatedAt = updatedAt,
 )
 
-private fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
+internal fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
     val locked = lockJson != null
     return NoteEntity(
         id = id,
@@ -707,7 +735,7 @@ private fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
     )
 }
 
-private fun BxReminder.toEntity(): ReminderEntity = ReminderEntity(
+internal fun BxReminder.toEntity(): ReminderEntity = ReminderEntity(
     id = id,
     noteId = noteId,
     triggerAt = scheduledAt,

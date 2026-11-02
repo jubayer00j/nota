@@ -212,3 +212,37 @@ data class NoteLinkEntity(
     val sourceId: String,
     val targetId: String,
 )
+
+/**
+ * A sync tombstone (Phase 3c, schema v5): the record that an entity
+ * was deleted on some device, retained 90 days so the deletion can
+ * propagate to every device sharing the Drive archive before the
+ * record itself is purged (1.x sync semantics). Written by the
+ * repositories' hard-delete paths and carried inside the archive's
+ * sync.json; stored per account because the table lives in the
+ * per-account database.
+ */
+@Entity(tableName = "tombstones", primaryKeys = ["entity", "id"])
+data class TombstoneEntity(
+    /** "note" | "folder" | "tag" | "reminder" | "attachment". */
+    val entity: String,
+    val id: String,
+    val deletedAt: Long,
+    /** The device that made the deletion (diagnostics + parity with
+     *  the archive shape); informational only. */
+    val deviceId: String?,
+)
+
+/**
+ * Key-value sync bookkeeping (Phase 3c, schema v5), per account
+ * because it lives in the per-account database: the device id, the
+ * last-sync state (remote fingerprint + per-entity base hashes the
+ * three-way merge diffs against). Never leaves the device except
+ * the device id, which rides inside the archive manifest/sync.json
+ * exactly as 1.x's does.
+ */
+@Entity(tableName = "sync_meta")
+data class SyncMetaEntity(
+    @PrimaryKey val key: String,
+    val value: String,
+)

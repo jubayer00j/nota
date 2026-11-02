@@ -34,6 +34,10 @@ class BackupWriter(
         val syncSyncedAtIso: String,
         val notes: List<BxNote>,
         val attachments: List<BxAttachmentMeta>,
+        /** Sync tombstones carried in sync.json (Phase 3c). Empty for
+         *  snapshots that don't participate in sync state — the
+         *  writer emits the same shape 1.x reads. */
+        val tombstones: List<BxTombstone> = emptyList(),
     )
 
     fun write(data: ExportData, out: OutputStream) {
@@ -53,7 +57,7 @@ class BackupWriter(
                     jObj(
                         "deviceId" to jStr(data.manifest.deviceId),
                         "syncedAt" to jStr(data.syncSyncedAtIso),
-                        "tombstones" to jArr(emptyList()),
+                        "tombstones" to jArr(data.tombstones.map { tombstoneJson(it) }),
                     ),
                 ),
             )
@@ -182,6 +186,15 @@ class BackupWriter(
             "parentId" to jStr(f.parentId),
             "createdAt" to jNum(f.createdAt),
             "updatedAt" to jNum(f.updatedAt),
+        )
+
+        /** sync.json tombstone shape — the reader's tolerant parser
+         *  (and 1.x) consume exactly these fields. */
+        fun tombstoneJson(t: BxTombstone): JObj = jObj(
+            "entity" to jStr(t.entity),
+            "id" to jStr(t.id),
+            "deletedAt" to jNum(t.deletedAt),
+            "deviceId" to jStr(t.deviceId),
         )
 
         fun tagJson(t: BxTag): JObj {

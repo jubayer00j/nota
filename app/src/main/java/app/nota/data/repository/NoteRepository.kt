@@ -149,6 +149,24 @@ class NoteRepository(
 
     suspend fun delete(note: NoteEntity) {
         db.withTransaction {
+            // Phase 3c: hard deletes leave sync tombstones (the note
+            // plus everything the FK cascades are about to remove —
+            // its attachments and reminders), so the deletion can
+            // propagate to other devices sharing the Drive archive.
+            // Trashing is NOT a hard delete and never lands here.
+            val syncStore = app.nota.data.sync.SyncStore(db)
+            val now = System.currentTimeMillis()
+            syncStore.recordTombstone(app.nota.data.sync.EntityHash.ENTITY_NOTE, note.id, now)
+            for (attachment in attachmentDao.getForNote(note.id)) {
+                syncStore.recordTombstone(
+                    app.nota.data.sync.EntityHash.ENTITY_ATTACHMENT, attachment.id, now,
+                )
+            }
+            for (reminder in db.reminderDao().getForNote(note.id)) {
+                syncStore.recordTombstone(
+                    app.nota.data.sync.EntityHash.ENTITY_REMINDER, reminder.id, now,
+                )
+            }
             noteDao.delete(note)
             ftsDao.deleteForNote(note.id)
         }
