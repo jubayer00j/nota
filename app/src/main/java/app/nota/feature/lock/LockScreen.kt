@@ -17,6 +17,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -43,6 +44,7 @@ import androidx.fragment.app.FragmentActivity
 import app.nota.data.security.AppLockBiometricStore
 import app.nota.data.security.AppLockManager
 import app.nota.data.security.AppLockMethod
+import app.nota.data.security.StepResult
 import app.nota.data.security.UnlockResult
 import app.nota.ui.components.NotaBrandLockup
 import app.nota.ui.theme.NotaSpacing
@@ -89,6 +91,12 @@ fun LockScreen(
     var patternError by remember { mutableStateOf(false) }
     var shakeKey by remember { mutableIntStateOf(0) }
     var formResetKey by remember { mutableIntStateOf(0) }
+    // Phase 2.6 (Fix B): one verification in flight at a time. A
+    // repeat submission while a verify is running is DROPPED here,
+    // never queued behind the manager's mutex to become a second
+    // derivation — and the form disables + shows progress so the
+    // wait is visible instead of feeling like a hang.
+    var verifying by remember { mutableStateOf(false) }
 
     // Lockout countdown, ticked locally from the persisted deadline.
     var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -108,29 +116,30 @@ fun LockScreen(
     // Phase 2.5 (F4, coordinator re-point of the F5 design): the ONE
     // biometric entry point for this screen — the auto-prompt effect
     // and the fingerprint disc both go through here. Crypto-bound:
-    // the cipher comes from AppLockBiometricStore.openCipher()
+    // the cipher comes from AppLockBiometricStore.openCipherResult()
     // (suspend); the prompt authorises it via CryptoObject, and
     // AppLockManager unlocks ONLY when that cipher decrypts the
     // sealed token. There is no bare-boolean path.
+    // Phase 2.6 (Fix A): both steps are typed — a failure (dead key,
+    // corrupt token, failed decrypt) lands in `feedback` with its
+    // step + reason instead of a generic or silent refusal.
     fun showCryptoBiometric() {
         val host = activity ?: return
         scope.launch {
-            val cipher = biometricStore.openCipher()
-            if (cipher == null) {
-                feedback = "Fingerprint needs re-enabling — unlock with your credential, " +
-                    "then turn Fingerprint unlock off and on again in Settings."
-                return@launch
+            when (val opened = biometricStore.openCipherResult()) {
+                is StepResult.Failed -> feedback = opened.userMessage
+                is StepResult.Ok -> showBiometricCryptoPrompt(
+                    host,
+                    opened.value,
+                    onAuthenticated = { authorised ->
+                        when (val unlocked = manager.unlockWithBiometric(authorised)) {
+                            is StepResult.Failed -> feedback = unlocked.userMessage
+                            is StepResult.Ok -> Unit // MainActivity swaps to the nav shell.
+                        }
+                    },
+                    onError = { /* credential form stays available */ },
+                )
             }
-            showBiometricCryptoPrompt(
-                host,
-                cipher,
-                onAuthenticated = { authorised ->
-                    if (!manager.unlockWithBiometric(authorised)) {
-                        feedback = "Fingerprint could not be verified — use your credential."
-                    }
-                },
-                onError = { /* credential form stays available */ },
-            )
         }
     }
 
@@ -148,21 +157,27 @@ fun LockScreen(
     }
 
     fun submit(method: AppLockMethod, canonicalSecret: String) {
+        if (verifying) return
+        verifying = true
         scope.launch {
-            when (manager.attemptUnlock(method, canonicalSecret)) {
-                UnlockResult.Success -> Unit // MainActivity swaps to the nav shell.
-                UnlockResult.Wrong -> {
-                    feedback = "Incorrect — try again"
-                    patternError = true
-                    shakeKey++
-                    formResetKey++
+            try {
+                when (manager.attemptUnlock(method, canonicalSecret)) {
+                    UnlockResult.Success -> Unit // MainActivity swaps to the nav shell.
+                    UnlockResult.Wrong -> {
+                        feedback = "Incorrect — try again"
+                        patternError = true
+                        shakeKey++
+                        formResetKey++
+                    }
+                    is UnlockResult.LockedOut -> {
+                        feedback = null
+                        patternError = true
+                        shakeKey++
+                        formResetKey++
+                    }
                 }
-                is UnlockResult.LockedOut -> {
-                    feedback = null
-                    patternError = true
-                    shakeKey++
-                    formResetKey++
-                }
+            } finally {
+                verifying = false
             }
         }
     }
@@ -214,12 +229,20 @@ fun LockScreen(
                             resetKey = formResetKey,
                             patternError = patternError,
                             error = feedback != null || patternError,
+                            enabled = !verifying,
                             onPatternTooShort = {
                                 feedback = "Pattern too short — connect at least 4 dots"
                                 patternError = true
                                 shakeKey++
                             },
                         )
+                        if (verifying) {
+                            Spacer(Modifier.height(NotaSpacing.sm))
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
                         if (feedback != null) {
                             Spacer(Modifier.height(NotaSpacing.sm))
                             Text(

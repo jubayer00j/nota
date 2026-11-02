@@ -7,7 +7,9 @@ import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.NoteLockBiometricStore
 import app.nota.data.security.NoteLockCrypto
+import app.nota.data.security.BiometricStep
 import app.nota.data.security.NoteLockDeviceKeyProvider
+import app.nota.data.security.StepResult
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
 import java.util.Base64
@@ -71,26 +73,29 @@ class NoteLockRepositoryRobolectricTest {
             null
         }
 
-        // Phase 2.5 cipher factories: the fake key needs no user
-        // authentication, so these are plain ciphers over the same
-        // raw key (the production auth-required behaviour is
-        // device-only - Robolectric cannot exercise it).
-        override fun sealCipher(): Cipher =
-            Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
-            }
+        // Phase 2.6 cipher factories: typed StepResults; the fake key needs no user
+        // authentication, so these are plain ciphers over the same raw key
+        // (the production auth-required behaviour is device-only).
+override fun sealCipherResult(): StepResult<Cipher> =
+            StepResult.Ok(
+                Cipher.getInstance("AES/GCM/NoPadding").apply {
+                    init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"))
+                },
+            )
 
-        override fun openCipher(packedBase64: String): Cipher? = try {
+        override fun openCipherResult(packedBase64: String): StepResult<Cipher> = try {
             val packed = Base64.getDecoder().decode(packedBase64)
-            Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(
-                    Cipher.DECRYPT_MODE,
-                    SecretKeySpec(key, "AES"),
-                    GCMParameterSpec(128, packed.copyOfRange(0, 12)),
-                )
-            }
+            StepResult.Ok(
+                Cipher.getInstance("AES/GCM/NoPadding").apply {
+                    init(
+                        Cipher.DECRYPT_MODE,
+                        SecretKeySpec(key, "AES"),
+                        GCMParameterSpec(128, packed.copyOfRange(0, 12)),
+                    )
+                },
+            )
         } catch (e: Exception) {
-            null
+            StepResult.Failed(BiometricStep.CIPHER_INIT, "fake provider: " + e.javaClass.simpleName)
         }
     }
 
@@ -153,7 +158,7 @@ class NoteLockRepositoryRobolectricTest {
             NoteLockMethod.PIN,
             NoteLockCrypto.canonicalPin("135790"),
             enableBiometric = true,
-            biometricCipher = biometricStore.sealCipher(),
+            biometricCipher = (biometricStore.sealCipherResult() as StepResult.Ok).value,
         )
         assertTrue(locked.locked)
         assertEquals("", locked.plainText)
@@ -212,7 +217,10 @@ class NoteLockRepositoryRobolectricTest {
         assertTrue(notes.searchNotes("zebra").isEmpty())
 
         // ---- Biometric copy unlocks with the same key.
-        val bio = lockRepo.unlockWithBiometric(resealed, lockRepo.biometricUnlockCipher(resealed)!!)
+        val bio = lockRepo.unlockWithBiometric(
+            resealed,
+            (lockRepo.biometricUnlockCipher(resealed) as StepResult.Ok).value,
+        )
         assertTrue(bio is NoteUnlockResult.Ok)
         assertArrayEquals(nek, (bio as NoteUnlockResult.Ok).nek)
 
@@ -228,7 +236,7 @@ class NoteLockRepositoryRobolectricTest {
         assertFalse(restoredRow.encrypted)
         assertArrayEquals(payload, store.fileFor(restoredRow).readBytes())
         // The device copy is gone with the lock.
-        assertNull(biometricStore.openCipher(note.id))
+        assertTrue(biometricStore.openCipherResult(note.id) is StepResult.Failed)
         nek.fill(0)
     }
 
@@ -267,14 +275,14 @@ class NoteLockRepositoryRobolectricTest {
 
         // Biometric toggling round-trips through the device copy.
         val stored = notes.getById(note.id)!!
-        assertTrue(lockRepo.setBiometric(stored, nek, true, biometricStore.sealCipher()))
+        assertTrue(lockRepo.setBiometric(stored, nek, true, (biometricStore.sealCipherResult() as StepResult.Ok).value))
         assertNotEquals(
             null,
             NoteLockRecord.parse(notes.getById(note.id)!!.lockRecordJson)!!.biometric
                 .takeIf { it },
         )
         assertTrue(lockRepo.setBiometric(notes.getById(note.id)!!, nek, false))
-        assertNull(biometricStore.openCipher(note.id))
+        assertTrue(biometricStore.openCipherResult(note.id) is StepResult.Failed)
         nek.fill(0)
     }
 

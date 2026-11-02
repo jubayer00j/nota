@@ -60,7 +60,7 @@ fun NoteLockGate(
     error: String?,
     onBack: () -> Unit,
     onSubmitCredential: (AppLockMethod, String) -> Unit,
-    biometricCipherProvider: suspend () -> javax.crypto.Cipher?,
+    biometricCipherProvider: suspend () -> app.nota.data.security.StepResult<javax.crypto.Cipher>,
     onBiometricUnlock: (javax.crypto.Cipher) -> Unit,
     modifier: Modifier = Modifier,
     // Phase 2.5 (F3): the lockout deadline as last reported by the
@@ -117,11 +117,16 @@ fun NoteLockGate(
     // the sealed copy's IV from DataStore). A fresh cipher is needed
     // per prompt; if the user cancels and retries, the effect key
     // (formResetKey) re-runs and fetches a new one.
-    var biometricCipher by remember(record, formResetKey) {
-        mutableStateOf<javax.crypto.Cipher?>(null)
+    // Phase 2.6 (Fix A): the prefetch is a typed StepResult — when it
+    // failed (dead key, missing copy), the fingerprint button stays
+    // visible and tapping it SHOWS the reason instead of doing
+    // nothing at all.
+    var biometricCipherResult by remember(record, formResetKey) {
+        mutableStateOf<app.nota.data.security.StepResult<javax.crypto.Cipher>?>(null)
     }
+    var bioError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(record, formResetKey) {
-        if (record.biometric) biometricCipher = biometricCipherProvider()
+        if (record.biometric) biometricCipherResult = biometricCipherProvider()
     }
 
     Column(modifier.fillMaxSize().padding(NotaSpacing.lg)) {
@@ -176,10 +181,11 @@ fun NoteLockGate(
                     // that would look like it was ignored).
                     enabled = !unlockInProgress,
                 )
-                if (error != null) {
+                val shownError = error ?: bioError
+                if (shownError != null) {
                     Spacer(Modifier.height(NotaSpacing.sm))
                     Text(
-                        error,
+                        shownError,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -191,16 +197,21 @@ fun NoteLockGate(
                     enabled = !unlockInProgress,
                     onClick = {
                         val host = activity
-                        val cipher = biometricCipher
-                        if (host != null && cipher != null) {
-                            showBiometricCryptoPrompt(
-                                host,
-                                cipher,
-                                title = "Unlock note",
-                                subtitle = noteTitle.ifBlank { "Untitled" },
-                                onAuthenticated = onBiometricUnlock,
-                                onError = { /* credential form stays available */ },
-                            )
+                        when (val result = biometricCipherResult) {
+                            is app.nota.data.security.StepResult.Failed ->
+                                bioError = result.userMessage
+                            is app.nota.data.security.StepResult.Ok -> if (host != null) {
+                                bioError = null
+                                showBiometricCryptoPrompt(
+                                    host,
+                                    result.value,
+                                    title = "Unlock note",
+                                    subtitle = noteTitle.ifBlank { "Untitled" },
+                                    onAuthenticated = onBiometricUnlock,
+                                    onError = { /* credential form stays available */ },
+                                )
+                            }
+                            null -> bioError = "Fingerprint is still preparing — try again in a moment."
                         }
                     },
                 ) {

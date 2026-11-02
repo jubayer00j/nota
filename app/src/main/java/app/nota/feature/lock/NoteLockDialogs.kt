@@ -34,6 +34,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.fragment.app.FragmentActivity
 import app.nota.data.security.AppLockMethod
 import app.nota.data.security.NoteLockBiometricStore
+import app.nota.data.security.StepResult
 import org.koin.compose.koinInject
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
@@ -103,6 +104,10 @@ fun LockNoteDialog(
     val biometricAvailable = remember(context) { isBiometricAvailable(context) }
     var method by remember { mutableStateOf(AppLockMethod.PASSWORD) }
     var useBiometric by remember { mutableStateOf(false) }
+    // Phase 2.6 (Fix A): a seal-cipher failure is shown HERE and the
+    // lock does NOT proceed — silently locking without the requested
+    // fingerprint (the old null-cipher fallback) hid the J7 defect.
+    var bioError by remember { mutableStateOf<String?>(null) }
     Dialog(onDismissRequest = onDismiss) {
         Card {
             Column(
@@ -150,27 +155,40 @@ fun LockNoteDialog(
                         // is threaded into lockNote and completes the
                         // NEK seal there. Cancelling the prompt locks
                         // with the credential only.
+                        // Phase 2.6: if the seal cipher can't even be
+                        // CREATED, the failure is shown and the lock
+                        // waits — the user can read why, toggle
+                        // fingerprint off, and confirm again to lock
+                        // with the credential only.
                         val host = activity
-                        val cipher = if (useBiometric) biometricStore.sealCipher() else null
-                        if (useBiometric && host != null && cipher != null) {
-                            showBiometricCryptoPrompt(
-                                host,
-                                cipher,
-                                title = "Confirm fingerprint unlock",
-                                negativeButtonText = "Lock without fingerprint",
-                                onAuthenticated = { authorised ->
-                                    onLock(method, canonical, true, authorised)
-                                },
-                                onError = { onLock(method, canonical, false, null) },
-                            )
+                        if (useBiometric) {
+                            when (val cipherResult = biometricStore.sealCipherResult()) {
+                                is StepResult.Failed -> bioError = cipherResult.userMessage
+                                is StepResult.Ok -> if (host != null) {
+                                    bioError = null
+                                    showBiometricCryptoPrompt(
+                                        host,
+                                        cipherResult.value,
+                                        title = "Confirm fingerprint unlock",
+                                        negativeButtonText = "Lock without fingerprint",
+                                        onAuthenticated = { authorised ->
+                                            onLock(method, canonical, true, authorised)
+                                        },
+                                        onError = { onLock(method, canonical, false, null) },
+                                    )
+                                } else {
+                                    onLock(method, canonical, false, null)
+                                }
+                            }
                         } else {
                             onLock(method, canonical, false, null)
                         }
                     },
                     onCancel = onDismiss,
                 )
-                if (error != null) {
-                    LockDialogError(error)
+                val shownError = error ?: bioError
+                if (shownError != null) {
+                    LockDialogError(shownError)
                 }
             }
         }
@@ -202,6 +220,9 @@ fun ManageLockDialog(
     val biometricAvailable = remember(context) { isBiometricAvailable(context) }
     var editingMethod by remember { mutableStateOf<AppLockMethod?>(null) }
     var confirmRemove by remember { mutableStateOf(false) }
+    // Phase 2.6 (Fix A): fingerprint enable failures render here
+    // instead of the switch silently staying off.
+    var bioError by remember { mutableStateOf<String?>(null) }
     Dialog(onDismissRequest = onDismiss) {
         Card {
             Column(
@@ -277,20 +298,31 @@ fun ManageLockDialog(
                             // Phase 2.5: enabling seals the NEK copy
                             // through a prompt-authorised cipher;
                             // disabling needs no proof.
+                            // Phase 2.6: typed result — a step failure
+                            // is shown, never a silent stay-off.
                             val host = activity
-                            val cipher = if (wantEnabled) biometricStore.sealCipher() else null
-                            if (wantEnabled && host != null && cipher != null) {
-                                showBiometricCryptoPrompt(
-                                    host,
-                                    cipher,
-                                    title = "Confirm fingerprint unlock",
-                                    negativeButtonText = "Cancel",
-                                    onAuthenticated = { authorised ->
-                                        onSetBiometric(true, authorised)
-                                    },
-                                    onError = { /* stays off */ },
-                                )
-                            } else if (!wantEnabled) {
+                            if (wantEnabled) {
+                                when (val cipherResult = biometricStore.sealCipherResult()) {
+                                    is StepResult.Failed -> bioError = cipherResult.userMessage
+                                    is StepResult.Ok -> if (host != null) {
+                                        bioError = null
+                                        showBiometricCryptoPrompt(
+                                            host,
+                                            cipherResult.value,
+                                            title = "Confirm fingerprint unlock",
+                                            negativeButtonText = "Cancel",
+                                            onAuthenticated = { authorised ->
+                                                onSetBiometric(true, authorised)
+                                            },
+                                            onError = { message ->
+                                                bioError = "Fingerprint prompt: $message"
+                                            },
+                                        )
+                                    } else {
+                                        bioError = "Fingerprint prompt isn't available on this screen."
+                                    }
+                                }
+                            } else {
                                 onSetBiometric(false, null)
                             }
                         },
@@ -316,6 +348,9 @@ fun ManageLockDialog(
                 }
                 if (feedback != null) {
                     LockDialogError(feedback)
+                }
+                if (bioError != null) {
+                    LockDialogError(bioError!!)
                 }
                 Spacer(Modifier.height(NotaSpacing.sm))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {

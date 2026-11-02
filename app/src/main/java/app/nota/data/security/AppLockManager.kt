@@ -128,24 +128,34 @@ class AppLockManager(
      * CRYPTO-BOUND biometric unlock (Phase 2.5, replacing the old
      * bare-boolean `unlockWithBiometric()`): [authorisedCipher] is the
      * cipher BiometricPrompt authorised via its CryptoObject, obtained
-     * from [AppLockBiometricStore.openCipher]. The app unlocks ONLY
+     * from [AppLockBiometricStore.openCipherResult]. The app unlocks ONLY
      * when that cipher actually decrypts the sealed token
-     * ([AppLockBiometricStore.verifyToken]) — a prompt success without
+     * ([AppLockBiometricStore.verifyTokenResult]) — a prompt success without
      * a working crypto result never reaches here as a proof, and a
      * cipher that cannot decrypt the token changes nothing.
-     * Returns true when the app is now unlocked.
+     * Phase 2.6: returns the typed [StepResult] so the lock screen
+     * can SHOW why a fingerprint attempt failed instead of refusing
+     * silently. Ok means the app is now unlocked.
      */
-    fun unlockWithBiometric(authorisedCipher: javax.crypto.Cipher): Boolean {
+    fun unlockWithBiometric(authorisedCipher: javax.crypto.Cipher): StepResult<Unit> {
         val current = _settings.value
-        if (!current.isEnabled || !current.biometricEnabled) return false
-        if (System.currentTimeMillis() < current.lockoutUntil) return false
-        if (!biometricStore.verifyToken(authorisedCipher)) return false
+        if (!current.isEnabled || !current.biometricEnabled) {
+            return StepResult.Failed(
+                BiometricStep.DECRYPT,
+                "fingerprint unlock is not enabled",
+            )
+        }
+        if (System.currentTimeMillis() < current.lockoutUntil) {
+            return StepResult.Failed(BiometricStep.DECRYPT, "app is in a temporary lockout")
+        }
+        val verified = biometricStore.verifyTokenResult(authorisedCipher)
+        if (verified is StepResult.Failed) return verified
         _isLocked.value = false
         backgroundedAtMillis = null
         scope.launch {
             attemptMutex.withLock { repository.setAppLockFailedAttempts(0, 0L) }
         }
-        return true
+        return StepResult.Ok(Unit)
     }
 
     /**
@@ -153,11 +163,18 @@ class AppLockManager(
      * same token proof as [unlockWithBiometric], but never unlocks
      * the app and never mutates the attempt counters.
      */
-    fun verifyBiometricForSettings(authorisedCipher: javax.crypto.Cipher): Boolean {
+    fun verifyBiometricForSettings(authorisedCipher: javax.crypto.Cipher): StepResult<Unit> {
         val current = _settings.value
-        if (!current.isEnabled || !current.biometricEnabled) return false
-        if (System.currentTimeMillis() < current.lockoutUntil) return false
-        return biometricStore.verifyToken(authorisedCipher)
+        if (!current.isEnabled || !current.biometricEnabled) {
+            return StepResult.Failed(
+                BiometricStep.DECRYPT,
+                "fingerprint unlock is not enabled",
+            )
+        }
+        if (System.currentTimeMillis() < current.lockoutUntil) {
+            return StepResult.Failed(BiometricStep.DECRYPT, "app is in a temporary lockout")
+        }
+        return biometricStore.verifyTokenResult(authorisedCipher)
     }
 
     /**
@@ -183,13 +200,16 @@ class AppLockManager(
         val now = System.currentTimeMillis()
         if (now < current.lockoutUntil) return UnlockResult.LockedOut(current.lockoutUntil)
         val credential = current.credentialFor(method) ?: return UnlockResult.Wrong
+        val iterations = AppLockCrypto.iterationsFor(method)
         val ok = withContext(Dispatchers.Default) {
-            AppLockCrypto.verify(
-                canonicalSecret,
-                credential.salt,
-                credential.hash,
-                AppLockCrypto.iterationsFor(method),
-            )
+            LockPerf.measure("app-lock verify", iterations) {
+                AppLockCrypto.verify(
+                    canonicalSecret,
+                    credential.salt,
+                    credential.hash,
+                    iterations,
+                )
+            }
         }
         return if (ok) {
             repository.setAppLockFailedAttempts(0, 0L)
@@ -213,13 +233,16 @@ class AppLockManager(
         val current = _settings.value
         if (System.currentTimeMillis() < current.lockoutUntil) return false
         val credential = current.credentialFor(method) ?: return false
+        val iterations = AppLockCrypto.iterationsFor(method)
         return withContext(Dispatchers.Default) {
-            AppLockCrypto.verify(
-                canonicalSecret,
-                credential.salt,
-                credential.hash,
-                AppLockCrypto.iterationsFor(method),
-            )
+            LockPerf.measure("app-lock settings verify", iterations) {
+                AppLockCrypto.verify(
+                    canonicalSecret,
+                    credential.salt,
+                    credential.hash,
+                    iterations,
+                )
+            }
         }
     }
 

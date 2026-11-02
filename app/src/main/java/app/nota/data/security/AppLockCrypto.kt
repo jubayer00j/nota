@@ -3,8 +3,6 @@ package app.nota.data.security
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
-import javax.crypto.SecretKeyFactory
-import javax.crypto.spec.PBEKeySpec
 
 /**
  * App Lock cryptography (Phase 2a) — a direct port of 1.x
@@ -23,6 +21,13 @@ import javax.crypto.spec.PBEKeySpec
  * secrets. App Lock credentials are freshly set up in Nota (never
  * imported from 1.x), so this is a scheme-parity port, not a data
  * migration.
+ *
+ * Phase 2.6 (Fix B): derivation runs through [Pbkdf2] — a manual
+ * HMAC-SHA256 loop — instead of the `SecretKeyFactory` PBKDF2 path,
+ * whose provider implementation on Android 8.1 made every unlock
+ * take seconds at these iteration counts. Output bytes are
+ * unchanged (the known-answer vectors below and the randomised
+ * equivalence test pin that); only the wall time moves.
  */
 object AppLockCrypto {
 
@@ -56,13 +61,18 @@ object AppLockCrypto {
     fun deriveKeyHash(secret: String, saltBase64: String, iterations: Int): String {
         require(iterations > 0) { "iterations must be positive" }
         val salt = Base64.getDecoder().decode(saltBase64)
-        val spec = PBEKeySpec(secret.toCharArray(), salt, iterations, 256)
+        // UTF-8: the WebCrypto TextEncoder semantics 1.x derived
+        // with (and the KAT encoding), for every secret shape.
+        val passwordBytes = secret.toByteArray(Charsets.UTF_8)
         try {
-            val derived = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-                .generateSecret(spec).encoded
-            return Base64.getEncoder().encodeToString(derived)
+            val derived = Pbkdf2.derive(passwordBytes, salt, iterations, 256 / 8)
+            try {
+                return Base64.getEncoder().encodeToString(derived)
+            } finally {
+                derived.fill(0)
+            }
         } finally {
-            spec.clearPassword()
+            passwordBytes.fill(0)
         }
     }
 
