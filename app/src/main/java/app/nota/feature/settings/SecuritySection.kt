@@ -84,16 +84,16 @@ fun SecuritySection(
     // setupEpoch) with the failure shown — never a dead dialog.
     var setupError by remember { mutableStateOf<String?>(null) }
     var setupEpoch by remember { mutableStateOf(0) }
-    LaunchedEffect(setupMethod) {
-        // A fresh dialog opening starts clean; a failure DURING this
-        // opening keeps its message (setupMethod doesn't change then).
-        if (setupMethod != null) setupError = null
-    }
     var verifyMethod by remember {
         mutableStateOf(AppLockMethod.PASSWORD)
     }
     var chooseMethodOpen by remember { mutableStateOf(false) }
     var setupMethod by remember { mutableStateOf<AppLockMethod?>(null) }
+    LaunchedEffect(setupMethod) {
+        // A fresh dialog opening starts clean; a failure DURING this
+        // opening keeps its message (setupMethod doesn't change then).
+        if (setupMethod != null) setupError = null
+    }
     var offerBiometricAfterSetup by remember { mutableStateOf(false) }
     var timeoutMenuOpen by remember { mutableStateOf(false) }
 
