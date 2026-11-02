@@ -28,7 +28,12 @@ class CaretSplitRobolectricTest {
         return state
     }
 
-    private fun text(html: String): String = PlainTextCodec.htmlToText(html).trim()
+    /** Visible text of an HTML half. The library serialises a
+     *  range-leading space as the numeric entity `&#32;` (to preserve
+     *  it), which PlainTextCodec does not decode — normalise it here
+     *  so assertions judge the split, not the entity dialect. */
+    private fun text(html: String): String =
+        PlainTextCodec.htmlToText(html).replace("&#32;", " ").trim()
 
     @Test
     fun caretMidParagraph_splitsText() {
@@ -80,13 +85,17 @@ class CaretSplitRobolectricTest {
     fun list_splitsIntoTwoLists() {
         val state = RichTextState()
         state.setHtml("<ul><li>One</li><li>Two</li></ul>")
-        // "One\nTwo": the caret at the start of "Two" is index 4.
-        state.selection = TextRange(4)
+        // List items carry placeholder characters in the annotated
+        // string (markers/spans), so locate the caret from the text
+        // itself instead of assuming an index.
+        val caret = state.annotatedString.text.indexOf("Two")
+        assertTrue("fixture text has no second item", caret > 0)
+        state.selection = TextRange(caret)
         val split = splitHtmlAtCaret(state)
         assertTrue("left half lost its list: ${split.leftHtml}", split.leftHtml.contains("<li>"))
         assertTrue("right half lost its list: ${split.rightHtml}", split.rightHtml.contains("<li>"))
-        assertEquals("One", text(split.leftHtml))
-        assertEquals("Two", text(split.rightHtml))
+        assertEquals("One", text(split.leftHtml).trim('•').trim())
+        assertEquals("Two", text(split.rightHtml).trim('•').trim())
     }
 
     @Test
