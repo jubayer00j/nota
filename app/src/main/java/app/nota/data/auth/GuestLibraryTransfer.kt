@@ -69,27 +69,46 @@ class GuestLibraryTransfer(
         val source = provider.openAdditional(NotaDatabase.GUEST_ACCOUNT)
         val target = provider.current
         try {
+            // Phase 1: read the whole guest library OUTSIDE any
+            // transaction. (Phase 3a CI finding: reading a second
+            // database from inside the target's withTransaction is
+            // unreliable — the attachment read came back empty under
+            // Robolectric while the identical read outside the
+            // transaction saw the row. Read-then-write is also the
+            // better shape: the write transaction stays short and
+            // single-database.)
+            val sourceFolders = source.folderDao().getAll()
+            val sourceTags = source.tagDao().getAllTags()
+            val sourceNotes = source.noteDao().getAll()
+            val sourceRefs = source.tagDao().observeAllCrossRefs().first()
+            val sourceAttachments = source.attachmentDao().getAll()
+            val sourceReminders = source.reminderDao().getAll()
+            val sourceVersions = source.noteVersionDao().getAll()
+            val sourceSearches = source.savedSearchDao().observeAll().first()
+
+            // Phase 2: insert-if-absent into the target, one
+            // transaction, target DAOs only.
             var notes = 0
             var folders = 0
             var tags = 0
             var attachments = 0
             target.withTransaction {
                 val folderDao = target.folderDao()
-                for (folder in source.folderDao().getAll()) {
+                for (folder in sourceFolders) {
                     if (folderDao.getById(folder.id) == null) {
                         folderDao.upsert(folder)
                         folders++
                     }
                 }
                 val tagDao = target.tagDao()
-                for (tag in source.tagDao().getAllTags()) {
+                for (tag in sourceTags) {
                     if (tagDao.getById(tag.id) == null) {
                         tagDao.upsert(tag)
                         tags++
                     }
                 }
                 val noteDao = target.noteDao()
-                for (note in source.noteDao().getAll()) {
+                for (note in sourceNotes) {
                     if (noteDao.getById(note.id) == null) {
                         noteDao.upsert(note)
                         notes++
@@ -99,33 +118,32 @@ class GuestLibraryTransfer(
                 // (a link to a note the account already had under a
                 // different copy state must never dangle); the link
                 // insert itself is IGNORE-on-conflict.
-                val sourceRefs = source.tagDao().observeAllCrossRefs().first()
                 for (ref in sourceRefs) {
                     if (noteDao.getById(ref.noteId) != null && tagDao.getById(ref.tagId) != null) {
                         tagDao.link(ref)
                     }
                 }
                 val attachmentDao = target.attachmentDao()
-                for (attachment in source.attachmentDao().getAll()) {
+                for (attachment in sourceAttachments) {
                     if (attachmentDao.getById(attachment.id) == null) {
                         attachmentDao.upsert(attachment)
                         attachments++
                     }
                 }
                 val reminderDao = target.reminderDao()
-                for (reminder in source.reminderDao().getAll()) {
+                for (reminder in sourceReminders) {
                     if (reminderDao.getById(reminder.id) == null) {
                         reminderDao.upsert(reminder)
                     }
                 }
                 val versionDao = target.noteVersionDao()
                 val existingVersionIds = versionDao.getAll().map { it.id }.toSet()
-                for (version in source.noteVersionDao().getAll()) {
+                for (version in sourceVersions) {
                     if (version.id !in existingVersionIds) versionDao.insert(version)
                 }
                 val searchDao = target.savedSearchDao()
                 val existingSearchIds = searchDao.observeAll().first().map { it.id }.toSet()
-                for (search in source.savedSearchDao().observeAll().first()) {
+                for (search in sourceSearches) {
                     if (search.id !in existingSearchIds) searchDao.upsert(search)
                 }
             }

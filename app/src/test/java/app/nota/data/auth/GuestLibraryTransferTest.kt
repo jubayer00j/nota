@@ -85,8 +85,10 @@ class GuestLibraryTransferTest {
     fun copyMovesEverythingAndLeavesGuestUntouched() = runBlocking {
         seedGuest()
         assertEquals(2, transfer.guestNoteCount())
-        // Diagnostic (Phase 3a CI): the seeded attachment must be
-        // visible on the live guest instance before any transfer runs.
+        // Seed sanity: the attachment row is on the live guest
+        // instance (the transfer reads the same file via a fresh
+        // handle — the two reads are pinned separately because a
+        // cross-database read inside a transaction once hid it).
         assertEquals(1, provider.current.attachmentDao().getAll().size)
 
         provider.switchTo("uid-transfer")
@@ -94,12 +96,6 @@ class GuestLibraryTransferTest {
         provider.current.noteDao().upsert(
             note("n2", "Account's own Second"),
         )
-        // Diagnostic (Phase 3a CI): a fresh handle over the guest
-        // file — exactly what the transfer reads — must see the seed.
-        val probe = provider.openAdditional(NotaDatabase.GUEST_ACCOUNT)
-        assertEquals(2, probe.noteDao().getAll().size)
-        assertEquals(1, probe.attachmentDao().getAll().size)
-        provider.closeAdditional(probe)
 
         val counts = transfer.copyGuestIntoCurrentAccount()
         assertEquals(1, counts.notes) // only n1 — n2 was already the account's
