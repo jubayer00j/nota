@@ -622,10 +622,15 @@ fun RichNoteEditorScreen(
                             val remainingPx =
                                 layoutInfo.viewportSize.height - tailInfo.offset
                             with(density) {
-                                remainingPx.coerceIn(
-                                    96.dp.roundToPx(),
-                                    layoutInfo.viewportSize.height,
-                                ).toDp()
+                                val minPx = 96.dp.roundToPx()
+                                if (layoutInfo.viewportSize.height <= minPx) {
+                                    96.dp
+                                } else {
+                                    remainingPx.coerceIn(
+                                        minPx,
+                                        layoutInfo.viewportSize.height,
+                                    ).toDp()
+                                }
                             }
                         } else {
                             96.dp
