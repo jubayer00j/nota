@@ -84,7 +84,7 @@ class BackupRepository(
             BxNote(
                 id = note.id,
                 title = note.title,
-                content = note.contentHtml,
+                content = if (note.locked) note.contentHtml else note.contentHtml.toOneXImageScheme(),
                 createdAt = note.createdAt,
                 updatedAt = note.updatedAt,
                 folderId = note.folderId,
@@ -107,7 +107,7 @@ class BackupRepository(
             BxNote(
                 id = template.id,
                 title = template.title,
-                content = template.contentHtml,
+                content = template.contentHtml.toOneXImageScheme(),
                 createdAt = nowMillis,
                 updatedAt = nowMillis,
                 folderId = null,
@@ -613,6 +613,20 @@ class BackupRepository(
 
 // ------------------------------------------------------------ mappings
 
+/**
+ * Phase 2.5 (F1 companion): 1.x writes inline-image srcs as
+ * `noma-attachment://<id>`; Nota's editor resolves
+ * `nota-attachment://<id>`. Import normalises the src attribute to
+ * Nota's scheme (unlocked notes only — locked envelopes always stay
+ * byte-verbatim); export maps it back so a Nota backup restored
+ * into 1.x keeps working images.
+ */
+private fun String.toNotaImageScheme(): String =
+    replace("src=\"noma-attachment://", "src=\"nota-attachment://")
+
+private fun String.toOneXImageScheme(): String =
+    replace("src=\"nota-attachment://", "src=\"noma-attachment://")
+
 private fun BxFolder.toEntity(): FolderEntity = FolderEntity(
     id = id, name = name, parentId = parentId, createdAt = createdAt, updatedAt = updatedAt,
 )
@@ -624,8 +638,9 @@ private fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
         folderId = folderId?.takeIf { it in validFolderIds },
         title = title,
         // Locked notes bypass ALL content processing: envelope + lock
-        // record are stored verbatim (PR-B invariants).
-        contentHtml = content,
+        // record are stored verbatim (PR-B invariants). Unlocked
+        // bodies get only the image-scheme normalisation above.
+        contentHtml = if (locked) content else content.toNotaImageScheme(),
         plainText = if (locked) "" else NoteDocument.plainText(NoteDocument.parse(content)),
         createdAt = createdAt,
         updatedAt = updatedAt,

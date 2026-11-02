@@ -158,13 +158,22 @@ class NoteDocumentTest {
 
     @Test
     fun everydayShapesStayTextSegments() {
-        // The library-lossless core must NOT be segmented.
+        // The library-lossless core must NOT be segmented. Tiptap's
+        // <li><p>…</p></li> list dialect is normalised to the bare-item
+        // shape on the way in (Phase 2.5 fix F1: the library's setHtml
+        // drops a list whose items wrap their content in <p>), so the
+        // serialised form differs from the 1.x input exactly there —
+        // everything else is byte-for-byte.
         val html = "<h2>Head</h2><p>one</p><ul><li><p>a</p></li><li><p>b</p></li></ul>" +
             "<ol><li><p>first</p></li></ol><p>tail</p>"
         val segments = NoteDocument.parse(html)
         assertEquals(1, segments.size)
         assertTrue(segments[0] is TextSegment)
-        assertEquals(html, NoteDocument.serialize(segments))
+        assertEquals(
+            "<h2>Head</h2><p>one</p><ul><li>a</li><li>b</li></ul>" +
+                "<ol><li>first</li></ol><p>tail</p>",
+            NoteDocument.serialize(segments),
+        )
     }
 
     @Test
