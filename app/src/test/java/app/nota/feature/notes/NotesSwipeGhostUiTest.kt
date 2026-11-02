@@ -238,20 +238,15 @@ class NotesSwipeGhostUiTest {
      *  back to rest, fully displayed, and stay swipeable. */
     @Test
     fun pinSwipe_rowSwingsBackAndStaysSwipeable() {
+        // Flip the mapping live, after composition: D3 promises the
+        // new configuration applies immediately, no restart — and the
+        // Activity compose rule allows only one setContent anyway.
         runBlocking { preferences.setSwipeRightAction(SwipeAction.PIN) }
         try {
-            composeScreen()
             awaitTrue("pin mapping live") {
                 viewModel.swipePreferences.value.right == SwipeAction.PIN
             }
-            awaitTrue("notes displayed under pin mapping") {
-                try {
-                    composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
-                    true
-                } catch (e: AssertionError) {
-                    false
-                }
-            }
+            composeRule.waitForIdle()
             composeRule.onNodeWithText("Ghost alpha").performTouchInput { swipeRight() }
             awaitTrue("alpha pinned") {
                 runBlocking { repository.getById("alpha")?.pinned == true }
