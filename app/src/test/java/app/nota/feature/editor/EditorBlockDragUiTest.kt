@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.room.Room
@@ -180,7 +181,27 @@ class EditorBlockDragUiTest {
             if (condition()) return
             Thread.sleep(50)
         }
-        fail("Timed out waiting for: $description")
+        fail("Timed out waiting for: $description\nSemantics: ${dumpSemantics()}")
+    }
+
+    /** Every text + content description currently in the tree. */
+    private fun dumpSemantics(): String {
+        val out = mutableListOf<String>()
+        fun walk(node: androidx.compose.ui.semantics.SemanticsNode) {
+            node.config.getOrNull(
+                androidx.compose.ui.semantics.SemanticsProperties.Text,
+            )?.forEach { out += "text:" + it.text.take(40) }
+            node.config.getOrNull(
+                androidx.compose.ui.semantics.SemanticsProperties.ContentDescription,
+            )?.forEach { out += "desc:" + it }
+            node.children.forEach(::walk)
+        }
+        return try {
+            walk(composeRule.onRoot().fetchSemanticsNode())
+            out.joinToString(" | ").take(900)
+        } catch (e: Throwable) {
+            "dump failed: $e"
+        }
     }
 
     private fun boundsOf(text: String) =
