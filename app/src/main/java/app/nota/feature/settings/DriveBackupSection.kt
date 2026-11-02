@@ -8,13 +8,17 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -34,11 +38,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import app.nota.data.auth.AuthManager
+import app.nota.data.auth.Session
 import app.nota.data.drive.DriveBackupScheduler
 import app.nota.data.drive.DriveRepository
 import app.nota.data.preferences.PreferencesRepository
-import app.nota.ui.components.NotaButton
-import app.nota.ui.components.NotaOutlinedButton
+import app.nota.ui.theme.NotaSpacing
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 
@@ -66,7 +70,7 @@ fun DriveBackupSection(onOpenSignIn: () -> Unit) {
     val mode by prefs.driveBackupMode.collectAsState(initial = PreferencesRepository.DRIVE_MODE_OFF)
     val intervalHours by prefs.driveBackupIntervalHours.collectAsState(initial = 24)
 
-    val signedIn = session as? AuthManager.Session.SignedIn
+    val signedIn = session as? Session.SignedIn
     val grantKnown by produceState(false, signedIn?.uid, driveState) {
         value = drive.hasGrant()
     }
@@ -102,183 +106,179 @@ fun DriveBackupSection(onOpenSignIn: () -> Unit) {
     var opError by remember { mutableStateOf<String?>(null) }
     var opBusy by remember { mutableStateOf(false) }
 
-    SettingsGroupCard(title = "Google Drive") {
+    Column {
+        Text(
+            "Google Drive",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
         if (signedIn == null) {
             Text(
                 "Nota backs up to the same \"Noma Backups\" folder your other devices use — " +
                     "sign in to connect Google Drive for this library.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp),
             )
-            NotaOutlinedButton(
-                "Sign in",
-                onClick = onOpenSignIn,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            )
-            return@SettingsGroupCard
-        }
-
-        val working = driveState as? DriveRepository.State.Working
-        if (working != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                CircularProgressIndicator()
-                Text(working.label, style = MaterialTheme.typography.bodyMedium)
-            }
-        }
-        when (val s = driveState) {
-            is DriveRepository.State.Done -> DriveStatusText(s.message, MaterialTheme.colorScheme.primary)
-            is DriveRepository.State.Failed -> DriveStatusText(s.message, MaterialTheme.colorScheme.error)
-            is DriveRepository.State.Paused -> DriveStatusText(s.message, MaterialTheme.colorScheme.tertiary)
-            else -> {}
-        }
-
-        Text(
-            when {
-                !grantKnown -> "Not connected yet. Nota can only see files it creates in Drive (drive.file)."
-                lastBackup != null && lastBackup!!.first > 0L ->
-                    "Last backup from this device: ${relativeTime(lastBackup!!.first)}"
-                else -> "Connected. No backup from this device yet."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        )
-
-        if (!grantKnown) {
-            NotaButton(
-                "Connect Google Drive",
-                onClick = { drive.startConnect() },
-                enabled = working == null,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
+            TextButton(onClick = onOpenSignIn) { Text("Sign in") }
         } else {
-            NotaButton(
-                "Back up now",
-                onClick = { drive.startBackup() },
-                enabled = working == null,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-            )
-            NotaOutlinedButton(
-                "Restore from Drive",
-                onClick = { drive.startRestore() },
-                enabled = working == null,
-                modifier = Modifier.padding(horizontal = 16.dp),
-            )
-
-            // ---- automatic mode ----
-            Text(
-                "Automatic backup",
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp),
-            )
-            DriveModeRow(
-                label = "Off",
-                selected = mode == PreferencesRepository.DRIVE_MODE_OFF,
-                onClick = { scope.launch { prefs.setDriveBackupMode(PreferencesRepository.DRIVE_MODE_OFF) } },
-            )
-            DriveModeRow(
-                label = "Scheduled",
-                selected = mode == PreferencesRepository.DRIVE_MODE_SCHEDULED,
-                onClick = {
-                    scope.launch { prefs.setDriveBackupMode(PreferencesRepository.DRIVE_MODE_SCHEDULED) }
-                },
-            )
-            if (mode == PreferencesRepository.DRIVE_MODE_SCHEDULED) {
+            val working = driveState as? DriveRepository.State.Working
+            if (working != null) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(vertical = NotaSpacing.sm),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    listOf(1 to "1h", 6 to "6h", 12 to "12h", 24 to "Daily", 168 to "Weekly", 720 to "30 days")
-                        .forEach { (hours, label) ->
+                    CircularProgressIndicator()
+                    Text(working.label, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            when (val s = driveState) {
+                is DriveRepository.State.Done ->
+                    DriveStatusText(s.message, MaterialTheme.colorScheme.primary)
+                is DriveRepository.State.Failed ->
+                    DriveStatusText(s.message, MaterialTheme.colorScheme.error)
+                is DriveRepository.State.Paused ->
+                    DriveStatusText(s.message, MaterialTheme.colorScheme.tertiary)
+                else -> {}
+            }
+
+            Text(
+                when {
+                    !grantKnown ->
+                        "Not connected yet. Nota can only see files it creates in Drive (drive.file)."
+                    lastBackup != null && lastBackup!!.first > 0L ->
+                        "Last backup from this device: ${relativeTime(lastBackup!!.first)}"
+                    else -> "Connected. No backup from this device yet."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (!grantKnown) {
+                Button(
+                    onClick = { drive.startConnect() },
+                    enabled = working == null,
+                    modifier = Modifier.padding(vertical = NotaSpacing.sm),
+                ) { Text("Connect Google Drive") }
+            } else {
+                Button(
+                    onClick = { drive.startBackup() },
+                    enabled = working == null,
+                    modifier = Modifier.padding(vertical = NotaSpacing.sm),
+                ) { Text("Back up now") }
+                OutlinedButton(
+                    onClick = { drive.startRestore() },
+                    enabled = working == null,
+                ) { Text("Restore from Drive") }
+
+                // ---- automatic mode ----
+                Text(
+                    "Automatic backup",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = NotaSpacing.md),
+                )
+                DriveModeRow(
+                    label = "Off",
+                    selected = mode == PreferencesRepository.DRIVE_MODE_OFF,
+                    onClick = {
+                        scope.launch { prefs.setDriveBackupMode(PreferencesRepository.DRIVE_MODE_OFF) }
+                    },
+                )
+                DriveModeRow(
+                    label = "Scheduled",
+                    selected = mode == PreferencesRepository.DRIVE_MODE_SCHEDULED,
+                    onClick = {
+                        scope.launch {
+                            prefs.setDriveBackupMode(PreferencesRepository.DRIVE_MODE_SCHEDULED)
+                        }
+                    },
+                )
+                if (mode == PreferencesRepository.DRIVE_MODE_SCHEDULED) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = NotaSpacing.xs),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        listOf(
+                            1 to "1h", 6 to "6h", 12 to "12h",
+                            24 to "Daily", 168 to "Weekly", 720 to "30 days",
+                        ).forEach { (hours, label) ->
                             FilterChip(
                                 selected = intervalHours == hours,
-                                onClick = { scope.launch { prefs.setDriveBackupIntervalHours(hours) } },
+                                onClick = {
+                                    scope.launch { prefs.setDriveBackupIntervalHours(hours) }
+                                },
                                 label = { Text(label) },
                             )
                         }
+                    }
+                }
+
+                // ---- backup encryption ----
+                Text(
+                    "Backup encryption",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(top = NotaSpacing.md),
+                )
+                when {
+                    record == null -> {
+                        Text(
+                            "Off. Backups are stored as a readable ZIP, like a local export.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = { opError = null; showSetup = true },
+                            modifier = Modifier.padding(vertical = NotaSpacing.sm),
+                        ) { Text("Set up encryption") }
+                    }
+                    record!!.deviceKeyBase64 != null -> {
+                        Text(
+                            "On — this device holds the key, so backups stay automatic. " +
+                                "Other devices will ask for your passphrase once.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = { opError = null; showChange = true },
+                            modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                        ) { Text("Change passphrase") }
+                        OutlinedButton(
+                            onClick = { showRemoveKeyConfirm = true },
+                            modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                        ) { Text("Remove key from this device") }
+                        OutlinedButton(
+                            onClick = { showTurnOffConfirm = true },
+                            modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                        ) { Text("Turn off encryption") }
+                    }
+                    else -> {
+                        Text(
+                            "On — but this device doesn't hold the key, so backups are paused " +
+                                "and restores will ask for the passphrase.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedButton(
+                            onClick = { opError = null; showUnlock = true },
+                            modifier = Modifier.padding(vertical = NotaSpacing.sm),
+                        ) { Text("Unlock with passphrase") }
+                        OutlinedButton(
+                            onClick = { showTurnOffConfirm = true },
+                            modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                        ) { Text("Turn off encryption") }
+                    }
+                }
+
+                TextButton(onClick = { showDisconnectConfirm = true }) {
+                    Text("Disconnect Drive")
                 }
             }
-
-            // ---- backup encryption ----
-            Text(
-                "Backup encryption",
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp),
-            )
-            val currentRecord = record
-            when {
-                currentRecord == null -> {
-                    Text(
-                        "Off. Backups are stored as a readable ZIP, like a local export.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                    NotaOutlinedButton(
-                        "Set up encryption",
-                        onClick = { opError = null; showSetup = true },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
-                }
-                currentRecord.deviceKeyBase64 != null -> {
-                    Text(
-                        "On — this device holds the key, so backups stay automatic. " +
-                            "Other devices will ask for your passphrase once.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                    NotaOutlinedButton(
-                        "Change passphrase",
-                        onClick = { opError = null; showChange = true },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                    NotaOutlinedButton(
-                        "Remove key from this device",
-                        onClick = { showRemoveKeyConfirm = true },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                    NotaOutlinedButton(
-                        "Turn off encryption",
-                        onClick = { showTurnOffConfirm = true },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                }
-                else -> {
-                    Text(
-                        "On — but this device doesn't hold the key, so backups are paused " +
-                            "and restores will ask for the passphrase.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                    NotaOutlinedButton(
-                        "Unlock with passphrase",
-                        onClick = { opError = null; showUnlock = true },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
-                    NotaOutlinedButton(
-                        "Turn off encryption",
-                        onClick = { showTurnOffConfirm = true },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                }
-            }
-
-            TextButton(
-                onClick = { showDisconnectConfirm = true },
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-            ) { Text("Disconnect Drive") }
         }
+        Spacer(Modifier.height(NotaSpacing.sm))
     }
 
     // ---- dialogs ----------------------------------------------------
@@ -428,7 +428,7 @@ private fun DriveStatusText(message: String, color: androidx.compose.ui.graphics
         message,
         style = MaterialTheme.typography.bodyMedium,
         color = color,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        modifier = Modifier.padding(vertical = NotaSpacing.xs),
     )
 }
 
@@ -438,7 +438,7 @@ private fun DriveModeRow(label: String, selected: Boolean, onClick: () -> Unit) 
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
+            .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         RadioButton(selected = selected, onClick = onClick)

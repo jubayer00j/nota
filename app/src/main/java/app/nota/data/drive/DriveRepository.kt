@@ -2,7 +2,7 @@ package app.nota.data.drive
 
 import android.content.Context
 import android.content.IntentSender
-import app.nota.data.auth.AuthManager
+import app.nota.data.auth.Session
 import app.nota.data.backup.BackupCrypto
 import app.nota.data.backup.BackupRepository
 import app.nota.data.backup.PendingRestoreState
@@ -36,7 +36,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 class DriveRepository(
     private val context: Context,
-    private val sessionProvider: () -> AuthManager.Session,
+    private val sessionProvider: () -> Session,
     private val driveAuth: DriveAuth,
     private val gateway: DriveGateway,
     private val backups: BackupRepository,
@@ -70,7 +70,7 @@ class DriveRepository(
     private var pendingOp: Op? = null
 
     private fun signedInUid(): String? =
-        (sessionProvider() as? AuthManager.Session.SignedIn)?.uid
+        (sessionProvider() as? Session.SignedIn)?.uid
 
     fun clearTransientState() {
         if (_state.value !is State.Working && _state.value !is State.NeedsConsent) {

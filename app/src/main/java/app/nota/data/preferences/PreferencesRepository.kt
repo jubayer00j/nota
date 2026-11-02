@@ -436,7 +436,7 @@ class PreferencesRepository(context: Context) {
             if (exception is IOException) emit(emptyPreferences()) else throw exception
         }
 
-    private companion object {
+    companion object {
         /** Mirrors NotaDatabase.GUEST_ACCOUNT (kept literal so the
          *  preferences layer stays free of a db dependency). */
         const val GUEST_ACCOUNT_ID = "guest"

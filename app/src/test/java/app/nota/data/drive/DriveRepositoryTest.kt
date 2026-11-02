@@ -2,7 +2,7 @@ package app.nota.data.drive
 
 import android.content.Context
 import app.nota.data.attachments.AttachmentStore
-import app.nota.data.auth.AuthManager
+import app.nota.data.auth.Session
 import app.nota.data.backup.BackupError
 import app.nota.data.backup.BackupRepository
 import app.nota.data.backup.PendingRestoreState
@@ -99,7 +99,7 @@ class DriveRepositoryTest {
         gateway = FakeGateway()
         drive = DriveRepository(
             context = context,
-            sessionProvider = { AuthManager.Session.SignedIn(uid, "D", "d@example.com", null) },
+            sessionProvider = { Session.SignedIn(uid, "D", "d@example.com", null) },
             driveAuth = FakeAuth(context),
             gateway = gateway,
             backups = backups,

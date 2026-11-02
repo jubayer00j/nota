@@ -84,6 +84,7 @@ class DriveClient(
             .post(metadata.toString().toRequestBody(JSON_MEDIA))
             .build()
         val json = executeJson(request)
+            ?: throw DriveError("Google Drive sent an empty reply.")
         return json.optString("id").ifEmpty {
             throw DriveError("Google Drive didn't create the backup folder.")
         }
@@ -151,7 +152,9 @@ class DriveClient(
                 .patch(file.asRequestBody(ZIP_MEDIA))
                 .build()
         }
-        parseMeta(executeJson(request))
+        parseMeta(
+            executeJson(request) ?: throw DriveError("Google Drive sent an empty reply."),
+        )
     }
 
     // ------------------------------------------------------------- internals
@@ -165,6 +168,7 @@ class DriveClient(
         val request = Request.Builder().url(url)
             .header("Authorization", "Bearer $token").get().build()
         val json = executeJson(request)
+            ?: throw DriveError("Google Drive sent an empty reply.")
         val files = json.optJSONArray("files") ?: return emptyList()
         return (0 until files.length()).map { parseMeta(files.getJSONObject(it)) }
     }
