@@ -519,7 +519,7 @@ class DriveRepositoryTest {
     @Test
     fun sync_remoteTombstoneDeletesLocalNote() = runBlocking {
         seedNote("n-1", "Doomed")
-        assertTrue(drive.runSyncCycle())
+        assertTrue("cycle1: ${drive.syncStatus.value}", drive.runSyncCycle())
         stageRemoteArchive(
             uid,
             emptyList(),
@@ -527,7 +527,7 @@ class DriveRepositoryTest {
                 app.nota.data.backup.BxTombstone("note", "n-1", 500L, "other-device"),
             ),
         )
-        assertTrue(drive.runSyncCycle())
+        assertTrue("cycle2: ${drive.syncStatus.value}", drive.runSyncCycle())
         val tombstones = app.nota.data.sync.SyncStore(provider.current).tombstones()
         assertTrue(
             "status=${drive.syncStatus.value} storedTombstones=$tombstones " +
