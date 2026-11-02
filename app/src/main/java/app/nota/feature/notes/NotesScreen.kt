@@ -116,9 +116,13 @@ fun NotesScreen(
     // Now every snapshot taken while an undo window is live queues
     // in [pendingUndo] (added BEFORE the previous snackbar job is
     // cancelled, so no interleaving can drop one), and the single
-    // surviving snackbar coroutine resolves the whole batch: Undo
-    // re-upserts every snapshot in swipe order; dismiss/timeout
-    // just clears the queue.
+    // surviving snackbar coroutine resolves the whole batch.
+    // Resolution applies the snapshots in REVERSE swipe order
+    // (Codex, PR #14): the same note can be swiped twice in one
+    // window (archive it, then restore it from Archived), and only
+    // reverse order leaves each note at its EARLIEST snapshot —
+    // the state before the whole batch, which is what Undo means.
+    // Dismiss/timeout just clears the queue.
     val pendingUndo = remember { mutableStateListOf<NoteEntity>() }
     var undoJob by remember { mutableStateOf<Job?>(null) }
 
@@ -129,7 +133,7 @@ fun NotesScreen(
         undoJob = scope.launch {
             val result = snackbarHostState.showSnackbar(message = message, actionLabel = "Undo")
             if (result == SnackbarResult.ActionPerformed) {
-                pendingUndo.forEach { viewModel.upsert(it) }
+                pendingUndo.asReversed().forEach { viewModel.upsert(it) }
             }
             pendingUndo.clear()
         }

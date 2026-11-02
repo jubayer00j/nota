@@ -218,6 +218,31 @@ class SwipeUndoFidelityRobolectricTest {
     }
 
     @Test
+    fun batchedDoubleSwipeUndoRestoresPreBatchState() = runBlocking {
+        // Codex (PR #14): the same note can be swiped TWICE inside
+        // one undo window — archive it in All, then restore it from
+        // Archived. The batch holds both pre-action snapshots; only
+        // applying them in REVERSE order (the screen's resolution)
+        // leaves the note at its pre-batch state. (Forward order
+        // would end on the archived snapshot — the state before the
+        // second swipe, not before the batch.)
+        val note = richFixture()
+        val before = snapshot(note.id)
+
+        repository.setArchived(note, true) // swipe 1 (All → archive)
+        val archivedSnapshot = db.noteDao().getById(note.id)!!
+        repository.restore(archivedSnapshot) // swipe 2 (Archived → restore)
+
+        // Batch resolution, exactly as NotesScreen performs it.
+        repository.upsert(archivedSnapshot)
+        repository.upsert(note)
+
+        val after = snapshot(note.id)
+        val d = diff(before, after)
+        if (d.isNotEmpty()) fail("Batched double-swipe Undo did not restore pre-batch state:\n$d")
+    }
+
+    @Test
     fun swipeRestoreThenInstantUndoRestoresFullState() = runBlocking {
         val base = richFixture()
         repository.trash(base)
