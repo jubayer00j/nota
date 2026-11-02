@@ -2,7 +2,6 @@ package app.nota.feature.lock
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.hardware.fingerprint.FingerprintManager
 import android.os.Build
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
@@ -74,26 +73,35 @@ enum class BiometricAvailability {
  * on 28/29). Returns null when the framework service is absent.
  * Never throws: a SecurityException (missing permission on some OEM
  * builds) maps to UNKNOWN rather than a false NO_HARDWARE.
+ *
+ * The service is reached REFLECTIVELY (coordinator fix at assembly):
+ * compileSdk 37 has removed `android.hardware.fingerprint
+ * .FingerprintManager` and `Context.FINGERPRINT_SERVICE` from the
+ * SDK stubs, so the class cannot be referenced at compile time —
+ * but it is present and public at runtime on exactly the API 23–27
+ * devices this probe serves (28+ primarily uses BiometricManager).
+ * Any reflective failure maps to UNKNOWN, never a false NO_HARDWARE.
  */
 private fun fingerprintProbe(context: Context): BiometricAvailability? {
     if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT)) {
         return BiometricAvailability.NO_HARDWARE
     }
+    // Context.FINGERPRINT_SERVICE == "fingerprint" (the literal is
+    // used because the constant is gone from the compileSdk 37 stubs).
     val manager = try {
-        @Suppress("DEPRECATION")
-        context.getSystemService(Context.FINGERPRINT_SERVICE) as? FingerprintManager
+        context.getSystemService("fingerprint")
     } catch (e: Exception) {
         null
     } ?: return null
     return try {
-        @Suppress("DEPRECATION")
+        val cls = manager.javaClass
+        val hardware = cls.getMethod("isHardwareDetected").invoke(manager) as? Boolean
+        val enrolled = cls.getMethod("hasEnrolledFingerprints").invoke(manager) as? Boolean
         when {
-            !manager.isHardwareDetected -> BiometricAvailability.NO_HARDWARE
-            !manager.hasEnrolledFingerprints() -> BiometricAvailability.NONE_ENROLLED
+            hardware != true -> BiometricAvailability.NO_HARDWARE
+            enrolled != true -> BiometricAvailability.NONE_ENROLLED
             else -> BiometricAvailability.AVAILABLE
         }
-    } catch (e: SecurityException) {
-        BiometricAvailability.UNKNOWN
     } catch (e: Exception) {
         BiometricAvailability.UNKNOWN
     }
