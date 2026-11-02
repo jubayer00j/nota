@@ -528,7 +528,12 @@ class DriveRepositoryTest {
             ),
         )
         assertTrue(drive.runSyncCycle())
-        assertTrue(provider.current.noteDao().getAll().isEmpty())
+        val tombstones = app.nota.data.sync.SyncStore(provider.current).tombstones()
+        assertTrue(
+            "status=${drive.syncStatus.value} storedTombstones=$tombstones " +
+                "notes=${provider.current.noteDao().getAll().map { it.id }}",
+            provider.current.noteDao().getAll().isEmpty(),
+        )
     }
 
 }
