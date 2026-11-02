@@ -125,10 +125,21 @@ override fun sealCipherResult(): StepResult<Cipher> =
         }
     }
 
+    private var stackSeq = 0
+
     private fun newStack(): Stack {
         val context = RuntimeEnvironment.getApplication()
-        val db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
-            .allowMainThreadQueries().build()
+        // File-backed under a discoverable account name, NOT in-memory:
+        // NotaApplication's startup orphan sweep reconciles the shared
+        // attachments/ root against every account database on disk
+        // (Phase 3a keep-set). An in-memory library is invisible to
+        // that sweep, so its freshly restored files could be swept as
+        // orphans mid-test — a race that stayed hidden until Phase 3a's
+        // test growth shifted the timing. A named file DB makes the
+        // sweep's keep-set cover this library in either ordering.
+        val accountId = "crossover-${++stackSeq}"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val db = NotaDatabase.build(context, accountId)
         dbs += db
         return Stack(db)
     }

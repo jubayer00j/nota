@@ -101,10 +101,17 @@ class BackupRichFormattingRestoreTest {
         val backup = BackupRepository(context, DatabaseProvider.forDatabase(context, db), TemplateRepository(context), store)
     }
 
+    private var stackSeq = 0
+
     private fun newStack(): Stack {
         val context = RuntimeEnvironment.getApplication()
-        val db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
-            .allowMainThreadQueries().build()
+        // File-backed under a discoverable account name (see
+        // BackupCrossoverRobolectricTest): the app startup orphan
+        // sweep must see this library's rows or it can sweep freshly
+        // restored attachment files mid-test.
+        val accountId = "richfmt-${++stackSeq}"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val db = NotaDatabase.build(context, accountId)
         dbs += db
         return Stack(db)
     }
