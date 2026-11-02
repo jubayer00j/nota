@@ -128,6 +128,11 @@ fun NotesScreen(
         val liveIds = state.items.mapTo(HashSet()) { it.note.id }
         dismissedIds.removeAll(dismissedIds.filter { it !in liveIds })
     }
+    // Switching lists hands rendering back to the data: an exclusion
+    // earned in All must not hide the note in Archived when the user
+    // goes looking for it inside the same undo window. (The pending
+    // batch itself is untouched — the snackbar still resolves it.)
+    LaunchedEffect(state.filter) { dismissedIds.clear() }
     val visibleItems = state.items.filter { it.note.id !in dismissedIds }
 
     // Phase 2.9 (J3): undo is BATCHED. A single SnackbarHostState
