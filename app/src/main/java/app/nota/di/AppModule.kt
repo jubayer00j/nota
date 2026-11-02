@@ -69,6 +69,7 @@ val appModule = module {
     // Phase 3a accounts: identity (Firebase Auth, identity only) +
     // the guest→account library copy.
     single { GuestLibraryTransfer(get(), get()) }
+    single { AuthManager(get(), get(), get()) }
     viewModel { NotesViewModel(get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
