@@ -40,8 +40,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "0.4.0"
+        versionCode = 13
+        versionName = "0.4.1"
     }
 
     buildTypes {
@@ -145,6 +145,11 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.mockwebserver)
     testImplementation(libs.robolectric)
+    // Phase 3.5 (D1): Compose UI tests under Robolectric — the ghost-row
+    // regression is a composition-layer defect, so its proof must drive
+    // the real list composable, not the data layer.
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
 
     // Phase 3a accounts: Firebase Auth (identity ONLY — notes never
     // leave the device except in the user's own Drive archive), and
