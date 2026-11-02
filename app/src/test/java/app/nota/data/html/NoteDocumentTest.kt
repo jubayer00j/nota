@@ -130,15 +130,20 @@ class NoteDocumentTest {
 
     @Test
     fun nestedTaskListInsideRegularListIsPreservedVerbatim() {
-        // A Tiptap task list nested inside a regular bullet item:
-        // the OUTER list is normalised to the bare-item dialect,
-        // but the nested task list (segmented and modelled
-        // separately) must survive byte-for-byte — its items'
-        // <div><p> scaffolding is not the editor-hostile shape
+        // A task list nested inside a regular bullet item, in the
+        // shape that reaches the normaliser: the nested list is a
+        // task list by its <ul data-type="taskList"> attribute
+        // (its items are plain <li> — with canonical
+        // data-type="taskItem" items the OUTER list is classified
+        // as a task list by parse's isTaskList heuristic before
+        // normalisation is ever consulted). The OUTER list is
+        // normalised to the bare-item dialect, but the nested task
+        // list must survive byte-for-byte — its items' <div><p>
+        // scaffolding is not the editor-hostile shape
         // normalisation exists to remove. (Codex P2, Phase 2.5.)
         val taskList = "<ul data-type=\"taskList\">" +
-            "<li data-type=\"taskItem\" data-checked=\"true\"><div><p>Revise optics</p></div></li>" +
-            "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Revise thermo</p></div></li></ul>"
+            "<li><div><p>Revise optics</p></div></li>" +
+            "<li><div><p>Revise thermo</p></div></li></ul>"
         val html = "<ul><li><p>Shopping</p>$taskList</li><li><p>Dinner</p></li></ul>"
         val reserialised = NoteDocument.serialize(NoteDocument.parse(html))
         assertEquals(
