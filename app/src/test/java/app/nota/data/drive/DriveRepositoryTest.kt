@@ -393,7 +393,7 @@ class DriveRepositoryTest {
     ) {
         val data = app.nota.data.backup.BackupWriter.ExportData(
             manifest = app.nota.data.backup.BackupManifest(
-                backupFormatVersion = 3,
+                backupFormatVersion = 2,
                 ownerId = owner,
                 libraryId = "lib",
                 nomaVersion = "0.4.0",

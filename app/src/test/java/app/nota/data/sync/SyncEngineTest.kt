@@ -40,7 +40,7 @@ class SyncEngineTest {
         device: String? = "device-a",
     ) = BackupWriter.ExportData(
         manifest = BackupManifest(
-            backupFormatVersion = 3, ownerId = owner, libraryId = "lib",
+            backupFormatVersion = 2, ownerId = owner, libraryId = "lib",
             nomaVersion = "0.4.0", createdAt = "2026-11-02T00:00:00Z",
             noteCount = notes.size, folderCount = 0, tagCount = 0,
             attachmentCount = attachments.size, reminderCount = 0,

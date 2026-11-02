@@ -209,6 +209,7 @@ object SyncEngine {
                     addAttachmentGeneric(
                         id, l, r, baseHashes, localAttachmentContent, remoteAttachmentContent,
                         ::killedByTombstone, ::addMergedAttachment,
+                        newId, conflictAttachmentSources,
                     )
                     // If the loser ALSO had this id with different
                     // bytes, clone the loser's version too.
@@ -238,6 +239,7 @@ object SyncEngine {
             addAttachmentGeneric(
                 id, l, r, baseHashes, localAttachmentContent, remoteAttachmentContent,
                 ::killedByTombstone, ::addMergedAttachment,
+                newId, conflictAttachmentSources,
             )
         }
 
@@ -353,9 +355,15 @@ object SyncEngine {
         remoteContent: Map<String, String>,
         killedByTombstone: (String, String, Long) -> Boolean,
         add: (BxAttachmentMeta, String) -> Unit,
+        newId: () -> String,
+        conflictSources: MutableMap<String, Pair<String, Boolean>>,
     ) {
         val winner: BxAttachmentMeta
         val winnerContent: String
+        // A both-sides content change clones the losing bytes under a
+        // fresh id on the same note (the note itself is not in
+        // conflict — only the bytes diverged). (meta, content, isRemote)
+        var loserClone: Triple<BxAttachmentMeta, String, Boolean>? = null
         if (l != null && r != null) {
             val lh = EntityHash.attachmentHash(l, localContent[id] ?: "")
             val rh = EntityHash.attachmentHash(r, remoteContent[id] ?: "")
@@ -365,10 +373,20 @@ object SyncEngine {
                 bh == lh -> { winner = r; winnerContent = remoteContent[id] ?: "" }
                 bh == rh -> { winner = l; winnerContent = localContent[id] ?: "" }
                 else -> {
-                    if ((r.updatedAt ?: r.createdAt) > (l.updatedAt ?: l.createdAt)) {
+                    val remoteWins = (r.updatedAt ?: r.createdAt) > (l.updatedAt ?: l.createdAt)
+                    if (remoteWins) {
                         winner = r; winnerContent = remoteContent[id] ?: ""
                     } else {
                         winner = l; winnerContent = localContent[id] ?: ""
+                    }
+                    val loserContent =
+                        if (remoteWins) localContent[id] ?: "" else remoteContent[id] ?: ""
+                    if (loserContent != winnerContent) {
+                        loserClone = Triple(
+                            if (remoteWins) l else r,
+                            loserContent,
+                            !remoteWins,
+                        )
                     }
                 }
             }
@@ -381,6 +399,11 @@ object SyncEngine {
         }
         if (killedByTombstone(EntityHash.ENTITY_ATTACHMENT, id, winner.updatedAt ?: winner.createdAt)) return
         add(winner, winnerContent)
+        loserClone?.let { (loserMeta, content, loserIsRemote) ->
+            val cloneId = newId()
+            add(loserMeta.copy(id = cloneId), content)
+            conflictSources[cloneId] = id to loserIsRemote
+        }
     }
 
     /** Hashes of a full snapshot (attachment content supplied). */
