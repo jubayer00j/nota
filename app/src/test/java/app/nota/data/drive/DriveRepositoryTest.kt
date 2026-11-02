@@ -517,6 +517,38 @@ class DriveRepositoryTest {
     }
 
     @Test
+    fun sync_writerReader_tombstonesRoundTrip() {
+        val data = app.nota.data.backup.BackupWriter.ExportData(
+            manifest = app.nota.data.backup.BackupManifest(
+                backupFormatVersion = 2, ownerId = uid, libraryId = "lib",
+                nomaVersion = "0.4.0", createdAt = "2026-11-02T00:00:00Z",
+                noteCount = 0, folderCount = 0, tagCount = 0,
+                attachmentCount = 0, reminderCount = 0, deviceId = "other-device",
+            ),
+            notes = emptyList(),
+            tombstones = listOf(
+                app.nota.data.backup.BxTombstone("note", "n-1", 500L, "other-device"),
+            ),
+        )
+        val zipFile = java.io.File(context.cacheDir, "roundtrip.zip")
+        java.io.FileOutputStream(zipFile).use { out ->
+            app.nota.data.backup.BackupWriter { null }.write(data, out)
+        }
+        val syncJson = java.util.zip.ZipFile(zipFile).use { zip ->
+            zip.getEntry("sync.json")?.let { entry ->
+                zip.getInputStream(entry).readBytes().decodeToString()
+            }
+        }
+        assertTrue("sync.json missing tombstone: $syncJson", syncJson?.contains("n-1") == true)
+        val handle = app.nota.data.backup.BackupReader(context.cacheDir).read(zipFile, null)
+        assertEquals(
+            "reader dropped tombstones; sync.json=$syncJson",
+            listOf("n-1"), handle.tombstones.map { it.id },
+        )
+        handle.close()
+    }
+
+    @Test
     fun sync_remoteTombstoneDeletesLocalNote() = runBlocking {
         seedNote("n-1", "Doomed")
         assertTrue("cycle1: ${drive.syncStatus.value}", drive.runSyncCycle())
