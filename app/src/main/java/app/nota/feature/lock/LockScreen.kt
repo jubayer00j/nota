@@ -137,7 +137,15 @@ fun LockScreen(
                             is StepResult.Ok -> Unit // MainActivity swaps to the nav shell.
                         }
                     },
-                    onError = { /* credential form stays available */ },
+                    onError = { failure ->
+                        // A user cancel just returns to the credential
+                        // form; every other prompt failure is shown
+                        // with its step + reason (Phase 2.7: framework
+                        // errors arrive typed the same way).
+                        if (failure.reason != "Cancelled") {
+                            feedback = failure.userMessage
+                        }
+                    },
                 )
             }
         }

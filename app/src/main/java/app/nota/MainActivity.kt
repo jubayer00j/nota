@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AppLockManager
+import app.nota.feature.lock.LegacyFingerprintPromptHost
 import app.nota.feature.lock.LockScreen
 import app.nota.notes.R
 import app.nota.ui.navigation.NotaNavShell
@@ -133,6 +134,14 @@ class MainActivity : FragmentActivity() {
                     lockSettings.isEnabled && isLocked -> LockScreen()
                     else -> NotaNavShell(startOnToday = startOnToday)
                 }
+                // Phase 2.7: the legacy (API < 28) fingerprint
+                // prompt's Compose host — composed once at the root
+                // so its dialog can present over the lock screen,
+                // Settings and the per-note surfaces alike. It
+                // renders nothing unless a framework prompt request
+                // is active (never on API 28+, where AndroidX is
+                // the executor).
+                LegacyFingerprintPromptHost()
             }
         }
     }

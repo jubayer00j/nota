@@ -314,8 +314,8 @@ fun ManageLockDialog(
                                             onAuthenticated = { authorised ->
                                                 onSetBiometric(true, authorised)
                                             },
-                                            onError = { message ->
-                                                bioError = "Fingerprint prompt: $message"
+                                            onError = { failure ->
+                                                bioError = failure.userMessage
                                             },
                                         )
                                     } else {

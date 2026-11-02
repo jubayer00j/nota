@@ -27,6 +27,7 @@ enum class BiometricStep(val label: String) {
     SEAL("sealing"),
     PERSIST("saving"),
     DECRYPT("verification"),
+    PROMPT("fingerprint prompt"),
 }
 
 /** Outcome of one biometric pipeline step. */
@@ -55,6 +56,8 @@ sealed interface StepResult<out T> {
                     "Couldn't save the fingerprint token (step: saving — $reason)"
                 BiometricStep.DECRYPT ->
                     "Fingerprint couldn't be verified on this device (step: verification — $reason)"
+                BiometricStep.PROMPT ->
+                    "Fingerprint prompt: $reason"
             }
     }
 }

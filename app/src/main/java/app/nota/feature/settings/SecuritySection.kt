@@ -138,7 +138,7 @@ fun SecuritySection(
                         }
                     }
                 },
-                onError = { message -> bioError = "Fingerprint prompt: $message" },
+                onError = { failure -> bioError = failure.userMessage },
             )
         }
     }
@@ -163,7 +163,7 @@ fun SecuritySection(
                             is StepResult.Ok -> onSuccess()
                         }
                     },
-                    onError = { message -> verifyFeedback = "Fingerprint prompt: $message" },
+                    onError = { failure -> verifyFeedback = failure.userMessage },
                 )
             }
         }
