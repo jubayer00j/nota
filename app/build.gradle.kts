@@ -83,6 +83,43 @@ kotlin {
     }
 }
 
+// --- Test execution bounds + CI sharding (Phase 3.6 close-out) ---
+//
+// The suite outgrew Gradle's defaults: with no explicit heap and
+// forkEvery = 0, all 300+ tests ran in ONE worker JVM capped at the
+// 512 MB default heap. The Robolectric + Compose-UI classes hold
+// large sandbox classloaders, and by late in the suite the worker
+// was spending its life in GC; on CI the test step kept dying at
+// ~6 minutes with exit 143 (SIGTERM — the worker killed under
+// memory pressure). Bounds below give each worker real headroom
+// and cap how much state any one worker accumulates.
+//
+// CI also shards the run into two parallel jobs (.github/workflows/
+// android.yml) via -PnotaTestShard=fast|ui: the Compose-UI classes
+// (full editor composition, native graphics, gesture injection)
+// run in their own job so neither job's test step lasts ~7 minutes.
+// Add new Compose-UI test classes to uiTestClasses so they land in
+// the UI shard. With no shard property (local runs) the full suite
+// runs unfiltered.
+val notaUiTestClasses = listOf(
+    "app.nota.feature.editor.EditorBlockDragUiTest",
+    "app.nota.feature.editor.EditorReadModeUiTest",
+    "app.nota.feature.notes.NotesSwipeGhostUiTest",
+)
+
+tasks.withType<Test>().configureEach {
+    maxHeapSize = "3g"
+    forkEvery = 25
+    when (providers.gradleProperty("notaTestShard").orNull) {
+        "fast" -> filter {
+            notaUiTestClasses.forEach { excludeTestsMatching(it) }
+        }
+        "ui" -> filter {
+            notaUiTestClasses.forEach { includeTestsMatching(it) }
+        }
+    }
+}
+
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }

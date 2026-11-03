@@ -466,16 +466,8 @@ fun RichNoteEditorScreen(
         val from = segments.indexOfFirst { it.id == ui.id }
         if (from < 0) return false
         val visible = listState.layoutInfo.visibleItemsInfo
-        val info = visible.firstOrNull { it.key == ui.id } ?: run {
-            DragProbe.log("eval: dragged not visible")
-            return false
-        }
+        val info = visible.firstOrNull { it.key == ui.id } ?: return false
         val centre = info.offset + dragOffsetPx + info.size / 2f
-        DragProbe.log(
-            "eval vp=${listState.layoutInfo.viewportSize.height} " +
-                "items=${visible.joinToString(",") { "${it.key.toString().takeLast(4)}@${it.offset}+${it.size}" }} " +
-                "dragOff=$dragOffsetPx centre=$centre",
-        )
         val spacingPx = with(density) { NotaSpacing.sm.toPx() }
         val prev = segments.getOrNull(from - 1)?.let { neighbour ->
             visible.firstOrNull { it.key == neighbour.id }
@@ -1225,19 +1217,16 @@ fun RichNoteEditorScreen(
                                     Modifier.longPressBlockDrag(
                                         key = ui.id,
                                         onDragStart = {
-                                            DragProbe.log("onDragStart")
                                             dragSegmentId = ui.id
                                             dragOffsetPx = 0f
                                         },
                                         onDrag = { dy -> onBlockDrag(ui, dy) },
                                         onDragEnd = {
-                                            DragProbe.log("onDragEnd")
                                             dragSegmentId = null
                                             dragOffsetPx = 0f
                                             persistNow()
                                         },
                                         onDragCancel = {
-                                            DragProbe.log("onDragCancel")
                                             dragSegmentId = null
                                             dragOffsetPx = 0f
                                         },

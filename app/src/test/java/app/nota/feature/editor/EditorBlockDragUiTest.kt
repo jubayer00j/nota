@@ -35,7 +35,6 @@ import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlin.math.abs
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
@@ -63,22 +62,24 @@ import org.robolectric.shadows.ShadowLooper
  * semantics tree, so paragraph nodes cannot be located — block
  * neighbours (a file name, a table cell, an image label) can.
  *
- * The display is deliberately TALL (h1000dp): in the default
- * 470dp window these short notes barely exceed the list viewport,
- * so a dragged block enters the G1 auto-scroll edge zone almost
- * immediately; under Robolectric's virtual clock the 16 ms
- * auto-scroll loop then interleaves with the synthetic event
- * stream, the list scrolls mid-gesture, the pointer coordinates
- * remap, and the stream dies before the centre can cross (probe-
- * verified: the drag accumulated ~100 of 186 px, then a −6 px
- * remapped event, then silence). A physical finger cannot be
- * remapped that way — this is a harness interaction, not the
- * reorder logic under test. With the tall window the content
- * cannot scroll at all, the drag runs on finger travel alone,
- * and the persisted order is asserted exactly as before.
+ * The drag is driven as ONE move, not a stepped glide (probe-
+ * verified root cause of the original timeouts): under
+ * Robolectric the injected events are processed from the paused
+ * main looper, and each stepped dispatch gives the editor's
+ * 16 ms auto-scroll loop a gap to interleave — in these short
+ * notes the dragged block sits in the edge zone almost at once,
+ * the list scrolls mid-gesture, the pointer coordinates remap
+ * (the probe recorded travel stalling at ~100 of 186 px, then a
+ * −6 px phantom delta), and the centre never crosses. A single
+ * move is evaluated inside one event pass — the swap check runs
+ * on the full offset before any auto-scroll tick can interfere.
+ * A physical finger produces a continuous stream and is not
+ * affected by any of this; the reorder logic, the swap math and
+ * the persist path were all exonerated by the probe (the drag
+ * engaged and accumulated exactly the travel it was given).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35], qualifiers = "w411dp-h1000dp")
+@Config(sdk = [35])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class EditorBlockDragUiTest {
 
@@ -255,8 +256,11 @@ class EditorBlockDragUiTest {
     /**
      * Long-press-drag on the node showing [text]: the finger holds
      * past the long-press timeout (the first small move carries the
-     * event clock past it, inside touch slop), then travels [totalDy]
-     * in steps so centre-crossing swaps engage progressively.
+     * event clock past it, inside touch slop), then travels the
+     * whole [totalDy] in ONE move — see the class doc for why a
+     * stepped glide is unreliable in this harness. Each test here
+     * crosses exactly one neighbouring block, and the swap check
+     * evaluates once per move, so one move is the exact dose.
      */
     private fun longPressDrag(text: String, totalDy: Float) {
         composeRule.onNodeWithText(text).performTouchInput {
@@ -264,14 +268,7 @@ class EditorBlockDragUiTest {
             advanceEventTime(700)
             moveBy(Offset(0f, 2f))
             advanceEventTime(16)
-            var travelled = 2f
-            val step = if (totalDy >= 0) 24f else -24f
-            while (abs(totalDy - travelled) > abs(step)) {
-                moveBy(Offset(0f, step))
-                travelled += step
-                advanceEventTime(16)
-            }
-            moveBy(Offset(0f, totalDy - travelled))
+            moveBy(Offset(0f, totalDy - 2f))
             advanceEventTime(16)
             up()
         }
