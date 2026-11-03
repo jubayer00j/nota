@@ -67,7 +67,8 @@ jobs:
           fi
 
       - name: Run fast unit tests (shard A, 22 of 44 non-UI classes)
-        run: ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
             --tests "app.nota.data.attachments.PendingInsertStoreTest" \
             --tests "app.nota.data.auth.GuestLibraryTransferTest" \
@@ -148,7 +149,8 @@ jobs:
           fi
 
       - name: Run fast unit tests (shard B, 22 of 44 non-UI classes)
-        run: ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.attachments.ImageSamplingTest" \
             --tests "app.nota.data.auth.GuestMovePolicyTest" \
             --tests "app.nota.data.backup.BackupRestoreSemanticsTest" \
