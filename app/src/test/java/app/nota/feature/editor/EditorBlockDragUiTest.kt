@@ -92,14 +92,20 @@ import org.robolectric.shadows.ShadowLooper
  *    item), FAR short of what centre-crossing would need — so
  *    these tests fail on the 3.6 math and pass on the session
  *    math.
- * 3. NOTHING PERSISTS WHILE THE FINGER IS DOWN. Each drag is
- *    driven as THREE separate injections (press / move / lift)
- *    so the test can read Room BETWEEN the move and the lift
- *    and assert the persisted order is still the ORIGINAL. On
- *    the 3.6/3.7 swap model this assertion fails — a swap
- *    mutated the document mid-drag and the autosave wrote it.
- *    On the session model it cannot fail: the segment list is
- *    never touched until the lift commits it.
+ * 3. NOTHING PERSISTS WHILE THE FINGER IS DOWN. Each test
+ *    reads Room BETWEEN the move and the lift — from inside the
+ *    single injection block, with the finger still down — and
+ *    asserts the persisted order is still the ORIGINAL. On the
+ *    3.6/3.7 swap model a swap persisted synchronously from the
+ *    gesture callback, so this assertion has teeth exactly
+ *    where it matters. On the session model it cannot fail:
+ *    the segment list is never touched until the lift commits
+ *    it. (An earlier 3.8 draft drove press/move/lift as THREE
+ *    separate performTouchInput calls to make this observation
+ *    from outside the block; the lift never arrived — pointer
+ *    state does not survive across injection calls in this
+ *    harness, the session hung, and all three tests timed out.
+ *    Hence: one block, observation inside it.)
  *
  * Why the drag is still ONE move in a TALL window (the Phase 3.6
  * verification arc — harness failure modes, none in the
@@ -302,23 +308,22 @@ class EditorBlockDragUiTest {
         composeRule.onRoot().fetchSemanticsNode().boundsInRoot.center.x
 
     /**
-     * Phase 3.8: the drag is driven as THREE separate injections
-     * so a test can observe the document BETWEEN the move and the
-     * lift (class doc, 3) — the pointer state carries across
-     * performTouchInput calls on the root.
-     *
-     * [beginLongPressDrag] presses at the root-space point
-     * [start] and holds past the long-press timeout (the first
-     * small move carries the event clock past it, inside the
-     * surface watch's drift allowance) — the session is live when
-     * it returns. [moveDragBy] then travels the whole distance in
-     * ONE move — see the class doc for why a stepped glide is
-     * unreliable in this harness; each test here crosses exactly
-     * one neighbouring block, and the target evaluates once per
-     * move, so one move is the exact dose. [endDrag] lifts the
-     * finger: the session commits.
+     * Long-press-drag starting at the root-space point [start],
+     * as ONE injection block: press and hold past the long-press
+     * timeout (the first small move carries the event clock past
+     * it, inside the surface watch's drift allowance), travel the
+     * whole [totalDy] in ONE move — see the class doc for why a
+     * stepped glide is unreliable in this harness; each test here
+     * crosses exactly one neighbouring block, and the target
+     * evaluates once per move, so one move is the exact dose —
+     * then run [midDragCheck] with the finger STILL DOWN (class
+     * doc, 3), and lift.
      */
-    private fun beginLongPressDrag(start: Offset) {
+    private fun longPressDragAt(
+        start: Offset,
+        totalDy: Float,
+        midDragCheck: () -> Unit = {},
+    ) {
         val rootTopLeft = composeRule.onRoot().fetchSemanticsNode()
             .boundsInRoot.topLeft
         val local = start - rootTopLeft
@@ -327,18 +332,9 @@ class EditorBlockDragUiTest {
             advanceEventTime(700)
             moveBy(Offset(0f, 2f))
             advanceEventTime(16)
-        }
-    }
-
-    private fun moveDragBy(totalDy: Float) {
-        composeRule.onRoot().performTouchInput {
             moveBy(Offset(0f, totalDy - 2f))
             advanceEventTime(16)
-        }
-    }
-
-    private fun endDrag() {
-        composeRule.onRoot().performTouchInput {
+            midDragCheck()
             up()
         }
     }
@@ -390,13 +386,17 @@ class EditorBlockDragUiTest {
         // which only adds safety margin — and the total stays far
         // short of both the closing paragraph's threshold and the
         // old centre-to-centre distance.
-        beginLongPressDrag(Offset(bodyCentreX(), (fileTop + fileBottom) / 2f))
-        moveDragBy((tableTop - fileBottom) + overshootPx() + 40f)
-        // The session's defining property: the finger is still
-        // DOWN, the target already computed — and the persisted
-        // document is still the original order (class doc, 3).
-        assertEquals(before, persistedKinds(note.id))
-        endDrag()
+        longPressDragAt(
+            Offset(bodyCentreX(), (fileTop + fileBottom) / 2f),
+            (tableTop - fileBottom) + overshootPx() + 40f,
+            midDragCheck = {
+                // The session's defining property: the finger is
+                // still DOWN, the target already computed — and
+                // the persisted document is still the original
+                // order (class doc, 3).
+                assertEquals(before, persistedKinds(note.id))
+            },
+        )
         awaitOrder(
             note.id,
             listOf(
@@ -429,11 +429,15 @@ class EditorBlockDragUiTest {
         // long press wakes the platform magnifier and crashes this
         // harness). Edge travel, sign-flipped: the ghost's top edge
         // must end the overshoot ABOVE the file's bottom edge.
-        beginLongPressDrag(Offset(bodyCentreX(), footerCentreY))
-        moveDragBy(fileBottom - overshootPx() - 40f - tableTop)
-        // Finger still down: the persisted order is untouched.
-        assertEquals(before, persistedKinds(note.id))
-        endDrag()
+        longPressDragAt(
+            Offset(bodyCentreX(), footerCentreY),
+            fileBottom - overshootPx() - 40f - tableTop,
+            midDragCheck = {
+                // Finger still down: the persisted order is
+                // untouched.
+                assertEquals(before, persistedKinds(note.id))
+            },
+        )
         awaitOrder(
             note.id,
             listOf(
@@ -469,13 +473,15 @@ class EditorBlockDragUiTest {
         // bottom starts one spacing above the file's top and must
         // end the overshoot past it (+ the bounded margin).
         val before = persistedKinds(note.id)
-        beginLongPressDrag(
+        longPressDragAt(
             Offset(bodyCentreX(), imageItemTop + imageItemSize / 2f),
+            spacingPx() + overshootPx() + 40f,
+            midDragCheck = {
+                // Finger still down: the persisted order is
+                // untouched.
+                assertEquals(before, persistedKinds(note.id))
+            },
         )
-        moveDragBy(spacingPx() + overshootPx() + 40f)
-        // Finger still down: the persisted order is untouched.
-        assertEquals(before, persistedKinds(note.id))
-        endDrag()
         awaitOrder(
             note.id,
             listOf(
