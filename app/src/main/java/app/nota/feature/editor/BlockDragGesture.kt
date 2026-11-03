@@ -67,7 +67,9 @@ fun Modifier.blockDragSurface(
 ): Modifier = pointerInput(key) {
     awaitEachGesture {
         val down = awaitFirstDown(pass = PointerEventPass.Initial)
-        if (!hitTest(down.position)) return@awaitEachGesture
+        val hit = hitTest(down.position)
+        DragProbe.log("DOWN pos=${down.position} hit=$hit")
+        if (!hit) return@awaitEachGesture
         var current: PointerInputChange = down
         var aborted = false
         try {
@@ -75,6 +77,7 @@ fun Modifier.blockDragSurface(
                 while (true) {
                     val event = awaitPointerEvent(PointerEventPass.Initial)
                     if (event.changes.count { it.pressed } > 1) {
+                        DragProbe.log("WATCH abort: second finger")
                         aborted = true
                         return@withTimeoutOrNull
                     }
@@ -83,12 +86,21 @@ fun Modifier.blockDragSurface(
                     // this Compose version — either way the press
                     // ended without becoming a drag.
                     if (change == null || change.changedToUp()) {
+                        DragProbe.log(
+                            "WATCH abort: changeNull=${change == null} " +
+                                "up=${change?.changedToUp()}",
+                        )
                         aborted = true
                         return@withTimeoutOrNull
                     }
                     if ((change.position - down.position).getDistance() >
                         viewConfiguration.touchSlop * 2f
                     ) {
+                        DragProbe.log(
+                            "WATCH abort: drift=" +
+                                (change.position - down.position).getDistance() +
+                                " limit=" + viewConfiguration.touchSlop * 2f,
+                        )
                         aborted = true
                         return@withTimeoutOrNull
                     }
@@ -100,24 +112,39 @@ fun Modifier.blockDragSurface(
                     if (change.uptimeMillis - down.uptimeMillis >=
                         viewConfiguration.longPressTimeoutMillis
                     ) {
+                        DragProbe.log(
+                            "WATCH claim: event clock dt=" +
+                                (change.uptimeMillis - down.uptimeMillis) +
+                                " timeout=" +
+                                viewConfiguration.longPressTimeoutMillis,
+                        )
                         return@withTimeoutOrNull
                     }
                 }
             }
         } catch (e: CancellationException) {
+            DragProbe.log("WATCH cancelled: $e")
             throw e
         }
         // The block returned early only on an abort condition; a
         // timeout (null result) means the finger simply held still
         // for the full long-press window — the session is on.
+        DragProbe.log("WATCH exit aborted=$aborted")
         if (aborted) return@awaitEachGesture
         current.consume()
+        DragProbe.log("CLAIM pos=${current.position}")
         onSessionStart(down.position)
         onSessionMove(current.position.y)
         try {
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull { it.id == down.id }
+                DragProbe.log(
+                    "SESSION ev changes=${event.changes.size} " +
+                        "trackedPressed=${change?.pressed} " +
+                        "trackedUp=${change?.changedToUp()} " +
+                        "trackedPos=${change?.position}",
+                )
                 // Claimed: consume every change in the Initial
                 // pass, the tracked pointer's and any other's —
                 // a second finger is ignored for the whole
@@ -125,6 +152,7 @@ fun Modifier.blockDragSurface(
                 event.changes.forEach { it.consume() }
                 if (change == null) continue
                 if (change.changedToUp()) {
+                    DragProbe.log("SESSION up -> onSessionEnd")
                     // The lift commits. This Compose version
                     // delivers a framework cancel as the same up
                     // change (no isCanceled signal exists), so a
@@ -139,6 +167,7 @@ fun Modifier.blockDragSurface(
                 onSessionMove(change.position.y)
             }
         } catch (e: CancellationException) {
+            DragProbe.log("SESSION cancelled: $e")
             onSessionCancel()
             throw e
         }

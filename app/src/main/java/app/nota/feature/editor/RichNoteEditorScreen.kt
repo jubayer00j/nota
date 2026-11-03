@@ -78,6 +78,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -249,6 +250,17 @@ fun RichNoteEditorScreen(
     var folderId by remember { mutableStateOf<String?>(null) }
     var segments by remember { mutableStateOf<List<UiSegment>>(emptyList()) }
     val textStates = remember { mutableMapOf<String, RichTextState>() }
+    // Phase 3.8 (Codex finding 3, PR #21): table-cell / task-item
+    // field text, hoisted ABOVE the block editors (the textStates
+    // pattern). A block's editor composes in two places over a
+    // drag — its list slot, then the session GHOST, then the slot
+    // again — and a remember() inside the field does not survive
+    // that move: the field re-seeded from the stored HTML through
+    // a trimming projection, and a later edit wrote the trimmed
+    // text back (silent loss of the user's boundary spaces). The
+    // state lives here, keyed by block position, so slot and ghost
+    // share the very same field state and a remount is a non-event.
+    val cellTextStates = remember { mutableMapOf<String, MutableState<String>>() }
     var activeSegmentId by remember { mutableStateOf<String?>(null) }
     var focusMode by remember { mutableStateOf(false) }
     var docStats by remember { mutableStateOf("") }
@@ -388,7 +400,13 @@ fun RichNoteEditorScreen(
     }
 
     fun persistNow(then: () -> Unit = {}) {
-        viewModel.persist(title, syncSegments(), folderId, tagsCsv, then)
+        val synced = syncSegments()
+        DragProbe.log(
+            "PERSIST kinds=" + synced.joinToString(",") {
+                it.javaClass.simpleName
+            },
+        )
+        viewModel.persist(title, synced, folderId, tagsCsv, then)
     }
 
     fun updateBlock(id: String, segment: DocSegment) {
@@ -654,6 +672,13 @@ fun RichNoteEditorScreen(
         val newTarget = (session.fromIndex - passedAboveIds.size +
             passedBelowIds.size).coerceIn(0, maxTarget)
         if (newTarget != dragTargetIndex) {
+            DragProbe.log(
+                "TARGET $dragTargetIndex->$newTarget ghostTop=$ghostTop " +
+                    "ghostBottom=$ghostBottom items=" +
+                    visibleSegmentItems().joinToString(",") { (i, inf) ->
+                        "$i@${inf.offset}+${inf.size}"
+                    },
+            )
             dragTargetIndex = newTarget
             hapticTick()
         }
@@ -672,9 +697,17 @@ fun RichNoteEditorScreen(
      */
     fun beginDragSession(downPosition: Offset) {
         val index = pendingDragIndex
-        val ui = segments.getOrNull(index) ?: return
+        val ui = segments.getOrNull(index)
+        if (ui == null) {
+            DragProbe.log("BEGIN fail: no segment at pendingIndex=$index")
+            return
+        }
         val info = listState.layoutInfo.visibleItemsInfo
-            .firstOrNull { it.key == ui.id } ?: return
+            .firstOrNull { it.key == ui.id }
+        if (info == null) {
+            DragProbe.log("BEGIN fail: no layoutInfo for segment idx=$index")
+            return
+        }
         dragSession = BlockDragSession(
             segmentId = ui.id,
             fromIndex = index,
@@ -688,6 +721,11 @@ fun RichNoteEditorScreen(
         passedBelowIds.clear()
         focusManager.clearFocus()
         updateDragTarget()
+        DragProbe.log(
+            "BEGIN idx=$index grabOffset=${dragSession?.grabOffsetPx} " +
+                "height=${info.size} offset=${info.offset} " +
+                "target=$dragTargetIndex",
+        )
     }
 
     /**
@@ -697,18 +735,27 @@ fun RichNoteEditorScreen(
      * persists nothing.
      */
     fun commitDragSession() {
-        val session = dragSession ?: return
+        val session = dragSession
+        DragProbe.log("COMMIT entry sessionNull=${session == null}")
+        if (session == null) return
         dragSession = null
         landingLineY.value = null
         passedAboveIds.clear()
         passedBelowIds.clear()
         val from = segments.indexOfFirst { it.id == session.segmentId }
-        if (from < 0) return
+        if (from < 0) {
+            DragProbe.log("COMMIT abort: dragged segment gone")
+            return
+        }
         // The list cannot change during a session, so [from] is
         // the session's origin and the target is already a valid
         // collapsed index; the coerce is belt-and-braces only.
         val target = dragTargetIndex.coerceIn(0, segments.size - 1)
-        if (target == from) return
+        if (target == from) {
+            DragProbe.log("COMMIT no-op: target=$target == from=$from")
+            return
+        }
+        DragProbe.log("COMMIT move $from->$target")
         segments = ensureTrailing(segments.moved(from, target))
         persistNow()
     }
@@ -720,6 +767,7 @@ fun RichNoteEditorScreen(
      * persist — the session simply evaporates.
      */
     fun cancelDragSession() {
+        DragProbe.log("CANCEL session")
         dragSession = null
         landingLineY.value = null
         passedAboveIds.clear()
@@ -1293,6 +1341,7 @@ fun RichNoteEditorScreen(
                 focusRequester = segmentFocusRequesters
                     .getOrPut(ui.id) { FocusRequester() },
                 stateFor = { richStateFor(ui) },
+                cellTextStates = cellTextStates,
                 onFocus = { activeSegmentId = ui.id },
                 onChange = { updateBlock(ui.id, it) },
                 onRemove = { removeBlock(ui.id) },
@@ -1926,6 +1975,10 @@ private fun SegmentEditor(
     focusRequester: FocusRequester? = null,
     dragHandleModifier: Modifier? = null,
     stateFor: () -> RichTextState,
+    // Phase 3.8 (Codex finding 3): the screen-owned cell/item field
+    // text states, hoisted above this editor so the list slot and
+    // the drag ghost share them (see the screen's declaration).
+    cellTextStates: MutableMap<String, MutableState<String>>,
     onFocus: () -> Unit,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
@@ -2014,8 +2067,8 @@ private fun SegmentEditor(
                 }
                 Box(Modifier.weight(1f)) {
                     when (segment) {
-                        is TableSegment -> TableBlock(ui.id, segment, onChange, onRemove)
-                        is TaskListSegment -> TaskListBlock(ui.id, segment, onChange, onRemove)
+                        is TableSegment -> TableBlock(ui.id, segment, cellTextStates, onChange, onRemove)
+                        is TaskListSegment -> TaskListBlock(ui.id, segment, cellTextStates, onChange, onRemove)
                         is ImageSegment -> ImageBlock(
                             segment, attachments, fileFor, onChange, onRemove, onPinchingChange,
                         )
@@ -2390,25 +2443,35 @@ private fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
 }
 
 /**
- * A single-line cell/item field with LOCAL text state. Writing back
- * through the segment on every keystroke is fine, but rendering from the
- * segment is not: the plain-text projection trims and normalises, which
- * would eat spaces while typing. Local state is keyed by block position
- * and only seeded from the stored content.
+ * A single-line cell/item field. Writing back through the segment
+ * on every keystroke is fine, but rendering from the segment is
+ * not: the plain-text projection trims and normalises, which would
+ * eat spaces while typing. So the field's text state is HOISTED
+ * into the screen-owned [cellTextStates] map, keyed by block
+ * position and only seeded (losslessly — see
+ * [app.nota.data.text.PlainTextCodec.htmlToCellText]) from the
+ * stored content on first composition. The hoist matters beyond
+ * typing: over a Phase 3.8 drag the block's editor composes in
+ * its list slot, then in the session ghost, then in the slot
+ * again — state held in a local remember() would be discarded at
+ * the first move and the field would re-seed trimmed (Codex
+ * finding 3, PR #21). In the hoisted map the same state object
+ * serves every composition site, so a remount is a non-event.
  */
 @Composable
 private fun EditableCellText(
     key: String,
     initial: String,
     bodyStyle: Boolean,
+    cellTextStates: MutableMap<String, MutableState<String>>,
     modifier: Modifier = Modifier,
     onEdit: (String) -> Unit,
 ) {
-    var text by remember(key) { mutableStateOf(initial) }
+    val textState = cellTextStates.getOrPut(key) { mutableStateOf(initial) }
     OutlinedTextField(
-        value = text,
+        value = textState.value,
         onValueChange = {
-            text = it
+            textState.value = it
             onEdit(it)
         },
         singleLine = true,
@@ -2425,6 +2488,7 @@ private fun EditableCellText(
 private fun TableBlock(
     blockId: String,
     table: TableSegment,
+    cellTextStates: MutableMap<String, MutableState<String>>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -2438,11 +2502,15 @@ private fun TableBlock(
                 Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                     row.forEachIndexed { c, cell ->
                         EditableCellText(
-                            // Local field state: projecting through the codec
-                            // on every frame would eat spaces mid-typing.
+                            // Field state is hoisted (see
+                            // EditableCellText): projecting through
+                            // the codec on every frame — or reseeding
+                            // on a drag remount — would eat spaces.
+                            // The seed is the lossless projection.
                             key = "$blockId-$r-$c",
-                            initial = PlainTextCodec.htmlToText(cell),
+                            initial = PlainTextCodec.htmlToCellText(cell),
                             bodyStyle = false,
+                            cellTextStates = cellTextStates,
                             modifier = Modifier.weight(1f),
                             onEdit = { newText ->
                                 val newRows = table.rows.mapIndexed { rr, rowCells ->
@@ -2517,6 +2585,7 @@ private fun TableBlock(
 private fun TaskListBlock(
     blockId: String,
     list: TaskListSegment,
+    cellTextStates: MutableMap<String, MutableState<String>>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -2542,8 +2611,9 @@ private fun TaskListBlock(
                     )
                     EditableCellText(
                         key = "$blockId-item-$index",
-                        initial = PlainTextCodec.htmlToText(item.contentHtml),
+                        initial = PlainTextCodec.htmlToCellText(item.contentHtml),
                         bodyStyle = true,
+                        cellTextStates = cellTextStates,
                         modifier = Modifier.weight(1f),
                         onEdit = { newText ->
                             onChange(

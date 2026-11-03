@@ -34,16 +34,19 @@ import app.nota.data.security.BiometricStep
 import app.nota.data.security.StepResult
 import app.nota.data.templates.TemplateRepository
 import app.nota.ui.theme.NotaSpacing
+import java.io.File
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TestName
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -146,6 +149,10 @@ class EditorBlockDragUiTest {
     @get:Rule
     val tempFolder = TemporaryFolder()
 
+    // TEMPORARY (Phase 3.8 diagnosis round): names the probe dump.
+    @get:Rule
+    val testName = TestName()
+
     /** Raw-key device provider, the NoteLockUnlockState test pattern. */
     private class RawKeyProvider : NoteLockDeviceKeyProvider {
         private val key = ByteArray(32) { (0x40 + it).toByte() }
@@ -211,6 +218,20 @@ class EditorBlockDragUiTest {
         )
         lockRepository = NoteLockRepository(repository, provider, attachmentStore, biometricStore)
         insertStore = PendingInsertStore(tempFolder.newFolder("files"))
+        DragProbe.clear()
+    }
+
+    /**
+     * TEMPORARY (Phase 3.8 diagnosis round): dump the drag-session
+     * probe into build/probe-output (uploaded with the run's own
+     * evidence artifact) so the release path's fate is readable
+     * from CI evidence. Removed with the diagnosis.
+     */
+    @After
+    fun dumpDragProbe() {
+        val dir = File("build/probe-output").apply { mkdirs() }
+        File(dir, "drag-probe-${testName.methodName}.txt")
+            .writeText(DragProbe.snapshot())
     }
 
     private fun composeEditor(noteId: String) {

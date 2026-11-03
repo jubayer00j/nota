@@ -35,6 +35,20 @@ class PlainTextCodecTest {
     }
 
     @Test
+    fun cellTextSeedPreservesBoundarySpaces() {
+        // Phase 3.8 (Codex finding 3): the field seed must NOT trim —
+        // the field text is the write-back source for the next edit,
+        // so a trimming seed silently deletes boundary spaces then.
+        assertEquals(" foo ", PlainTextCodec.htmlToCellText(" foo "))
+        assertEquals(" foo ", PlainTextCodec.htmlToCellText("<p> foo </p>"))
+        assertEquals(" x ", PlainTextCodec.htmlToCellText("<b> x </b>"))
+        assertEquals("a & b ", PlainTextCodec.htmlToCellText("a &amp; b "))
+        assertEquals(" ", PlainTextCodec.htmlToCellText(" "))
+        assertEquals("", PlainTextCodec.htmlToCellText(""))
+        assertEquals("CellA", PlainTextCodec.htmlToCellText("CellA"))
+    }
+
+    @Test
     fun blockBoundariesBecomeLineBreaksNotFusedWords() {
         // Rich-editor shapes must not fuse adjacent blocks into single
         // words in the plain-text projection (snippets + FTS).
