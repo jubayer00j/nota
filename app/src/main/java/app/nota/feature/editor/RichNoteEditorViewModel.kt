@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -61,6 +62,12 @@ class RichNoteEditorViewModel(
 
     private val _tagNames = MutableStateFlow<List<String>>(emptyList())
     val tagNames: StateFlow<List<String>> = _tagNames
+
+    /** Every tag in the library (Phase 4.1: the Suggest-tags prompt
+     *  prefers existing library tags, mirroring 1.x). */
+    val libraryTagNames: StateFlow<List<String>> = repository.observeTags()
+        .map { tags -> tags.map { it.name } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _attachments = MutableStateFlow<List<AttachmentEntity>>(emptyList())
     val attachments: StateFlow<List<AttachmentEntity>> = _attachments

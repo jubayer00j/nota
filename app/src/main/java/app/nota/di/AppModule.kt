@@ -1,5 +1,11 @@
 package app.nota.di
 
+import app.nota.data.ai.AiHttpClient
+import app.nota.data.ai.AiKeyCipher
+import app.nota.data.ai.AiService
+import app.nota.data.ai.AiSettingsStore
+import app.nota.data.ai.AndroidKeystoreAiKeyCipher
+import app.nota.data.ai.OkHttpAiClient
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.auth.AuthManager
 import app.nota.data.auth.GuestLibraryTransfer
@@ -68,10 +74,20 @@ val appModule = module {
     single { NoteLockRepository(get(), get(), get(), get()) }
     // Phase 2c backup/restore engine (local ZIP + NOMAENC1 + crossover).
     single { BackupRepository(androidContext(), get(), get(), get()) }
+    // Phase 4.1 BYOK AI: Keystore-sealed per-account provider keys
+    // (device-local preferences — never Room, never a backup), the
+    // HTTP seam, and the call orchestration. Registered before
+    // AuthManager, which drops an account's keys on sign-out.
+    single<AiKeyCipher> { AndroidKeystoreAiKeyCipher() }
+    single { AiSettingsStore(get(), get()) }
+    single<AiHttpClient> { OkHttpAiClient() }
+    single {
+        AiService(get(), get(), accountIdProvider = { get<DatabaseProvider>().accountId.value })
+    }
     // Phase 3a accounts: identity (Firebase Auth, identity only) +
     // the guest→account library copy.
     single { GuestLibraryTransfer(get(), get(), get()) }
-    single { AuthManager(get(), get(), get()) }
+    single { AuthManager(get(), get(), get(), get()) }
     // Phase 3b Google Drive: authorization (drive.file only), the
     // REST gateway, and the app-scoped operations coordinator.
     single { app.nota.data.drive.DriveAuth(get()) }

@@ -47,10 +47,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -98,8 +100,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -114,6 +118,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextLayoutResult
+import app.nota.data.ai.AiException
+import app.nota.data.ai.AiService
+import app.nota.data.ai.AiSummaryHtml
+import app.nota.data.ai.AiSummaryOutcome
+import app.nota.data.ai.AiTagOutcome
 import app.nota.data.attachments.PendingInsertKind
 import app.nota.data.attachments.PendingInsertMode
 import app.nota.data.attachments.PendingInsertRecord
@@ -154,6 +163,8 @@ import java.util.Date
 import kotlin.math.roundToInt
 import java.util.Locale
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
@@ -223,11 +234,14 @@ fun RichNoteEditorScreen(
     // seam, injected so UI tests can substitute a temp-dir store.
     pendingInsertStore: PendingInsertStore = koinInject(),
     databaseProvider: DatabaseProvider = koinInject(),
+    // Phase 4.1: the BYOK AI orchestration (Summarize / Suggest tags).
+    aiService: AiService = koinInject(),
 ) {
     LaunchedEffect(noteId) { viewModel.load(noteId) }
     val note by viewModel.note.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val existingTags by viewModel.tagNames.collectAsState()
+    val libraryTagNames by viewModel.libraryTagNames.collectAsState()
     val attachments by viewModel.attachments.collectAsState()
     val linkedFrom by viewModel.linkedFrom.collectAsState()
     val linkableNotes by viewModel.linkableNotes.collectAsState()
@@ -350,6 +364,7 @@ fun RichNoteEditorScreen(
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
     val bringIntoView = remember { BringIntoViewRequester() }
     // Phase 1.5 fix 2: focus target for "tap below the last block".
     val trailingFocusRequester = remember { FocusRequester() }
@@ -405,6 +420,58 @@ fun RichNoteEditorScreen(
 
     fun updateBlock(id: String, segment: DocSegment) {
         segments = segments.map { if (it.id == id) it.copy(segment = segment) else it }
+    }
+
+    // ---- Phase 4.1: AI actions (Summarize / Suggest tags) --------
+    // User-initiated only, confirm-before-apply: the model's output
+    // lands in a sheet/dialog and touches the note only on Insert /
+    // Apply. The in-flight call is a Job the progress dialog's
+    // Cancel button cancels (which also cancels the HTTP request).
+    // With no key saved for the active provider the service throws
+    // NO_KEY, whose message points at Settings → AI features —
+    // the same dialog shows mapped provider errors in calm form.
+    var aiJob by remember { mutableStateOf<Job?>(null) }
+    var aiBusyLabel by remember { mutableStateOf<String?>(null) }
+    var aiNotice by remember { mutableStateOf<String?>(null) }
+    var aiSummary by remember { mutableStateOf<AiSummaryOutcome?>(null) }
+    var aiTags by remember { mutableStateOf<AiTagOutcome?>(null) }
+
+    fun runAiAction(label: String, action: suspend () -> Unit) {
+        aiBusyLabel = label
+        aiJob = scope.launch {
+            try {
+                action()
+            } catch (e: AiException) {
+                aiNotice = e.displayMessage
+            } catch (e: CancellationException) {
+                // The user's Cancel — nothing to report. Rethrow so
+                // the coroutine ends as cancelled, not completed.
+                throw e
+            } finally {
+                aiBusyLabel = null
+                aiJob = null
+            }
+        }
+    }
+
+    fun startSummarize() {
+        runAiAction("Summarize") {
+            aiSummary = aiService.summarize(
+                title = title,
+                plainText = NoteDocument.plainText(syncSegments()),
+            )
+        }
+    }
+
+    fun startSuggestTags() {
+        runAiAction("Suggest tags") {
+            aiTags = aiService.suggestTags(
+                title = title,
+                plainText = NoteDocument.plainText(syncSegments()),
+                existingTagNames = libraryTagNames,
+                currentTagNames = parseTagsCsv(tagsCsv),
+            )
+        }
     }
 
     /**
@@ -1201,6 +1268,25 @@ fun RichNoteEditorScreen(
                             text = { Text(if (focusMode) "Focus mode: on" else "Focus mode: off") },
                             onClick = { focusMode = !focusMode; menuExpanded = false },
                         )
+                        // Phase 4.1: the two BYOK AI actions — edit
+                        // mode only; they run on the unlocked
+                        // content the editor already holds.
+                        if (editing) {
+                            DropdownMenuItem(
+                                text = { Text("Summarize") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.AutoAwesome, contentDescription = null)
+                                },
+                                onClick = { menuExpanded = false; startSummarize() },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Suggest tags") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Sell, contentDescription = null)
+                                },
+                                onClick = { menuExpanded = false; startSuggestTags() },
+                            )
+                        }
                         if (current?.locked != true) {
                             DropdownMenuItem(
                                 text = { Text("Save as template") },
@@ -1838,6 +1924,50 @@ fun RichNoteEditorScreen(
                 Spacer(Modifier.height(NotaSpacing.md))
             }
         }
+    }
+
+    // Phase 4.1 AI action surfaces (see AiActionSheets.kt):
+    // progress-with-cancel while a call is in flight, the no-key /
+    // error notice, and the two confirm-before-apply result
+    // surfaces. Insert and Apply are the only paths by which model
+    // output ever reaches the note.
+    if (aiBusyLabel != null) {
+        AiProgressDialog(label = aiBusyLabel!!, onCancel = { aiJob?.cancel() })
+    }
+    aiNotice?.let { message ->
+        AiNoticeDialog(message = message, onDismiss = { aiNotice = null })
+    }
+    aiSummary?.let { outcome ->
+        AiSummarySheet(
+            summary = outcome.summary,
+            truncated = outcome.truncated,
+            onInsertAtTop = {
+                segments = listOf(
+                    UiSegment(newUiId(), TextSegment(AiSummaryHtml.toHtml(outcome.summary))),
+                ) + segments
+                persistNow()
+                aiSummary = null
+            },
+            onCopy = {
+                clipboard.setText(AnnotatedString(outcome.summary))
+                aiSummary = null
+            },
+            onDismiss = { aiSummary = null },
+        )
+    }
+    aiTags?.let { outcome ->
+        AiTagsDialog(
+            tags = outcome.tags,
+            truncated = outcome.truncated,
+            onApply = { chosen ->
+                val merged = (parseTagsCsv(tagsCsv) + chosen)
+                    .distinctBy { it.trim().lowercase() }
+                tagsCsv = merged.joinToString(", ")
+                persistNow()
+                aiTags = null
+            },
+            onDismiss = { aiTags = null },
+        )
     }
 
     if (showTemplateDialog) {

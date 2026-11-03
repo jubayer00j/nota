@@ -1,5 +1,6 @@
 package app.nota.data.auth
 
+import app.nota.data.ai.AiSettingsStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
@@ -59,6 +60,7 @@ class AuthManager(
     private val provider: DatabaseProvider,
     private val preferences: PreferencesRepository,
     private val transfer: GuestLibraryTransfer,
+    private val aiSettingsStore: AiSettingsStore,
 ) {
     private val auth: FirebaseAuth? by lazy {
         runCatching { FirebaseAuth.getInstance() }.getOrNull()
@@ -109,9 +111,20 @@ class AuthManager(
 
     private fun applyUser(user: FirebaseUser?) {
         if (user == null) {
+            val previousUid = (_session.value as? Session.SignedIn)?.uid
             _session.value = Session.Guest
             _guestMoveOffer.value = null
             provider.switchTo(NotaDatabase.GUEST_ACCOUNT)
+            // Phase 4.1: signing out drops the account's AI keys
+            // (1.x behaviour — no credential material outlives the
+            // sign-in it belongs to). Fire-and-forget on the
+            // manager scope; a storage failure here must never
+            // block the sign-out itself.
+            if (previousUid != null) {
+                scope.launch {
+                    runCatching { aiSettingsStore.clearAccount(previousUid) }
+                }
+            }
         } else {
             _session.value = user.toSession()
             provider.switchTo(user.uid)
