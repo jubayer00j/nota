@@ -78,6 +78,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -106,11 +107,11 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.zIndex
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.lazy.LazyListItemInfo
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextLayoutResult
 import app.nota.data.attachments.PendingInsertKind
@@ -160,6 +161,22 @@ import org.koin.androidx.compose.koinViewModel
 /** One row of the editor's working document (stable id across recompositions). */
 private data class UiSegment(val id: String, val segment: DocSegment)
 
+/**
+ * Phase 3.8: one live block-drag session. [fromIndex] is the
+ * dragged segment's index in the working list; [grabOffsetPx] is
+ * where inside the block (below its top, list-viewport px) the
+ * finger claimed it — the ghost's top is always the pointer Y
+ * minus this; [blockHeightPx] is the block's laid-out height at
+ * the claim: the placeholder slot holds exactly this height for
+ * the whole session.
+ */
+private data class BlockDragSession(
+    val segmentId: String,
+    val fromIndex: Int,
+    val grabOffsetPx: Float,
+    val blockHeightPx: Int,
+)
+
 private fun newUiId(): String = UUID.randomUUID().toString()
 
 /** A copy of the list with the element at [from] moved to [to] (Phase 3.5, D4 drag reorder). */
@@ -167,11 +184,15 @@ private fun <T> List<T>.moved(from: Int, to: Int): List<T> =
     toMutableList().apply { add(to, removeAt(from)) }
 
 /**
- * Phase 3.7: how far a dragged block's leading edge must push past a
- * neighbour's near edge before the swap commits (see
- * evaluateBlockSwap). A small constant — big enough to read as
- * intent and to act as the swap hysteresis, small enough that
- * reordering even the tallest blocks is a flick, not a haul.
+ * Phase 3.7 origin, Phase 3.8 role: how far a dragged block's
+ * leading edge must push past a neighbour's near edge before
+ * that neighbour counts as PASSED for the insertion target (see
+ * updateDragTarget). A small constant — big enough to read as
+ * intent, small enough that reordering even the tallest blocks
+ * is a flick, not a haul. It is also the target's hysteresis:
+ * once an edge has passed, the finger must retreat the full
+ * overshoot to un-pass it, so a parked finger cannot flicker
+ * the landing line back and forth across a boundary.
  */
 private val BLOCK_SWAP_OVERSHOOT = 24.dp
 
@@ -229,6 +250,17 @@ fun RichNoteEditorScreen(
     var folderId by remember { mutableStateOf<String?>(null) }
     var segments by remember { mutableStateOf<List<UiSegment>>(emptyList()) }
     val textStates = remember { mutableMapOf<String, RichTextState>() }
+    // Phase 3.8 (Codex finding 3, PR #21): table-cell / task-item
+    // field text, hoisted ABOVE the block editors (the textStates
+    // pattern). A block's editor composes in two places over a
+    // drag — its list slot, then the session GHOST, then the slot
+    // again — and a remember() inside the field does not survive
+    // that move: the field re-seeded from the stored HTML through
+    // a trimming projection, and a later edit wrote the trimmed
+    // text back (silent loss of the user's boundary spaces). The
+    // state lives here, keyed by block position, so slot and ghost
+    // share the very same field state and a remount is a non-event.
+    val cellTextStates = remember { mutableMapOf<String, MutableState<String>>() }
     var activeSegmentId by remember { mutableStateOf<String?>(null) }
     var focusMode by remember { mutableStateOf(false) }
     var docStats by remember { mutableStateOf("") }
@@ -250,13 +282,51 @@ fun RichNoteEditorScreen(
     // the block takes the caret at its start (applied once composed).
     var pendingCaretFocusId by remember { mutableStateOf<String?>(null) }
     val segmentFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
-    // Phase 3.5 (D4): block drag-reorder state — the dragged
-    // segment's id and its accumulated vertical translation.
-    var dragSegmentId by remember { mutableStateOf<String?>(null) }
-    var dragOffsetPx by remember { mutableFloatStateOf(0f) }
-    // Phase 3.6 (G1): layout heights of the segment rows, so the
-    // dragged block's slot can stay behind as the drop indicator.
-    val segmentHeights = remember { mutableStateMapOf<String, Int>() }
+    // Phase 3.8: the drag SESSION state (see BlockDragGesture.kt).
+    // While a session is live the document NEVER reorders and
+    // neighbours never animate: the dragged block's content rides
+    // a ghost overlay positioned by translation only, its list
+    // slot renders as an empty placeholder of the same height,
+    // and the only thing tracked is the insertion target. The
+    // drop commits exactly one reorder + persist.
+    var dragSession by remember { mutableStateOf<BlockDragSession?>(null) }
+    // The pointer's current Y in list-viewport coordinates. Read
+    // ONLY inside the ghost's graphicsLayer (a draw-phase read —
+    // moving the finger never recomposes anything) and by the
+    // session bookkeeping functions, never during composition.
+    var dragPointerY by remember { mutableFloatStateOf(0f) }
+    // The insertion target: an index into the COLLAPSED list (the
+    // document with the dragged segment lifted out). The origin
+    // position — a no-op drop — is the dragged segment's own index.
+    var dragTargetIndex by remember { mutableIntStateOf(0) }
+    // The segment index a surface down landed on, stashed by the
+    // hit-test for the session start that follows a claim (the
+    // pendingCaretFocusId pattern — hit-test and claim are two
+    // calls for the same down, with no interleaving down between).
+    var pendingDragIndex by remember { mutableIntStateOf(-1) }
+    // Phase 3.8 (Codex review, PR #21): the ids of neighbours the
+    // ghost has PASSED, accumulated across the whole session.
+    // The target counts passed neighbours, but layoutInfo only
+    // describes VISIBLE rows — on a long note under auto-scroll a
+    // passed row scrolls out of the viewport and would stop
+    // counting, walking the target backward while the finger
+    // never moved. So crossings are remembered by identity: a
+    // visible row joins its set when the edge condition holds
+    // and leaves it when it visibly stops holding; an off-screen
+    // row keeps its membership (it can only un-pass by sweeping
+    // back past the ghost's edge, which makes it visible again
+    // first). Plain mutable sets, not snapshot state — read and
+    // written only inside the session bookkeeping, never during
+    // composition.
+    val passedAboveIds = remember { mutableSetOf<String>() }
+    val passedBelowIds = remember { mutableSetOf<String>() }
+    // The landing line's Y (list-viewport px), computed by the
+    // session bookkeeping and held as state so the overlay can
+    // read it INSIDE the line's graphicsLayer — a draw-phase
+    // read. Computing it during composition instead would
+    // subscribe the overlay to layoutInfo, and every auto-scroll
+    // tick would recompose the ghost (Codex review, PR #21).
+    val landingLineY = remember { mutableStateOf<Float?>(null) }
     // Phase 3.6 (G4): true while a two-finger image pinch is live —
     // the list must not scroll under it.
     var imagePinchActive by remember { mutableStateOf(false) }
@@ -451,82 +521,221 @@ fun RichNoteEditorScreen(
     }
 
     /** Phase 3.6 (G1): a small tick when a dragged block locks into
-     *  a new slot — the landing is felt as well as seen. */
+     *  a new slot — the landing is felt as well as seen. Phase 3.8:
+     *  fired when the session's insertion TARGET changes (there
+     *  are no mid-drag swaps anymore), so the tick rate is the
+     *  target-change rate. */
     fun hapticTick() {
         view.performHapticFeedback(HapticFeedbackConstants.CONTEXT_CLICK)
     }
 
     /**
-     * Phase 3.5 (D4) drag-reorder, Phase 3.6 (G1) refactor, Phase 3.7
-     * threshold change: evaluates ONE swap for the dragged block at
-     * its current accumulated translation and returns true when a
-     * swap happened. The dragged block follows the finger via a
-     * graphicsLayer translation; when a swap commits, the two blocks
-     * trade places in the working list and the accumulated
-     * translation is adjusted by the neighbour's height (+ the
-     * inter-segment spacing) so the block stays under the finger.
-     * Neighbours are located through the list's layout info by item
-     * key — title/meta/attachments rows, whose keys are not segment
-     * ids, can never be swap targets, so a block moves among segments
-     * only. Called per finger move AND per auto-scroll step (G1), so
-     * a block can be walked the length of a long note.
-     *
-     * 3.7 — EDGE thresholds replace 3.6's centre-to-centre crossing.
-     * Centre-crossing made the required travel proportional to the
-     * blocks' heights: swapping a tall file card past a tall image
-     * meant hauling the finger most of a screen before anything
-     * responded (Jubayer's 0.4.2 verdict). Now a swap commits when
-     * the dragged block's LEADING edge has pushed [BLOCK_SWAP_OVERSHOOT]
-     * past the neighbour's NEAR edge — a constant, short travel
-     * whatever the blocks' heights. The overshoot doubles as the
-     * hysteresis: after a swap, the reverse threshold sits the same
-     * overshoot beyond the passed neighbour's far side of the new
-     * geometry, so a parked finger cannot oscillate a swap back and
-     * forth.
+     * Segment rows currently laid out, as (segment index, layout
+     * info) pairs in document order. The title/meta/attachments
+     * rows share the list, but their keys are not segment ids, so
+     * they never appear here — a block moves among segments only.
+     * All geometry below comes from this layout info (exact laid-
+     * out quantities), never from the semantics tree.
      */
-    fun evaluateBlockSwap(ui: UiSegment): Boolean {
-        val from = segments.indexOfFirst { it.id == ui.id }
-        if (from < 0) return false
-        val visible = listState.layoutInfo.visibleItemsInfo
-        val info = visible.firstOrNull { it.key == ui.id } ?: return false
-        val overshootPx = with(density) { BLOCK_SWAP_OVERSHOOT.toPx() }
-        val visualTop = info.offset + dragOffsetPx
-        val visualBottom = visualTop + info.size
-        val spacingPx = with(density) { NotaSpacing.sm.toPx() }
-        val prev = segments.getOrNull(from - 1)?.let { neighbour ->
-            visible.firstOrNull { it.key == neighbour.id }
+    fun visibleSegmentItems(): List<Pair<Int, LazyListItemInfo>> {
+        val indexByKey = segments.mapIndexed { i, ui -> ui.id to i }.toMap()
+        return listState.layoutInfo.visibleItemsInfo.mapNotNull { info ->
+            indexByKey[info.key]?.let { it to info }
         }
-        if (prev != null && visualTop + overshootPx < prev.offset + prev.size) {
-            segments = segments.moved(from, from - 1)
-            dragOffsetPx += prev.size + spacingPx
-            return true
-        }
-        val next = segments.getOrNull(from + 1)?.let { neighbour ->
-            visible.firstOrNull { it.key == neighbour.id }
-        }
-        if (next != null && visualBottom - overshootPx > next.offset) {
-            // Never swap past the trailing caret segment: an empty
-            // text tail is not content to pass but the Phase 1.5
-            // guarantee itself — a block stopped above it is already
-            // the last content. (Codex, PR #18.)
-            val nextIsTailCaret = from + 1 == segments.lastIndex &&
-                (segments[from + 1].segment as? TextSegment)
-                    ?.let { NoteDocument.isEmptyTextSegment(it) } == true
-            if (!nextIsTailCaret) {
-                segments = segments.moved(from, from + 1)
-                // A block swapped below a real final text segment
-                // lands last; restore the caret tail below it.
-                segments = ensureTrailing(segments)
-                dragOffsetPx -= next.size + spacingPx
-                return true
-            }
-        }
-        return false
     }
 
-    fun onBlockDrag(ui: UiSegment, dragAmountY: Float) {
-        dragOffsetPx += dragAmountY
-        if (evaluateBlockSwap(ui)) hapticTick()
+    /**
+     * Phase 3.8 hit-test for the surface gesture (see
+     * BlockDragGesture.kt): is [position] (list-viewport
+     * coordinates) on a DRAGGABLE segment — anything but a plain
+     * text segment, whose long press is text selection? On a hit
+     * the segment index is stashed in [pendingDragIndex] for
+     * [beginDragSession]; the geometry itself is re-read there,
+     * at claim time, so a hair of list movement during the press
+     * cannot stale it.
+     */
+    fun dragHitTest(position: Offset): Boolean {
+        if (!editing) return false
+        val hit = visibleSegmentItems().firstOrNull { (index, info) ->
+            segments[index].segment !is TextSegment &&
+                position.y >= info.offset && position.y < info.offset + info.size
+        } ?: return false
+        pendingDragIndex = hit.first
+        return true
+    }
+
+    /**
+     * Phase 3.8: the landing line's Y (list-viewport coordinates)
+     * for insertion target [target], or null when the boundary
+     * cannot be placed from the visible rows. At the origin
+     * target the line caps the dragged block's own slot; elsewhere
+     * it sits in the gap above the segment that would follow the
+     * dropped block — or below the last visible segment when the
+     * target is past it. Called ONLY from [updateDragTarget]
+     * (event/auto-scroll callbacks), never from composition —
+     * see [landingLineY].
+     */
+    fun computeLandingLineY(target: Int): Float? {
+        val session = dragSession ?: return null
+        val spacingPx = with(density) { NotaSpacing.sm.toPx() }
+        val items = visibleSegmentItems().toMap()
+        val from = session.fromIndex
+        if (target == from) {
+            return items[from]?.let { it.offset - spacingPx / 2f }
+        }
+        // The collapsed item that would sit AT [target] after the
+        // drop is the segment now at [target] (above the gap) or
+        // [target] + 1 (below it).
+        val following = if (target < from) target else target + 1
+        items[following]?.let { return it.offset - spacingPx / 2f }
+        // The target is past every visible segment: the line
+        // trails the last visible one instead.
+        val lastVisible = visibleSegmentItems()
+            .lastOrNull { (index, _) -> index != from } ?: return null
+        return lastVisible.second.offset + lastVisible.second.size + spacingPx / 2f
+    }
+
+    /**
+     * Phase 3.8: recompute the insertion target for the live
+     * session — called on every drag move and every auto-scroll
+     * step. The rule is the 3.7 edge rule, re-targeted: the
+     * document does not move, so instead of swapping, a neighbour
+     * counts as PASSED once the ghost's leading edge has pushed
+     * [BLOCK_SWAP_OVERSHOOT] past the neighbour's near edge —
+     * ghost bottom vs the near edge of each block below, ghost
+     * top vs the far edge of each block above, all read from the
+     * list's own layoutInfo (exact laid-out offsets and sizes).
+     * The target is the origin index, minus the blocks passed
+     * above, plus the blocks passed below. Passed-ness is
+     * accumulated BY SEGMENT ID across the session (see
+     * [passedBelowIds]) so rows that scroll out of the viewport
+     * under auto-scroll keep counting.
+     *
+     * Because the thresholds sit on the ghost's EDGES, the rule
+     * is grab-point independent: at rest both edges sit inside
+     * the block's own slot, nothing counts as passed, and the
+     * target is the origin for any grab — including a deep grab
+     * on a tall block over a short neighbour, where a
+     * pointer/centre rule would retarget before the finger has
+     * moved at all. Travel stays the short flick 3.7 shipped
+     * (spacing + overshoot), whatever either block's height, and
+     * the overshoot doubles as the hysteresis: un-passing needs
+     * the full overshoot in retreat.
+     *
+     * The trailing caret tail clamps the target exactly as the
+     * 3.7 swap guard did: the block may pass a real closing
+     * paragraph (the commit restores the caret tail below it)
+     * but never the empty caret segment itself.
+     *
+     * Every call also refreshes [landingLineY] — computed here,
+     * in event/auto-scroll callbacks rather than composition, so
+     * the overlay never subscribes to layoutInfo (see the state's
+     * doc).
+     */
+    fun updateDragTarget() {
+        val session = dragSession ?: return
+        val overshootPx = with(density) { BLOCK_SWAP_OVERSHOOT.toPx() }
+        val ghostTop = dragPointerY - session.grabOffsetPx
+        val ghostBottom = ghostTop + session.blockHeightPx
+        for ((index, info) in visibleSegmentItems()) {
+            if (index == session.fromIndex) continue
+            val id = segments[index].id
+            if (index < session.fromIndex) {
+                if (info.offset + info.size - overshootPx > ghostTop) {
+                    passedAboveIds += id
+                } else {
+                    passedAboveIds -= id
+                }
+            } else {
+                if (info.offset + overshootPx < ghostBottom) {
+                    passedBelowIds += id
+                } else {
+                    passedBelowIds -= id
+                }
+            }
+        }
+        val collapsedCount = segments.size - 1
+        val last = segments.lastOrNull()?.segment
+        val maxTarget = if (last is TextSegment &&
+            NoteDocument.isEmptyTextSegment(last)
+        ) {
+            collapsedCount - 1
+        } else {
+            collapsedCount
+        }
+        val newTarget = (session.fromIndex - passedAboveIds.size +
+            passedBelowIds.size).coerceIn(0, maxTarget)
+        if (newTarget != dragTargetIndex) {
+            dragTargetIndex = newTarget
+            hapticTick()
+        }
+        landingLineY.value = computeLandingLineY(newTarget)
+    }
+
+    /**
+     * Phase 3.8: a surface long press claimed the block at
+     * [pendingDragIndex] — open the session. The target starts at
+     * the origin (a no-op drop), and any focus a block child (a
+     * table cell) raised on the press is cleared: the session owns
+     * the finger now, and a same-frame text selection/cursor must
+     * not survive into it. Together with the surface gesture's
+     * Initial-pass claim this is what makes a cell long press a
+     * drag, always — a TAP still focuses and edits the cell.
+     */
+    fun beginDragSession(downPosition: Offset) {
+        val index = pendingDragIndex
+        val ui = segments.getOrNull(index) ?: return
+        val info = listState.layoutInfo.visibleItemsInfo
+            .firstOrNull { it.key == ui.id } ?: return
+        dragSession = BlockDragSession(
+            segmentId = ui.id,
+            fromIndex = index,
+            grabOffsetPx = (downPosition.y - info.offset)
+                .coerceIn(0f, info.size.toFloat()),
+            blockHeightPx = info.size,
+        )
+        dragPointerY = downPosition.y
+        dragTargetIndex = index
+        passedAboveIds.clear()
+        passedBelowIds.clear()
+        focusManager.clearFocus()
+        updateDragTarget()
+    }
+
+    /**
+     * Phase 3.8: the finger lifted — commit the session with
+     * EXACTLY ONE reorder (and one persist) when the target
+     * differs from the origin. A no-move drop changes nothing and
+     * persists nothing.
+     */
+    fun commitDragSession() {
+        val session = dragSession ?: return
+        dragSession = null
+        landingLineY.value = null
+        passedAboveIds.clear()
+        passedBelowIds.clear()
+        val from = segments.indexOfFirst { it.id == session.segmentId }
+        if (from < 0) return
+        // The list cannot change during a session, so [from] is
+        // the session's origin and the target is already a valid
+        // collapsed index; the coerce is belt-and-braces only.
+        val target = dragTargetIndex.coerceIn(0, segments.size - 1)
+        if (target == from) return
+        segments = ensureTrailing(segments.moved(from, target))
+        persistNow()
+    }
+
+    /**
+     * Phase 3.8: the gesture was cancelled (the framework took
+     * the pointer). The document was never touched during the
+     * session, so there is nothing to undo and nothing to
+     * persist — the session simply evaporates.
+     */
+    fun cancelDragSession() {
+        dragSession = null
+        landingLineY.value = null
+        passedAboveIds.clear()
+        passedBelowIds.clear()
     }
 
     // --- Phase 3.6 (G3): read ⇄ edit mode transitions ----------------
@@ -684,24 +893,26 @@ fun RichNoteEditorScreen(
         editEntryTarget = null
     }
 
-    // Phase 3.6 (G1): auto-scroll while a block drag rides the
-    // viewport's edge — the finger can hold still at the edge while
-    // the document walks beneath it, swap by swap. This removes the
-    // Phase 3.5 limitation (a drag stayed within the composed
-    // window). The step grows with how deep into the edge zone the
-    // dragged block's visual edge sits.
-    LaunchedEffect(dragSegmentId) {
-        val id = dragSegmentId ?: return@LaunchedEffect
+    // Phase 3.6 (G1) origin, Phase 3.8 form: auto-scroll while a
+    // drag session rides the viewport's edge — the finger can hold
+    // still at the edge while the document walks beneath it. In
+    // the session model there is no translation to glue: the
+    // pointer Y is a viewport quantity and does not change when
+    // the list scrolls; what changes is the geometry the target
+    // is computed from, so each consumed step simply recomputes
+    // the target against the fresh layout. The step grows with
+    // how deep into the edge zone the GHOST's visual edge sits;
+    // the ghost itself never leaves the finger.
+    LaunchedEffect(dragSession?.segmentId) {
+        val session = dragSession ?: return@LaunchedEffect
         val zonePx = with(density) { 72.dp.toPx() }
         val maxStepPx = with(density) { 14.dp.toPx() }
         while (true) {
             delay(16)
-            if (dragSegmentId != id) break
-            val ui = segments.firstOrNull { it.id == id } ?: break
+            if (dragSession?.segmentId != session.segmentId) break
             val info = listState.layoutInfo
-            val item = info.visibleItemsInfo.firstOrNull { it.key == id } ?: continue
-            val top = item.offset + dragOffsetPx
-            val bottom = top + item.size
+            val top = dragPointerY - session.grabOffsetPx
+            val bottom = top + session.blockHeightPx
             val step = when {
                 top < info.viewportStartOffset + zonePx ->
                     -maxStepPx * ((info.viewportStartOffset + zonePx - top) / zonePx)
@@ -714,15 +925,7 @@ fun RichNoteEditorScreen(
             if (step != 0f) {
                 val consumed = listState.scrollBy(step)
                 if (consumed != 0f) {
-                    // The list moved under the stationary finger:
-                    // absorb the scroll into the drag translation so
-                    // the block stays glued to the finger (and inside
-                    // the edge zone) while the slots walk beneath it.
-                    // Without this the block's visual edge retreats
-                    // out of the zone and the scroll stalls after one
-                    // step (Codex, PR #19).
-                    dragOffsetPx += consumed
-                    if (evaluateBlockSwap(ui)) hapticTick()
+                    updateDragTarget()
                 }
             }
         }
@@ -1085,7 +1288,55 @@ fun RichNoteEditorScreen(
             }
             return@Scaffold
         }
+        // Phase 3.8: one segment-editor body, two hosts — the
+        // segment's list slot in normal flow, and the drag ghost
+        // overlay while a session holds the segment. Factoring the
+        // call keeps the ghost a pixel-exact copy of the slot it
+        // left. (The rail stays a visual affordance; the drag
+        // gesture itself lives on the surface, below.)
+        val segmentEditor: @Composable (UiSegment, Int) -> Unit = { ui, index ->
+            val isBlock = ui.segment !is TextSegment && ui.segment !is QuoteSegment
+            SegmentEditor(
+                ui = ui,
+                isActive = ui.id == activeSegmentId,
+                isTrailingCaret = index == segments.lastIndex &&
+                    ui.segment is TextSegment,
+                trailingFocusRequester = trailingFocusRequester,
+                focusRequester = segmentFocusRequesters
+                    .getOrPut(ui.id) { FocusRequester() },
+                stateFor = { richStateFor(ui) },
+                cellTextStates = cellTextStates,
+                onFocus = { activeSegmentId = ui.id },
+                onChange = { updateBlock(ui.id, it) },
+                onRemove = { removeBlock(ui.id) },
+                attachments = attachments,
+                fileFor = { viewModel.attachmentFile(it) },
+                bringIntoView = bringIntoView,
+                onPinchingChange = { imagePinchActive = it },
+                dragHandleModifier = if (isBlock) Modifier else null,
+            )
+        }
         Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
+            // Phase 3.8: the drag surface wraps the list — it
+            // hit-tests every down, claims block long presses in
+            // the Initial pass, and hosts the session overlays
+            // (landing line + ghost) above the list. The box and
+            // the list share one origin, so surface coordinates
+            // ARE list-viewport coordinates throughout.
+            Box(
+                Modifier.fillMaxWidth().weight(1f)
+                    .blockDragSurface(
+                        key = editing,
+                        hitTest = { position -> dragHitTest(position) },
+                        onSessionStart = { down -> beginDragSession(down) },
+                        onSessionMove = { pointerY ->
+                            dragPointerY = pointerY
+                            updateDragTarget()
+                        },
+                        onSessionEnd = { commitDragSession() },
+                        onSessionCancel = { cancelDragSession() },
+                    ),
+            ) {
             LazyColumn(
                 state = listState,
                 // Phase 3.5 (D4): while a block drag is live the list
@@ -1093,8 +1344,8 @@ fun RichNoteEditorScreen(
                 // Phase 3.6 (G4): the same while an image pinch is live.
                 // (Auto-scroll during a drag is programmatic scrollBy,
                 // which userScrollEnabled does not gate.)
-                userScrollEnabled = dragSegmentId == null && !imagePinchActive,
-                modifier = Modifier.fillMaxWidth().weight(1f),
+                userScrollEnabled = dragSession == null && !imagePinchActive,
+                modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(NotaSpacing.md),
                 verticalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
             ) {
@@ -1187,114 +1438,27 @@ fun RichNoteEditorScreen(
                         return@itemsIndexed
                     }
                     // Phase 3.6 (G1): EVERY block type drags — and so
-                    // does a quote — by long-press on the block itself
-                    // (see BlockDragGesture.kt); only plain text
-                    // segments are exempt, because their long-press is
-                    // text selection. The 3.5 rail remains as the
-                    // visual affordance. While dragged, the block
-                    // floats (translation + elevation + alpha) above
-                    // its slot.
-                    //
-                    // Phase 3.7: the slot is no longer a big filled
-                    // box (0.4.2 verdict: it read as a hole the note
-                    // fell into). It is now just the block's own space
-                    // held open, marked by a THIN landing line at its
-                    // top edge — the insertion boundary — and the
-                    // other items animate to their new places on a
-                    // swap instead of teleporting (animateItem, only
-                    // while a drag is live so normal editing never
-                    // animates; the dragged item itself is excluded —
-                    // its motion is the finger's, via the translation).
-                    val isDraggable = ui.segment !is TextSegment
-                    val isBlock = ui.segment !is TextSegment && ui.segment !is QuoteSegment
-                    val isDragged = dragSegmentId == ui.id
-                    Box(
-                        (if (dragSegmentId != null && !isDragged) {
-                            Modifier.animateItem()
-                        } else {
-                            Modifier
-                        }).onSizeChanged { segmentHeights[ui.id] = it.height },
-                    ) {
-                        if (isDragged) {
-                            val slotHeight = segmentHeights[ui.id]
-                            Box(
-                                Modifier.fillMaxWidth()
-                                    .then(
-                                        if (slotHeight != null) {
-                                            Modifier.height(
-                                                with(density) { slotHeight.toDp() },
-                                            )
-                                        } else {
-                                            Modifier
-                                        },
-                                    ),
-                            ) {
-                                Box(
-                                    Modifier.fillMaxWidth()
-                                        .height(3.dp)
-                                        .background(
-                                            MaterialTheme.colorScheme.primary,
-                                            RoundedCornerShape(2.dp),
-                                        ),
-                                )
-                            }
-                        }
+                    // does a quote — by long-press on the block itself;
+                    // only plain text segments are exempt, because
+                    // their long-press is text selection. In 3.8 the
+                    // gesture lives on the surface wrapping this list
+                    // (see BlockDragGesture.kt), and a live session
+                    // changes exactly one thing here: the dragged
+                    // segment's slot renders as an EMPTY PLACEHOLDER
+                    // holding the block's height, while its content
+                    // rides the ghost overlay. The document under the
+                    // finger does not reorder, animate or recompose
+                    // for the whole session — the drop is the single
+                    // moment anything moves.
+                    val session = dragSession
+                    if (session != null && session.segmentId == ui.id) {
                         Box(
-                            (if (isDragged) {
-                                Modifier.zIndex(1f).graphicsLayer {
-                                    translationY = dragOffsetPx
-                                    alpha = 0.92f
-                                    shadowElevation = with(density) { 8.dp.toPx() }
-                                }
-                            } else {
-                                Modifier
-                            }).then(
-                                if (isDraggable) {
-                                    Modifier.longPressBlockDrag(
-                                        key = ui.id,
-                                        onDragStart = {
-                                            dragSegmentId = ui.id
-                                            dragOffsetPx = 0f
-                                        },
-                                        onDrag = { dy -> onBlockDrag(ui, dy) },
-                                        onDragEnd = {
-                                            dragSegmentId = null
-                                            dragOffsetPx = 0f
-                                            persistNow()
-                                        },
-                                        onDragCancel = {
-                                            dragSegmentId = null
-                                            dragOffsetPx = 0f
-                                        },
-                                    )
-                                } else {
-                                    Modifier
-                                },
-                            ),
-                        ) {
-                            SegmentEditor(
-                                ui = ui,
-                                isActive = ui.id == activeSegmentId,
-                                isTrailingCaret = index == segments.lastIndex &&
-                                    ui.segment is TextSegment,
-                                trailingFocusRequester = trailingFocusRequester,
-                                focusRequester = segmentFocusRequesters
-                                    .getOrPut(ui.id) { FocusRequester() },
-                                stateFor = { richStateFor(ui) },
-                                onFocus = { activeSegmentId = ui.id },
-                                onChange = { updateBlock(ui.id, it) },
-                                onRemove = { removeBlock(ui.id) },
-                                attachments = attachments,
-                                fileFor = { viewModel.attachmentFile(it) },
-                                bringIntoView = bringIntoView,
-                                onPinchingChange = { imagePinchActive = it },
-                                // The rail is the visual affordance
-                                // now; the drag gesture lives on the
-                                // whole block (container above).
-                                dragHandleModifier = if (isBlock) Modifier else null,
-                            )
-                        }
+                            Modifier.fillMaxWidth()
+                                .height(with(density) { session.blockHeightPx.toDp() }),
+                        )
+                        return@itemsIndexed
                     }
+                    segmentEditor(ui, index)
                 }
                 if (segments.lastOrNull()?.segment is TextSegment) {
                     // Phase 1.5 fix 2 + Phase 2.8 (E1): the empty area
@@ -1483,6 +1647,55 @@ fun RichNoteEditorScreen(
                         }
                     }
                 }
+            }
+            // Phase 3.8: the session overlays, drawn above the
+            // list inside the drag surface's box, in list-viewport
+            // coordinates: first the landing line at the current
+            // insertion target, then the GHOST — the dragged
+            // block's own editor, composed once when the session
+            // starts and afterwards moved ONLY by the graphicsLayer
+            // translation below (a draw-phase read of the pointer
+            // state, so the block's content never recomposes while
+            // the finger moves). On drop the session state clears
+            // and the real item composes in its committed place in
+            // the same frame — the ghost snaps, never tweens, so
+            // the settle can never fight the commit.
+            val session = dragSession
+            if (session != null) {
+                val draggedUi = segments.firstOrNull { it.id == session.segmentId }
+                if (draggedUi != null) {
+                    // The landing line: its Y was computed by the
+                    // session bookkeeping (updateDragTarget) and is
+                    // read here INSIDE the graphicsLayer — a
+                    // draw-phase read, so an auto-scroll tick moves
+                    // the line without recomposing anything.
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .padding(horizontal = NotaSpacing.md)
+                            .graphicsLayer {
+                                val y = landingLineY.value
+                                translationY = y ?: 0f
+                                alpha = if (y == null) 0f else 1f
+                            }
+                            .height(3.dp)
+                            .background(
+                                MaterialTheme.colorScheme.primary,
+                                RoundedCornerShape(2.dp),
+                            ),
+                    )
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .padding(horizontal = NotaSpacing.md)
+                            .graphicsLayer {
+                                translationY = dragPointerY - session.grabOffsetPx
+                                alpha = 0.92f
+                                shadowElevation = with(density) { 8.dp.toPx() }
+                            },
+                    ) {
+                        segmentEditor(draggedUi, session.fromIndex)
+                    }
+                }
+            }
             }
             if (editing && linkSuggestions.isNotEmpty() && linkTrigger != null) {
                 Row(
@@ -1726,6 +1939,10 @@ private fun SegmentEditor(
     focusRequester: FocusRequester? = null,
     dragHandleModifier: Modifier? = null,
     stateFor: () -> RichTextState,
+    // Phase 3.8 (Codex finding 3): the screen-owned cell/item field
+    // text states, hoisted above this editor so the list slot and
+    // the drag ghost share them (see the screen's declaration).
+    cellTextStates: MutableMap<String, MutableState<String>>,
     onFocus: () -> Unit,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
@@ -1814,8 +2031,8 @@ private fun SegmentEditor(
                 }
                 Box(Modifier.weight(1f)) {
                     when (segment) {
-                        is TableSegment -> TableBlock(ui.id, segment, onChange, onRemove)
-                        is TaskListSegment -> TaskListBlock(ui.id, segment, onChange, onRemove)
+                        is TableSegment -> TableBlock(ui.id, segment, cellTextStates, onChange, onRemove)
+                        is TaskListSegment -> TaskListBlock(ui.id, segment, cellTextStates, onChange, onRemove)
                         is ImageSegment -> ImageBlock(
                             segment, attachments, fileFor, onChange, onRemove, onPinchingChange,
                         )
@@ -2190,25 +2407,63 @@ private fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
 }
 
 /**
- * A single-line cell/item field with LOCAL text state. Writing back
- * through the segment on every keystroke is fine, but rendering from the
- * segment is not: the plain-text projection trims and normalises, which
- * would eat spaces while typing. Local state is keyed by block position
- * and only seeded from the stored content.
+ * A single-line cell/item field. Writing back through the segment
+ * on every keystroke is fine, but rendering from the segment is
+ * not: the plain-text projection trims and normalises, which would
+ * eat spaces while typing. So the field's text state is HOISTED
+ * into the screen-owned [cellTextStates] map, keyed by block
+ * position and only seeded (losslessly — see
+ * [app.nota.data.text.PlainTextCodec.htmlToCellText]) from the
+ * stored content on first composition. The hoist matters beyond
+ * typing: over a Phase 3.8 drag the block's editor composes in
+ * its list slot, then in the session ghost, then in the slot
+ * again — state held in a local remember() would be discarded at
+ * the first move and the field would re-seed trimmed (Codex
+ * finding 3, PR #21). In the hoisted map the same state object
+ * serves every composition site, so a remount is a non-event.
+ * The one event the hoist must NOT survive is a structural
+ * edit to the block itself — see [evictCellTextStates].
  */
+
+/**
+ * Phase 3.8 follow-up (Codex P2, PR #21): the hoisted field
+ * states are keyed by POSITION inside their block ("<block>-r-c"
+ * for table cells, "<block>-item-i" for task items), so when a
+ * block's structure changes — a task item or a table row/column
+ * added or removed — the surviving keys no longer name the
+ * fields they were seeded for. Worst case, a REMOVED item's
+ * state outlives it: a fresh item added at the same index would
+ * inherit the deleted text in its field, and a later edit would
+ * write that text back into the document. The structural
+ * handlers in TableBlock / TaskListBlock therefore evict the
+ * block's entries before applying the change. Every field then
+ * re-seeds losslessly from the segment — which the
+ * per-keystroke write-through keeps in sync — so the eviction
+ * is invisible except that stale text can no longer resurrect.
+ * (Block ids are UUIDs, so the "<blockId>-" prefix cannot
+ * collide with another block's keys.)
+ */
+private fun evictCellTextStates(
+    cellTextStates: MutableMap<String, MutableState<String>>,
+    blockId: String,
+) {
+    val prefix = "$blockId-"
+    cellTextStates.keys.removeAll { it.startsWith(prefix) }
+}
 @Composable
 private fun EditableCellText(
     key: String,
     initial: String,
     bodyStyle: Boolean,
+    cellTextStates: MutableMap<String, MutableState<String>>,
     modifier: Modifier = Modifier,
     onEdit: (String) -> Unit,
 ) {
-    var text by remember(key) { mutableStateOf(initial) }
+    val textState = cellTextStates.getOrPut(key) { mutableStateOf(initial) }
     OutlinedTextField(
-        value = text,
+        value = textState.value,
         onValueChange = {
-            text = it
+            textState.value = it
             onEdit(it)
         },
         singleLine = true,
@@ -2225,6 +2480,7 @@ private fun EditableCellText(
 private fun TableBlock(
     blockId: String,
     table: TableSegment,
+    cellTextStates: MutableMap<String, MutableState<String>>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -2238,11 +2494,15 @@ private fun TableBlock(
                 Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                     row.forEachIndexed { c, cell ->
                         EditableCellText(
-                            // Local field state: projecting through the codec
-                            // on every frame would eat spaces mid-typing.
+                            // Field state is hoisted (see
+                            // EditableCellText): projecting through
+                            // the codec on every frame — or reseeding
+                            // on a drag remount — would eat spaces.
+                            // The seed is the lossless projection.
                             key = "$blockId-$r-$c",
-                            initial = PlainTextCodec.htmlToText(cell),
+                            initial = PlainTextCodec.htmlToCellText(cell),
                             bodyStyle = false,
+                            cellTextStates = cellTextStates,
                             modifier = Modifier.weight(1f),
                             onEdit = { newText ->
                                 val newRows = table.rows.mapIndexed { rr, rowCells ->
@@ -2263,6 +2523,7 @@ private fun TableBlock(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
+                    evictCellTextStates(cellTextStates, blockId)
                     val cols = table.rows.firstOrNull()?.size ?: 1
                     val newSpans = if (table.cellSpans.isEmpty()) {
                         emptyList()
@@ -2274,6 +2535,7 @@ private fun TableBlock(
                     )
                 }) { Text("+ Row") }
                 TextButton(onClick = {
+                    evictCellTextStates(cellTextStates, blockId)
                     onChange(
                         TableSegment(
                             table.rows.map { it + "" },
@@ -2284,6 +2546,7 @@ private fun TableBlock(
                 }) { Text("+ Col") }
                 if (table.rows.size > 1) {
                     TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
                         onChange(
                             TableSegment(
                                 table.rows.dropLast(1),
@@ -2295,6 +2558,7 @@ private fun TableBlock(
                 }
                 if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
                     TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
                         onChange(
                             TableSegment(
                                 table.rows.map { it.dropLast(1) },
@@ -2317,6 +2581,7 @@ private fun TableBlock(
 private fun TaskListBlock(
     blockId: String,
     list: TaskListSegment,
+    cellTextStates: MutableMap<String, MutableState<String>>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
 ) {
@@ -2342,8 +2607,9 @@ private fun TaskListBlock(
                     )
                     EditableCellText(
                         key = "$blockId-item-$index",
-                        initial = PlainTextCodec.htmlToText(item.contentHtml),
+                        initial = PlainTextCodec.htmlToCellText(item.contentHtml),
                         bodyStyle = true,
+                        cellTextStates = cellTextStates,
                         modifier = Modifier.weight(1f),
                         onEdit = { newText ->
                             onChange(
@@ -2360,6 +2626,7 @@ private fun TaskListBlock(
                         },
                     )
                     IconButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
                         onChange(TaskListSegment(list.items.filterIndexed { i, _ -> i != index }))
                     }) {
                         Icon(Icons.Filled.Close, contentDescription = "Remove item")
@@ -2368,6 +2635,7 @@ private fun TaskListBlock(
             }
             Row {
                 TextButton(onClick = {
+                    evictCellTextStates(cellTextStates, blockId)
                     onChange(TaskListSegment(list.items + TaskItem("<p></p>", checked = false)))
                 }) { Text("+ Item") }
                 Spacer(Modifier.weight(1f))

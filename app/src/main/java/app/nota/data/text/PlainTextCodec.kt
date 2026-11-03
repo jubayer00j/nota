@@ -47,6 +47,35 @@ object PlainTextCodec {
             .replace(Regex("\n[ \t]+"), "\n")
     }
 
+    /**
+     * The cell / task-item field SEED projection (Phase 3.8, Codex
+     * finding 3 on PR #21): the same structural projection as
+     * [htmlToText] — block boundaries become newlines, tags are
+     * stripped, entities unescaped — but WITHOUT the final trim and
+     * WITHOUT the space-collapses around newlines. A cell whose
+     * stored text carries leading/trailing spaces must seed its
+     * editor field with those spaces intact: the field's text is
+     * the write-back source for the next edit, so a trimming seed
+     * silently deletes the user's spaces on that edit. Structural
+     * newlines at the edges (produced by a wrapping `<p>`) are
+     * still trimmed — they are markup, not text.
+     */
+    fun htmlToCellText(html: String): String {
+        if (html.isEmpty()) return ""
+        var s = html
+        s = s.replace(Regex("(?i)<br\\s*/?>"), "\n")
+        s = s.replace(Regex("(?i)<hr\\s*/?>"), "\n\n")
+        s = s.replace(Regex("(?i)</p>"), "\n\n")
+        s = s.replace(Regex("(?i)</(h[1-6]|blockquote|pre|div)>"), "\n\n")
+        s = s.replace(Regex("(?i)</li>"), "\n")
+        s = s.replace(Regex("(?i)</tr>"), "\n")
+        s = s.replace(Regex("(?i)</t[dh]>"), " ")
+        s = s.replace(Regex("(?i)<p[^>]*>"), "")
+        s = s.replace(Regex("<[^>]+>"), "")
+        s = unescape(s)
+        return s.replace(Regex("\n{3,}"), "\n\n").trim('\n')
+    }
+
     private fun escape(text: String): String = text
         .replace("&", "&amp;")
         .replace("<", "&lt;")

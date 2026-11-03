@@ -6,12 +6,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.room.Room
@@ -40,6 +42,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
@@ -52,58 +55,88 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
 
 /**
- * Block-drag UI regression tests — Phase 3.6 (G1) origin, Phase 3.7
- * model. Drives the REAL [RichNoteEditorScreen] (the
- * NotesSwipeGhostUiTest pattern): a long press ON THE BLOCK'S BODY —
- * file, table and image — then a drag past a neighbouring BLOCK, and
- * the PERSISTED document order is asserted from Room.
+ * Block-drag UI regression tests — Phase 3.6 (G1) origin, Phase
+ * 3.8 model. Drives the REAL [RichNoteEditorScreen] (the
+ * NotesSwipeGhostUiTest pattern): a long press ON THE BLOCK'S
+ * BODY — file, table and image — a drag past a neighbouring
+ * BLOCK, a release, and the PERSISTED document order is asserted
+ * from Room.
  *
- * Phase 3.7 is the drag-FEEL fix (Jubayer's 0.4.2 device verdict:
- * the drag felt handle-only and unresponsive), so the model under
- * test changed in exactly the ways the product changed:
+ * Phase 3.8 is the drag-ARCHITECTURE rebuild (Jubayer's 0.4.3
+ * device verdict: activation and short swaps worked, but the
+ * dragged block TREMBLED because the document reordered and
+ * recomposed under the finger on every mid-drag swap). The
+ * model under test is now a drag SESSION: a long press claims
+ * the block, the document freezes, the block's content rides a
+ * translated overlay (the ghost), an insertion target is
+ * computed live from the ghost's edges against the list's
+ * laid-out geometry, and exactly ONE reorder + persist happens
+ * when the finger lifts. The tests assert the session model's
+ * defining properties:
  *
  * 1. STARTS LAND ON BODY CENTRES. In 3.6 the touches started on
  *    convenient label nodes. Now every drag starts at the dragged
  *    block's measured body centre — the file card's middle, the
- *    image's middle — the grab a hand actually makes. (The table is
- *    the one exception in the VERTICAL: its exact centre is a cell
- *    text field, whose long press wakes the platform text magnifier
- *    and crashes under Robolectric on a null Surface — a harness
- *    artifact, not product behaviour. The table's start is its body
- *    centre horizontally, on its footer row vertically: still the
- *    block's own card, never the rail.)
- * 2. TRAVEL IS EDGE TRAVEL. 3.6 swapped on centre-to-centre
- *    crossing, so travel was measured between block centres. 3.7
- *    swaps when the dragged block's leading edge pushes
- *    BLOCK_SWAP_OVERSHOOT (24 dp) past the neighbour's near edge —
- *    a constant short travel at any block height. Each test aims
- *    just past that threshold (overshoot + a bounded 30 px margin
- *    absorbing the few px by which inner label nodes misreport the
- *    layout item), FAR short of what centre-crossing would need —
- *    so these tests fail on the 3.6 math and pass on the 3.7 math.
+ *    image's middle — the grab a hand actually makes. (The table
+ *    is the one exception in the VERTICAL: its exact centre is
+ *    a cell text field, whose long press wakes the platform text
+ *    magnifier and crashes under Robolectric on a null Surface —
+ *    a harness artifact, not product behaviour. The table's
+ *    start is its body centre horizontally, on its footer row
+ *    vertically: still the block's own card, never the rail.)
+ * 2. TRAVEL IS EDGE TRAVEL. The insertion target counts a
+ *    neighbour as PASSED when the ghost's leading edge pushes
+ *    BLOCK_SWAP_OVERSHOOT (24 dp) past the neighbour's near
+ *    edge — the thresholds 3.7 shipped, kept verbatim; only
+ *    what happens AT the threshold changed (target bookkeeping
+ *    instead of a live swap). Each test aims just past that
+ *    threshold (overshoot + a bounded 40 px margin absorbing
+ *    the few px by which inner label nodes misreport the layout
+ *    item), FAR short of what centre-crossing would need — so
+ *    these tests fail on the 3.6 math and pass on the session
+ *    math.
+ * 3. NOTHING PERSISTS WHILE THE FINGER IS DOWN. Each test
+ *    reads Room BETWEEN the move and the lift — from inside the
+ *    single injection block, with the finger still down — and
+ *    asserts the persisted order is still the ORIGINAL. On the
+ *    3.6/3.7 swap model a swap persisted synchronously from the
+ *    gesture callback, so this assertion has teeth exactly
+ *    where it matters. On the session model it cannot fail:
+ *    the segment list is never touched until the lift commits
+ *    it. (An earlier 3.8 draft drove press/move/lift as THREE
+ *    separate performTouchInput calls to make this observation
+ *    from outside the block; the lift never arrived — pointer
+ *    state does not survive across injection calls in this
+ *    harness, the session hung, and all three tests timed out.
+ *    Hence: one block, observation inside it.)
  *
- * Why the drag is still driven as ONE move in a TALL window (the
- * Phase 3.6 verification arc — three failure modes, all in the
- * harness, none in the product):
+ * Why the drag is still ONE move in a TALL window (the Phase 3.6
+ * verification arc — harness failure modes, none in the
+ * product):
  *
  * 1. STEPPED GLIDES STARVE. The editor's auto-scroll loop ticks
- *    every 16 ms while a drag is live. In the default 470 dp window
- *    these short notes barely exceed the list viewport, so the
- *    dragged block sits in an edge zone almost immediately; under
- *    Robolectric's paused looper the ticks are processed in bursts
- *    between injected moves, the list walks under the finger, the
- *    pointer coordinates remap, and the delivered travel stalls.
- * 2. OVERSHOOT DOUBLE-SWAPS. The same tick re-evaluates the swap
- *    after the intended one if the finger parks past the NEXT
- *    segment's threshold — hence the bounded margins above.
- * 3. THE IMAGE'S SEMANTICS LIE. The image block's text/description
- *    nodes overstate its layout extent, so its geometry comes from
- *    the drag rails instead: rail tops differ from item tops by one
- *    constant padding, which cancels in every difference taken.
+ *    every 16 ms while a session is live. In the default 470 dp
+ *    window these short notes barely exceed the list viewport,
+ *    so the ghost sits in an edge zone almost immediately; under
+ *    Robolectric's paused looper the ticks are processed in
+ *    bursts between injected moves, the list walks under the
+ *    finger, the pointer coordinates remap, and the delivered
+ *    travel stalls.
+ * 2. THE IMAGE'S SEMANTICS LIE. The image block's
+ *    text/description nodes overstate its layout extent, so its
+ *    geometry comes from the drag rails instead: rail tops
+ *    differ from item tops by one constant padding, which
+ *    cancels in every difference taken.
+ *
+ * (The swap-era third failure mode — the overshoot DOUBLE-SWAP,
+ * where one glide's tick re-evaluated the swap past the next
+ * segment too — is RETIRED: there is no swap evaluator anymore.
+ * The target is one pure function of the ghost's position,
+ * evaluated per move, and the commit fires once, on the lift.)
  *
  * A physical finger produces a continuous real-time stream and
- * exhibits none of this. Assertions are unchanged throughout: the
- * exact persisted order is asserted from Room.
+ * exhibits none of this. Assertions throughout: the exact
+ * persisted order, from Room — before, during and after.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w411dp-h1000dp")
@@ -263,12 +296,12 @@ class EditorBlockDragUiTest {
         composeRule.onAllNodesWithContentDescription("Drag to move block")
             .fetchSemanticsNodes().map { it.boundsInRoot.top }
 
-    /** The edge-swap overshoot (the product's BLOCK_SWAP_OVERSHOOT)
-     *  in harness pixels. */
+    /** The passed-neighbour overshoot (the product's
+     *  BLOCK_SWAP_OVERSHOOT) in harness pixels. */
     private fun overshootPx(): Float = with(composeRule.density) { 24.dp.toPx() }
 
     /** One inter-item spacing step in harness pixels (the product's
-     *  swap math spaces items by [NotaSpacing.sm]). */
+     *  drag geometry spaces items by [NotaSpacing.sm]). */
     private fun spacingPx(): Float = with(composeRule.density) { NotaSpacing.sm.toPx() }
 
     /** The horizontal centre of the editor surface — every block
@@ -278,16 +311,22 @@ class EditorBlockDragUiTest {
         composeRule.onRoot().fetchSemanticsNode().boundsInRoot.center.x
 
     /**
-     * Long-press-drag starting at the root-space point [start]:
-     * the finger holds past the long-press timeout (the first small
-     * move carries the event clock past it, inside the drift
-     * allowance), then travels the whole [totalDy] in ONE move —
-     * see the class doc for why a stepped glide is unreliable in
-     * this harness. Each test here crosses exactly one neighbouring
-     * block, and the swap check evaluates once per move, so one
-     * move is the exact dose.
+     * Long-press-drag starting at the root-space point [start],
+     * as ONE injection block: press and hold past the long-press
+     * timeout (the first small move carries the event clock past
+     * it, inside the surface watch's drift allowance), travel the
+     * whole [totalDy] in ONE move — see the class doc for why a
+     * stepped glide is unreliable in this harness; each test here
+     * crosses exactly one neighbouring block, and the target
+     * evaluates once per move, so one move is the exact dose —
+     * then run [midDragCheck] with the finger STILL DOWN (class
+     * doc, 3), and lift.
      */
-    private fun longPressDragAt(start: Offset, totalDy: Float) {
+    private fun longPressDragAt(
+        start: Offset,
+        totalDy: Float,
+        midDragCheck: () -> Unit = {},
+    ) {
         val rootTopLeft = composeRule.onRoot().fetchSemanticsNode()
             .boundsInRoot.topLeft
         val local = start - rootTopLeft
@@ -298,6 +337,7 @@ class EditorBlockDragUiTest {
             advanceEventTime(16)
             moveBy(Offset(0f, totalDy - 2f))
             advanceEventTime(16)
+            midDragCheck()
             up()
         }
     }
@@ -322,6 +362,28 @@ class EditorBlockDragUiTest {
         assertEquals(expected, persistedKinds(noteId))
     }
 
+    /** The current text of every editable field on screen (title,
+     *  rich text, table cells, task items), in semantics order. */
+    private fun fieldTexts(): List<String> =
+        composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+            .mapNotNull { it.config.getOrNull(SemanticsProperties.EditableText)?.text }
+
+    /** Replaces the text of the one editable field currently
+     *  showing [current] — the semantics SetText action, which the
+     *  field reports through its normal onValueChange (so the
+     *  segment write-through runs exactly as for typed input). */
+    private fun setFieldText(current: String, replacement: String) {
+        val nodes = composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = nodes.indexOfFirst {
+            it.config.getOrNull(SemanticsProperties.EditableText)?.text == current
+        }
+        if (index < 0) {
+            fail("no editable field showing '$current'; fields=${fieldTexts()}")
+        }
+        composeRule.onAllNodes(hasSetTextAction())[index]
+            .performTextReplacement(replacement)
+    }
+
     @Test
     fun dragFileBlock_downPastTable_reordersAndPersists() {
         val note = runBlocking {
@@ -341,7 +403,8 @@ class EditorBlockDragUiTest {
         val fileTop = boundsOf("drag-report.pdf").top
         val fileBottom = boundsOf("Attachment not found on this device").bottom
         val tableTop = boundsOf("CellA").top
-        // Edge travel: the file's bottom edge starts one item gap
+        val before = persistedKinds(note.id)
+        // Edge travel: the ghost's bottom edge starts one item gap
         // above the table's top; it must end the overshoot PAST
         // that top (+ the bounded margin). The label-measured gap
         // overstates the true one by the labels' chrome offsets,
@@ -350,7 +413,14 @@ class EditorBlockDragUiTest {
         // old centre-to-centre distance.
         longPressDragAt(
             Offset(bodyCentreX(), (fileTop + fileBottom) / 2f),
-            (tableTop - fileBottom) + overshootPx() + 30f,
+            (tableTop - fileBottom) + overshootPx() + 40f,
+            midDragCheck = {
+                // The session's defining property: the finger is
+                // still DOWN, the target already computed — and
+                // the persisted document is still the original
+                // order (class doc, 3).
+                assertEquals(before, persistedKinds(note.id))
+            },
         )
         awaitOrder(
             note.id,
@@ -378,14 +448,20 @@ class EditorBlockDragUiTest {
         val fileBottom = boundsOf("Attachment not found on this device").bottom
         val tableTop = boundsOf("CellA").top
         val footerCentreY = boundsOf("+ Row").center.y
+        val before = persistedKinds(note.id)
         // The grab lands on the table's body — centre x, footer-row
         // y (class doc: the true centre is a cell text field, whose
         // long press wakes the platform magnifier and crashes this
-        // harness). Edge travel, sign-flipped: the table's top edge
+        // harness). Edge travel, sign-flipped: the ghost's top edge
         // must end the overshoot ABOVE the file's bottom edge.
         longPressDragAt(
             Offset(bodyCentreX(), footerCentreY),
-            fileBottom - overshootPx() - 30f - tableTop,
+            fileBottom - overshootPx() - 40f - tableTop,
+            midDragCheck = {
+                // Finger still down: the persisted order is
+                // untouched.
+                assertEquals(before, persistedKinds(note.id))
+            },
         )
         awaitOrder(
             note.id,
@@ -395,6 +471,138 @@ class EditorBlockDragUiTest {
                 "text:Charlie clos",
             ),
         )
+    }
+
+    @Test
+    fun dragTableBlock_cellTextSurvivesGhostRemount() {
+        // Phase 3.8 regression (Codex finding 3, PR #21): a table
+        // cell's text must survive the drag's slot -> ghost -> slot
+        // remount EXACTLY — boundary spaces included. Before the
+        // fix the field's text state lived in a remember() inside
+        // the block editor: the remount discarded it and the field
+        // re-seeded from the stored HTML through the TRIMMING
+        // projection, so the typed " A " came back as "A" and the
+        // next edit would have written the trimmed text into the
+        // document — silent data loss. The state is now hoisted
+        // above the block editors and the seed projection is
+        // lossless; both halves are exercised here.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Drag Cell Text",
+                contentHtml = "<div data-nota-file=\"att-drag\" data-name=\"drag-report.pdf\" " +
+                    "data-mime=\"application/pdf\"></div>" +
+                    "<table><tr><td>CellA</td><td>CellB</td></tr>" +
+                    "<tr><td>CellC</td><td>CellD</td></tr></table>" +
+                    "<p>Charlie closing paragraph</p>",
+            )
+        }
+        composeEditor(note.id)
+        // Type boundary spaces into the first cell: the field and
+        // (through the write-through) the stored segment now both
+        // hold " A ".
+        setFieldText("CellA", " A ")
+        awaitTrue("cell field holds the typed text") {
+            fieldTexts().contains(" A ")
+        }
+        // Drag the table up past the file — the same edge travel
+        // as the table drag test, with the table's item top taken
+        // from its rail (the CellA label is a field now, so its
+        // bounds no longer name the cell's text).
+        val fileBottom = boundsOf("Attachment not found on this device").bottom
+        val tableItemTop = railTops()[1] - spacingPx()
+        val footerCentreY = boundsOf("+ Row").center.y
+        longPressDragAt(
+            Offset(bodyCentreX(), footerCentreY),
+            fileBottom - overshootPx() - 40f - tableItemTop,
+        )
+        awaitOrder(
+            note.id,
+            listOf(
+                "table",
+                "file:drag-report.pdf",
+                "text:Charlie clos",
+            ),
+        )
+        // The drop's persist carries the cell verbatim...
+        val html = runBlocking { repository.getById(note.id)?.contentHtml ?: "" }
+        assertTrue(
+            "persisted cell keeps its boundary spaces: $html",
+            html.contains("<td> A </td>"),
+        )
+        // ...and the cell field, recomposed in its new slot after
+        // the ghost remount, still shows the exact typed text.
+        awaitTrue("cell field still holds ' A ' after the drag") {
+            fieldTexts().contains(" A ")
+        }
+    }
+
+    @Test
+    fun removeAndReAddTaskItem_newItemSeedsBlankAndPersistsClean() {
+        // Phase 3.8 follow-up regression (Codex P2, PR #21): the
+        // hoisted field states are keyed by position inside their
+        // block, and the hoist at first had no eviction — deleting
+        // the LAST task item left its text in
+        // "cellTextStates[<block>-item-1]", and a fresh item added
+        // at the same index inherited the DELETED text in its
+        // field; a later edit would have written it back into the
+        // document. The structural handlers now evict the block's
+        // entries on add/remove, so the new field re-seeds
+        // (losslessly) from the fresh item: blank. This test is
+        // the Codex scenario end to end — field state first, then
+        // the persisted document after a type-and-save cycle.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Task Eviction",
+                contentHtml = "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<div><p>Alpha task</p></div></li>" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<div><p>Beta task</p></div></li>" +
+                    "</ul>" +
+                    "<p>Closing note</p>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("both task fields composed") {
+            fieldTexts().contains("Alpha task") && fieldTexts().contains("Beta task")
+        }
+        // Delete the LAST item ("Beta task") via its own button...
+        composeRule.onAllNodesWithContentDescription("Remove item")[1]
+            .performClick()
+        awaitTrue("one item remains") {
+            composeRule.onAllNodesWithContentDescription("Remove item")
+                .fetchSemanticsNodes().size == 1
+        }
+        // ...and add a fresh item at the same (last) position.
+        composeRule.onNodeWithText("+ Item").performClick()
+        awaitTrue("two items again") {
+            composeRule.onAllNodesWithContentDescription("Remove item")
+                .fetchSemanticsNodes().size == 2
+        }
+        // The new item's field must show the fresh seed (blank) —
+        // NOT the deleted text — and the surviving item must be
+        // undisturbed by the eviction.
+        assertTrue(
+            "deleted text resurrected in the new item's field: ${fieldTexts()}",
+            !fieldTexts().contains("Beta task"),
+        )
+        assertTrue(
+            "surviving item keeps its text: ${fieldTexts()}",
+            fieldTexts().contains("Alpha task"),
+        )
+        // Type into the new item — the only blank field on screen
+        // (the title and the closing paragraph hold their texts) —
+        // then leave edit mode, which persists. The saved document
+        // must carry the typed text and no trace of the deleted
+        // item: nothing resurrected, nothing written back.
+        setFieldText("", "Gamma task")
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("persisted document is clean") {
+            val html = runBlocking { repository.getById(note.id)?.contentHtml ?: "" }
+            html.contains("Gamma task") &&
+                html.contains("Alpha task") &&
+                !html.contains("Beta task")
+        }
     }
 
     @Test
@@ -418,12 +626,18 @@ class EditorBlockDragUiTest {
         val imageItemTop = rails[0] - spacingPx()
         val imageItemSize = (rails[1] - rails[0]) - spacingPx()
         // The grab lands on the image's BODY CENTRE — on the image
-        // itself, not its header label. Edge travel: the image's
+        // itself, not its header label. Edge travel: the ghost's
         // bottom starts one spacing above the file's top and must
         // end the overshoot past it (+ the bounded margin).
+        val before = persistedKinds(note.id)
         longPressDragAt(
             Offset(bodyCentreX(), imageItemTop + imageItemSize / 2f),
-            spacingPx() + overshootPx() + 30f,
+            spacingPx() + overshootPx() + 40f,
+            midDragCheck = {
+                // Finger still down: the persisted order is
+                // untouched.
+                assertEquals(before, persistedKinds(note.id))
+            },
         )
         awaitOrder(
             note.id,

@@ -1,7 +1,11 @@
 name: Package Release APK (manual)
 
 # Phase 3.6 close-out: dispatch-only packaging run, approved by
-# Jubayer on 2026-11-03. The main workflow's build-android job is
+# Jubayer on 2026-11-03. Phase 3.8 (diagnosis round): the same
+# route packages v0.4.4 from phase38-ghost-drag — the branch is
+# added to the push trigger below; product/test code is unchanged
+# by that commit, so the main workflow's run on the same head is
+# the merge gate as usual. The main workflow's build-android job is
 # gated on all three test shards going green in a single run, and
 # GitHub's runner fleet kept killing test-fast-b mid-step, so the
 # signed v0.4.2 APK is built here instead — on the assembled test
@@ -24,7 +28,7 @@ on:
   # the packaging run is fired from the branch. After the merge,
   # dispatch works as originally intended.
   push:
-    branches: ["phase36-drag-readmode", "phase37-drag-feel"]
+    branches: ["phase36-drag-readmode", "phase37-drag-feel", "phase38-ghost-drag"]
     paths: [".github/workflows/package-apk.yml"]
 
 jobs:
