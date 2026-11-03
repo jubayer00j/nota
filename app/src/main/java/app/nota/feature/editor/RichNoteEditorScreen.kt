@@ -553,33 +553,34 @@ fun RichNoteEditorScreen(
     }
 
     /**
-     * Phase 3.8: a surface long press claimed the block at
-     * [pendingDragIndex] — open the session. The target starts at
-     * the origin (a no-op drop), and any focus a block child (a
-     * table cell) raised on the press is cleared: the session owns
-     * the finger now, and a same-frame text selection/cursor must
-     * not survive into it. Together with the surface gesture's
-     * Initial-pass claim this is what makes a cell long press a
-     * drag, always — a TAP still focuses and edits the cell.
+     * Phase 3.8: the landing line's Y (list-viewport coordinates)
+     * for insertion target [target], or null when the boundary
+     * cannot be placed from the visible rows. At the origin
+     * target the line caps the dragged block's own slot; elsewhere
+     * it sits in the gap above the segment that would follow the
+     * dropped block — or below the last visible segment when the
+     * target is past it. Called ONLY from [updateDragTarget]
+     * (event/auto-scroll callbacks), never from composition —
+     * see [landingLineY].
      */
-    fun beginDragSession(downPosition: Offset) {
-        val index = pendingDragIndex
-        val ui = segments.getOrNull(index) ?: return
-        val info = listState.layoutInfo.visibleItemsInfo
-            .firstOrNull { it.key == ui.id } ?: return
-        dragSession = BlockDragSession(
-            segmentId = ui.id,
-            fromIndex = index,
-            grabOffsetPx = (downPosition.y - info.offset)
-                .coerceIn(0f, info.size.toFloat()),
-            blockHeightPx = info.size,
-        )
-        dragPointerY = downPosition.y
-        dragTargetIndex = index
-        passedAboveIds.clear()
-        passedBelowIds.clear()
-        focusManager.clearFocus()
-        updateDragTarget()
+    fun computeLandingLineY(target: Int): Float? {
+        val session = dragSession ?: return null
+        val spacingPx = with(density) { NotaSpacing.sm.toPx() }
+        val items = visibleSegmentItems().toMap()
+        val from = session.fromIndex
+        if (target == from) {
+            return items[from]?.let { it.offset - spacingPx / 2f }
+        }
+        // The collapsed item that would sit AT [target] after the
+        // drop is the segment now at [target] (above the gap) or
+        // [target] + 1 (below it).
+        val following = if (target < from) target else target + 1
+        items[following]?.let { return it.offset - spacingPx / 2f }
+        // The target is past every visible segment: the line
+        // trails the last visible one instead.
+        val lastVisible = visibleSegmentItems()
+            .lastOrNull { (index, _) -> index != from } ?: return null
+        return lastVisible.second.offset + lastVisible.second.size + spacingPx / 2f
     }
 
     /**
@@ -660,34 +661,33 @@ fun RichNoteEditorScreen(
     }
 
     /**
-     * Phase 3.8: the landing line's Y (list-viewport coordinates)
-     * for insertion target [target], or null when the boundary
-     * cannot be placed from the visible rows. At the origin
-     * target the line caps the dragged block's own slot; elsewhere
-     * it sits in the gap above the segment that would follow the
-     * dropped block — or below the last visible segment when the
-     * target is past it. Called ONLY from [updateDragTarget]
-     * (event/auto-scroll callbacks), never from composition —
-     * see [landingLineY].
+     * Phase 3.8: a surface long press claimed the block at
+     * [pendingDragIndex] — open the session. The target starts at
+     * the origin (a no-op drop), and any focus a block child (a
+     * table cell) raised on the press is cleared: the session owns
+     * the finger now, and a same-frame text selection/cursor must
+     * not survive into it. Together with the surface gesture's
+     * Initial-pass claim this is what makes a cell long press a
+     * drag, always — a TAP still focuses and edits the cell.
      */
-    fun computeLandingLineY(target: Int): Float? {
-        val session = dragSession ?: return null
-        val spacingPx = with(density) { NotaSpacing.sm.toPx() }
-        val items = visibleSegmentItems().toMap()
-        val from = session.fromIndex
-        if (target == from) {
-            return items[from]?.let { it.offset - spacingPx / 2f }
-        }
-        // The collapsed item that would sit AT [target] after the
-        // drop is the segment now at [target] (above the gap) or
-        // [target] + 1 (below it).
-        val following = if (target < from) target else target + 1
-        items[following]?.let { return it.offset - spacingPx / 2f }
-        // The target is past every visible segment: the line
-        // trails the last visible one instead.
-        val lastVisible = visibleSegmentItems()
-            .lastOrNull { (index, _) -> index != from } ?: return null
-        return lastVisible.second.offset + lastVisible.second.size + spacingPx / 2f
+    fun beginDragSession(downPosition: Offset) {
+        val index = pendingDragIndex
+        val ui = segments.getOrNull(index) ?: return
+        val info = listState.layoutInfo.visibleItemsInfo
+            .firstOrNull { it.key == ui.id } ?: return
+        dragSession = BlockDragSession(
+            segmentId = ui.id,
+            fromIndex = index,
+            grabOffsetPx = (downPosition.y - info.offset)
+                .coerceIn(0f, info.size.toFloat()),
+            blockHeightPx = info.size,
+        )
+        dragPointerY = downPosition.y
+        dragTargetIndex = index
+        passedAboveIds.clear()
+        passedBelowIds.clear()
+        focusManager.clearFocus()
+        updateDragTarget()
     }
 
     /**
