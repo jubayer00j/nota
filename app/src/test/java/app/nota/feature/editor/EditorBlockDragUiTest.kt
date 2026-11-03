@@ -7,6 +7,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -62,24 +63,46 @@ import org.robolectric.shadows.ShadowLooper
  * semantics tree, so paragraph nodes cannot be located — block
  * neighbours (a file name, a table cell, an image label) can.
  *
- * The drag is driven as ONE move, not a stepped glide (probe-
- * verified root cause of the original timeouts): under
- * Robolectric the injected events are processed from the paused
- * main looper, and each stepped dispatch gives the editor's
- * 16 ms auto-scroll loop a gap to interleave — in these short
- * notes the dragged block sits in the edge zone almost at once,
- * the list scrolls mid-gesture, the pointer coordinates remap
- * (the probe recorded travel stalling at ~100 of 186 px, then a
- * −6 px phantom delta), and the centre never crosses. A single
- * move is evaluated inside one event pass — the swap check runs
- * on the full offset before any auto-scroll tick can interfere.
- * A physical finger produces a continuous stream and is not
- * affected by any of this; the reorder logic, the swap math and
- * the persist path were all exonerated by the probe (the drag
- * engaged and accumulated exactly the travel it was given).
+ * Why the drag is driven exactly this way (probe-verified across
+ * the Phase 3.6 verification arc — three failure modes, all in
+ * the harness, none in the product):
+ *
+ * 1. STEPPED GLIDES STARVE. The editor's G1 auto-scroll loop
+ *    ticks every 16 ms while a drag is live. In the default
+ *    470 dp window these short notes barely exceed the list
+ *    viewport, so the dragged block sits in an edge zone almost
+ *    immediately; under Robolectric's paused looper the ticks are
+ *    processed in bursts between the injected moves, the list
+ *    walks under the finger, the pointer coordinates remap, and
+ *    the dragged centre stalls short of the crossing (recorded:
+ *    ~100 of 186 px delivered, then a −6 px phantom delta).
+ * 2. OVERSHOOT DOUBLE-SWAPS. The same tick re-evaluates the swap
+ *    after the intended one: a finger parked past the NEXT
+ *    segment's centre swaps a second time on the tick (recorded:
+ *    an image dragged past its file neighbour landed past the
+ *    closing paragraph too). Travel is therefore aimed just past
+ *    the crossing — a bounded margin over the exact threshold,
+ *    far short of the next centre.
+ * 3. THE IMAGE'S SEMANTICS LIE. The image block's text/description
+ *    nodes overstate its layout extent, so its travel is computed
+ *    from the drag rails instead: rail tops are exact layout
+ *    quantities (item tops), and the dragged block's size is the
+ *    rail-to-rail distance minus the item spacing.
+ *
+ * Defences, combined: a TALL display (h1000dp) in which these
+ * notes cannot scroll at all, so no auto-scroll tick can ever
+ * walk the list; a SINGLE move, so the swap is evaluated inside
+ * one event pass on the full offset; and measured travel with
+ * the bounded margins above. A physical finger produces a
+ * continuous real-time stream and exhibits none of this — the
+ * reorder logic, swap math and persist path were exonerated by
+ * the probe traces (drag engaged, exact travel delivered, one
+ * swap, persisted order correct) before these tests were shaped
+ * this way. Assertions are unchanged throughout: the exact
+ * persisted order is asserted from Room.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], qualifiers = "w411dp-h1000dp")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class EditorBlockDragUiTest {
 
@@ -228,10 +251,6 @@ class EditorBlockDragUiTest {
     private fun boundsOf(text: String) =
         composeRule.onNodeWithText(text).fetchSemanticsNode().boundsInRoot
 
-    private fun boundsOfDescription(description: String) =
-        composeRule.onNodeWithContentDescription(description)
-            .fetchSemanticsNode().boundsInRoot
-
     /**
      * A block's vertical centre, estimated from its topmost and
      * bottommost findable nodes. The swap math is centre-to-centre,
@@ -239,19 +258,20 @@ class EditorBlockDragUiTest {
      * blocks' tops) under-travels by half the height difference —
      * the first version of these tests did exactly that and the
      * dragged centre stopped short of the neighbour's centre.
-     *
-     * Even centre-to-centre is only the EDGE of the swap window:
-     * inner text nodes are not the layout item (card padding and
-     * field chrome distort the estimate by tens of pixels), so the
-     * tests aim for the MIDDLE of the window — centre-to-centre
-     * plus half the TARGET block's measured height. The window's
-     * far edge is the next segment's centre, always more than half
-     * the target's height beyond the near edge (plus spacing), so
-     * the aim cannot overshoot into a second swap. Deriving the
-     * margin from the measured bounds keeps it right at any
-     * density.
+     * Travel is the centre-to-centre distance plus a bounded
+     * margin (40 px): enough to absorb the few px by which inner
+     * text nodes misreport the layout item (card padding, field
+     * chrome), far short of the following segment's centre — see
+     * the class doc, failure mode 2.
      */
     private fun blockCentreY(top: Float, bottom: Float) = (top + bottom) / 2f
+
+    /** The drag rails' top edges, in segment order — exact layout
+     *  item tops (each rail icon sits a padding step below its
+     *  item's top), for the image test's travel (class doc, 3). */
+    private fun railTops(): List<Float> =
+        composeRule.onAllNodesWithContentDescription("Drag to move block")
+            .fetchSemanticsNodes().map { it.boundsInRoot.top }
 
     /**
      * Long-press-drag on the node showing [text]: the finger holds
@@ -316,10 +336,10 @@ class EditorBlockDragUiTest {
         val tableBottom = boundsOf("+ Row").bottom
         val fileCentre = blockCentreY(fileTop, fileBottom)
         val tableCentre = blockCentreY(tableTop, tableBottom)
-        // Aim at the middle of the swap window (see blockCentreY).
+        // Bounded margin past the crossing (see blockCentreY).
         longPressDrag(
             "drag-report.pdf",
-            tableCentre - fileCentre + (tableBottom - tableTop) / 2f,
+            tableCentre - fileCentre + 40f,
         )
         awaitOrder(
             note.id,
@@ -355,11 +375,11 @@ class EditorBlockDragUiTest {
         // text magnifier, which crashes under Robolectric (null
         // Surface) before the block drag can complete. The footer
         // is part of the same block — the long press lands on the
-        // block itself either way. Travel aims at the middle of
-        // the swap window (see blockCentreY).
+        // block itself either way. Travel is the crossing plus the
+        // same bounded margin, sign-flipped (see blockCentreY).
         longPressDrag(
             "+ Row",
-            fileCentre - tableCentre - (tableBottom - tableTop) / 2f,
+            fileCentre - tableCentre - 40f,
         )
         awaitOrder(
             note.id,
@@ -383,20 +403,24 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        // The image block runs header label → image area (the
-        // content-description node); the file card as in the other
-        // tests. The long press lands on the header label — the
-        // block itself.
-        val imageTop = boundsOf("Drag image").top
-        val imageBottom = boundsOfDescription("Drag image").bottom
+        // The image's own semantics nodes overstate its layout
+        // extent (class doc, failure mode 3), so its travel is
+        // computed from the drag rails instead: the rail-to-rail
+        // distance between the image and the file IS the image
+        // block's laid-out height plus the item spacing, and the
+        // exact crossing is that distance plus half the size
+        // difference. A bounded 30 px margin past the crossing
+        // keeps the landing inside the file's swap window. The
+        // long press lands on the header label — the block itself.
+        val rails = railTops()
+        val deltaTops = rails[1] - rails[0]
+        val imageSize = deltaTops - 8f
         val fileTop = boundsOf("drag-report.pdf").top
         val fileBottom = boundsOf("Attachment not found on this device").bottom
-        val imageCentre = blockCentreY(imageTop, imageBottom)
-        val fileCentre = blockCentreY(fileTop, fileBottom)
-        // Aim at the middle of the swap window (see blockCentreY).
+        val fileSize = (fileBottom - fileTop) + 16f
         longPressDrag(
             "Drag image",
-            fileCentre - imageCentre + (fileBottom - fileTop) / 2f,
+            deltaTops + (fileSize - imageSize) / 2f + 30f,
         )
         awaitOrder(
             note.id,
