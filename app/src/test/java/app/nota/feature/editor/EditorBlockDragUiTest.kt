@@ -224,6 +224,17 @@ class EditorBlockDragUiTest {
      * blocks' tops) under-travels by half the height difference —
      * the first version of these tests did exactly that and the
      * dragged centre stopped short of the neighbour's centre.
+     *
+     * Even centre-to-centre is only the EDGE of the swap window:
+     * inner text nodes are not the layout item (card padding and
+     * field chrome distort the estimate by tens of pixels), so the
+     * tests aim for the MIDDLE of the window — centre-to-centre
+     * plus half the TARGET block's measured height. The window's
+     * far edge is the next segment's centre, always more than half
+     * the target's height beyond the near edge (plus spacing), so
+     * the aim cannot overshoot into a second swap. Deriving the
+     * margin from the measured bounds keeps it right at any
+     * density.
      */
     private fun blockCentreY(top: Float, bottom: Float) = (top + bottom) / 2f
 
@@ -288,15 +299,17 @@ class EditorBlockDragUiTest {
         // Block centres from each block's extreme nodes: the file
         // card runs name → mime → error line; the table runs its
         // first cell → its footer row.
-        val fileCentre = blockCentreY(
-            boundsOf("drag-report.pdf").top,
-            boundsOf("Attachment not found on this device").bottom,
+        val fileTop = boundsOf("drag-report.pdf").top
+        val fileBottom = boundsOf("Attachment not found on this device").bottom
+        val tableTop = boundsOf("CellA").top
+        val tableBottom = boundsOf("+ Row").bottom
+        val fileCentre = blockCentreY(fileTop, fileBottom)
+        val tableCentre = blockCentreY(tableTop, tableBottom)
+        // Aim at the middle of the swap window (see blockCentreY).
+        longPressDrag(
+            "drag-report.pdf",
+            tableCentre - fileCentre + (tableBottom - tableTop) / 2f,
         )
-        val tableCentre = blockCentreY(
-            boundsOf("CellA").top,
-            boundsOf("+ Row").bottom,
-        )
-        longPressDrag("drag-report.pdf", tableCentre - fileCentre + 24f)
         awaitOrder(
             note.id,
             listOf(
@@ -320,21 +333,23 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        val fileCentre = blockCentreY(
-            boundsOf("drag-report.pdf").top,
-            boundsOf("Attachment not found on this device").bottom,
-        )
-        val tableCentre = blockCentreY(
-            boundsOf("CellA").top,
-            boundsOf("+ Row").bottom,
-        )
+        val fileTop = boundsOf("drag-report.pdf").top
+        val fileBottom = boundsOf("Attachment not found on this device").bottom
+        val tableTop = boundsOf("CellA").top
+        val tableBottom = boundsOf("+ Row").bottom
+        val fileCentre = blockCentreY(fileTop, fileBottom)
+        val tableCentre = blockCentreY(tableTop, tableBottom)
         // The drag starts on the table's FOOTER text, not a cell:
         // a long press inside a text-field cell wakes the platform
         // text magnifier, which crashes under Robolectric (null
         // Surface) before the block drag can complete. The footer
         // is part of the same block — the long press lands on the
-        // block itself either way.
-        longPressDrag("+ Row", fileCentre - tableCentre - 24f)
+        // block itself either way. Travel aims at the middle of
+        // the swap window (see blockCentreY).
+        longPressDrag(
+            "+ Row",
+            fileCentre - tableCentre - (tableBottom - tableTop) / 2f,
+        )
         awaitOrder(
             note.id,
             listOf(
@@ -361,15 +376,17 @@ class EditorBlockDragUiTest {
         // content-description node); the file card as in the other
         // tests. The long press lands on the header label — the
         // block itself.
-        val imageCentre = blockCentreY(
-            boundsOf("Drag image").top,
-            boundsOfDescription("Drag image").bottom,
+        val imageTop = boundsOf("Drag image").top
+        val imageBottom = boundsOfDescription("Drag image").bottom
+        val fileTop = boundsOf("drag-report.pdf").top
+        val fileBottom = boundsOf("Attachment not found on this device").bottom
+        val imageCentre = blockCentreY(imageTop, imageBottom)
+        val fileCentre = blockCentreY(fileTop, fileBottom)
+        // Aim at the middle of the swap window (see blockCentreY).
+        longPressDrag(
+            "Drag image",
+            fileCentre - imageCentre + (fileBottom - fileTop) / 2f,
         )
-        val fileCentre = blockCentreY(
-            boundsOf("drag-report.pdf").top,
-            boundsOf("Attachment not found on this device").bottom,
-        )
-        longPressDrag("Drag image", fileCentre - imageCentre + 24f)
         awaitOrder(
             note.id,
             listOf(
