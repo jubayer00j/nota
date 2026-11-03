@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.unit.dp
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import app.nota.data.attachments.AttachmentStore
@@ -32,6 +33,7 @@ import app.nota.data.security.NoteLockDeviceKeyProvider
 import app.nota.data.security.BiometricStep
 import app.nota.data.security.StepResult
 import app.nota.data.templates.TemplateRepository
+import app.nota.ui.theme.NotaSpacing
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -50,56 +52,58 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
 
 /**
- * Phase 3.6 (G1) — UI-level regression tests for the rebuilt block
- * drag. Drives the REAL [RichNoteEditorScreen] (the
- * NotesSwipeGhostUiTest pattern): a long press ON THE BLOCK ITSELF
- * — file, table and image — then a drag past a neighbouring BLOCK,
- * and the PERSISTED document order is asserted from Room. The 3.5
- * rail-only drag is not what is exercised here: the touch starts on
- * the block's own content.
+ * Block-drag UI regression tests — Phase 3.6 (G1) origin, Phase 3.7
+ * model. Drives the REAL [RichNoteEditorScreen] (the
+ * NotesSwipeGhostUiTest pattern): a long press ON THE BLOCK'S BODY —
+ * file, table and image — then a drag past a neighbouring BLOCK, and
+ * the PERSISTED document order is asserted from Room.
  *
- * Travel distances are measured between block nodes on purpose:
- * the rich text editor does not publish its content in the
- * semantics tree, so paragraph nodes cannot be located — block
- * neighbours (a file name, a table cell, an image label) can.
+ * Phase 3.7 is the drag-FEEL fix (Jubayer's 0.4.2 device verdict:
+ * the drag felt handle-only and unresponsive), so the model under
+ * test changed in exactly the ways the product changed:
  *
- * Why the drag is driven exactly this way (probe-verified across
- * the Phase 3.6 verification arc — three failure modes, all in
- * the harness, none in the product):
+ * 1. STARTS LAND ON BODY CENTRES. In 3.6 the touches started on
+ *    convenient label nodes. Now every drag starts at the dragged
+ *    block's measured body centre — the file card's middle, the
+ *    image's middle — the grab a hand actually makes. (The table is
+ *    the one exception in the VERTICAL: its exact centre is a cell
+ *    text field, whose long press wakes the platform text magnifier
+ *    and crashes under Robolectric on a null Surface — a harness
+ *    artifact, not product behaviour. The table's start is its body
+ *    centre horizontally, on its footer row vertically: still the
+ *    block's own card, never the rail.)
+ * 2. TRAVEL IS EDGE TRAVEL. 3.6 swapped on centre-to-centre
+ *    crossing, so travel was measured between block centres. 3.7
+ *    swaps when the dragged block's leading edge pushes
+ *    BLOCK_SWAP_OVERSHOOT (24 dp) past the neighbour's near edge —
+ *    a constant short travel at any block height. Each test aims
+ *    just past that threshold (overshoot + a bounded 30 px margin
+ *    absorbing the few px by which inner label nodes misreport the
+ *    layout item), FAR short of what centre-crossing would need —
+ *    so these tests fail on the 3.6 math and pass on the 3.7 math.
  *
- * 1. STEPPED GLIDES STARVE. The editor's G1 auto-scroll loop
- *    ticks every 16 ms while a drag is live. In the default
- *    470 dp window these short notes barely exceed the list
- *    viewport, so the dragged block sits in an edge zone almost
- *    immediately; under Robolectric's paused looper the ticks are
- *    processed in bursts between the injected moves, the list
- *    walks under the finger, the pointer coordinates remap, and
- *    the dragged centre stalls short of the crossing (recorded:
- *    ~100 of 186 px delivered, then a −6 px phantom delta).
+ * Why the drag is still driven as ONE move in a TALL window (the
+ * Phase 3.6 verification arc — three failure modes, all in the
+ * harness, none in the product):
+ *
+ * 1. STEPPED GLIDES STARVE. The editor's auto-scroll loop ticks
+ *    every 16 ms while a drag is live. In the default 470 dp window
+ *    these short notes barely exceed the list viewport, so the
+ *    dragged block sits in an edge zone almost immediately; under
+ *    Robolectric's paused looper the ticks are processed in bursts
+ *    between injected moves, the list walks under the finger, the
+ *    pointer coordinates remap, and the delivered travel stalls.
  * 2. OVERSHOOT DOUBLE-SWAPS. The same tick re-evaluates the swap
- *    after the intended one: a finger parked past the NEXT
- *    segment's centre swaps a second time on the tick (recorded:
- *    an image dragged past its file neighbour landed past the
- *    closing paragraph too). Travel is therefore aimed just past
- *    the crossing — a bounded margin over the exact threshold,
- *    far short of the next centre.
+ *    after the intended one if the finger parks past the NEXT
+ *    segment's threshold — hence the bounded margins above.
  * 3. THE IMAGE'S SEMANTICS LIE. The image block's text/description
- *    nodes overstate its layout extent, so its travel is computed
- *    from the drag rails instead: rail tops are exact layout
- *    quantities (item tops), and the dragged block's size is the
- *    rail-to-rail distance minus the item spacing.
+ *    nodes overstate its layout extent, so its geometry comes from
+ *    the drag rails instead: rail tops differ from item tops by one
+ *    constant padding, which cancels in every difference taken.
  *
- * Defences, combined: a TALL display (h1000dp) in which these
- * notes cannot scroll at all, so no auto-scroll tick can ever
- * walk the list; a SINGLE move, so the swap is evaluated inside
- * one event pass on the full offset; and measured travel with
- * the bounded margins above. A physical finger produces a
- * continuous real-time stream and exhibits none of this — the
- * reorder logic, swap math and persist path were exonerated by
- * the probe traces (drag engaged, exact travel delivered, one
- * swap, persisted order correct) before these tests were shaped
- * this way. Assertions are unchanged throughout: the exact
- * persisted order is asserted from Room.
+ * A physical finger produces a continuous real-time stream and
+ * exhibits none of this. Assertions are unchanged throughout: the
+ * exact persisted order is asserted from Room.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], qualifiers = "w411dp-h1000dp")
@@ -251,40 +255,44 @@ class EditorBlockDragUiTest {
     private fun boundsOf(text: String) =
         composeRule.onNodeWithText(text).fetchSemanticsNode().boundsInRoot
 
-    /**
-     * A block's vertical centre, estimated from its topmost and
-     * bottommost findable nodes. The swap math is centre-to-centre,
-     * so measuring between two blocks' LABELS (both near their
-     * blocks' tops) under-travels by half the height difference —
-     * the first version of these tests did exactly that and the
-     * dragged centre stopped short of the neighbour's centre.
-     * Travel is the centre-to-centre distance plus a bounded
-     * margin (40 px): enough to absorb the few px by which inner
-     * text nodes misreport the layout item (card padding, field
-     * chrome), far short of the following segment's centre — see
-     * the class doc, failure mode 2.
-     */
-    private fun blockCentreY(top: Float, bottom: Float) = (top + bottom) / 2f
-
-    /** The drag rails' top edges, in segment order — exact layout
-     *  item tops (each rail icon sits a padding step below its
-     *  item's top), for the image test's travel (class doc, 3). */
+    /** The drag rails' top edges, in segment order — each rail icon
+     *  sits one [NotaSpacing.sm] padding below its item's top, a
+     *  constant offset that cancels in every difference (class
+     *  doc, 3). */
     private fun railTops(): List<Float> =
         composeRule.onAllNodesWithContentDescription("Drag to move block")
             .fetchSemanticsNodes().map { it.boundsInRoot.top }
 
+    /** The edge-swap overshoot (the product's BLOCK_SWAP_OVERSHOOT)
+     *  in harness pixels. */
+    private fun overshootPx(): Float = with(composeRule.density) { 24.dp.toPx() }
+
+    /** One inter-item spacing step in harness pixels (the product's
+     *  swap math spaces items by [NotaSpacing.sm]). */
+    private fun spacingPx(): Float = with(composeRule.density) { NotaSpacing.sm.toPx() }
+
+    /** The horizontal centre of the editor surface — every block
+     *  card spans it, so a start here lands on the block's body,
+     *  never on the 24 dp rail at its left edge. */
+    private fun bodyCentreX(): Float =
+        composeRule.onRoot().fetchSemanticsNode().boundsInRoot.center.x
+
     /**
-     * Long-press-drag on the node showing [text]: the finger holds
-     * past the long-press timeout (the first small move carries the
-     * event clock past it, inside touch slop), then travels the
-     * whole [totalDy] in ONE move — see the class doc for why a
-     * stepped glide is unreliable in this harness. Each test here
-     * crosses exactly one neighbouring block, and the swap check
-     * evaluates once per move, so one move is the exact dose.
+     * Long-press-drag starting at the root-space point [start]:
+     * the finger holds past the long-press timeout (the first small
+     * move carries the event clock past it, inside the drift
+     * allowance), then travels the whole [totalDy] in ONE move —
+     * see the class doc for why a stepped glide is unreliable in
+     * this harness. Each test here crosses exactly one neighbouring
+     * block, and the swap check evaluates once per move, so one
+     * move is the exact dose.
      */
-    private fun longPressDrag(text: String, totalDy: Float) {
-        composeRule.onNodeWithText(text).performTouchInput {
-            down(center)
+    private fun longPressDragAt(start: Offset, totalDy: Float) {
+        val rootTopLeft = composeRule.onRoot().fetchSemanticsNode()
+            .boundsInRoot.topLeft
+        val local = start - rootTopLeft
+        composeRule.onRoot().performTouchInput {
+            down(local)
             advanceEventTime(700)
             moveBy(Offset(0f, 2f))
             advanceEventTime(16)
@@ -327,19 +335,22 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        // Block centres from each block's extreme nodes: the file
-        // card runs name → mime → error line; the table runs its
-        // first cell → its footer row.
+        // The grab lands on the file card's BODY CENTRE: the card
+        // runs name → mime → error line, so its centre is the
+        // midpoint of those extremes, at the surface's centre x.
         val fileTop = boundsOf("drag-report.pdf").top
         val fileBottom = boundsOf("Attachment not found on this device").bottom
         val tableTop = boundsOf("CellA").top
-        val tableBottom = boundsOf("+ Row").bottom
-        val fileCentre = blockCentreY(fileTop, fileBottom)
-        val tableCentre = blockCentreY(tableTop, tableBottom)
-        // Bounded margin past the crossing (see blockCentreY).
-        longPressDrag(
-            "drag-report.pdf",
-            tableCentre - fileCentre + 40f,
+        // Edge travel: the file's bottom edge starts one item gap
+        // above the table's top; it must end the overshoot PAST
+        // that top (+ the bounded margin). The label-measured gap
+        // overstates the true one by the labels' chrome offsets,
+        // which only adds safety margin — and the total stays far
+        // short of both the closing paragraph's threshold and the
+        // old centre-to-centre distance.
+        longPressDragAt(
+            Offset(bodyCentreX(), (fileTop + fileBottom) / 2f),
+            (tableTop - fileBottom) + overshootPx() + 30f,
         )
         awaitOrder(
             note.id,
@@ -364,22 +375,17 @@ class EditorBlockDragUiTest {
             )
         }
         composeEditor(note.id)
-        val fileTop = boundsOf("drag-report.pdf").top
         val fileBottom = boundsOf("Attachment not found on this device").bottom
         val tableTop = boundsOf("CellA").top
-        val tableBottom = boundsOf("+ Row").bottom
-        val fileCentre = blockCentreY(fileTop, fileBottom)
-        val tableCentre = blockCentreY(tableTop, tableBottom)
-        // The drag starts on the table's FOOTER text, not a cell:
-        // a long press inside a text-field cell wakes the platform
-        // text magnifier, which crashes under Robolectric (null
-        // Surface) before the block drag can complete. The footer
-        // is part of the same block — the long press lands on the
-        // block itself either way. Travel is the crossing plus the
-        // same bounded margin, sign-flipped (see blockCentreY).
-        longPressDrag(
-            "+ Row",
-            fileCentre - tableCentre - 40f,
+        val footerCentreY = boundsOf("+ Row").center.y
+        // The grab lands on the table's body — centre x, footer-row
+        // y (class doc: the true centre is a cell text field, whose
+        // long press wakes the platform magnifier and crashes this
+        // harness). Edge travel, sign-flipped: the table's top edge
+        // must end the overshoot ABOVE the file's bottom edge.
+        longPressDragAt(
+            Offset(bodyCentreX(), footerCentreY),
+            fileBottom - overshootPx() - 30f - tableTop,
         )
         awaitOrder(
             note.id,
@@ -404,23 +410,20 @@ class EditorBlockDragUiTest {
         }
         composeEditor(note.id)
         // The image's own semantics nodes overstate its layout
-        // extent (class doc, failure mode 3), so its travel is
-        // computed from the drag rails instead: the rail-to-rail
-        // distance between the image and the file IS the image
-        // block's laid-out height plus the item spacing, and the
-        // exact crossing is that distance plus half the size
-        // difference. A bounded 30 px margin past the crossing
-        // keeps the landing inside the file's swap window. The
-        // long press lands on the header label — the block itself.
+        // extent (class doc, 3), so its geometry comes from the
+        // drag rails: consecutive rail tops differ by the item's
+        // laid-out height plus one inter-item spacing, and each
+        // rail top sits one spacing below its item top.
         val rails = railTops()
-        val deltaTops = rails[1] - rails[0]
-        val imageSize = deltaTops - 8f
-        val fileTop = boundsOf("drag-report.pdf").top
-        val fileBottom = boundsOf("Attachment not found on this device").bottom
-        val fileSize = (fileBottom - fileTop) + 16f
-        longPressDrag(
-            "Drag image",
-            deltaTops + (fileSize - imageSize) / 2f + 30f,
+        val imageItemTop = rails[0] - spacingPx()
+        val imageItemSize = (rails[1] - rails[0]) - spacingPx()
+        // The grab lands on the image's BODY CENTRE — on the image
+        // itself, not its header label. Edge travel: the image's
+        // bottom starts one spacing above the file's top and must
+        // end the overshoot past it (+ the bounded margin).
+        longPressDragAt(
+            Offset(bodyCentreX(), imageItemTop + imageItemSize / 2f),
+            spacingPx() + overshootPx() + 30f,
         )
         awaitOrder(
             note.id,
