@@ -105,6 +105,9 @@ val notaUiTestClasses = listOf(
     "app.nota.feature.editor.EditorBlockDragUiTest",
     "app.nota.feature.editor.EditorReadModeUiTest",
     "app.nota.feature.notes.NotesSwipeGhostUiTest",
+    // DIAGNOSTIC-3 (throwaway): routed into the UI shard so the
+    // probe runs in the short job; removed with the diagnostic.
+    "app.nota.feature.editor.DragDiagnosticTest",
 )
 
 tasks.withType<Test>().configureEach {

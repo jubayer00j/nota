@@ -466,8 +466,16 @@ fun RichNoteEditorScreen(
         val from = segments.indexOfFirst { it.id == ui.id }
         if (from < 0) return false
         val visible = listState.layoutInfo.visibleItemsInfo
-        val info = visible.firstOrNull { it.key == ui.id } ?: return false
+        val info = visible.firstOrNull { it.key == ui.id } ?: run {
+            DragProbe.log("eval: dragged not visible")
+            return false
+        }
         val centre = info.offset + dragOffsetPx + info.size / 2f
+        DragProbe.log(
+            "eval from=$from vp=${listState.layoutInfo.viewportSize.height} " +
+                "items=${visible.joinToString(",") { "${it.key.toString().takeLast(4)}@${it.offset}+${it.size}" }} " +
+                "dragOff=$dragOffsetPx centre=$centre",
+        )
         val spacingPx = with(density) { NotaSpacing.sm.toPx() }
         val prev = segments.getOrNull(from - 1)?.let { neighbour ->
             visible.firstOrNull { it.key == neighbour.id }
@@ -475,6 +483,7 @@ fun RichNoteEditorScreen(
         if (prev != null && centre < prev.offset + prev.size / 2f) {
             segments = segments.moved(from, from - 1)
             dragOffsetPx += prev.size + spacingPx
+            DragProbe.log("SWAP up from=$from")
             return true
         }
         val next = segments.getOrNull(from + 1)?.let { neighbour ->
@@ -494,6 +503,7 @@ fun RichNoteEditorScreen(
                 // lands last; restore the caret tail below it.
                 segments = ensureTrailing(segments)
                 dragOffsetPx -= next.size + spacingPx
+                DragProbe.log("SWAP down from=$from")
                 return true
             }
         }
@@ -502,6 +512,7 @@ fun RichNoteEditorScreen(
 
     fun onBlockDrag(ui: UiSegment, dragAmountY: Float) {
         dragOffsetPx += dragAmountY
+        DragProbe.log("onBlockDrag dy=$dragAmountY total=$dragOffsetPx")
         if (evaluateBlockSwap(ui)) hapticTick()
     }
 
@@ -1217,16 +1228,19 @@ fun RichNoteEditorScreen(
                                     Modifier.longPressBlockDrag(
                                         key = ui.id,
                                         onDragStart = {
+                                            DragProbe.log("onDragStart")
                                             dragSegmentId = ui.id
                                             dragOffsetPx = 0f
                                         },
                                         onDrag = { dy -> onBlockDrag(ui, dy) },
                                         onDragEnd = {
+                                            DragProbe.log("onDragEnd")
                                             dragSegmentId = null
                                             dragOffsetPx = 0f
                                             persistNow()
                                         },
                                         onDragCancel = {
+                                            DragProbe.log("onDragCancel")
                                             dragSegmentId = null
                                             dragOffsetPx = 0f
                                         },
