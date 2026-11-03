@@ -166,6 +166,15 @@ private fun newUiId(): String = UUID.randomUUID().toString()
 private fun <T> List<T>.moved(from: Int, to: Int): List<T> =
     toMutableList().apply { add(to, removeAt(from)) }
 
+/**
+ * Phase 3.7: how far a dragged block's leading edge must push past a
+ * neighbour's near edge before the swap commits (see
+ * evaluateBlockSwap). A small constant — big enough to read as
+ * intent and to act as the swap hysteresis, small enough that
+ * reordering even the tallest blocks is a flick, not a haul.
+ */
+private val BLOCK_SWAP_OVERSHOOT = 24.dp
+
 private fun escapeCellText(text: String): String = text
     .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -448,12 +457,12 @@ fun RichNoteEditorScreen(
     }
 
     /**
-     * Phase 3.5 (D4) drag-reorder, Phase 3.6 (G1) refactor: evaluates
-     * ONE centre-crossing swap for the dragged block at its current
-     * accumulated translation and returns true when a swap happened.
-     * The dragged block follows the finger via a graphicsLayer
-     * translation; when its centre crosses a neighbouring SEGMENT's
-     * centre the two swap in the working list and the accumulated
+     * Phase 3.5 (D4) drag-reorder, Phase 3.6 (G1) refactor, Phase 3.7
+     * threshold change: evaluates ONE swap for the dragged block at
+     * its current accumulated translation and returns true when a
+     * swap happened. The dragged block follows the finger via a
+     * graphicsLayer translation; when a swap commits, the two blocks
+     * trade places in the working list and the accumulated
      * translation is adjusted by the neighbour's height (+ the
      * inter-segment spacing) so the block stays under the finger.
      * Neighbours are located through the list's layout info by item
@@ -461,18 +470,33 @@ fun RichNoteEditorScreen(
      * ids, can never be swap targets, so a block moves among segments
      * only. Called per finger move AND per auto-scroll step (G1), so
      * a block can be walked the length of a long note.
+     *
+     * 3.7 — EDGE thresholds replace 3.6's centre-to-centre crossing.
+     * Centre-crossing made the required travel proportional to the
+     * blocks' heights: swapping a tall file card past a tall image
+     * meant hauling the finger most of a screen before anything
+     * responded (Jubayer's 0.4.2 verdict). Now a swap commits when
+     * the dragged block's LEADING edge has pushed [BLOCK_SWAP_OVERSHOOT]
+     * past the neighbour's NEAR edge — a constant, short travel
+     * whatever the blocks' heights. The overshoot doubles as the
+     * hysteresis: after a swap, the reverse threshold sits the same
+     * overshoot beyond the passed neighbour's far side of the new
+     * geometry, so a parked finger cannot oscillate a swap back and
+     * forth.
      */
     fun evaluateBlockSwap(ui: UiSegment): Boolean {
         val from = segments.indexOfFirst { it.id == ui.id }
         if (from < 0) return false
         val visible = listState.layoutInfo.visibleItemsInfo
         val info = visible.firstOrNull { it.key == ui.id } ?: return false
-        val centre = info.offset + dragOffsetPx + info.size / 2f
+        val overshootPx = with(density) { BLOCK_SWAP_OVERSHOOT.toPx() }
+        val visualTop = info.offset + dragOffsetPx
+        val visualBottom = visualTop + info.size
         val spacingPx = with(density) { NotaSpacing.sm.toPx() }
         val prev = segments.getOrNull(from - 1)?.let { neighbour ->
             visible.firstOrNull { it.key == neighbour.id }
         }
-        if (prev != null && centre < prev.offset + prev.size / 2f) {
+        if (prev != null && visualTop + overshootPx < prev.offset + prev.size) {
             segments = segments.moved(from, from - 1)
             dragOffsetPx += prev.size + spacingPx
             return true
@@ -480,7 +504,7 @@ fun RichNoteEditorScreen(
         val next = segments.getOrNull(from + 1)?.let { neighbour ->
             visible.firstOrNull { it.key == neighbour.id }
         }
-        if (next != null && centre > next.offset + next.size / 2f) {
+        if (next != null && visualBottom - overshootPx > next.offset) {
             // Never swap past the trailing caret segment: an empty
             // text tail is not content to pass but the Phase 1.5
             // guarantee itself — a block stopped above it is already
@@ -1168,15 +1192,28 @@ fun RichNoteEditorScreen(
                     // segments are exempt, because their long-press is
                     // text selection. The 3.5 rail remains as the
                     // visual affordance. While dragged, the block
-                    // floats (translation + elevation + alpha) and its
-                    // SLOT stays behind as the drop indicator: the
-                    // highlighted gap is exactly where it will land,
-                    // because swaps are live.
+                    // floats (translation + elevation + alpha) above
+                    // its slot.
+                    //
+                    // Phase 3.7: the slot is no longer a big filled
+                    // box (0.4.2 verdict: it read as a hole the note
+                    // fell into). It is now just the block's own space
+                    // held open, marked by a THIN landing line at its
+                    // top edge — the insertion boundary — and the
+                    // other items animate to their new places on a
+                    // swap instead of teleporting (animateItem, only
+                    // while a drag is live so normal editing never
+                    // animates; the dragged item itself is excluded —
+                    // its motion is the finger's, via the translation).
                     val isDraggable = ui.segment !is TextSegment
                     val isBlock = ui.segment !is TextSegment && ui.segment !is QuoteSegment
                     val isDragged = dragSegmentId == ui.id
                     Box(
-                        Modifier.onSizeChanged { segmentHeights[ui.id] = it.height },
+                        (if (dragSegmentId != null && !isDragged) {
+                            Modifier.animateItem()
+                        } else {
+                            Modifier
+                        }).onSizeChanged { segmentHeights[ui.id] = it.height },
                     ) {
                         if (isDragged) {
                             val slotHeight = segmentHeights[ui.id]
@@ -1190,18 +1227,17 @@ fun RichNoteEditorScreen(
                                         } else {
                                             Modifier
                                         },
-                                    )
-                                    .background(
-                                        MaterialTheme.colorScheme.primaryContainer
-                                            .copy(alpha = 0.55f),
-                                        RoundedCornerShape(8.dp),
-                                    )
-                                    .border(
-                                        2.dp,
-                                        MaterialTheme.colorScheme.primary,
-                                        RoundedCornerShape(8.dp),
                                     ),
-                            )
+                            ) {
+                                Box(
+                                    Modifier.fillMaxWidth()
+                                        .height(3.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary,
+                                            RoundedCornerShape(2.dp),
+                                        ),
+                                )
+                            }
                         }
                         Box(
                             (if (isDragged) {
