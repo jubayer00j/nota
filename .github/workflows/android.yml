@@ -149,7 +149,15 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B, 22 of 44 non-UI classes)
+      # Phase 3.8 diagnosis round: shard B is split THREE ways
+      # (B/B2/B3, 8/7/7 classes). The combined 22-class step needed
+      # ~4.5-5 min and the runner fleet killed it mid-step twelve
+      # consecutive times on 2026-11-03 (always ~3.5-4 min in,
+      # zero test failures in any partial log), while every shorter
+      # shard completed. Each third fits the survival window the
+      # other shards already enjoy. The PARTITION is unchanged in
+      # total: B ∪ B2 ∪ B3 is exactly the old shard-B class list.
+      - name: Run fast unit tests (shard B, 8 of 22 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.attachments.ImageSamplingTest" \
@@ -160,6 +168,51 @@ jobs:
             --tests "app.nota.data.drive.DriveRepositoryTest" \
             --tests "app.nota.data.html.NoteDocumentTest" \
             --tests "app.nota.data.preferences.PreferencesSwipeActionTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-B test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-b
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  test-fast-b2:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run fast unit tests (shard B2, 7 of 22 shard-B classes)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.repository.NoteLockRepositoryRobolectricTest" \
             --tests "app.nota.data.repository.SwipeUndoFidelityRobolectricTest" \
             --tests "app.nota.data.security.AppLockCryptoTest" \
@@ -167,6 +220,51 @@ jobs:
             --tests "app.nota.data.security.Pbkdf2Test" \
             --tests "app.nota.data.text.PlainTextCodecTest" \
             --tests "app.nota.domain.SmartFoldersTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-B2 test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-b2
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  test-fast-b3:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run fast unit tests (shard B3, 7 of 22 shard-B classes)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.feature.editor.NoteLockUnlockStateRobolectricTest" \
             --tests "app.nota.feature.editor.TapBelowContentTest" \
             --tests "app.nota.feature.editor.ToolbarStateTest" \
@@ -176,11 +274,11 @@ jobs:
             --tests "app.nota.feature.spike.HtmlRoundTripTest" \
             --stacktrace
 
-      - name: Upload fast-shard-B test reports
+      - name: Upload fast-shard-B3 test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unit-test-evidence-fast-b
+          name: unit-test-evidence-fast-b3
           path: |
             app/build/probe-output
             app/build/reports/tests
@@ -245,7 +343,7 @@ jobs:
           if-no-files-found: ignore
 
   build-android:
-    needs: [test-fast-a, test-fast-b, test-ui]
+    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-ui]
     runs-on: ubuntu-latest
 
     steps:
