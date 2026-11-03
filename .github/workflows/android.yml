@@ -19,7 +19,7 @@ jobs:
   # across jobs and attempts, and the fast shard is split AGAIN
   # into two parallel jobs (test-fast-a / test-fast-b) with
   # explicit, deterministic --tests class lists partitioning the
-  # 44 non-UI classes 22/22 (UI classes stay in test-ui).
+  # 45 non-UI classes 23/22 (UI classes stay in test-ui).
   # build-android runs once all three test jobs are green.
   test-fast-a:
     runs-on: ubuntu-latest
@@ -66,7 +66,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 22 of 44 non-UI classes)
+      - name: Run fast unit tests (shard A, 23 of 45 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -88,7 +88,8 @@ jobs:
             --tests "app.nota.feature.editor.CaretSplitRobolectricTest" \
             --tests "app.nota.feature.editor.ImagePinchMathTest" \
             --tests "app.nota.feature.editor.PendingInsertResumerTest" \
-            --tests "app.nota.feature.lock.LegacyFingerprintPromptTest" \
+            --tests "app.nota.feature.lock.LegacyFingerprintPromptCoordinatorTest" \
+            --tests "app.nota.feature.lock.LegacyFingerprintPromptStateMachineTest" \
             --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
             --tests "app.nota.ui.theme.ThemeSelectionTest" \
             --stacktrace
