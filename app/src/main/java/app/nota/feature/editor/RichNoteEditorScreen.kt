@@ -714,12 +714,21 @@ fun RichNoteEditorScreen(
     // Now the intent is staged durably BEFORE launch and consumed
     // from the record, not from composition memory.
 
-    /** Stages the durable record for a picker about to launch. The
-     *  working document is flushed first so the staged segment index
-     *  and anchor describe the stored content a rebuilt editor will
-     *  parse after a lock swap / process death. */
-    fun stagePendingInsert(kind: PendingInsertKind, mode: PendingInsertMode) {
-        persistNow()
+    /** Stages the durable record for a picker about to launch, then
+     *  runs [onStaged] — the picker launch itself. The working
+     *  document is flushed first AND the staging waits for the
+     *  flush: persist is asynchronous, so staging on the caller's
+     *  timeline would let a process death in the picker resurrect
+     *  the pre-flush body, losing the very edits the staged index,
+     *  anchor and caret describe (Codex P2, PR #19). Every persist
+     *  path invokes its completion callback (including the
+     *  no-change and no-session-key branches), so [onStaged] always
+     *  runs exactly once. */
+    fun stagePendingInsert(
+        kind: PendingInsertKind,
+        mode: PendingInsertMode,
+        onStaged: () -> Unit,
+    ) {
         val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
         val activeUi = segments.getOrNull(activeIndex)
         val activeSegment = activeUi?.segment
@@ -741,23 +750,27 @@ fun RichNoteEditorScreen(
             caret = 0
             caretEnd = 0
         }
-        pendingInsertStore.stage(
-            PendingInsertRecord(
-                accountId = databaseProvider.accountId.value,
-                noteId = noteId,
-                kind = kind,
-                mode = mode,
-                segmentIndex = if (mode == PendingInsertMode.INSERT_AT_CARET) {
-                    activeIndex
-                } else {
-                    -1
-                },
-                segmentAnchorHash = PendingInsertRecord.anchorHash(anchor),
-                segmentAnchorLength = anchor.length,
-                caretOffset = caret,
-                caretEndOffset = caretEnd,
-            ),
+        val record = PendingInsertRecord(
+            accountId = databaseProvider.accountId.value,
+            noteId = noteId,
+            kind = kind,
+            mode = mode,
+            segmentIndex = if (mode == PendingInsertMode.INSERT_AT_CARET) {
+                activeIndex
+            } else {
+                -1
+            },
+            segmentAnchorHash = PendingInsertRecord.anchorHash(anchor),
+            segmentAnchorLength = anchor.length,
+            caretOffset = caret,
+            caretEndOffset = caretEnd,
         )
+        // Stage only once the flush has landed (see the doc above):
+        // the record and the picker both belong after the write.
+        persistNow {
+            pendingInsertStore.stage(record)
+            onStaged()
+        }
     }
 
     /** Inserts [block] at the caret target a staged record saved:
@@ -1347,19 +1360,21 @@ fun RichNoteEditorScreen(
                             stagePendingInsert(
                                 PendingInsertKind.IMAGE,
                                 PendingInsertMode.IMPORT_ONLY,
-                            )
-                            imagePicker.launch(
-                                PickVisualMediaRequest(
-                                    ActivityResultContracts.PickVisualMedia.ImageOnly,
-                                ),
-                            )
+                            ) {
+                                imagePicker.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            }
                         },
                         onAddFile = {
                             stagePendingInsert(
                                 PendingInsertKind.FILE,
                                 PendingInsertMode.IMPORT_ONLY,
-                            )
-                            filePicker.launch(arrayOf("*/*"))
+                            ) {
+                                filePicker.launch(arrayOf("*/*"))
+                            }
                         },
                         onInsertImage = { attachment ->
                             // Phase 3.5 (D4): at the caret, not appended.
@@ -1454,18 +1469,20 @@ fun RichNoteEditorScreen(
                         stagePendingInsert(
                             PendingInsertKind.IMAGE,
                             PendingInsertMode.INSERT_AT_CARET,
-                        )
-                        imagePicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                        )
+                        ) {
+                            imagePicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        }
                     },
                     onInsertFile = {
                         insertFileOnPick = true
                         stagePendingInsert(
                             PendingInsertKind.FILE,
                             PendingInsertMode.INSERT_AT_CARET,
-                        )
-                        filePicker.launch(arrayOf("*/*"))
+                        ) {
+                            filePicker.launch(arrayOf("*/*"))
+                        }
                     },
                     onInsertBlock = { insertBlock(it) },
                 )

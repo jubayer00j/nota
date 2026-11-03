@@ -187,7 +187,23 @@ class PendingInsertStore(private val dir: File) {
     }
 
     private fun readFromDisk(): PendingInsertRecord? = try {
-        if (file.isFile) PendingInsertRecord.parse(file.readText()) else null
+        if (file.isFile) {
+            val raw = file.readText()
+            val parsed = PendingInsertRecord.parse(raw)
+            // A record staged before the anchor was hashed still
+            // holds the segment's words as plaintext in this file.
+            // Parse converted it in memory — persist the conversion
+            // so the text does not outlive the read (Codex P2,
+            // PR #19).
+            if (parsed != null && raw.contains("\"segmentAnchor\"") &&
+                !raw.contains("\"segmentAnchorHash\"")
+            ) {
+                writeToDisk(parsed)
+            }
+            parsed
+        } else {
+            null
+        }
     } catch (e: Exception) {
         null
     }

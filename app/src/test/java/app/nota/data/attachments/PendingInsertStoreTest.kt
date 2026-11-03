@@ -146,13 +146,7 @@ class PendingInsertStoreTest {
         // (and before caretEndOffset existed): the plaintext field
         // converts on read, the restore keeps working, and the text
         // is never retained or re-serialised.
-        val legacy = """
-            {"id":"rec-legacy","accountId":"guest","noteId":"note-1",
-             "kind":"FILE","mode":"INSERT_AT_CARET","segmentIndex":3,
-             "segmentAnchor":"Bravo middle paragraph","caretOffset":7,
-             "stagedAtMillis":99}
-        """.trimIndent()
-        val parsed = PendingInsertRecord.parse(legacy)!!
+        val parsed = PendingInsertRecord.parse(LEGACY_JSON)!!
         assertEquals(
             PendingInsertRecord.anchorHash("Bravo middle paragraph"),
             parsed.segmentAnchorHash,
@@ -161,5 +155,34 @@ class PendingInsertStoreTest {
         assertEquals(7, parsed.caretEndOffset)
         assertEquals(7, parsed.selectionEnd)
         assertFalse(parsed.toJson().contains("Bravo"))
+    }
+
+    @Test
+    fun legacyFile_isRewrittenWithoutPlaintextOnRead() {
+        // The in-memory conversion is not enough (Codex P2,
+        // PR #19): the legacy FILE still holds the segment's words
+        // until something rewrites it. Reading the store rewrites
+        // it in the hashed form.
+        val dir = tempFolder.newFolder("files")
+        File(dir, PendingInsertStore.FILE_NAME).writeText(LEGACY_JSON)
+        val store = PendingInsertStore(dir)
+        assertEquals(
+            PendingInsertRecord.anchorHash("Bravo middle paragraph"),
+            store.peek()?.segmentAnchorHash,
+        )
+        val after = File(dir, PendingInsertStore.FILE_NAME).readText()
+        assertFalse(after.contains("Bravo"))
+        assertEquals(store.peek(), PendingInsertRecord.parse(after))
+    }
+
+    private companion object {
+        /** A record as the pre-hash build wrote it: plaintext
+         *  anchor, no caretEndOffset. */
+        val LEGACY_JSON = """
+            {"id":"rec-legacy","accountId":"guest","noteId":"note-1",
+             "kind":"FILE","mode":"INSERT_AT_CARET","segmentIndex":3,
+             "segmentAnchor":"Bravo middle paragraph","caretOffset":7,
+             "stagedAtMillis":99}
+        """.trimIndent()
     }
 }
