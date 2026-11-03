@@ -292,6 +292,29 @@ fun RichNoteEditorScreen(
     // pendingCaretFocusId pattern — hit-test and claim are two
     // calls for the same down, with no interleaving down between).
     var pendingDragIndex by remember { mutableIntStateOf(-1) }
+    // Phase 3.8 (Codex review, PR #21): the ids of neighbours the
+    // ghost has PASSED, accumulated across the whole session.
+    // The target counts passed neighbours, but layoutInfo only
+    // describes VISIBLE rows — on a long note under auto-scroll a
+    // passed row scrolls out of the viewport and would stop
+    // counting, walking the target backward while the finger
+    // never moved. So crossings are remembered by identity: a
+    // visible row joins its set when the edge condition holds
+    // and leaves it when it visibly stops holding; an off-screen
+    // row keeps its membership (it can only un-pass by sweeping
+    // back past the ghost's edge, which makes it visible again
+    // first). Plain mutable sets, not snapshot state — read and
+    // written only inside the session bookkeeping, never during
+    // composition.
+    val passedAboveIds = remember { mutableSetOf<String>() }
+    val passedBelowIds = remember { mutableSetOf<String>() }
+    // The landing line's Y (list-viewport px), computed by the
+    // session bookkeeping and held as state so the overlay can
+    // read it INSIDE the line's graphicsLayer — a draw-phase
+    // read. Computing it during composition instead would
+    // subscribe the overlay to layoutInfo, and every auto-scroll
+    // tick would recompose the ghost (Codex review, PR #21).
+    val landingLineY = remember { mutableStateOf<Float?>(null) }
     // Phase 3.6 (G4): true while a two-finger image pinch is live —
     // the list must not scroll under it.
     var imagePinchActive by remember { mutableStateOf(false) }
@@ -553,7 +576,10 @@ fun RichNoteEditorScreen(
         )
         dragPointerY = downPosition.y
         dragTargetIndex = index
+        passedAboveIds.clear()
+        passedBelowIds.clear()
         focusManager.clearFocus()
+        updateDragTarget()
     }
 
     /**
@@ -567,7 +593,10 @@ fun RichNoteEditorScreen(
      * top vs the far edge of each block above, all read from the
      * list's own layoutInfo (exact laid-out offsets and sizes).
      * The target is the origin index, minus the blocks passed
-     * above, plus the blocks passed below.
+     * above, plus the blocks passed below. Passed-ness is
+     * accumulated BY SEGMENT ID across the session (see
+     * [passedBelowIds]) so rows that scroll out of the viewport
+     * under auto-scroll keep counting.
      *
      * Because the thresholds sit on the ghost's EDGES, the rule
      * is grab-point independent: at rest both edges sit inside
@@ -578,30 +607,37 @@ fun RichNoteEditorScreen(
      * moved at all. Travel stays the short flick 3.7 shipped
      * (spacing + overshoot), whatever either block's height, and
      * the overshoot doubles as the hysteresis: un-passing needs
-     * the full overshoot in retreat. Only VISIBLE neighbours can
-     * be passed — the auto-scroll loop extends the range.
+     * the full overshoot in retreat.
      *
      * The trailing caret tail clamps the target exactly as the
      * 3.7 swap guard did: the block may pass a real closing
      * paragraph (the commit restores the caret tail below it)
      * but never the empty caret segment itself.
+     *
+     * Every call also refreshes [landingLineY] — computed here,
+     * in event/auto-scroll callbacks rather than composition, so
+     * the overlay never subscribes to layoutInfo (see the state's
+     * doc).
      */
     fun updateDragTarget() {
         val session = dragSession ?: return
         val overshootPx = with(density) { BLOCK_SWAP_OVERSHOOT.toPx() }
         val ghostTop = dragPointerY - session.grabOffsetPx
         val ghostBottom = ghostTop + session.blockHeightPx
-        var passedAbove = 0
-        var passedBelow = 0
         for ((index, info) in visibleSegmentItems()) {
             if (index == session.fromIndex) continue
+            val id = segments[index].id
             if (index < session.fromIndex) {
                 if (info.offset + info.size - overshootPx > ghostTop) {
-                    passedAbove++
+                    passedAboveIds += id
+                } else {
+                    passedAboveIds -= id
                 }
             } else {
                 if (info.offset + overshootPx < ghostBottom) {
-                    passedBelow++
+                    passedBelowIds += id
+                } else {
+                    passedBelowIds -= id
                 }
             }
         }
@@ -614,27 +650,30 @@ fun RichNoteEditorScreen(
         } else {
             collapsedCount
         }
-        val newTarget = (session.fromIndex - passedAbove + passedBelow)
-            .coerceIn(0, maxTarget)
+        val newTarget = (session.fromIndex - passedAboveIds.size +
+            passedBelowIds.size).coerceIn(0, maxTarget)
         if (newTarget != dragTargetIndex) {
             dragTargetIndex = newTarget
             hapticTick()
         }
+        landingLineY.value = computeLandingLineY(newTarget)
     }
 
     /**
      * Phase 3.8: the landing line's Y (list-viewport coordinates)
-     * for the current [dragTargetIndex], or null when the boundary
-     * is off-screen. At the origin target the line caps the
-     * dragged block's own slot; elsewhere it sits in the gap above
-     * the segment that would follow the dropped block — or below
-     * the last visible segment when the target is past it.
+     * for insertion target [target], or null when the boundary
+     * cannot be placed from the visible rows. At the origin
+     * target the line caps the dragged block's own slot; elsewhere
+     * it sits in the gap above the segment that would follow the
+     * dropped block — or below the last visible segment when the
+     * target is past it. Called ONLY from [updateDragTarget]
+     * (event/auto-scroll callbacks), never from composition —
+     * see [landingLineY].
      */
-    fun dragLineYPx(): Float? {
+    fun computeLandingLineY(target: Int): Float? {
         val session = dragSession ?: return null
         val spacingPx = with(density) { NotaSpacing.sm.toPx() }
         val items = visibleSegmentItems().toMap()
-        val target = dragTargetIndex
         val from = session.fromIndex
         if (target == from) {
             return items[from]?.let { it.offset - spacingPx / 2f }
@@ -660,6 +699,9 @@ fun RichNoteEditorScreen(
     fun commitDragSession() {
         val session = dragSession ?: return
         dragSession = null
+        landingLineY.value = null
+        passedAboveIds.clear()
+        passedBelowIds.clear()
         val from = segments.indexOfFirst { it.id == session.segmentId }
         if (from < 0) return
         // The list cannot change during a session, so [from] is
@@ -679,6 +721,9 @@ fun RichNoteEditorScreen(
      */
     fun cancelDragSession() {
         dragSession = null
+        landingLineY.value = null
+        passedAboveIds.clear()
+        passedBelowIds.clear()
     }
 
     // --- Phase 3.6 (G3): read ⇄ edit mode transitions ----------------
@@ -1606,19 +1651,25 @@ fun RichNoteEditorScreen(
             if (session != null) {
                 val draggedUi = segments.firstOrNull { it.id == session.segmentId }
                 if (draggedUi != null) {
-                    val lineY = dragLineYPx()
-                    if (lineY != null) {
-                        Box(
-                            Modifier.fillMaxWidth()
-                                .padding(horizontal = NotaSpacing.md)
-                                .graphicsLayer { translationY = lineY }
-                                .height(3.dp)
-                                .background(
-                                    MaterialTheme.colorScheme.primary,
-                                    RoundedCornerShape(2.dp),
-                                ),
-                        )
-                    }
+                    // The landing line: its Y was computed by the
+                    // session bookkeeping (updateDragTarget) and is
+                    // read here INSIDE the graphicsLayer — a
+                    // draw-phase read, so an auto-scroll tick moves
+                    // the line without recomposing anything.
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .padding(horizontal = NotaSpacing.md)
+                            .graphicsLayer {
+                                val y = landingLineY.value
+                                translationY = y ?: 0f
+                                alpha = if (y == null) 0f else 1f
+                            }
+                            .height(3.dp)
+                            .background(
+                                MaterialTheme.colorScheme.primary,
+                                RoundedCornerShape(2.dp),
+                            ),
+                    )
                     Box(
                         Modifier.fillMaxWidth()
                             .padding(horizontal = NotaSpacing.md)
