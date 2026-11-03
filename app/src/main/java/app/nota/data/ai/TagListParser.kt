@@ -88,8 +88,24 @@ object TagListParser {
                         val c = span[i]
                         when {
                             c == '\\' && i + 1 < span.length -> {
-                                sb.append(unescape(span[i + 1]))
-                                i += 2
+                                val esc = span[i + 1]
+                                val decoded = if (esc == 'u' && i + 5 < span.length) {
+                                    span.substring(i + 2, i + 6).toIntOrNull(16)
+                                } else {
+                                    null
+                                }
+                                if (decoded != null) {
+                                    // \uXXXX — decode it fully;
+                                    // dropping the backslash alone
+                                    // would corrupt "café" into
+                                    // "cafu00e9" (Codex review,
+                                    // Phase 4.1).
+                                    sb.append(decoded.toChar())
+                                    i += 6
+                                } else {
+                                    sb.append(unescape(esc))
+                                    i += 2
+                                }
                             }
                             c == '"' -> {
                                 closed = true

@@ -147,6 +147,18 @@ class OpenAiCompatibleProviderTest {
         } catch (e: AiException) {
             assertEquals(AiErrorKind.NO_KEY, e.kind)
         }
+        // Unparseable URL behind an https:// prefix — must be a
+        // configuration error, never an unmapped crash from the
+        // HTTP layer (Codex review, Phase 4.1).
+        try {
+            provider(AiProviderId.CUSTOM).complete(
+                config(AiProviderId.CUSTOM, baseUrl = "https://["),
+                "p",
+            )
+            fail("expected NOT_CONFIGURED")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.NOT_CONFIGURED, e.kind)
+        }
         assertTrue("no request may leave the device", http.calls.isEmpty())
     }
 

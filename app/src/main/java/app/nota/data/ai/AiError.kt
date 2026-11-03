@@ -18,6 +18,7 @@ enum class AiErrorKind(val userMessage: String) {
     INVALID_KEY("That key didn't work — check it and try again."),
     RATE_LIMITED("Rate limit reached — try again in a little while."),
     OFFLINE("You're offline — AI needs a connection."),
+    TIMEOUT("The provider took too long to answer — try again."),
     BAD_RESPONSE("The provider sent back something Nota couldn't read. Try again."),
     EMPTY("The provider didn't return anything for this note. Try again."),
     MODEL_UNAVAILABLE("That model isn't available through the provider right now. Try again later."),
@@ -36,7 +37,8 @@ class AiException(
     val kind: AiErrorKind,
     message: String = kind.userMessage,
     val upstreamMessage: String? = null,
-) : Exception(message) {
+    cause: Throwable? = null,
+) : Exception(message, cause) {
 
     /** The full user-facing line: the calm sentence, plus the
      *  provider's own words when they were preserved. */

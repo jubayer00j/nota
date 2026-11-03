@@ -41,7 +41,7 @@ interface AiHttpClient {
  *  in-flight request, which is what the editor's Cancel button
  *  relies on. */
 class OkHttpAiClient(
-    private val client: OkHttpClient = OkHttpClient(),
+    private val client: OkHttpClient = defaultClient(),
 ) : AiHttpClient {
 
     override suspend fun post(
@@ -82,5 +82,18 @@ class OkHttpAiClient(
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=UTF-8".toMediaType()
+
+        /** Timeouts sized for generation, not pings (Codex review,
+         *  Phase 4.1): OkHttp's defaults (10s read) would abort a
+         *  legitimate Summarize on a long note — and the timeout
+         *  would then be misreported as "offline". 60s read / 90s
+         *  whole-call lets slow generations finish while real
+         *  connection failures still surface quickly. */
+        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
     }
 }

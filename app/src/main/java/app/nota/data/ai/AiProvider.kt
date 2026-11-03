@@ -1,5 +1,6 @@
 package app.nota.data.ai
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -127,7 +128,15 @@ internal suspend fun postOrThrow(
     val response = try {
         http.post(url, headers, jsonBody)
     } catch (e: AiNetworkException) {
-        throw AiException(AiErrorKind.OFFLINE)
+        // A timeout means the request DID leave the device —
+        // reporting it as OFFLINE would send the user to check a
+        // healthy connection (Codex review, Phase 4.1).
+        val timedOut = e.cause is java.net.SocketTimeoutException ||
+            e.cause is java.io.InterruptedIOException
+        throw AiException(
+            if (timedOut) AiErrorKind.TIMEOUT else AiErrorKind.OFFLINE,
+            cause = e,
+        )
     }
     if (response.status !in 200..299) {
         throw mapHttpError(response, apiKey, model, invalidKeyStatuses)
@@ -149,6 +158,15 @@ class GeminiProvider(private val http: AiHttpClient) : AiProvider {
         val key = config.apiKey.trim()
         if (key.isBlank()) throw AiException.noKey()
         val model = config.resolvedModel()
+        val url = "$API_BASE/models/$model:generateContent"
+        // A model name containing characters no URL can carry
+        // would make the HTTP layer throw an unmapped exception
+        // (Codex review, Phase 4.1) — reject it here instead.
+        if (url.toHttpUrlOrNull() == null) {
+            throw AiException.notConfigured(
+                "That model name doesn't look usable — check it in Settings → AI features.",
+            )
+        }
         val body = JSONObject()
             .put(
                 "contents",
@@ -162,7 +180,7 @@ class GeminiProvider(private val http: AiHttpClient) : AiProvider {
             .toString()
         val responseBody = postOrThrow(
             http = http,
-            url = "$API_BASE/models/$model:generateContent",
+            url = url,
             headers = mapOf("x-goog-api-key" to key),
             jsonBody = body,
             apiKey = key,
@@ -218,6 +236,15 @@ class OpenAiCompatibleProvider(
         if (endpoint == null || !endpoint.startsWith("https://")) {
             throw AiException.notConfigured(
                 "Set a provider endpoint URL starting with https:// in Settings → AI features.",
+            )
+        }
+        if (endpoint.toHttpUrlOrNull() == null) {
+            // Starts with https:// but isn't a parseable URL
+            // ("https://["): the HTTP layer would throw an
+            // unmapped exception the UI can't handle (Codex
+            // review, Phase 4.1) — reject it here instead.
+            throw AiException.notConfigured(
+                "That endpoint address doesn't look right — check it in Settings → AI features.",
             )
         }
         val model = config.model.trim()

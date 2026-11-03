@@ -25,32 +25,39 @@ import org.robolectric.RuntimeEnvironment
  * (or an old key tested as a success). Here Test must exercise
  * the values currently in the form — proven by recording exactly
  * which key the fake transport receives.
+ *
+ * Every test uses its OWN account id: the preferences DataStore
+ * file is shared by every Robolectric class in the shard fork,
+ * so AI fields written for one account id are visible to all —
+ * per-test ids are the isolation (the repo's standing pattern).
  */
 @RunWith(RobolectricTestRunner::class)
 class AiSettingsFormTest {
 
     private lateinit var store: AiSettingsStore
     private lateinit var http: FakeAiHttpClient
-    private lateinit var form: AiSettingsForm
 
     private fun geminiOk(): AiHttpResponse = AiHttpResponse(
         200,
         """{"candidates":[{"content":{"parts":[{"text":"ready"}]}}]}""",
     )
 
+    private fun formFor(account: String): AiSettingsForm =
+        AiSettingsForm(store, AiService(store, http) { account }) { account }
+
     @Before
     fun setUp() {
         val prefs = PreferencesRepository(RuntimeEnvironment.getApplication())
         store = AiSettingsStore(prefs, FakeAiKeyCipher())
         http = FakeAiHttpClient()
-        val service = AiService(store, http) { "guest" }
-        form = AiSettingsForm(store, service) { "guest" }
     }
 
     @Test
     fun testConnectionUsesTheTypedKeyNotTheSavedOne() = runBlocking {
+        val acct = "form-wart"
+        val form = formFor(acct)
         // A key is already saved…
-        store.saveSlot("guest", AiProviderId.GEMINI, AiProviderSlot(apiKey = "SAVED-KEY"))
+        store.saveSlot(acct, AiProviderId.GEMINI, AiProviderSlot(apiKey = "SAVED-KEY"))
         form.load()
         assertEquals("SAVED-KEY", form.draft.key)
         assertFalse(form.isDirty)
@@ -66,16 +73,17 @@ class AiSettingsFormTest {
         // The transport saw the TYPED key — the wart is dead.
         assertEquals("TYPED-KEY", http.calls.single().headers["x-goog-api-key"])
         // And the saved record still holds the old key until Save.
-        assertEquals("SAVED-KEY", store.slot("guest", AiProviderId.GEMINI).apiKey)
+        assertEquals("SAVED-KEY", store.slot(acct, AiProviderId.GEMINI).apiKey)
 
         form.save()
         assertFalse(form.isDirty)
         assertTrue(form.justSaved)
-        assertEquals("TYPED-KEY", store.slot("guest", AiProviderId.GEMINI).apiKey)
+        assertEquals("TYPED-KEY", store.slot(acct, AiProviderId.GEMINI).apiKey)
     }
 
     @Test
     fun testFailureSurfacesTheMappedMessage() = runBlocking {
+        val form = formFor("form-fail")
         form.load()
         form.draft.key = "bad-key"
         http.next = AiHttpResponse(401, """{"error":{"message":"API key not valid"}}""")
@@ -89,8 +97,10 @@ class AiSettingsFormTest {
 
     @Test
     fun providerSwitchingKeepsEachProvidersOwnValues() = runBlocking {
-        store.saveSlot("guest", AiProviderId.GEMINI, AiProviderSlot(apiKey = "gemini-key", model = "g-model"))
-        store.saveSlot("guest", AiProviderId.OPENAI, AiProviderSlot(apiKey = "openai-key", model = "o-model"))
+        val acct = "form-switch"
+        val form = formFor(acct)
+        store.saveSlot(acct, AiProviderId.GEMINI, AiProviderSlot(apiKey = "gemini-key", model = "g-model"))
+        store.saveSlot(acct, AiProviderId.OPENAI, AiProviderSlot(apiKey = "openai-key", model = "o-model"))
         form.load()
         assertEquals(AiProviderId.GEMINI, form.activeProvider)
         assertEquals("gemini-key", form.draft.key)
@@ -98,7 +108,7 @@ class AiSettingsFormTest {
 
         form.selectProvider(AiProviderId.OPENAI)
         // The pick persists immediately (the editor follows it)…
-        assertEquals(AiProviderId.OPENAI, store.activeProvider("guest"))
+        assertEquals(AiProviderId.OPENAI, store.activeProvider(acct))
         // …and the fields show OpenAI's own saved values.
         assertEquals("openai-key", form.draft.key)
         assertEquals("o-model", form.draft.model)
@@ -108,8 +118,8 @@ class AiSettingsFormTest {
         form.draft.key = "openai-key-2"
         assertTrue(form.isDirty)
         form.save()
-        assertEquals("openai-key-2", store.slot("guest", AiProviderId.OPENAI).apiKey)
-        assertEquals("gemini-key", store.slot("guest", AiProviderId.GEMINI).apiKey)
+        assertEquals("openai-key-2", store.slot(acct, AiProviderId.OPENAI).apiKey)
+        assertEquals("gemini-key", store.slot(acct, AiProviderId.GEMINI).apiKey)
 
         form.selectProvider(AiProviderId.GEMINI)
         assertEquals("gemini-key", form.draft.key)
@@ -117,6 +127,8 @@ class AiSettingsFormTest {
 
     @Test
     fun freshFormShowsPresetDefaultsAndIsNotDirty() = runBlocking {
+        val acct = "form-fresh"
+        val form = formFor(acct)
         form.load()
         assertEquals("", form.draft.key)
         assertEquals("gemini-3.5-flash-lite", form.draft.model)
@@ -132,16 +144,17 @@ class AiSettingsFormTest {
         assertFalse(form.isDirty)
         assertEquals(
             "https://llm.example.com/v1",
-            store.slot("guest", AiProviderId.CUSTOM).baseUrl,
+            store.slot(acct, AiProviderId.CUSTOM).baseUrl,
         )
     }
 
     @Test
     fun summarizeThroughServiceUsesSavedConfigAndParsesTags() = runBlocking {
+        val acct = "form-service"
         // The editor path: actions use the SAVED active config —
         // the mirror image of the form's Test rule.
-        store.saveSlot("guest", AiProviderId.GEMINI, AiProviderSlot(apiKey = "SAVED-KEY"))
-        val service = AiService(store, http) { "guest" }
+        store.saveSlot(acct, AiProviderId.GEMINI, AiProviderSlot(apiKey = "SAVED-KEY"))
+        val service = AiService(store, http) { acct }
         http.next = AiHttpResponse(
             200,
             """{"candidates":[{"content":{"parts":[{"text":"[\"work\", \"ideas\"]"}]}}]}""",

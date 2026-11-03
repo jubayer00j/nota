@@ -21,7 +21,7 @@ class GeminiProviderTest {
 
     private val http = FakeAiHttpClient()
     private val provider = GeminiProvider(http)
-    private val config = AiConfig(AiProviderId.GEMINI, apiKey = "<redacted>", model = "")
+    private val config = AiConfig(AiProviderId.GEMINI, apiKey = "TEST-KEY-123", model = "")
 
     private fun okBody(text: String): String = JSONObject()
         .put(
@@ -104,6 +104,22 @@ class GeminiProviderTest {
             fail("expected AiException")
         } catch (e: AiException) {
             assertEquals(AiErrorKind.OFFLINE, e.kind)
+        }
+    }
+
+    @Test
+    fun timeoutMapsToTimeoutNotOffline() = runBlocking {
+        // The request left the device; the provider was slow.
+        // Reporting "offline" would blame a healthy connection
+        // (Codex review, Phase 4.1).
+        http.failure = AiNetworkException(
+            java.net.SocketTimeoutException("read timed out"),
+        )
+        try {
+            provider.complete(config, "p")
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.TIMEOUT, e.kind)
         }
     }
 

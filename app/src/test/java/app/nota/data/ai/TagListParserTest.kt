@@ -38,8 +38,10 @@ class TagListParserTest {
 
     @Test
     fun dedupesAndDropsTagsTheNoteAlreadyHas() {
+        // "Work"/"work" dedupe to the first form; "#travel" is
+        // dropped (the note already has "Travel"); "new" is new.
         assertEquals(
-            listOf("new"),
+            listOf("Work", "new"),
             TagListParser.parse(
                 """["Work", "work", "#travel", "new"]""",
                 currentTagNames = listOf("Travel"),
@@ -96,6 +98,16 @@ class TagListParserTest {
         assertEquals(
             listOf("say \"hi\""),
             TagListParser.parse("""["say \"hi\""]"""),
+        )
+    }
+
+    @Test
+    fun unicodeEscapesAreDecoded() {
+        // A provider that escapes non-ASCII must yield the real
+        // tag, not backslash-dropped debris (Codex review, 4.1).
+        assertEquals(
+            listOf("café", "naïve"),
+            TagListParser.parse("""["caf\u00e9", "na\u00efve"]"""),
         )
     }
 }

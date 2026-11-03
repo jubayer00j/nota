@@ -81,10 +81,15 @@ class AiSettingsStoreTest {
 
     @Test
     fun accountsAreIsolated() = runBlocking {
+        // Distinct ids per test throughout this class: the
+        // DataStore file is shared across the shard fork, so an
+        // id another suite also writes (e.g. the literal "guest"
+        // the form test once used) would leak state between
+        // classes.
         store.saveSlot("uid-a", AiProviderId.GEMINI, AiProviderSlot(apiKey = "a-key"))
-        store.saveSlot("guest", AiProviderId.GEMINI, AiProviderSlot(apiKey = "guest-key"))
+        store.saveSlot("acct-guestlike", AiProviderId.GEMINI, AiProviderSlot(apiKey = "guest-key"))
         assertEquals("a-key", store.slot("uid-a", AiProviderId.GEMINI).apiKey)
-        assertEquals("guest-key", store.slot("guest", AiProviderId.GEMINI).apiKey)
+        assertEquals("guest-key", store.slot("acct-guestlike", AiProviderId.GEMINI).apiKey)
         assertEquals("", store.slot("uid-b", AiProviderId.GEMINI).apiKey)
     }
 
