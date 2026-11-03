@@ -729,6 +729,10 @@ fun RichNoteEditorScreen(
         val caretEnd: Int
         if (mode == PendingInsertMode.INSERT_AT_CARET && activeUi != null && textLike) {
             val state = textStates[activeUi.id]
+            // The anchor identifies the target segment after a
+            // rebuild; only its DIGEST is staged (the record is a
+            // plaintext file — a locked note's words must not sit
+            // in it. Codex P1, PR #19).
             anchor = (state?.annotatedString?.text ?: "").take(INSERT_ANCHOR_CHARS)
             caret = state?.selection?.start ?: 0
             caretEnd = state?.selection?.end ?: caret
@@ -748,7 +752,8 @@ fun RichNoteEditorScreen(
                 } else {
                     -1
                 },
-                segmentAnchor = anchor,
+                segmentAnchorHash = PendingInsertRecord.anchorHash(anchor),
+                segmentAnchorLength = anchor.length,
                 caretOffset = caret,
                 caretEndOffset = caretEnd,
             ),

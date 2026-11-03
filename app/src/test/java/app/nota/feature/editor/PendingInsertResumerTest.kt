@@ -30,7 +30,8 @@ class PendingInsertResumerTest {
         kind = PendingInsertKind.FILE,
         mode = PendingInsertMode.INSERT_AT_CARET,
         segmentIndex = segmentIndex,
-        segmentAnchor = segmentAnchor,
+        segmentAnchorHash = PendingInsertRecord.anchorHash(segmentAnchor),
+        segmentAnchorLength = segmentAnchor.length,
         caretOffset = 0,
         stagedAtMillis = 1L,
     )

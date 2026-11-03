@@ -65,15 +65,17 @@ class PendingInsertResumer {
  * Resolves a staged record's caret target against the editor's
  * CURRENT segment list (Phase 3.6, G2). The list may have been
  * rebuilt from storage since staging (lock swap / process death), so
- * the staged index is only a hint: the anchor — the target segment's
- * plain-text prefix at stage time — is the identity.
+ * the staged index is only a hint: the anchor — a SHA-256 digest of
+ * the target segment's plain-text prefix at stage time (the text
+ * itself is never stored, see [PendingInsertRecord]) — is the
+ * identity.
  *
  * [candidates] pairs each segment's (isTextLike, plainText): text and
  * quote segments are the only split-insert targets. Resolution order:
  * 1. the staged index, when it is in range, text-like, and its text
- *    starts with the anchor (or the anchor is empty);
- * 2. the first text-like segment whose text starts with a non-empty
- *    anchor;
+ *    matches the anchor digest (or there is no anchor);
+ * 2. the first text-like segment whose text matches a non-empty
+ *    anchor digest;
  * 3. the staged index, when in range and text-like (anchor drifted —
  *    the position is still the best information available);
  * else null (the caller falls back to the ordinary caret insert).
@@ -82,17 +84,21 @@ fun resolveInsertTargetIndex(
     record: PendingInsertRecord,
     candidates: List<Pair<Boolean, String>>,
 ): Int? {
+    // A candidate matches when the digest of ITS prefix of the
+    // anchored length equals the staged digest — equivalent to the
+    // old startsWith check, without the text ever being stored.
+    fun matches(text: String): Boolean =
+        record.segmentAnchorLength == 0 ||
+            PendingInsertRecord.anchorHash(
+                text.take(record.segmentAnchorLength),
+            ) == record.segmentAnchorHash
     val index = record.segmentIndex
     val atIndex = candidates.getOrNull(index)
-    if (atIndex != null && atIndex.first &&
-        (record.segmentAnchor.isEmpty() || atIndex.second.startsWith(record.segmentAnchor))
-    ) {
+    if (atIndex != null && atIndex.first && matches(atIndex.second)) {
         return index
     }
-    if (record.segmentAnchor.isNotEmpty()) {
-        val byAnchor = candidates.indexOfFirst {
-            it.first && it.second.startsWith(record.segmentAnchor)
-        }
+    if (record.segmentAnchorLength > 0) {
+        val byAnchor = candidates.indexOfFirst { it.first && matches(it.second) }
         if (byAnchor >= 0) return byAnchor
     }
     if (atIndex != null && atIndex.first) return index

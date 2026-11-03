@@ -1,6 +1,7 @@
 package app.nota.data.attachments
 
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,8 +44,10 @@ enum class PendingInsertKind { IMAGE, FILE }
  * PendingInsertResumer); the editor consumes the record when the
  * picker result arrives and applies the insertion at the saved caret
  * target — [segmentIndex] into the editor's segment list, verified
- * against [segmentAnchor] (the target segment's plain-text prefix),
- * with [caretOffset] the caret's offset inside that segment.
+ * against [segmentAnchorHash] (a SHA-256 of the target segment's
+ * plain-text prefix — the digest, never the text: this record is a
+ * plaintext file, and a locked note's decrypted words must not sit
+ * in it), with [caretOffset] the caret's offset inside that segment.
  */
 data class PendingInsertRecord(
     val id: String = UUID.randomUUID().toString(),
@@ -53,15 +56,29 @@ data class PendingInsertRecord(
     val kind: PendingInsertKind,
     val mode: PendingInsertMode,
     val segmentIndex: Int = -1,
-    val segmentAnchor: String = "",
+    /** SHA-256 (hex) of the target segment's plain-text prefix at
+     *  staging; "" when there is no anchor. The text itself is
+     *  never stored (Codex P1, PR #19): this record is a plaintext
+     *  file, and for a per-note locked note the anchor would be
+     *  decrypted content — also eligible for platform backup, whose
+     *  rules exclude credential material on the same principle. */
+    val segmentAnchorHash: String = "",
+    /** Length of the anchored prefix, so candidates can be hashed
+     *  over the same span. Not content; safe to store. */
+    val segmentAnchorLength: Int = 0,
     val caretOffset: Int = 0,
     /** Selection end at staging; -1 = same as [caretOffset]. */
     val caretEndOffset: Int = -1,
     val stagedAtMillis: Long = System.currentTimeMillis(),
 ) {
-    /** The selection end to restore (never before the start). */
+    /** The selection end to restore, DIRECTION PRESERVED: a
+     *  right-to-left selection stages start > end, and collapsing
+     *  the range here would make the restore insert WITHOUT
+     *  deleting the selected text (Codex P2, PR #19). The restore
+     *  normalises with min/max when it rebuilds the range. A staged
+     *  -1 means no distinct end — the caret itself. */
     val selectionEnd: Int
-        get() = if (caretEndOffset >= caretOffset) caretEndOffset else caretOffset
+        get() = if (caretEndOffset >= 0) caretEndOffset else caretOffset
 
     fun toJson(): String = JSONObject()
         .put("id", id)
@@ -70,13 +87,22 @@ data class PendingInsertRecord(
         .put("kind", kind.name)
         .put("mode", mode.name)
         .put("segmentIndex", segmentIndex)
-        .put("segmentAnchor", segmentAnchor)
+        .put("segmentAnchorHash", segmentAnchorHash)
+        .put("segmentAnchorLength", segmentAnchorLength)
         .put("caretOffset", caretOffset)
         .put("caretEndOffset", caretEndOffset)
         .put("stagedAtMillis", stagedAtMillis)
         .toString()
 
     companion object {
+        /** SHA-256 hex of [anchor]; "" stays "" (no anchor). */
+        fun anchorHash(anchor: String): String {
+            if (anchor.isEmpty()) return ""
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(anchor.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
+
         fun parse(json: String): PendingInsertRecord? = try {
             val obj = JSONObject(json)
             val caret = obj.optInt("caretOffset", 0)
@@ -87,7 +113,20 @@ data class PendingInsertRecord(
                 kind = PendingInsertKind.valueOf(obj.getString("kind")),
                 mode = PendingInsertMode.valueOf(obj.getString("mode")),
                 segmentIndex = obj.optInt("segmentIndex", -1),
-                segmentAnchor = obj.optString("segmentAnchor", ""),
+                // A record staged before the anchor was hashed
+                // carries the plaintext prefix: convert it on read —
+                // the digest keeps the restore working and the text
+                // itself is never retained.
+                segmentAnchorHash = if (obj.has("segmentAnchorHash")) {
+                    obj.optString("segmentAnchorHash", "")
+                } else {
+                    anchorHash(obj.optString("segmentAnchor", ""))
+                },
+                segmentAnchorLength = if (obj.has("segmentAnchorLength")) {
+                    obj.optInt("segmentAnchorLength", 0)
+                } else {
+                    obj.optString("segmentAnchor", "").length
+                },
                 caretOffset = caret,
                 // A record staged before the range was kept reads as
                 // a collapsed caret.

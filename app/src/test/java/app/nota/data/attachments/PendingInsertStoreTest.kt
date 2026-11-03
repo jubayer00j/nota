@@ -2,6 +2,7 @@ package app.nota.data.attachments
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
@@ -35,7 +36,8 @@ class PendingInsertStoreTest {
         kind = PendingInsertKind.FILE,
         mode = PendingInsertMode.INSERT_AT_CARET,
         segmentIndex = 3,
-        segmentAnchor = "Bravo middle paragraph",
+        segmentAnchorHash = PendingInsertRecord.anchorHash("Bravo middle paragraph"),
+        segmentAnchorLength = "Bravo middle paragraph".length,
         caretOffset = 7,
         caretEndOffset = 12,
         stagedAtMillis = 123_456L,
@@ -54,7 +56,11 @@ class PendingInsertStoreTest {
         assertEquals(PendingInsertKind.FILE, restored!!.kind)
         assertEquals(PendingInsertMode.INSERT_AT_CARET, restored.mode)
         assertEquals(3, restored.segmentIndex)
-        assertEquals("Bravo middle paragraph", restored.segmentAnchor)
+        assertEquals(
+            PendingInsertRecord.anchorHash("Bravo middle paragraph"),
+            restored.segmentAnchorHash,
+        )
+        assertEquals(22, restored.segmentAnchorLength)
         assertEquals(7, restored.caretOffset)
         // The selection END survives too: a picker insert over a
         // selected range must keep Phase 3.5's replace-selection
@@ -105,5 +111,55 @@ class PendingInsertStoreTest {
     fun recordJson_roundTrips() {
         val original = record()
         assertEquals(original, PendingInsertRecord.parse(original.toJson()))
+    }
+
+    @Test
+    fun stagedRecord_containsNoAnchorPlaintext() {
+        // The anchor is a digest by design (Codex P1, PR #19): this
+        // record is a plaintext file in filesDir, and for a per-note
+        // locked note the anchor text would be decrypted content —
+        // also eligible for platform backup. Neither the JSON form
+        // nor the on-disk file may contain the segment's words.
+        assertFalse(record().toJson().contains("Bravo"))
+        val dir = tempFolder.newFolder("files")
+        PendingInsertStore(dir).stage(record())
+        val onDisk = File(dir, PendingInsertStore.FILE_NAME).readText()
+        assertFalse(onDisk.contains("Bravo"))
+        assertEquals(record(), PendingInsertRecord.parse(onDisk))
+    }
+
+    @Test
+    fun reversedSelection_endSurvivesUncollapsed() {
+        // A right-to-left selection stages start 12, end 7 (Codex
+        // P2, PR #19). Collapsing the end up to the start would
+        // make the restore's range empty, so the picker insert
+        // would land WITHOUT deleting the selected text.
+        assertEquals(7, record().copy(caretOffset = 12, caretEndOffset = 7).selectionEnd)
+        assertEquals(12, record().copy(caretOffset = 7, caretEndOffset = 12).selectionEnd)
+        // No distinct end staged (-1): the caret itself.
+        assertEquals(9, record().copy(caretOffset = 9, caretEndOffset = -1).selectionEnd)
+    }
+
+    @Test
+    fun legacyJson_plaintextAnchorConvertsToDigest() {
+        // A record staged by the build before the anchor was hashed
+        // (and before caretEndOffset existed): the plaintext field
+        // converts on read, the restore keeps working, and the text
+        // is never retained or re-serialised.
+        val legacy = """
+            {"id":"rec-legacy","accountId":"guest","noteId":"note-1",
+             "kind":"FILE","mode":"INSERT_AT_CARET","segmentIndex":3,
+             "segmentAnchor":"Bravo middle paragraph","caretOffset":7,
+             "stagedAtMillis":99}
+        """.trimIndent()
+        val parsed = PendingInsertRecord.parse(legacy)!!
+        assertEquals(
+            PendingInsertRecord.anchorHash("Bravo middle paragraph"),
+            parsed.segmentAnchorHash,
+        )
+        assertEquals(22, parsed.segmentAnchorLength)
+        assertEquals(7, parsed.caretEndOffset)
+        assertEquals(7, parsed.selectionEnd)
+        assertFalse(parsed.toJson().contains("Bravo"))
     }
 }
