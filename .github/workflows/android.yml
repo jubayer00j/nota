@@ -8,7 +8,20 @@ on:
   pull_request:
 
 jobs:
-  build-android:
+  # Phase 3.6 close-out: the single "Run unit tests" step had grown
+  # to ~7 minutes and kept dying mid-step (exit 143 / cancelled).
+  # Stage 1 split the suite into two parallel shard jobs (fast JVM
+  # tests / Compose-UI tests, via -PnotaTestShard in
+  # app/build.gradle.kts) and bounded the test workers (heap/fork).
+  # Stage 2 attacks the remaining killer — the ~4 min COLD Kotlin
+  # compile inside every test step: setup-gradle now caches the
+  # Gradle User Home (dependencies + wrapper + local build cache)
+  # across jobs and attempts, and the fast shard is split AGAIN
+  # into two parallel jobs (test-fast-a / test-fast-b) with
+  # explicit, deterministic --tests class lists partitioning the
+  # 45 non-UI classes 23/22 (UI classes stay in test-ui).
+  # build-android runs once all three test jobs are green.
+  test-fast-a:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,7 +33,245 @@ jobs:
         with:
           distribution: "temurin"
           java-version: "21"
-          cache: "gradle"
+
+      # Phase 3.6 close-out (stage 2): Gradle User Home caching via
+      # setup-gradle — dependencies, wrapper AND the local build
+      # cache (org.gradle.caching=true in gradle.properties) are
+      # restored across jobs/attempts, so no job pays the ~4 min
+      # cold Kotlin compile that kept outliving the runner fleet.
+      # cache-read-only is explicitly false: the action's default
+      # writes only from the default branch, and this workflow's
+      # proving runs live on PR branches.
+      # (setup-java's own cache: gradle is intentionally NOT used —
+      # the two mechanisms interfere per gradle/actions docs.)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # Phase 3a: google-services.json is never committed (Noma
+      # precedent) — materialise it from the repo secret before any
+      # Gradle task runs. The google-services plugin fails the build
+      # without it, which is the point: a build that cannot reach the
+      # right Firebase project must not ship.
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run fast unit tests (shard A, 23 of 45 non-UI classes)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            --tests "app.nota.data.DatabaseNamingTest" \
+            --tests "app.nota.data.attachments.PendingInsertStoreTest" \
+            --tests "app.nota.data.auth.GuestLibraryTransferTest" \
+            --tests "app.nota.data.backup.BackupCrossoverRobolectricTest" \
+            --tests "app.nota.data.backup.BackupRichFormattingRestoreTest" \
+            --tests "app.nota.data.backup.PendingRestoreStoreTest" \
+            --tests "app.nota.data.drive.DriveClientTest" \
+            --tests "app.nota.data.html.NoteDocumentFileSegmentTest" \
+            --tests "app.nota.data.preferences.NoteLockBiometricCopyScopingTest" \
+            --tests "app.nota.data.repository.FtsQueryBuilderTest" \
+            --tests "app.nota.data.repository.NoteRepositoryRobolectricTest" \
+            --tests "app.nota.data.security.AppLockBiometricStoreTest" \
+            --tests "app.nota.data.security.AppLockManagerSetupTest" \
+            --tests "app.nota.data.security.NoteLockRecordTest" \
+            --tests "app.nota.data.sync.SyncEngineTest" \
+            --tests "app.nota.data.text.RichBodyTest" \
+            --tests "app.nota.feature.editor.CaretSplitRobolectricTest" \
+            --tests "app.nota.feature.editor.ImagePinchMathTest" \
+            --tests "app.nota.feature.editor.PendingInsertResumerTest" \
+            --tests "app.nota.feature.lock.LegacyFingerprintPromptCoordinatorTest" \
+            --tests "app.nota.feature.lock.LegacyFingerprintPromptStateMachineTest" \
+            --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
+            --tests "app.nota.ui.theme.ThemeSelectionTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-A test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-a
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  test-fast-b:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      # Phase 3.6 close-out (stage 2): Gradle User Home caching via
+      # setup-gradle — dependencies, wrapper AND the local build
+      # cache (org.gradle.caching=true in gradle.properties) are
+      # restored across jobs/attempts, so no job pays the ~4 min
+      # cold Kotlin compile that kept outliving the runner fleet.
+      # cache-read-only is explicitly false: the action's default
+      # writes only from the default branch, and this workflow's
+      # proving runs live on PR branches.
+      # (setup-java's own cache: gradle is intentionally NOT used —
+      # the two mechanisms interfere per gradle/actions docs.)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # Phase 3a: google-services.json is never committed (Noma
+      # precedent) — materialise it from the repo secret before any
+      # Gradle task runs. The google-services plugin fails the build
+      # without it, which is the point: a build that cannot reach the
+      # right Firebase project must not ship.
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run fast unit tests (shard B, 22 of 44 non-UI classes)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            --tests "app.nota.data.attachments.ImageSamplingTest" \
+            --tests "app.nota.data.auth.GuestMovePolicyTest" \
+            --tests "app.nota.data.backup.BackupRestoreSemanticsTest" \
+            --tests "app.nota.data.backup.BlockOrderBackupRoundTripTest" \
+            --tests "app.nota.data.db.DatabaseProviderSwitchingTest" \
+            --tests "app.nota.data.drive.DriveRepositoryTest" \
+            --tests "app.nota.data.html.NoteDocumentTest" \
+            --tests "app.nota.data.preferences.PreferencesSwipeActionTest" \
+            --tests "app.nota.data.repository.NoteLockRepositoryRobolectricTest" \
+            --tests "app.nota.data.repository.SwipeUndoFidelityRobolectricTest" \
+            --tests "app.nota.data.security.AppLockCryptoTest" \
+            --tests "app.nota.data.security.NoteLockCryptoTest" \
+            --tests "app.nota.data.security.Pbkdf2Test" \
+            --tests "app.nota.data.text.PlainTextCodecTest" \
+            --tests "app.nota.domain.SmartFoldersTest" \
+            --tests "app.nota.feature.editor.NoteLockUnlockStateRobolectricTest" \
+            --tests "app.nota.feature.editor.TapBelowContentTest" \
+            --tests "app.nota.feature.editor.ToolbarStateTest" \
+            --tests "app.nota.feature.lock.CredentialSetupFlowTest" \
+            --tests "app.nota.feature.notes.SwipeActionsTest" \
+            --tests "app.nota.feature.settings.UnlockRestoreResumerTest" \
+            --tests "app.nota.feature.spike.HtmlRoundTripTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-B test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-b
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  test-ui:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      # Phase 3.6 close-out (stage 2): Gradle User Home caching via
+      # setup-gradle — dependencies, wrapper AND the local build
+      # cache (org.gradle.caching=true in gradle.properties) are
+      # restored across jobs/attempts, so no job pays the ~4 min
+      # cold Kotlin compile that kept outliving the runner fleet.
+      # cache-read-only is explicitly false: the action's default
+      # writes only from the default branch, and this workflow's
+      # proving runs live on PR branches.
+      # (setup-java's own cache: gradle is intentionally NOT used —
+      # the two mechanisms interfere per gradle/actions docs.)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # Phase 3a: google-services.json is never committed (Noma
+      # precedent) — materialise it from the repo secret before any
+      # Gradle task runs. The google-services plugin fails the build
+      # without it, which is the point: a build that cannot reach the
+      # right Firebase project must not ship.
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run Compose-UI tests
+        run: ./gradlew -PnotaTestShard=ui :app:testDebugUnitTest --stacktrace
+
+      - name: Upload UI-shard test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-ui
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  build-android:
+    needs: [test-fast-a, test-fast-b, test-ui]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      # Phase 3.6 close-out (stage 2): Gradle User Home caching via
+      # setup-gradle — dependencies, wrapper AND the local build
+      # cache (org.gradle.caching=true in gradle.properties) are
+      # restored across jobs/attempts, so no job pays the ~4 min
+      # cold Kotlin compile that kept outliving the runner fleet.
+      # cache-read-only is explicitly false: the action's default
+      # writes only from the default branch, and this workflow's
+      # proving runs live on PR branches.
+      # (setup-java's own cache: gradle is intentionally NOT used —
+      # the two mechanisms interfere per gradle/actions docs.)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
 
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
@@ -51,19 +302,6 @@ jobs:
             echo "ERROR: ANDROID_DEBUG_KEYSTORE_BASE64 secret is not set."
             exit 1
           fi
-
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
-
-      - name: Upload probe outputs + test reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unit-test-evidence
-          path: |
-            app/build/probe-output
-            app/build/reports/tests
-          if-no-files-found: ignore
 
       - name: Build Android debug APK
         env:

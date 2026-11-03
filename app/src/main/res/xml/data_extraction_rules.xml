@@ -4,6 +4,10 @@
         <exclude domain="database" path="." />
         <exclude domain="sharedpref" path="." />
         <exclude domain="file" path="attachments/" />
+        <!-- Transient picker-insert staging (Phase 3.6) — never
+             backed up; see backup_rules.xml. -->
+        <exclude domain="file" path="pending_insert.json" />
+        <exclude domain="file" path="pending_insert.json.tmp" />
         <!-- App Lock verifiers live in the preferences DataStore file
              (Phase 2a) — never backed up; see backup_rules.xml. No
              device-transfer section is declared, exactly as before, so

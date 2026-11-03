@@ -7,6 +7,11 @@
     <!-- Attachment binaries live under files/attachments (Phase 1c store);
          they travel in Nota's own backup ZIP, never in platform cloud backup. -->
     <exclude domain="file" path="attachments/" />
+    <!-- The staged picker-insert record (Phase 3.6) is transient
+         state — note id, caret offsets, an anchor DIGEST. Transient
+         state never travels in a platform backup. -->
+    <exclude domain="file" path="pending_insert.json" />
+    <exclude domain="file" path="pending_insert.json.tmp" />
     <!-- The preferences DataStore file holds the App Lock PBKDF2 verifiers
          (Phase 2a): credential hashes must never leave the device in a
          platform backup, where low-entropy PIN/pattern verifiers could be

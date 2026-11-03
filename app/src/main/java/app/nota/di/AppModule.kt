@@ -52,6 +52,8 @@ val appModule = module {
     single { NoteRepository(get()) }
     single { LibraryRepository(get()) }
     single { AttachmentStore(androidContext(), get()) }
+    // Phase 3.6 (G2): the durable picker-insert record (filesDir).
+    single { app.nota.data.attachments.PendingInsertStore(androidContext()) }
     single { TemplateRepository(androidContext()) }
     single { PreferencesRepository(androidContext()) }
     // Phase 2.5: App Lock biometric is crypto-bound - the manager owns
