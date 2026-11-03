@@ -1942,9 +1942,11 @@ fun RichNoteEditorScreen(
             summary = outcome.summary,
             truncated = outcome.truncated,
             onInsertAtTop = {
-                segments = listOf(
-                    UiSegment(newUiId(), TextSegment(AiSummaryHtml.toHtml(outcome.summary))),
-                ) + segments
+                segments = ensureTrailing(
+                    listOf(
+                        UiSegment(newUiId(), TextSegment(AiSummaryHtml.toHtml(outcome.summary))),
+                    ) + segments,
+                )
                 persistNow()
                 aiSummary = null
             },

@@ -84,6 +84,24 @@ class OpenAiCompatibleProviderTest {
     }
 
     @Test
+    fun blankModelOnPresetFallsBackToItsDefault() = runBlocking {
+        // Jules review (Phase 4.1): the compatible client used to
+        // reject a blank model outright while Gemini resolved it
+        // to the provider default — so clearing the model field
+        // broke OpenAI/OpenRouter calls. A blank model now
+        // resolves via AiConfig.resolvedModel, exactly like
+        // Gemini, and the request carries the default.
+        http.next = AiHttpResponse(200, okBody("done"))
+        val out = provider(AiProviderId.OPENAI).complete(
+            config(AiProviderId.OPENAI, model = " "),
+            "Hi there",
+        )
+        assertEquals("done", out)
+        val body = JSONObject(http.calls.single().body)
+        assertEquals(AiProviderId.OPENAI.defaultModel, body.getString("model"))
+    }
+
+    @Test
     fun partsArrayContentIsJoined() = runBlocking {
         val body = JSONObject()
             .put(
@@ -127,10 +145,17 @@ class OpenAiCompatibleProviderTest {
         } catch (e: AiException) {
             assertEquals(AiErrorKind.NOT_CONFIGURED, e.kind)
         }
-        // No model.
+        // No model — on a provider with no default to resolve
+        // to (Custom's default model is blank). A blank model on
+        // a PRESET resolves to the preset's default instead
+        // (blankModelOnPresetFallsBackToItsDefault below).
         try {
-            provider(AiProviderId.OPENAI).complete(
-                config(AiProviderId.OPENAI, model = " "),
+            provider(AiProviderId.CUSTOM).complete(
+                config(
+                    AiProviderId.CUSTOM,
+                    model = " ",
+                    baseUrl = "https://llm.example.com/v1",
+                ),
                 "p",
             )
             fail("expected NOT_CONFIGURED")

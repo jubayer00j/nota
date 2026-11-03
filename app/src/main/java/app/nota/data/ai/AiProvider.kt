@@ -247,7 +247,11 @@ class OpenAiCompatibleProvider(
                 "That endpoint address doesn't look right — check it in Settings → AI features.",
             )
         }
-        val model = config.model.trim()
+        // Resolve exactly like Gemini does: a blank configured
+        // model means the provider default; only a provider
+        // whose default is ALSO blank (Custom) is unconfigured
+        // (Jules review, Phase 4.1).
+        val model = config.resolvedModel()
         if (model.isBlank()) {
             throw AiException.notConfigured(
                 "Choose a model for this provider in Settings → AI features.",

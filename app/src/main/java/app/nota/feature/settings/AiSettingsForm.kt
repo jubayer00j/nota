@@ -36,6 +36,10 @@ import app.nota.data.ai.normalizeAiBaseUrl
  *   never stored one (the preset-fill behaviour of 1.x), and the
  *   dirty check compares effective values, so a pristine form is
  *   never dirty.
+ * - Saving a cleared model field stores the provider's default,
+ *   never a blank: the saved slot always names the model a call
+ *   will use (Custom's default is blank, so its cleared field
+ *   stays blank).
  */
 class AiSettingsForm(
     private val store: AiSettingsStore,
@@ -150,6 +154,13 @@ class AiSettingsForm(
     suspend fun save() {
         val provider = activeProvider
         val current = drafts.getValue(provider)
+        // A cleared model field means "the default", never a
+        // stored blank: persist the resolved value and show it,
+        // so a preset's slot round-trips to its default and the
+        // form can't read dirty against the very default it
+        // displays (Jules review, Phase 4.1). Custom's default
+        // is blank, so a cleared Custom model stays blank.
+        current.model = current.model.trim().ifBlank { provider.defaultModel }
         store.saveSlot(
             accountId,
             provider,

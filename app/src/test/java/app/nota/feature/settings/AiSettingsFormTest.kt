@@ -149,6 +149,33 @@ class AiSettingsFormTest {
     }
 
     @Test
+    fun savingAClearedModelStoresThePresetDefault() = runBlocking {
+        val acct = "form-cleared-model"
+        val form = formFor(acct)
+        form.load()
+        form.selectProvider(AiProviderId.OPENAI)
+        assertEquals("gpt-4o-mini", form.draft.model)
+
+        // The user clears the model field and saves. That means
+        // "use the default", so the default is what persists —
+        // never a blank that reads dirty against the default the
+        // form itself displays (Jules review, Phase 4.1).
+        form.draft.model = ""
+        form.onEdited()
+        assertTrue(form.isDirty)
+        form.save()
+        assertEquals("gpt-4o-mini", store.slot(acct, AiProviderId.OPENAI).model)
+        assertEquals("gpt-4o-mini", form.draft.model)
+        assertFalse(form.isDirty)
+
+        // Custom has no default: a cleared field stays blank.
+        form.selectProvider(AiProviderId.CUSTOM)
+        form.draft.model = ""
+        form.save()
+        assertEquals("", store.slot(acct, AiProviderId.CUSTOM).model)
+    }
+
+    @Test
     fun summarizeThroughServiceUsesSavedConfigAndParsesTags() = runBlocking {
         val acct = "form-service"
         // The editor path: actions use the SAVED active config —
