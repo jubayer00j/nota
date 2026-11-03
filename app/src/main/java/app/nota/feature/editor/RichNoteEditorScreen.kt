@@ -2421,7 +2421,35 @@ private fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
  * the first move and the field would re-seed trimmed (Codex
  * finding 3, PR #21). In the hoisted map the same state object
  * serves every composition site, so a remount is a non-event.
+ * The one event the hoist must NOT survive is a structural
+ * edit to the block itself — see [evictCellTextStates].
  */
+
+/**
+ * Phase 3.8 follow-up (Codex P2, PR #21): the hoisted field
+ * states are keyed by POSITION inside their block ("<block>-r-c"
+ * for table cells, "<block>-item-i" for task items), so when a
+ * block's structure changes — a task item or a table row/column
+ * added or removed — the surviving keys no longer name the
+ * fields they were seeded for. Worst case, a REMOVED item's
+ * state outlives it: a fresh item added at the same index would
+ * inherit the deleted text in its field, and a later edit would
+ * write that text back into the document. The structural
+ * handlers in TableBlock / TaskListBlock therefore evict the
+ * block's entries before applying the change. Every field then
+ * re-seeds losslessly from the segment — which the
+ * per-keystroke write-through keeps in sync — so the eviction
+ * is invisible except that stale text can no longer resurrect.
+ * (Block ids are UUIDs, so the "<blockId>-" prefix cannot
+ * collide with another block's keys.)
+ */
+private fun evictCellTextStates(
+    cellTextStates: MutableMap<String, MutableState<String>>,
+    blockId: String,
+) {
+    val prefix = "$blockId-"
+    cellTextStates.keys.removeAll { it.startsWith(prefix) }
+}
 @Composable
 private fun EditableCellText(
     key: String,
@@ -2495,6 +2523,7 @@ private fun TableBlock(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
+                    evictCellTextStates(cellTextStates, blockId)
                     val cols = table.rows.firstOrNull()?.size ?: 1
                     val newSpans = if (table.cellSpans.isEmpty()) {
                         emptyList()
@@ -2506,6 +2535,7 @@ private fun TableBlock(
                     )
                 }) { Text("+ Row") }
                 TextButton(onClick = {
+                    evictCellTextStates(cellTextStates, blockId)
                     onChange(
                         TableSegment(
                             table.rows.map { it + "" },
@@ -2516,6 +2546,7 @@ private fun TableBlock(
                 }) { Text("+ Col") }
                 if (table.rows.size > 1) {
                     TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
                         onChange(
                             TableSegment(
                                 table.rows.dropLast(1),
@@ -2527,6 +2558,7 @@ private fun TableBlock(
                 }
                 if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
                     TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
                         onChange(
                             TableSegment(
                                 table.rows.map { it.dropLast(1) },
@@ -2594,6 +2626,7 @@ private fun TaskListBlock(
                         },
                     )
                     IconButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
                         onChange(TaskListSegment(list.items.filterIndexed { i, _ -> i != index }))
                     }) {
                         Icon(Icons.Filled.Close, contentDescription = "Remove item")
@@ -2602,6 +2635,7 @@ private fun TaskListBlock(
             }
             Row {
                 TextButton(onClick = {
+                    evictCellTextStates(cellTextStates, blockId)
                     onChange(TaskListSegment(list.items + TaskItem("<p></p>", checked = false)))
                 }) { Text("+ Item") }
                 Spacer(Modifier.weight(1f))

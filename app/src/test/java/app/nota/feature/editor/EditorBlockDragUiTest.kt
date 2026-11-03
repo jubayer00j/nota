@@ -537,6 +537,75 @@ class EditorBlockDragUiTest {
     }
 
     @Test
+    fun removeAndReAddTaskItem_newItemSeedsBlankAndPersistsClean() {
+        // Phase 3.8 follow-up regression (Codex P2, PR #21): the
+        // hoisted field states are keyed by position inside their
+        // block, and the hoist at first had no eviction — deleting
+        // the LAST task item left its text in
+        // "cellTextStates[<block>-item-1]", and a fresh item added
+        // at the same index inherited the DELETED text in its
+        // field; a later edit would have written it back into the
+        // document. The structural handlers now evict the block's
+        // entries on add/remove, so the new field re-seeds
+        // (losslessly) from the fresh item: blank. This test is
+        // the Codex scenario end to end — field state first, then
+        // the persisted document after a type-and-save cycle.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Task Eviction",
+                contentHtml = "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<div><p>Alpha task</p></div></li>" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<div><p>Beta task</p></div></li>" +
+                    "</ul>" +
+                    "<p>Closing note</p>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("both task fields composed") {
+            fieldTexts().contains("Alpha task") && fieldTexts().contains("Beta task")
+        }
+        // Delete the LAST item ("Beta task") via its own button...
+        composeRule.onAllNodesWithContentDescription("Remove item")[1]
+            .performClick()
+        awaitTrue("one item remains") {
+            composeRule.onAllNodesWithContentDescription("Remove item")
+                .fetchSemanticsNodes().size == 1
+        }
+        // ...and add a fresh item at the same (last) position.
+        composeRule.onNodeWithText("+ Item").performClick()
+        awaitTrue("two items again") {
+            composeRule.onAllNodesWithContentDescription("Remove item")
+                .fetchSemanticsNodes().size == 2
+        }
+        // The new item's field must show the fresh seed (blank) —
+        // NOT the deleted text — and the surviving item must be
+        // undisturbed by the eviction.
+        assertTrue(
+            "deleted text resurrected in the new item's field: ${fieldTexts()}",
+            !fieldTexts().contains("Beta task"),
+        )
+        assertTrue(
+            "surviving item keeps its text: ${fieldTexts()}",
+            fieldTexts().contains("Alpha task"),
+        )
+        // Type into the new item — the only blank field on screen
+        // (the title and the closing paragraph hold their texts) —
+        // then leave edit mode, which persists. The saved document
+        // must carry the typed text and no trace of the deleted
+        // item: nothing resurrected, nothing written back.
+        setFieldText("", "Gamma task")
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("persisted document is clean") {
+            val html = runBlocking { repository.getById(note.id)?.contentHtml ?: "" }
+            html.contains("Gamma task") &&
+                html.contains("Alpha task") &&
+                !html.contains("Beta task")
+        }
+    }
+
+    @Test
     fun dragImageBlock_downPastFile_reordersAndPersists() {
         val note = runBlocking {
             repository.createRichNote(
