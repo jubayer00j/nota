@@ -6,7 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
-import androidx.compose.ui.input.pointer.changedToUpOrCanceled
+import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
@@ -79,10 +79,10 @@ fun Modifier.blockDragSurface(
                         return@withTimeoutOrNull
                     }
                     val change = event.changes.firstOrNull { it.id == down.id }
-                    // A framework cancel surfaces as an
-                    // up-or-cancelled in current Compose — either
-                    // way the press ended without becoming a drag.
-                    if (change == null || change.changedToUpOrCanceled()) {
+                    // A framework cancel surfaces as an up in
+                    // this Compose version — either way the press
+                    // ended without becoming a drag.
+                    if (change == null || change.changedToUp()) {
                         aborted = true
                         return@withTimeoutOrNull
                     }
@@ -124,15 +124,16 @@ fun Modifier.blockDragSurface(
                 // session (see the class doc).
                 event.changes.forEach { it.consume() }
                 if (change == null) continue
-                if (change.changedToUpOrCanceled()) {
-                    // A genuine lift commits; a framework cancel
-                    // (system gesture takeover) aborts the session
-                    // with the document untouched.
-                    if (change.isCanceled) {
-                        onSessionCancel()
-                    } else {
-                        onSessionEnd()
-                    }
+                if (change.changedToUp()) {
+                    // The lift commits. This Compose version
+                    // delivers a framework cancel as the same up
+                    // change (no isCanceled signal exists), so a
+                    // system takeover mid-session also lands here —
+                    // the commit is a single atomic reorder, so the
+                    // document can never be left half-moved; a
+                    // genuine coroutine cancellation (the surface
+                    // leaving composition) is the abort path below.
+                    onSessionEnd()
                     break
                 }
                 onSessionMove(change.position.y)
