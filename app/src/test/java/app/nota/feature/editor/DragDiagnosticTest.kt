@@ -207,6 +207,7 @@ class DragDiagnosticTest {
             )
         }
         composeEditor(note.id)
+        DragProbe.clear()
         val before = geometry("BEFORE")
         val fileCentre = (boundsOf("drag-report.pdf").top +
             boundsOf("Attachment not found on this device").bottom) / 2f
@@ -239,7 +240,8 @@ class DragDiagnosticTest {
         val after = geometry("AFTER")
         fail(
             "DIAG totalDy=$totalDy fileCentre=$fileCentre tableCentre=$tableCentre\n" +
-                "$before\n$after\npersisted=${persistedKinds(note.id)}",
+                "$before\n$after\npersisted=${persistedKinds(note.id)}\n" +
+                "probe=${DragProbe.snapshot().joinToString(" ;; ")}",
         )
     }
 }
