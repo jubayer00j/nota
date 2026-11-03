@@ -31,7 +31,16 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * Two deliberate bail-outs: a second finger (pinch territory — image
  * resizing must never turn into a block drag) and any movement beyond
- * touch slop before the timeout (a scroll, not a press).
+ * the drift allowance before the timeout (a scroll, not a press).
+ *
+ * Phase 3.7: the drift allowance is TWICE the platform touch slop.
+ * On device, a finger planted on a large block card (the natural
+ * grab — a file card's body, an image) rolls measurably more during
+ * the long-press window than a finger on the small rail icon, and
+ * the 3.6 single-slop watch aborted those body presses before the
+ * drag could start: the drag felt handle-only. A scroll still
+ * aborts the watch — it exceeds the allowance almost immediately —
+ * so widening it costs nothing.
  *
  * [onDrag] receives vertical deltas in this modifier's local
  * coordinate space — the block's LAYOUT position never changes while
@@ -67,7 +76,7 @@ fun Modifier.longPressBlockDrag(
                         return@withTimeoutOrNull
                     }
                     if ((change.position - down.position).getDistance() >
-                        viewConfiguration.touchSlop
+                        viewConfiguration.touchSlop * 2f
                     ) {
                         aborted = true
                         return@withTimeoutOrNull

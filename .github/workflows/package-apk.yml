@@ -24,7 +24,7 @@ on:
   # the packaging run is fired from the branch. After the merge,
   # dispatch works as originally intended.
   push:
-    branches: ["phase36-drag-readmode"]
+    branches: ["phase36-drag-readmode", "phase37-drag-feel"]
     paths: [".github/workflows/package-apk.yml"]
 
 jobs:
