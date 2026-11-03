@@ -62,9 +62,23 @@ import org.robolectric.shadows.ShadowLooper
  * the rich text editor does not publish its content in the
  * semantics tree, so paragraph nodes cannot be located — block
  * neighbours (a file name, a table cell, an image label) can.
+ *
+ * The display is deliberately TALL (h1000dp): in the default
+ * 470dp window these short notes barely exceed the list viewport,
+ * so a dragged block enters the G1 auto-scroll edge zone almost
+ * immediately; under Robolectric's virtual clock the 16 ms
+ * auto-scroll loop then interleaves with the synthetic event
+ * stream, the list scrolls mid-gesture, the pointer coordinates
+ * remap, and the stream dies before the centre can cross (probe-
+ * verified: the drag accumulated ~100 of 186 px, then a −6 px
+ * remapped event, then silence). A physical finger cannot be
+ * remapped that way — this is a harness interaction, not the
+ * reorder logic under test. With the tall window the content
+ * cannot scroll at all, the drag runs on finger travel alone,
+ * and the persisted order is asserted exactly as before.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], qualifiers = "w411dp-h1000dp")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class EditorBlockDragUiTest {
 
