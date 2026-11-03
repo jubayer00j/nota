@@ -6,12 +6,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.room.Room
@@ -34,19 +36,17 @@ import app.nota.data.security.BiometricStep
 import app.nota.data.security.StepResult
 import app.nota.data.templates.TemplateRepository
 import app.nota.ui.theme.NotaSpacing
-import java.io.File
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TestName
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -149,10 +149,6 @@ class EditorBlockDragUiTest {
     @get:Rule
     val tempFolder = TemporaryFolder()
 
-    // TEMPORARY (Phase 3.8 diagnosis round): names the probe dump.
-    @get:Rule
-    val testName = TestName()
-
     /** Raw-key device provider, the NoteLockUnlockState test pattern. */
     private class RawKeyProvider : NoteLockDeviceKeyProvider {
         private val key = ByteArray(32) { (0x40 + it).toByte() }
@@ -218,20 +214,6 @@ class EditorBlockDragUiTest {
         )
         lockRepository = NoteLockRepository(repository, provider, attachmentStore, biometricStore)
         insertStore = PendingInsertStore(tempFolder.newFolder("files"))
-        DragProbe.clear()
-    }
-
-    /**
-     * TEMPORARY (Phase 3.8 diagnosis round): dump the drag-session
-     * probe into build/probe-output (uploaded with the run's own
-     * evidence artifact) so the release path's fate is readable
-     * from CI evidence. Removed with the diagnosis.
-     */
-    @After
-    fun dumpDragProbe() {
-        val dir = File("build/probe-output").apply { mkdirs() }
-        File(dir, "drag-probe-${testName.methodName}.txt")
-            .writeText(DragProbe.snapshot())
     }
 
     private fun composeEditor(noteId: String) {
@@ -380,6 +362,28 @@ class EditorBlockDragUiTest {
         assertEquals(expected, persistedKinds(noteId))
     }
 
+    /** The current text of every editable field on screen (title,
+     *  rich text, table cells, task items), in semantics order. */
+    private fun fieldTexts(): List<String> =
+        composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+            .mapNotNull { it.config.getOrNull(SemanticsProperties.EditableText)?.text }
+
+    /** Replaces the text of the one editable field currently
+     *  showing [current] — the semantics SetText action, which the
+     *  field reports through its normal onValueChange (so the
+     *  segment write-through runs exactly as for typed input). */
+    private fun setFieldText(current: String, replacement: String) {
+        val nodes = composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = nodes.indexOfFirst {
+            it.config.getOrNull(SemanticsProperties.EditableText)?.text == current
+        }
+        if (index < 0) {
+            fail("no editable field showing '$current'; fields=${fieldTexts()}")
+        }
+        composeRule.onAllNodes(hasSetTextAction())[index]
+            .performTextReplacement(replacement)
+    }
+
     @Test
     fun dragFileBlock_downPastTable_reordersAndPersists() {
         val note = runBlocking {
@@ -467,6 +471,69 @@ class EditorBlockDragUiTest {
                 "text:Charlie clos",
             ),
         )
+    }
+
+    @Test
+    fun dragTableBlock_cellTextSurvivesGhostRemount() {
+        // Phase 3.8 regression (Codex finding 3, PR #21): a table
+        // cell's text must survive the drag's slot -> ghost -> slot
+        // remount EXACTLY — boundary spaces included. Before the
+        // fix the field's text state lived in a remember() inside
+        // the block editor: the remount discarded it and the field
+        // re-seeded from the stored HTML through the TRIMMING
+        // projection, so the typed " A " came back as "A" and the
+        // next edit would have written the trimmed text into the
+        // document — silent data loss. The state is now hoisted
+        // above the block editors and the seed projection is
+        // lossless; both halves are exercised here.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Drag Cell Text",
+                contentHtml = "<div data-nota-file=\"att-drag\" data-name=\"drag-report.pdf\" " +
+                    "data-mime=\"application/pdf\"></div>" +
+                    "<table><tr><td>CellA</td><td>CellB</td></tr>" +
+                    "<tr><td>CellC</td><td>CellD</td></tr></table>" +
+                    "<p>Charlie closing paragraph</p>",
+            )
+        }
+        composeEditor(note.id)
+        // Type boundary spaces into the first cell: the field and
+        // (through the write-through) the stored segment now both
+        // hold " A ".
+        setFieldText("CellA", " A ")
+        awaitTrue("cell field holds the typed text") {
+            fieldTexts().contains(" A ")
+        }
+        // Drag the table up past the file — the same edge travel
+        // as the table drag test, with the table's item top taken
+        // from its rail (the CellA label is a field now, so its
+        // bounds no longer name the cell's text).
+        val fileBottom = boundsOf("Attachment not found on this device").bottom
+        val tableItemTop = railTops()[1] - spacingPx()
+        val footerCentreY = boundsOf("+ Row").center.y
+        longPressDragAt(
+            Offset(bodyCentreX(), footerCentreY),
+            fileBottom - overshootPx() - 40f - tableItemTop,
+        )
+        awaitOrder(
+            note.id,
+            listOf(
+                "table",
+                "file:drag-report.pdf",
+                "text:Charlie clos",
+            ),
+        )
+        // The drop's persist carries the cell verbatim...
+        val html = runBlocking { repository.getById(note.id)?.contentHtml ?: "" }
+        assertTrue(
+            "persisted cell keeps its boundary spaces: $html",
+            html.contains("<td> A </td>"),
+        )
+        // ...and the cell field, recomposed in its new slot after
+        // the ghost remount, still shows the exact typed text.
+        awaitTrue("cell field still holds ' A ' after the drag") {
+            fieldTexts().contains(" A ")
+        }
     }
 
     @Test

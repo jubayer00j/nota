@@ -400,13 +400,7 @@ fun RichNoteEditorScreen(
     }
 
     fun persistNow(then: () -> Unit = {}) {
-        val synced = syncSegments()
-        DragProbe.log(
-            "PERSIST kinds=" + synced.joinToString(",") {
-                it.javaClass.simpleName
-            },
-        )
-        viewModel.persist(title, synced, folderId, tagsCsv, then)
+        viewModel.persist(title, syncSegments(), folderId, tagsCsv, then)
     }
 
     fun updateBlock(id: String, segment: DocSegment) {
@@ -672,13 +666,6 @@ fun RichNoteEditorScreen(
         val newTarget = (session.fromIndex - passedAboveIds.size +
             passedBelowIds.size).coerceIn(0, maxTarget)
         if (newTarget != dragTargetIndex) {
-            DragProbe.log(
-                "TARGET $dragTargetIndex->$newTarget ghostTop=$ghostTop " +
-                    "ghostBottom=$ghostBottom items=" +
-                    visibleSegmentItems().joinToString(",") { (i, inf) ->
-                        "$i@${inf.offset}+${inf.size}"
-                    },
-            )
             dragTargetIndex = newTarget
             hapticTick()
         }
@@ -697,17 +684,9 @@ fun RichNoteEditorScreen(
      */
     fun beginDragSession(downPosition: Offset) {
         val index = pendingDragIndex
-        val ui = segments.getOrNull(index)
-        if (ui == null) {
-            DragProbe.log("BEGIN fail: no segment at pendingIndex=$index")
-            return
-        }
+        val ui = segments.getOrNull(index) ?: return
         val info = listState.layoutInfo.visibleItemsInfo
-            .firstOrNull { it.key == ui.id }
-        if (info == null) {
-            DragProbe.log("BEGIN fail: no layoutInfo for segment idx=$index")
-            return
-        }
+            .firstOrNull { it.key == ui.id } ?: return
         dragSession = BlockDragSession(
             segmentId = ui.id,
             fromIndex = index,
@@ -721,11 +700,6 @@ fun RichNoteEditorScreen(
         passedBelowIds.clear()
         focusManager.clearFocus()
         updateDragTarget()
-        DragProbe.log(
-            "BEGIN idx=$index grabOffset=${dragSession?.grabOffsetPx} " +
-                "height=${info.size} offset=${info.offset} " +
-                "target=$dragTargetIndex",
-        )
     }
 
     /**
@@ -735,27 +709,18 @@ fun RichNoteEditorScreen(
      * persists nothing.
      */
     fun commitDragSession() {
-        val session = dragSession
-        DragProbe.log("COMMIT entry sessionNull=${session == null}")
-        if (session == null) return
+        val session = dragSession ?: return
         dragSession = null
         landingLineY.value = null
         passedAboveIds.clear()
         passedBelowIds.clear()
         val from = segments.indexOfFirst { it.id == session.segmentId }
-        if (from < 0) {
-            DragProbe.log("COMMIT abort: dragged segment gone")
-            return
-        }
+        if (from < 0) return
         // The list cannot change during a session, so [from] is
         // the session's origin and the target is already a valid
         // collapsed index; the coerce is belt-and-braces only.
         val target = dragTargetIndex.coerceIn(0, segments.size - 1)
-        if (target == from) {
-            DragProbe.log("COMMIT no-op: target=$target == from=$from")
-            return
-        }
-        DragProbe.log("COMMIT move $from->$target")
+        if (target == from) return
         segments = ensureTrailing(segments.moved(from, target))
         persistNow()
     }
@@ -767,7 +732,6 @@ fun RichNoteEditorScreen(
      * persist — the session simply evaporates.
      */
     fun cancelDragSession() {
-        DragProbe.log("CANCEL session")
         dragSession = null
         landingLineY.value = null
         passedAboveIds.clear()
