@@ -17,6 +17,15 @@ name: Package Release APK (manual)
 # needs gate.
 on:
   workflow_dispatch:
+  # NOTE: workflow_dispatch only registers once this file exists on
+  # the default branch (the dispatches API 404s for branch-only
+  # workflows), so until PR #19 merges, this branch-scoped push
+  # trigger — the packaging file itself is the only path — is how
+  # the packaging run is fired from the branch. After the merge,
+  # dispatch works as originally intended.
+  push:
+    branches: ["phase36-drag-readmode"]
+    paths: [".github/workflows/package-apk.yml"]
 
 jobs:
   package-release:
