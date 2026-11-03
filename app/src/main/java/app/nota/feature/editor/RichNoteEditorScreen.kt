@@ -98,6 +98,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
@@ -250,6 +251,13 @@ fun RichNoteEditorScreen(
     // Phase 3.6 (G4): true while a two-finger image pinch is live —
     // the list must not scroll under it.
     var imagePinchActive by remember { mutableStateOf(false) }
+    // Phase 3.6 (G2): while a picker insert's flush is in flight the
+    // editor is frozen (barrier at the end of the Scaffold body) —
+    // edits landing between the snapshot and the picker launch are
+    // in neither the flushed body nor the staged record, and a
+    // process death in the picker would lose them.
+    var pickerFlushPending by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
     // Phase 3.6 (G3): read mode. A note opens for READING (Noma
     // parity); editing is entered deliberately — tap on the body or
     // the pencil — and ✓/back returns here, not out of the note. The
@@ -767,8 +775,14 @@ fun RichNoteEditorScreen(
         )
         // Stage only once the flush has landed (see the doc above):
         // the record and the picker both belong after the write.
+        // Freeze input first: from here to the picker launch the
+        // snapshot below is the document of record (see
+        // pickerFlushPending).
+        pickerFlushPending = true
+        focusManager.clearFocus()
         persistNow {
             pendingInsertStore.stage(record)
+            pickerFlushPending = false
             onStaged()
         }
     }
@@ -1487,6 +1501,26 @@ fun RichNoteEditorScreen(
                     onInsertBlock = { insertBlock(it) },
                 )
             }
+        }
+        if (pickerFlushPending) {
+            // Input freeze while a picker insert's flush is in
+            // flight: swallow every gesture until the callback
+            // stages the record and launches the picker (the
+            // keyboard is already dismissed — focus was cleared
+            // when the flush began).
+            Box(
+                Modifier.fillMaxSize().pointerInput(Unit) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        down.consume()
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            event.changes.forEach { it.consume() }
+                            if (event.changes.none { it.pressed }) break
+                        }
+                    }
+                },
+            )
         }
     }
 
