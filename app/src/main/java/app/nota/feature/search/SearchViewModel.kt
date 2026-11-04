@@ -73,7 +73,11 @@ class SearchViewModel(
             for (hit in hits) {
                 if (hit.noteId in keywordIds) continue
                 val note = repository.getById(hit.noteId) ?: continue
-                if (note.locked || note.trashedAt != null) continue
+                // Archived notes stay out of search everywhere —
+                // keyword results above already exclude them via
+                // FTS; the semantic section must agree (Jules
+                // PR #23 P2).
+                if (note.locked || note.trashedAt != null || note.archived) continue
                 related += note
             }
             if (_query.value == value) _semanticResults.value = related

@@ -104,8 +104,21 @@ class SemanticIndexStore(private val rootDir: File) {
         if (!temp.renameTo(target)) {
             // Rename can fail across filesystems on some devices;
             // fall back to a direct copy so the index still lands.
-            temp.copyTo(target, overwrite = true)
-            temp.delete()
+            try {
+                temp.copyTo(target, overwrite = true)
+            } catch (e: Exception) {
+                // A copy that dies mid-write (disk full) leaves a
+                // truncated target behind; drop it rather than let
+                // a partial file pose as the index — load() reads
+                // a missing file as "no index", and the index is
+                // always rebuildable (Jules PR #23 P3).
+                runCatching { target.delete() }
+                throw e
+            } finally {
+                // Either way the temp file goes: a stale .tmp must
+                // not linger until the next save/delete.
+                runCatching { temp.delete() }
+            }
         }
     }
 

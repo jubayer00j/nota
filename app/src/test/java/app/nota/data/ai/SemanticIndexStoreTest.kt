@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -82,6 +83,30 @@ class SemanticIndexStoreTest {
             "openai|https://api.openai.com/v1|text-embedding-3-large",
             store.load("uid-42")!!.signature,
         )
+    }
+
+    @Test
+    fun failedCopyFallbackCleansUpTempAndLeavesNoPartialTarget() {
+        // Jules PR #23 P3: the renameTo fallback copy was
+        // unwrapped — a mid-copy failure (disk full) propagated
+        // AND left a truncated target plus a stale .tmp behind.
+        // A directory squatting on the target path makes renameTo
+        // fail and the fallback copy throw, reproducing that
+        // failure class without any mocking heroics.
+        val store = store()
+        val target = store.fileFor("guest")
+        target.parentFile.mkdirs()
+        target.mkdir()
+        try {
+            store.save("guest", sampleIndex())
+            fail("expected the copy failure to propagate")
+        } catch (e: Exception) {
+            // Expected: the failure still reaches the caller.
+        }
+        // No stale temp file is left behind…
+        assertFalse(File(folder.root, "idx/" + target.name + ".tmp").exists())
+        // …and no partial target poses as an index.
+        assertNull(store.load("guest"))
     }
 
     @Test

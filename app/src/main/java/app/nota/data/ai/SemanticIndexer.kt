@@ -25,13 +25,19 @@ data class SemanticIndexStatus(
  * per-note lock:
  *
  * - **Locked notes are NEVER indexed.** Eligibility is
- *   `!locked && !trashed` and the reconcile purge enforces it
- *   locally, with no provider involved: a note that becomes
- *   locked, trashed, emptied or deleted loses its vectors in the
- *   same pass that would otherwise embed it, so a plaintext-
- *   derived vector never outlives the state that made its note
- *   unembeddable. Search results are re-checked against the live
- *   note rows before surfacing, as a second line of defence.
+ *   `!locked && !trashed && !archived` and the reconcile purge
+ *   enforces it locally, with no provider involved: a note that
+ *   becomes locked, trashed, archived, emptied or deleted loses
+ *   its vectors in the same pass that would otherwise embed it,
+ *   so a plaintext-derived vector never outlives the state that
+ *   made its note unembeddable. Search results are re-checked
+ *   against the live note rows before surfacing, as a second
+ *   line of defence. Two further guards close the windows a
+ *   single snapshot cannot see (Jules review of PR #23): every
+ *   embed re-checks the note's LIVE row first, so a lock that
+ *   lands mid-pass is honoured by the pass already running; and
+ *   the lock flow evicts a note's vectors the moment it locks
+ *   ([evictNote]) instead of waiting for the next pass.
  * - **One embedding space per index.** Every stored vector was
  *   written under the config's space signature; a provider,
  *   endpoint or embedding-model change makes the stored index
@@ -65,13 +71,23 @@ class SemanticIndexer(
         val chunks: List<String>,
     )
 
+    /** The index's eligibility rule: a note that is locked,
+     *  trashed or archived is never embedded and never surfaces.
+     *  (Archived matches every other search surface in the app —
+     *  FTS and the note lists all require `archived = 0`; semantic
+     *  search was the odd one out. Jules PR #23 P2.) Checked
+     *  against the snapshot in [desiredNotes] and re-checked
+     *  against the LIVE row before every embed. */
+    private fun isIndexEligible(note: NoteEntity): Boolean =
+        !note.locked && note.trashedAt == null && !note.archived
+
     /** The notes the index should hold vectors for right now
      *  (active account's database only). */
     private suspend fun desiredNotes(): Map<String, DesiredNote> {
         val all = databaseProvider.current.noteDao().getAll()
         val out = LinkedHashMap<String, DesiredNote>()
         for (note in all) {
-            if (note.locked || note.trashedAt != null) continue
+            if (!isIndexEligible(note)) continue
             val chunks = NoteChunker.chunk(note.title, note.plainText)
             if (chunks.isEmpty()) continue
             out[note.id] = DesiredNote(note, fingerprint(note.title, note.plainText), chunks)
@@ -113,7 +129,16 @@ class SemanticIndexer(
             val working = LinkedHashMap<String, StoredNoteVectors>()
             var dims = 0
             var sinceSave = 0
+            val noteDao = databaseProvider.current.noteDao()
             for (desired in desiredNotes().values) {
+                // Snapshot-vs-live re-check (Jules PR #23 P1): the
+                // desired set was computed at pass start; a note
+                // locked, trashed or archived SINCE then must not
+                // be embedded from its stale snapshot — above all
+                // a locked note's plaintext must never reach the
+                // provider.
+                val live = noteDao.getById(desired.note.id)
+                if (live == null || !isIndexEligible(live)) continue
                 val vectors = embedNote(config, desired, dims)
                 if (dims == 0) dims = vectors.first().size
                 working[desired.note.id] = StoredNoteVectors(desired.fingerprint, vectors)
@@ -169,8 +194,9 @@ class SemanticIndexer(
             dims = stored.dims
         }
 
-        // Purge: gone, locked, trashed or emptied notes lose their
-        // vectors — locally, before any provider call is made.
+        // Purge: gone, locked, trashed, archived or emptied notes
+        // lose their vectors — locally, before any provider call
+        // is made.
         val iterator = working.entries.iterator()
         while (iterator.hasNext()) {
             if (iterator.next().key !in desired) iterator.remove()
@@ -184,7 +210,19 @@ class SemanticIndexer(
         // stop and keep what succeeded (the rest stays stale).
         var changed = working.size != (stored?.notes?.size ?: 0)
         var sinceSave = 0
+        val noteDao = databaseProvider.current.noteDao()
         for ((noteId, want) in desired) {
+            // Snapshot-vs-live re-check (Jules PR #23 P1): the
+            // snapshot predates any lock/trash/archive that landed
+            // while this pass was embedding earlier notes. Such a
+            // note is not embedded from its stale snapshot, and
+            // vectors it already had do not survive the pass
+            // either — the purge above only saw the snapshot.
+            val live = noteDao.getById(noteId)
+            if (live == null || !isIndexEligible(live)) {
+                if (working.remove(noteId) != null) changed = true
+                continue
+            }
             val existing = working[noteId]
             if (existing != null && existing.fingerprint == want.fingerprint) continue
             val vectors = try {
@@ -244,12 +282,12 @@ class SemanticIndexer(
         if (raw.isEmpty()) return raw
         // Defence in depth (1.x's merge rule): a hit only ever
         // surfaces a note that is eligible RIGHT NOW — a stale
-        // vector can never resurrect a locked/trashed/deleted
-        // note into the results.
+        // vector can never resurrect a locked/trashed/archived/
+        // deleted note into the results.
         val noteDao = databaseProvider.current.noteDao()
         return raw.filter { hit ->
             val note = noteDao.getById(hit.noteId)
-            note != null && !note.locked && note.trashedAt == null
+            note != null && isIndexEligible(note)
         }
     }
 
@@ -257,6 +295,27 @@ class SemanticIndexer(
      *  an account's vectors belong to the sign-in). */
     suspend fun clearAccount(accountId: String) {
         mutex.withLock { store.delete(accountId) }
+    }
+
+    /**
+     * Drops ONE note's vectors immediately (Jules PR #23 P1):
+     * called by the lock flow the moment a note locks, so its
+     * plaintext-derived vectors do not linger in the on-disk
+     * index until the 15 s maintenance debounce fires — or
+     * forever, if the process dies first. Local file work only:
+     * no provider, no config, so it is safe with no key saved.
+     * Serialised with reconcile/rebuild by the same mutex, so it
+     * cannot interleave with a running pass — and a pass already
+     * running honours the lock through its live re-check.
+     */
+    suspend fun evictNote(accountId: String, noteId: String) {
+        mutex.withLock {
+            val stored = store.load(accountId) ?: return
+            if (noteId !in stored.notes) return
+            val working = LinkedHashMap(stored.notes)
+            working.remove(noteId)
+            persist(accountId, stored.signature, stored.dims, working)
+        }
     }
 
     /** Embeds one note's chunks, enforcing a single dimension

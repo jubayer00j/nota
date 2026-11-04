@@ -2,6 +2,14 @@ package app.nota.data.repository
 
 import android.app.Application
 import androidx.room.Room
+import app.nota.data.ai.AiHttpClient
+import app.nota.data.ai.AiHttpResponse
+import app.nota.data.ai.AiProviderId
+import app.nota.data.ai.AiProviderSlot
+import app.nota.data.ai.AiSettingsStore
+import app.nota.data.ai.FakeAiKeyCipher
+import app.nota.data.ai.SemanticIndexStore
+import app.nota.data.ai.SemanticIndexer
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
@@ -14,6 +22,7 @@ import app.nota.data.security.NoteLockDeviceKeyProvider
 import app.nota.data.security.StepResult
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
+import java.io.File
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -120,6 +129,25 @@ override fun sealCipherResult(): StepResult<Cipher> =
         }
     }
 
+    /** Constant-vector embedding transport for the eviction
+     *  test: the indexer only needs SOME valid Gemini-shaped
+     *  reply — the test asserts index contents, not ranking. */
+    private class ConstantEmbeddingHttpClient : AiHttpClient {
+        override suspend fun post(
+            url: String,
+            headers: Map<String, String>,
+            jsonBody: String,
+        ): AiHttpResponse {
+            val values = org.json.JSONArray().put(1.0).put(0.0).put(0.5)
+            return AiHttpResponse(
+                200,
+                org.json.JSONObject()
+                    .put("embedding", org.json.JSONObject().put("values", values))
+                    .toString(),
+            )
+        }
+    }
+
     private lateinit var db: NotaDatabase
     private lateinit var notes: NoteRepository
     private lateinit var store: AttachmentStore
@@ -141,6 +169,38 @@ override fun sealCipherResult(): StepResult<Cipher> =
     @After
     fun tearDown() {
         db.close()
+    }
+
+    @Test
+    fun lockingEvictsSemanticVectorsImmediately() = runBlocking {
+        // Jules PR #23 P1: before the fix, locking a note only
+        // updated Room — its plaintext-derived vectors stayed in
+        // the on-disk semantic index until the 15 s maintenance
+        // debounce fired (or indefinitely, if the process died
+        // first). The lock flow must evict them in the same call.
+        val context = RuntimeEnvironment.getApplication()
+        val provider = DatabaseProvider.forDatabase(context, db)
+        val aiSettings = AiSettingsStore(PreferencesRepository(context), FakeAiKeyCipher())
+        aiSettings.saveSlot(
+            "guest", AiProviderId.GEMINI, AiProviderSlot(apiKey = "test-key"),
+        )
+        val indexStore = SemanticIndexStore(
+            File(context.cacheDir, "lock-evict-test-${System.nanoTime()}"),
+        )
+        val indexer = SemanticIndexer(
+            provider, aiSettings, ConstantEmbeddingHttpClient(), indexStore,
+        )
+        val wiredLockRepo = NoteLockRepository(notes, provider, store, biometricStore, indexer)
+
+        val note = notes.createRichNote("Evict me", "<p>apple orchard</p>")
+        indexer.reconcile("guest")
+        assertEquals(setOf(note.id), indexStore.load("guest")?.notes?.keys)
+
+        wiredLockRepo.lockNote(note.id, NoteLockMethod.PIN, "1234")
+
+        // No debounce wait and no further reconcile: the vectors
+        // are already gone from the on-disk index.
+        assertNull(indexStore.load("guest"))
     }
 
     @Test

@@ -28,6 +28,15 @@ object NoteChunker {
     const val TARGET_CHARS = 500
     const val MAX_CHUNK_CHARS = 600
     const val OVERLAP_CHARS = 60
+
+    /** The word-start adjustment in [splitLongBlock] is only
+     *  taken when at least this much shared tail survives it —
+     *  a space in the last few characters before the cut would
+     *  otherwise move the next piece's start to (or past) the
+     *  cut itself and silently erase the overlap (Jules PR #23
+     *  P3: a space at cut - 1 produced next == cut, i.e. zero
+     *  shared characters between consecutive pieces). */
+    const val MIN_OVERLAP_CHARS = 20
     const val MAX_TEXT_CHARS = 12_000
 
     /** The exact text a note is embedded as: title, blank line,
@@ -85,10 +94,14 @@ object NoteChunker {
             if (piece.isNotEmpty()) out += piece
             // The next piece re-starts OVERLAP_CHARS back (moved
             // forward to a word start) so the cut phrase survives
-            // whole in at least one piece.
+            // whole in at least one piece. The move is only taken
+            // when MIN_OVERLAP_CHARS of shared tail survive it —
+            // next must stay strictly behind the cut.
             var next = (cut - OVERLAP_CHARS).coerceAtLeast(0)
             val space = rest.indexOf(' ', next)
-            if (space in next until cut) next = space + 1
+            if (space in next until cut && cut - (space + 1) >= MIN_OVERLAP_CHARS) {
+                next = space + 1
+            }
             rest = rest.substring(next).trimStart()
             // Progress guarantee: a pathological no-space input
             // must still advance.

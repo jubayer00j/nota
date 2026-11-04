@@ -1,5 +1,6 @@
 package app.nota.data.repository
 
+import app.nota.data.ai.SemanticIndexer
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
@@ -57,12 +58,22 @@ data class DecryptedNoteData(
  *   Nota today (the DAO insert has no callers), so there is no plaintext
  *   history to purge on lock — 1.x's clearVersions has no counterpart
  *   yet; when versions land, lockNote must purge them.
+ * - Locking also evicts the note's semantic-search vectors in the
+ *   same call (Phase 4.2, Jules PR #23 P1): the vectors are derived
+ *   from the note's plaintext and must not linger in the local
+ *   index file until the next maintenance pass — that pass is
+ *   debounced, and a process death could postpone it indefinitely.
  */
 class NoteLockRepository(
     private val noteRepository: NoteRepository,
     private val provider: DatabaseProvider,
     private val attachmentStore: AttachmentStore,
     private val biometricStore: NoteLockBiometricStore,
+    /** The semantic indexer, for the on-lock vector eviction
+     *  above. Optional only so pre-4.2 constructions (tests that
+     *  never touch the index) keep compiling; production wiring
+     *  always passes it (AppModule). */
+    private val semanticIndexer: SemanticIndexer? = null,
 ) {
     // Phase 3a: resolved per call through the provider — the active
     // database changes with the signed-in account.
@@ -153,6 +164,22 @@ class NoteLockRepository(
                     updatedAt = System.currentTimeMillis(),
                 )
                 noteRepository.upsert(locked)
+            }
+            // The lock has landed: evict the note's semantic
+            // vectors NOW (see the class doc). Best-effort by
+            // construction — the eviction is local file work that
+            // cannot fail the lock that already succeeded, and
+            // reconcile's purge remains the backstop — and it
+            // targets the ACTIVE account, the only database this
+            // repository ever writes to.
+            semanticIndexer?.let { indexer ->
+                try {
+                    indexer.evictNote(provider.accountId.value, noteId)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Best-effort (see above): swallowed by design.
+                }
             }
             noteRepository.getById(noteId) ?: throw IllegalStateException("Note not found.")
         } catch (e: Exception) {

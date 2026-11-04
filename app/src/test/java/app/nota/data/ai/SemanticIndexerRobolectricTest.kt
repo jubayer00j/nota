@@ -51,12 +51,18 @@ class SemanticIndexerRobolectricTest {
         val calls = mutableListOf<Call>()
         var transportFailure = false
 
+        /** Test hook fired inside every call — lets a test land
+         *  a state change (a lock, an archive) in the middle of
+         *  an indexing pass, between the snapshot and the embed. */
+        var onCall: (suspend () -> Unit)? = null
+
         override suspend fun post(
             url: String,
             headers: Map<String, String>,
             jsonBody: String,
         ): AiHttpResponse {
             calls += Call(url, jsonBody)
+            onCall?.invoke()
             if (transportFailure) throw AiNetworkException(IOException("no route"))
             val body = JSONObject(jsonBody)
             val text = body.getJSONObject("content").getJSONArray("parts")
@@ -168,6 +174,72 @@ class SemanticIndexerRobolectricTest {
         // And it cannot surface in results.
         val hits = indexer.search(account, "apple")
         assertEquals(listOf(open.id), hits.map { it.noteId })
+    }
+
+    @Test
+    fun noteLockedMidPassIsNotEmbedded() = runBlocking {
+        // Jules PR #23 P1: desiredNotes() snapshots a note's
+        // chunks at pass start; before the fix, a lock landing
+        // while the pass was embedding an EARLIER note did not
+        // stop this note being embedded from the stale snapshot —
+        // its plaintext went to the provider and its vectors were
+        // persisted by that pass.
+        saveGeminiKey()
+        val first = notes.createRichNote("First", "<p>apple one</p>")
+        val second = notes.createRichNote("Second", "<p>bananasecret two</p>")
+        var lockLanded = false
+        http.onCall = {
+            if (!lockLanded) {
+                lockLanded = true
+                // The lock flow's end state, landed mid-pass:
+                // sealed body, empty plainText, locked flag set.
+                val row = notes.getById(second.id)!!
+                notes.upsert(
+                    row.copy(
+                        contentHtml = "sealed-envelope",
+                        plainText = "",
+                        locked = true,
+                        lockRecordJson = "{}",
+                    ),
+                )
+            }
+        }
+
+        indexer.reconcile(account)
+
+        // Only the first note was embedded…
+        assertEquals(setOf(first.id), indexStore.load(account)?.notes?.keys)
+        // …and the second note's snapshot text never reached the
+        // transport at all.
+        assertTrue(http.calls.none { it.body.contains("bananasecret") })
+        assertTrue(lockLanded)
+    }
+
+    @Test
+    fun archivedNotesAreNotIndexedNeverSurfaceAndArePurged() = runBlocking {
+        // Jules PR #23 P2: keyword (FTS) search excludes archived
+        // notes everywhere; semantic search indexed and surfaced
+        // them. Eligibility must agree across all three sites —
+        // indexing, the search-time live filter, and (via the
+        // purge) reconcile maintenance.
+        saveGeminiKey()
+        val active = notes.createRichNote("Active", "<p>apple active</p>")
+        val archived = notes.createRichNote("Archived", "<p>apple archived</p>")
+        notes.setArchived(archived, true)
+
+        indexer.reconcile(account)
+
+        // Never indexed…
+        assertEquals(setOf(active.id), indexStore.load(account)?.notes?.keys)
+        // …and never surfaces under "Related by meaning".
+        assertEquals(listOf(active.id), indexer.search(account, "apple").map { it.noteId })
+
+        // Archiving an already-indexed note purges its vectors on
+        // the next pass (desiredNotes exclusion drives the purge).
+        notes.setArchived(active, true)
+        indexer.reconcile(account)
+        assertNull(indexStore.load(account))
+        assertTrue(indexer.search(account, "apple").isEmpty())
     }
 
     @Test

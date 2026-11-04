@@ -68,6 +68,23 @@ class NoteChunkerTest {
     }
 
     @Test
+    fun splitNeverDropsToZeroOverlap() {
+        // Jules PR #23 P3: with a space exactly at cut - 1, the
+        // word-start adjustment used to move the next piece's
+        // start to the cut itself — consecutive pieces shared
+        // ZERO characters, so a phrase straddling the cut landed
+        // whole in neither piece.
+        val block = "a".repeat(599) + " " + "b".repeat(300)
+        val chunks = NoteChunker.chunk("", block)
+        assertEquals(2, chunks.size)
+        // The second piece re-covers a real tail of the first…
+        assertTrue(chunks[1].startsWith(chunks[0].takeLast(NoteChunker.OVERLAP_CHARS)))
+        // …and nothing is lost: the space and the whole b-run
+        // survive in the second piece.
+        assertTrue(chunks[1].contains(" " + "b".repeat(300)))
+    }
+
+    @Test
     fun wholeNoteTextIsCappedKeepingTheHead() {
         val text = NoteChunker.embeddedText("HeadTitle", "y".repeat(20_000))
         assertEquals(NoteChunker.MAX_TEXT_CHARS, text.length)

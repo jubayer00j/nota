@@ -71,7 +71,12 @@ val appModule = module {
     // copy store + the lock repository (Koin singles).
     single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }
     single { NoteLockBiometricStore(get(), get(), get()) }
-    single { NoteLockRepository(get(), get(), get(), get()) }
+    // The fifth get() is the SemanticIndexer: locking a note
+    // evicts its semantic vectors immediately (Phase 4.2 fix
+    // round). Koin resolves it lazily and the indexer does not
+    // depend back on this repository, so there is no cycle even
+    // though the indexer's own definition sits further down.
+    single { NoteLockRepository(get(), get(), get(), get(), get()) }
     // Phase 2c backup/restore engine (local ZIP + NOMAENC1 + crossover).
     single { BackupRepository(androidContext(), get(), get(), get()) }
     // Phase 4.1 BYOK AI: Keystore-sealed per-account provider keys
