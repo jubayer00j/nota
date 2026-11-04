@@ -464,6 +464,39 @@ class PreferencesRepository(context: Context) {
         }
     }
 
+    // ---- AI provider settings (Phase 4.1) -------------------------
+    // Device-local BYOK state, keyed per account like the Drive
+    // records above: the active provider plus one field set per
+    // provider slot (sealed key, model, custom endpoint), addressed
+    // by caller-supplied field names (see AiSettingsStore for the
+    // field vocabulary). Keys arrive here SEALED (AiKeyCipher) —
+    // this store never holds a plaintext key. And like every other
+    // record in this file it lives outside Room, so AI state can
+    // never enter a backup ZIP or a sync payload.
+
+    private fun aiFieldKey(accountId: String, field: String) =
+        stringPreferencesKey("ai_${accountId}_$field")
+
+    suspend fun getAiField(accountId: String, field: String): String? =
+        dataStore.safeData.first()[aiFieldKey(accountId, field)]
+
+    suspend fun setAiField(accountId: String, field: String, value: String?) {
+        safeEdit {
+            if (value == null) {
+                remove(aiFieldKey(accountId, field))
+            } else {
+                this[aiFieldKey(accountId, field)] = value
+            }
+        }
+    }
+
+    /** Drops every AI field for an account (sign-out: 1.x drops the
+     *  account's keys when it signs out — no credential material
+     *  outlives the sign-in it belongs to). */
+    suspend fun clearAiFields(accountId: String, fields: Collection<String>) {
+        safeEdit { fields.forEach { remove(aiFieldKey(accountId, it)) } }
+    }
+
     private fun String?.toSwipeAction(default: SwipeAction): SwipeAction =
         this?.let { runCatching { SwipeAction.valueOf(it) }.getOrNull() } ?: default
 

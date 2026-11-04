@@ -21,6 +21,8 @@ jobs:
   # explicit, deterministic --tests class lists partitioning the
   # 45 non-UI classes 23/22 (UI classes stay in test-ui).
   # build-android runs once all three test jobs are green.
+  # (Phase 4.1: the non-UI partition is now 52 classes, 26/26
+  # across fast-a and the three B shards.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -66,10 +68,13 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 23 of 45 non-UI classes)
+      - name: Run fast unit tests (shard A, 26 of 52 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
+            --tests "app.nota.data.ai.AiSettingsStoreTest" \
+            --tests "app.nota.data.ai.TagListParserTest" \
+            --tests "app.nota.feature.settings.AiSettingsFormTest" \
             --tests "app.nota.data.attachments.PendingInsertStoreTest" \
             --tests "app.nota.data.auth.GuestLibraryTransferTest" \
             --tests "app.nota.data.backup.BackupCrossoverRobolectricTest" \
@@ -150,16 +155,25 @@ jobs:
           fi
 
       # Phase 3.8 diagnosis round: shard B is split THREE ways
-      # (B/B2/B3, 8/7/7 classes). The combined 22-class step needed
-      # ~4.5-5 min and the runner fleet killed it mid-step twelve
-      # consecutive times on 2026-11-03 (always ~3.5-4 min in,
-      # zero test failures in any partial log), while every shorter
-      # shard completed. Each third fits the survival window the
-      # other shards already enjoy. The PARTITION is unchanged in
-      # total: B ∪ B2 ∪ B3 is exactly the old shard-B class list.
-      - name: Run fast unit tests (shard B, 8 of 22 shard-B classes)
+      # (B/B2/B3). The combined step needed ~4.5-5 min and the
+      # runner fleet killed it mid-step twelve consecutive times
+      # on 2026-11-03 (always ~3.5-4 min in, zero test failures in
+      # any partial log), while every shorter shard completed.
+      # Each third fits the survival window the other shards
+      # already enjoy. The PARTITION is unchanged in total:
+      # B ∪ B2 ∪ B3 is exactly the old shard-B class list.
+      # Phase 4.1: the partition grows by the AI classes
+      # (B +1, B2 +0, B3 +3 — 27 across the three B shards).
+      # B2 deliberately gets NONE of the new classes: with the
+      # two AI classes in its fork pool, NoteLockRepository's
+      # rollback test failed deterministically (3 runs) though
+      # it touches no AI code — a fork-composition interaction
+      # (Robolectric sandbox/classloader neighbours). B2 keeps
+      # its pre-4.1 composition, which was green on main.
+      - name: Run fast unit tests (shard B, 9 of 27 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            --tests "app.nota.data.ai.AiBackupExclusionTest" \
             --tests "app.nota.data.attachments.ImageSamplingTest" \
             --tests "app.nota.data.auth.GuestMovePolicyTest" \
             --tests "app.nota.data.backup.BackupRestoreSemanticsTest" \
@@ -210,7 +224,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B2, 7 of 22 shard-B classes)
+      - name: Run fast unit tests (shard B2, 7 of 27 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.repository.NoteLockRepositoryRobolectricTest" \
@@ -262,9 +276,12 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B3, 7 of 22 shard-B classes)
+      - name: Run fast unit tests (shard B3, 10 of 27 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            --tests "app.nota.data.ai.AiSummaryHtmlTest" \
+            --tests "app.nota.data.ai.GeminiProviderTest" \
+            --tests "app.nota.data.ai.OpenAiCompatibleProviderTest" \
             --tests "app.nota.feature.editor.NoteLockUnlockStateRobolectricTest" \
             --tests "app.nota.feature.editor.TapBelowContentTest" \
             --tests "app.nota.feature.editor.ToolbarStateTest" \

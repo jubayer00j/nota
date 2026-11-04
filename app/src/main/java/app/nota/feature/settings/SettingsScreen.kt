@@ -149,6 +149,12 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.sm))
 
+        // Phase 4.1: BYOK AI provider setup (the "AI features"
+        // category the placeholder footer below used to promise).
+        AiSection()
+        HorizontalDivider()
+        Spacer(Modifier.height(NotaSpacing.sm))
+
         Text(
             "Writing",
             style = MaterialTheme.typography.titleMedium,
@@ -164,7 +170,7 @@ fun SettingsScreen(
         HorizontalDivider()
         Spacer(Modifier.height(NotaSpacing.md))
         Text(
-            "AI features · Data · About — arrive with their phases.",
+            "Data · About — arrive with their phases.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

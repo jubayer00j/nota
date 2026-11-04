@@ -1,5 +1,6 @@
 package app.nota.data.repository
 
+import android.app.Application
 import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
@@ -34,6 +35,25 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
+ * A bare Application for [NoteLockRepositoryRobolectricTest]
+ * (Phase 4.1 diagnosis). Robolectric re-creates the Application
+ * per test method, and NotaApplication.onCreate launches a
+ * fire-and-forget attachment-orphan sweep built on the Koin
+ * graph's REAL databases. This class writes real attachment
+ * files whose rows live in a throwaway in-memory database, so
+ * the startup sweep sees those files as orphans and deletes
+ * them mid-test — the rollback test lost that race
+ * deterministically once startup singleton warm-up grew (its
+ * vulnerable window spans the 300k-iteration PBKDF2 inside
+ * lockNote). The class under test is fully self-contained (own
+ * DB, stores and repositories; no Koin), so a plain Application
+ * removes the interference without touching any assertion.
+ * Production is unaffected: on device the sweep queries the
+ * real databases the files belong to.
+ */
+class NoteLockPlainApplication : Application()
+
+/**
  * Per-note lock flow test (Phase 2b) under Robolectric: note + real
  * attachment file → lock → sealed at rest (envelope body, empty
  * plainText, title-only FTS, cleared links, envelope attachment file) →
@@ -48,7 +68,7 @@ import org.robolectric.annotation.Config
  * is wrapped but never unwrapped here.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], application = NoteLockPlainApplication::class)
 class NoteLockRepositoryRobolectricTest {
 
     /** Raw-key device provider: AES-256-GCM with a fixed 32-byte key. */
