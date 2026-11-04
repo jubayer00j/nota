@@ -273,7 +273,7 @@ class OpenAiCompatibleProviderTest {
         // ONE call for the whole batch, array input, default model.
         val call = http.calls.single()
         assertEquals("https://api.openai.com/v1/embeddings", call.url)
-        assertEquals("Bearer <redacted>", call.headers["Authorization"])
+        assertEquals("Bearer sk-test-1", call.headers["Authorization"])
         val body = JSONObject(call.body)
         assertEquals("text-embedding-3-large", body.getString("model"))
         val input = body.getJSONArray("input")
