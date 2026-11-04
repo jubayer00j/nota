@@ -150,7 +150,7 @@ internal suspend fun postOrThrow(
  * `x-goog-api-key` header; the reply text lives at
  * candidates[0].content.parts[].text, parts joined.
  */
-class GeminiProvider(private val http: AiHttpClient) : AiProvider {
+class GeminiProvider(private val http: AiHttpClient) : AiProvider, AiEmbeddingProvider {
 
     override val id: AiProviderId = AiProviderId.GEMINI
 
@@ -208,6 +208,68 @@ class GeminiProvider(private val http: AiHttpClient) : AiProvider {
         return text
     }
 
+    /**
+     * Phase 4.2: POST v1beta/models/{model}:embedContent with the
+     * key in the `x-goog-api-key` header; the vector lives at
+     * embedding.values. The task type follows [kind] — documents
+     * and queries are embedded into the space differently, as in
+     * 1.x. One text per call (the batch endpoint is a later
+     * optimisation; indexing is a background, best-effort flow).
+     */
+    override suspend fun embed(
+        config: AiEmbeddingConfig,
+        text: String,
+        kind: EmbedKind,
+    ): FloatArray {
+        val key = config.apiKey.trim()
+        if (key.isBlank()) throw AiException.noKey()
+        val model = config.resolvedEmbeddingModel()
+        if (model.isBlank()) {
+            throw AiException.notConfigured(
+                "Choose an embedding model for this provider in Settings → AI features.",
+            )
+        }
+        val url = "$API_BASE/models/$model:embedContent"
+        if (url.toHttpUrlOrNull() == null) {
+            throw AiException.notConfigured(
+                "That embedding model name doesn't look usable — check it in Settings → AI features.",
+            )
+        }
+        val body = JSONObject()
+            .put("model", "models/$model")
+            .put(
+                "content",
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(JSONObject().put("text", text)),
+                ),
+            )
+            .put(
+                "taskType",
+                when (kind) {
+                    EmbedKind.DOCUMENT -> "RETRIEVAL_DOCUMENT"
+                    EmbedKind.QUERY -> "RETRIEVAL_QUERY"
+                },
+            )
+            .toString()
+        val responseBody = postOrThrow(
+            http = http,
+            url = url,
+            headers = mapOf("x-goog-api-key" to key),
+            jsonBody = body,
+            apiKey = key,
+            model = model,
+            invalidKeyStatuses = setOf(400, 401, 403),
+        )
+        val root = try {
+            JSONObject(responseBody)
+        } catch (e: Exception) {
+            throw AiException(AiErrorKind.BAD_RESPONSE)
+        }
+        return parseEmbeddingVector(root.optJSONObject("embedding")?.optJSONArray("values"))
+            ?: throw AiException(AiErrorKind.BAD_RESPONSE)
+    }
+
     companion object {
         const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
     }
@@ -227,7 +289,7 @@ class GeminiProvider(private val http: AiHttpClient) : AiProvider {
 class OpenAiCompatibleProvider(
     override val id: AiProviderId,
     private val http: AiHttpClient,
-) : AiProvider {
+) : AiProvider, AiEmbeddingProvider {
 
     override suspend fun complete(config: AiConfig, prompt: String): String {
         val key = config.apiKey.trim()
@@ -299,5 +361,89 @@ class OpenAiCompatibleProvider(
         }.trim()
         if (text.isEmpty()) throw AiException(AiErrorKind.EMPTY)
         return text
+    }
+
+    /**
+     * Phase 4.2: POST {baseUrl}/embeddings with a Bearer key. The
+     * compatible shape takes an ARRAY of inputs in one call, so
+     * [embedAll] is the real implementation and [embed] delegates.
+     * The reply carries one data entry per input, each with its
+     * own index — results are reassembled in input order, and a
+     * count or shape mismatch is a BAD_RESPONSE, never a silently
+     * misaligned vector.
+     */
+    override suspend fun embed(
+        config: AiEmbeddingConfig,
+        text: String,
+        kind: EmbedKind,
+    ): FloatArray = embedAll(config, listOf(text), kind).single()
+
+    override suspend fun embedAll(
+        config: AiEmbeddingConfig,
+        texts: List<String>,
+        kind: EmbedKind,
+    ): List<FloatArray> {
+        if (texts.isEmpty()) return emptyList()
+        val key = config.apiKey.trim()
+        if (key.isBlank()) throw AiException.noKey()
+        val endpoint = config.resolvedBaseUrl()
+        if (endpoint == null || !endpoint.startsWith("https://")) {
+            throw AiException.notConfigured(
+                "Set a provider endpoint URL starting with https:// in Settings → AI features.",
+            )
+        }
+        if (endpoint.toHttpUrlOrNull() == null) {
+            throw AiException.notConfigured(
+                "That endpoint address doesn't look right — check it in Settings → AI features.",
+            )
+        }
+        // Same resolution discipline as chat (Phase 4.1 fix): a
+        // blank configured model means the provider's embedding
+        // default; only a provider whose default is ALSO blank
+        // (Custom) is unconfigured.
+        val model = config.resolvedEmbeddingModel()
+        if (model.isBlank()) {
+            throw AiException.notConfigured(
+                "Choose an embedding model for this provider in Settings → AI features.",
+            )
+        }
+        val inputs = JSONArray()
+        texts.forEach { inputs.put(it) }
+        val body = JSONObject()
+            .put("model", model)
+            .put("input", inputs)
+            .toString()
+        val headers = mutableMapOf("Authorization" to "Bearer $key")
+        if (id == AiProviderId.OPENROUTER) {
+            headers["X-Title"] = "Nota"
+            headers["HTTP-Referer"] = "https://github.com/jubayer00j/nota"
+        }
+        val responseBody = postOrThrow(
+            http = http,
+            url = "$endpoint/embeddings",
+            headers = headers,
+            jsonBody = body,
+            apiKey = key,
+            model = model,
+            invalidKeyStatuses = setOf(401, 403),
+        )
+        val root = try {
+            JSONObject(responseBody)
+        } catch (e: Exception) {
+            throw AiException(AiErrorKind.BAD_RESPONSE)
+        }
+        val data = root.optJSONArray("data")
+            ?: throw AiException(AiErrorKind.BAD_RESPONSE)
+        if (data.length() != texts.size) throw AiException(AiErrorKind.BAD_RESPONSE)
+        val byIndex = arrayOfNulls<FloatArray>(texts.size)
+        for (i in 0 until data.length()) {
+            val entry = data.optJSONObject(i)
+                ?: throw AiException(AiErrorKind.BAD_RESPONSE)
+            val index = entry.optInt("index", -1)
+            if (index !in texts.indices) throw AiException(AiErrorKind.BAD_RESPONSE)
+            byIndex[index] = parseEmbeddingVector(entry.optJSONArray("embedding"))
+                ?: throw AiException(AiErrorKind.BAD_RESPONSE)
+        }
+        return byIndex.map { it ?: throw AiException(AiErrorKind.BAD_RESPONSE) }
     }
 }

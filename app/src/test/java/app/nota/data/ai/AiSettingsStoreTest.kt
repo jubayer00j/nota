@@ -140,4 +140,71 @@ class AiSettingsStoreTest {
         assertEquals("keep-me", store.slot("uid-keep", AiProviderId.GEMINI).apiKey)
         assertTrue(store.hasUsableKey("uid-keep"))
     }
+
+    // ---- Embedding model (Phase 4.2) -------------------------------
+
+    @Test
+    fun embeddingModelRoundTripsPerProvider() = runBlocking {
+        store.saveSlot(
+            "acct-emb", AiProviderId.GEMINI,
+            AiProviderSlot(apiKey = "k", embeddingModel = "gem-emb-x"),
+        )
+        store.saveSlot(
+            "acct-emb", AiProviderId.OPENAI,
+            AiProviderSlot(apiKey = "k2", embeddingModel = "oai-emb-y"),
+        )
+        assertEquals("gem-emb-x", store.slot("acct-emb", AiProviderId.GEMINI).embeddingModel)
+        assertEquals("oai-emb-y", store.slot("acct-emb", AiProviderId.OPENAI).embeddingModel)
+        // The chat model slot is a separate field and stays empty.
+        assertEquals("", store.slot("acct-emb", AiProviderId.GEMINI).model)
+    }
+
+    @Test
+    fun activeEmbeddingConfigProjection() = runBlocking {
+        // No key anywhere → no embedding config.
+        assertNull(store.activeEmbeddingConfig("acct-embproj"))
+        store.saveSlot("acct-embproj", AiProviderId.OPENAI, AiProviderSlot(apiKey = "o-key"))
+        store.setActiveProvider("acct-embproj", AiProviderId.OPENAI)
+        val config = store.activeEmbeddingConfig("acct-embproj")
+        assertEquals(AiProviderId.OPENAI, config!!.providerId)
+        assertEquals("o-key", config.apiKey)
+        // No embedding model stored → the 1.x default stands in.
+        assertEquals("text-embedding-3-large", config.resolvedEmbeddingModel())
+        assertEquals("https://api.openai.com/v1", config.resolvedBaseUrl())
+
+        // Custom with no embedding model named is NOT configured:
+        // there is no default to resolve to.
+        store.saveSlot(
+            "acct-embproj", AiProviderId.CUSTOM,
+            AiProviderSlot(apiKey = "c-key", baseUrl = "https://llm.example.com/v1"),
+        )
+        store.setActiveProvider("acct-embproj", AiProviderId.CUSTOM)
+        assertNull(store.activeEmbeddingConfig("acct-embproj"))
+        store.saveSlot(
+            "acct-embproj", AiProviderId.CUSTOM,
+            AiProviderSlot(
+                apiKey = "c-key",
+                baseUrl = "https://llm.example.com/v1",
+                embeddingModel = "my-embedder",
+            ),
+        )
+        val custom = store.activeEmbeddingConfig("acct-embproj")
+        assertEquals("my-embedder", custom!!.resolvedEmbeddingModel())
+        assertEquals("https://llm.example.com/v1", custom.resolvedBaseUrl())
+    }
+
+    @Test
+    fun clearAccountAlsoDropsEmbeddingModels() = runBlocking {
+        store.saveSlot(
+            "uid-drop-emb", AiProviderId.GEMINI,
+            AiProviderSlot(apiKey = "k", embeddingModel = "emb-1"),
+        )
+        store.clearAccount("uid-drop-emb")
+        assertEquals("", store.slot("uid-drop-emb", AiProviderId.GEMINI).embeddingModel)
+        assertNull(
+            prefs.getAiField(
+                "uid-drop-emb", AiSettingsStore.embeddingModelField(AiProviderId.GEMINI),
+            ),
+        )
+    }
 }

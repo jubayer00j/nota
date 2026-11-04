@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.dp
 import app.nota.data.ai.AiProviderId
 import app.nota.data.ai.AiService
 import app.nota.data.ai.AiSettingsStore
+import app.nota.data.ai.SemanticIndexStatus
+import app.nota.data.ai.SemanticIndexer
 import app.nota.data.db.DatabaseProvider
 import app.nota.ui.theme.NotaSpacing
 import kotlinx.coroutines.launch
@@ -61,6 +63,7 @@ import org.koin.compose.koinInject
 fun AiSection(
     store: AiSettingsStore = koinInject(),
     service: AiService = koinInject(),
+    indexer: SemanticIndexer = koinInject(),
     databaseProvider: DatabaseProvider = koinInject(),
 ) {
     val form = remember {
@@ -68,6 +71,21 @@ fun AiSection(
     }
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { form.load() }
+
+    // Phase 4.2: the semantic index's status + rebuild. The index
+    // itself lives in SemanticIndexer; this block only reports and
+    // triggers. Status refreshes on entry, after a Save (saving a
+    // key or an embedding model is a backfill trigger), and after
+    // a rebuild.
+    var indexStatus by remember { mutableStateOf<SemanticIndexStatus?>(null) }
+    var rebuilding by remember { mutableStateOf(false) }
+    var rebuildError by remember { mutableStateOf<String?>(null) }
+    fun refreshIndexStatus() {
+        scope.launch {
+            indexStatus = indexer.status(databaseProvider.accountId.value)
+        }
+    }
+    LaunchedEffect(Unit) { refreshIndexStatus() }
 
     Text(
         "AI features",
@@ -150,6 +168,19 @@ fun AiSection(
         modifier = Modifier.fillMaxWidth(),
     )
     Spacer(Modifier.height(NotaSpacing.sm))
+    OutlinedTextField(
+        value = draft.embeddingModel,
+        onValueChange = { draft.embeddingModel = it; form.onEdited() },
+        label = { Text("Embedding model") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(
+        "Used by semantic search to compare notes by meaning.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(NotaSpacing.sm))
     if (form.activeProvider == AiProviderId.CUSTOM) {
         OutlinedTextField(
             value = draft.baseUrl,
@@ -178,7 +209,16 @@ fun AiSection(
         }
         Spacer(Modifier.size(NotaSpacing.sm))
         Button(
-            onClick = { scope.launch { form.save() } },
+            onClick = {
+                scope.launch {
+                    form.save()
+                    // Saving a key or an embedding model is a
+                    // semantic-index backfill trigger (best-effort;
+                    // reconcile never throws).
+                    indexer.reconcile(databaseProvider.accountId.value)
+                    refreshIndexStatus()
+                }
+            },
             enabled = form.isDirty,
         ) {
             Text("Save")
@@ -213,5 +253,72 @@ fun AiSection(
             modifier = Modifier.padding(top = NotaSpacing.xs),
         )
         else -> Unit
+    }
+
+    // ---- Semantic search (Phase 4.2) --------------------------------
+    Spacer(Modifier.height(NotaSpacing.md))
+    Text(
+        "Semantic search",
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.primary,
+    )
+    Text(
+        "Notes are turned into vectors by the provider above so search " +
+            "can find them by meaning. Vectors are stored only on this " +
+            "device, are never included in backups, and locked notes are " +
+            "never indexed.",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(NotaSpacing.sm))
+    val status = indexStatus
+    Text(
+        when {
+            status == null -> "Checking the index…"
+            !status.canIndex ->
+                "Add an API key above to use semantic search."
+            status.indexedNotes == 0 ->
+                "No notes indexed yet — rebuild, or just search: the first " +
+                    "search builds the index."
+            !status.spaceIsCurrent ->
+                "${status.indexedNotes} note(s) indexed with a different " +
+                    "provider or embedding model — rebuild to use them."
+            else -> "${status.indexedNotes} of ${status.eligibleNotes} note(s) indexed."
+        },
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(NotaSpacing.sm))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        OutlinedButton(
+            onClick = {
+                rebuilding = true
+                rebuildError = null
+                scope.launch {
+                    try {
+                        indexer.rebuild(databaseProvider.accountId.value)
+                    } catch (e: app.nota.data.ai.AiException) {
+                        rebuildError = e.displayMessage
+                    }
+                    rebuilding = false
+                    refreshIndexStatus()
+                }
+            },
+            enabled = status?.canIndex == true && !rebuilding,
+        ) {
+            Text("Rebuild index")
+        }
+        if (rebuilding) {
+            Spacer(Modifier.size(NotaSpacing.sm))
+            CircularProgressIndicator(Modifier.size(20.dp))
+        }
+    }
+    rebuildError?.let { message ->
+        Text(
+            message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(top = NotaSpacing.xs),
+        )
     }
 }

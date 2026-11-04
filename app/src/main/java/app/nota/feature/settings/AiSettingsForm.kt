@@ -40,6 +40,11 @@ import app.nota.data.ai.normalizeAiBaseUrl
  *   never a blank: the saved slot always names the model a call
  *   will use (Custom's default is blank, so its cleared field
  *   stays blank).
+ * - Phase 4.2: the EMBEDDING model rides the same discipline —
+ *   its own draft field, filled from the provider's embedding
+ *   default, dirtied/saved/cleared-to-default exactly like the
+ *   chat model. Test connection stays a CHAT test; it never
+ *   exercises the embedding model.
  */
 class AiSettingsForm(
     private val store: AiSettingsStore,
@@ -48,10 +53,11 @@ class AiSettingsForm(
 ) {
 
     /** One provider's editable fields. */
-    class Draft(key: String, model: String, baseUrl: String) {
+    class Draft(key: String, model: String, baseUrl: String, embeddingModel: String = "") {
         var key by mutableStateOf(key)
         var model by mutableStateOf(model)
         var baseUrl by mutableStateOf(baseUrl)
+        var embeddingModel by mutableStateOf(embeddingModel)
     }
 
     sealed interface TestState {
@@ -92,6 +98,7 @@ class AiSettingsForm(
                 key = slot.apiKey,
                 model = slot.model.ifBlank { provider.defaultModel },
                 baseUrl = slot.baseUrl,
+                embeddingModel = slot.embeddingModel.ifBlank { provider.defaultEmbeddingModel },
             )
         }
         testState = TestState.Idle
@@ -121,6 +128,11 @@ class AiSettingsForm(
             val current = drafts.getValue(provider)
             if (current.key.trim() != saved.apiKey.trim()) return true
             if (current.model.trim() != saved.model.ifBlank { provider.defaultModel }) return true
+            if (current.embeddingModel.trim() !=
+                saved.embeddingModel.ifBlank { provider.defaultEmbeddingModel }
+            ) {
+                return true
+            }
             if (provider == AiProviderId.CUSTOM &&
                 normalizeAiBaseUrl(current.baseUrl) != normalizeAiBaseUrl(saved.baseUrl)
             ) {
@@ -161,6 +173,8 @@ class AiSettingsForm(
         // displays (Jules review, Phase 4.1). Custom's default
         // is blank, so a cleared Custom model stays blank.
         current.model = current.model.trim().ifBlank { provider.defaultModel }
+        current.embeddingModel =
+            current.embeddingModel.trim().ifBlank { provider.defaultEmbeddingModel }
         store.saveSlot(
             accountId,
             provider,
@@ -168,6 +182,7 @@ class AiSettingsForm(
                 apiKey = current.key,
                 model = current.model,
                 baseUrl = current.baseUrl,
+                embeddingModel = current.embeddingModel,
             ),
         )
         savedSlots[provider] = store.slot(accountId, provider)

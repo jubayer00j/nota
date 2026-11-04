@@ -242,4 +242,102 @@ class OpenAiCompatibleProviderTest {
             assertEquals(AiErrorKind.EMPTY, e.kind)
         }
     }
+
+    // ---- Embeddings (Phase 4.2) -----------------------------------
+
+    private fun embedConfig(
+        id: AiProviderId,
+        key: String = "sk-test-1",
+        embeddingModel: String = "",
+        baseUrl: String? = null,
+    ) = AiEmbeddingConfig(id, apiKey = key, embeddingModel = embeddingModel, baseUrl = baseUrl)
+
+    private fun embedOkBody(vectors: List<List<Double>>): String {
+        val data = JSONArray()
+        vectors.forEachIndexed { index, values ->
+            val arr = JSONArray()
+            values.forEach { arr.put(it) }
+            data.put(JSONObject().put("index", index).put("embedding", arr))
+        }
+        return JSONObject().put("data", data).toString()
+    }
+
+    @Test
+    fun embedAllBatchesIntoOneCallAndParsesInOrder() = runBlocking {
+        http.next = AiHttpResponse(200, embedOkBody(listOf(listOf(0.1, 0.2), listOf(0.3, 0.4))))
+        val out = provider(AiProviderId.OPENAI)
+            .embedAll(embedConfig(AiProviderId.OPENAI), listOf("first", "second"), EmbedKind.DOCUMENT)
+        assertEquals(2, out.size)
+        assertEquals(0.1f, out[0][0])
+        assertEquals(0.4f, out[1][1])
+        // ONE call for the whole batch, array input, default model.
+        val call = http.calls.single()
+        assertEquals("https://api.openai.com/v1/embeddings", call.url)
+        assertEquals("Bearer <redacted>", call.headers["Authorization"])
+        val body = JSONObject(call.body)
+        assertEquals("text-embedding-3-large", body.getString("model"))
+        val input = body.getJSONArray("input")
+        assertEquals("first", input.getString(0))
+        assertEquals("second", input.getString(1))
+    }
+
+    @Test
+    fun embedOutOfOrderDataIsReassembledByIndex() = runBlocking {
+        // The reply's entries arrive shuffled; the index field,
+        // not the array position, decides which vector is whose.
+        val body = JSONObject().put(
+            "data",
+            JSONArray()
+                .put(JSONObject().put("index", 1).put("embedding", JSONArray().put(9.0).put(9.0)))
+                .put(JSONObject().put("index", 0).put("embedding", JSONArray().put(1.0).put(1.0))),
+        ).toString()
+        http.next = AiHttpResponse(200, body)
+        val out = provider(AiProviderId.OPENAI)
+            .embedAll(embedConfig(AiProviderId.OPENAI), listOf("a", "b"), EmbedKind.DOCUMENT)
+        assertEquals(1.0f, out[0][0])
+        assertEquals(9.0f, out[1][0])
+    }
+
+    @Test
+    fun embedCountMismatchIsBadResponse() = runBlocking {
+        http.next = AiHttpResponse(200, embedOkBody(listOf(listOf(0.1))))
+        try {
+            provider(AiProviderId.OPENAI)
+                .embedAll(embedConfig(AiProviderId.OPENAI), listOf("a", "b"), EmbedKind.DOCUMENT)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.BAD_RESPONSE, e.kind)
+        }
+    }
+
+    @Test
+    fun embedCustomBlankModelIsNotConfiguredBeforeAnyRequest() = runBlocking {
+        try {
+            provider(AiProviderId.CUSTOM).embed(
+                embedConfig(
+                    AiProviderId.CUSTOM,
+                    embeddingModel = "",
+                    baseUrl = "https://llm.example.com/v1",
+                ),
+                "x",
+                EmbedKind.DOCUMENT,
+            )
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.NOT_CONFIGURED, e.kind)
+        }
+        assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun embedUnauthorizedMapsToInvalidKey() = runBlocking {
+        http.next = AiHttpResponse(401, "{}")
+        try {
+            provider(AiProviderId.OPENAI)
+                .embed(embedConfig(AiProviderId.OPENAI), "x", EmbedKind.QUERY)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.INVALID_KEY, e.kind)
+        }
+    }
 }

@@ -24,6 +24,10 @@ enum class AiProviderId(
     val presetBaseUrl: String?,
     /** Model pre-filled for a fresh slot; the user can overwrite. */
     val defaultModel: String,
+    /** Embedding model pre-filled for a fresh slot (Phase 4.2);
+     *  the user can overwrite. Blank for Custom: the endpoint is
+     *  the user's own, so no model name can be presumed. */
+    val defaultEmbeddingModel: String,
     /** True when calls take the OpenAI-compatible wire shape. */
     val openAiCompatible: Boolean,
 ) {
@@ -32,6 +36,7 @@ enum class AiProviderId(
         label = "Gemini",
         presetBaseUrl = null,
         defaultModel = "gemini-3.5-flash-lite",
+        defaultEmbeddingModel = "gemini-embedding-001",
         openAiCompatible = false,
     ),
     OPENAI(
@@ -39,6 +44,7 @@ enum class AiProviderId(
         label = "OpenAI",
         presetBaseUrl = "https://api.openai.com/v1",
         defaultModel = "gpt-4o-mini",
+        defaultEmbeddingModel = "text-embedding-3-large",
         openAiCompatible = true,
     ),
     OPENROUTER(
@@ -46,6 +52,7 @@ enum class AiProviderId(
         label = "OpenRouter",
         presetBaseUrl = "https://openrouter.ai/api/v1",
         defaultModel = "openai/gpt-4o-mini",
+        defaultEmbeddingModel = "text-embedding-3-large",
         openAiCompatible = true,
     ),
     CUSTOM(
@@ -53,6 +60,7 @@ enum class AiProviderId(
         label = "Custom endpoint",
         presetBaseUrl = null,
         defaultModel = "",
+        defaultEmbeddingModel = "",
         openAiCompatible = true,
     ),
     ;

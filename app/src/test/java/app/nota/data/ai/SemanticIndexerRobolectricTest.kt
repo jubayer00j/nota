@@ -1,0 +1,280 @@
+package app.nota.data.ai
+
+import android.content.Context
+import androidx.room.Room
+import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.NoteEntity
+import app.nota.data.db.NotaDatabase
+import app.nota.data.preferences.PreferencesRepository
+import app.nota.data.repository.NoteRepository
+import java.io.File
+import java.io.IOException
+import java.util.UUID
+import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+
+/**
+ * Semantic indexer behaviour (Phase 4.2) against an in-memory
+ * database and a keyword-space fake transport — the fake embeds
+ * text into a tiny [apple, banana, constant] space, so "meaning"
+ * in these tests is literally keyword overlap and every expected
+ * hit/miss is computable by hand. No real network anywhere.
+ *
+ * The tests that matter most are the safety ones: a locked note
+ * is NEVER embedded (its text never reaches the transport and no
+ * vector is stored for it), edits replace vectors, deletes and
+ * trashes remove them, sign-out drops the whole index, and a
+ * provider failure degrades reconcile silently while rebuild
+ * still reports it.
+ */
+@RunWith(RobolectricTestRunner::class)
+class SemanticIndexerRobolectricTest {
+
+    /** Gemini-shaped fake: reads the embedContent body's text and
+     *  answers with the keyword-space vector for it. */
+    private class KeywordEmbeddingHttpClient : AiHttpClient {
+        data class Call(val url: String, val body: String)
+
+        val calls = mutableListOf<Call>()
+        var transportFailure = false
+
+        override suspend fun post(
+            url: String,
+            headers: Map<String, String>,
+            jsonBody: String,
+        ): AiHttpResponse {
+            calls += Call(url, jsonBody)
+            if (transportFailure) throw AiNetworkException(IOException("no route"))
+            val body = JSONObject(jsonBody)
+            val text = body.getJSONObject("content").getJSONArray("parts")
+                .getJSONObject(0).getString("text")
+            val values = JSONArray()
+            vectorFor(text).forEach { values.put(it.toDouble()) }
+            return AiHttpResponse(
+                200,
+                JSONObject().put("embedding", JSONObject().put("values", values)).toString(),
+            )
+        }
+
+        fun vectorFor(text: String): FloatArray {
+            val t = text.lowercase()
+            fun count(word: String) = t.split(word).size - 1
+            return floatArrayOf(count("apple").toFloat(), count("banana").toFloat(), 0.5f)
+        }
+    }
+
+    private lateinit var db: NotaDatabase
+    private lateinit var provider: DatabaseProvider
+    private lateinit var notes: NoteRepository
+    private lateinit var settings: AiSettingsStore
+    private lateinit var http: KeywordEmbeddingHttpClient
+    private lateinit var indexStore: SemanticIndexStore
+    private lateinit var indexer: SemanticIndexer
+
+    private val account = "guest"
+
+    @Before
+    fun setUp() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        provider = DatabaseProvider.forDatabase(context, db)
+        notes = NoteRepository(provider)
+        settings = AiSettingsStore(PreferencesRepository(context), FakeAiKeyCipher())
+        http = KeywordEmbeddingHttpClient()
+        indexStore = SemanticIndexStore(
+            File(context.cacheDir, "semantic-indexer-test-${System.nanoTime()}"),
+        )
+        indexer = SemanticIndexer(provider, settings, http, indexStore)
+        runBlocking { settings.clearAccount(account) }
+    }
+
+    @After
+    fun tearDown() {
+        db.close()
+    }
+
+    private suspend fun saveGeminiKey(embeddingModel: String = "") {
+        settings.saveSlot(
+            account, AiProviderId.GEMINI,
+            AiProviderSlot(apiKey = "test-key", embeddingModel = embeddingModel),
+        )
+    }
+
+    @Test
+    fun reconcileEmbedsEligibleNotesAndSearchRanksByMeaning() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        val banana = notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+
+        indexer.reconcile(account)
+
+        val status = indexer.status(account)
+        assertEquals(2, status.indexedNotes)
+        assertTrue(status.spaceIsCurrent)
+        assertTrue(status.canIndex)
+
+        val appleHits = indexer.search(account, "apple")
+        assertEquals(listOf(apple.id), appleHits.map { it.noteId })
+        val bananaHits = indexer.search(account, "banana")
+        assertEquals(listOf(banana.id), bananaHits.map { it.noteId })
+    }
+
+    @Test
+    fun lockedNoteIsNeverEmbeddedAndNeverSurfaces() = runBlocking {
+        saveGeminiKey()
+        val open = notes.createRichNote("Orchard", "<p>apple trees everywhere</p>")
+        // A locked note exactly as the lock flow leaves it in the
+        // table — with a body text no one may ever read. The
+        // indexer must skip it on the locked flag alone, even
+        // though this row (defence-in-depth) carries plaintext.
+        val locked = NoteEntity(
+            id = UUID.randomUUID().toString(),
+            title = "Secret orchard",
+            contentHtml = "sealed-envelope",
+            plainText = "apple apple apple topsecret",
+            createdAt = 1L,
+            updatedAt = 1L,
+            locked = true,
+            lockRecordJson = "{}",
+        )
+        notes.upsert(locked)
+
+        indexer.reconcile(account)
+
+        val stored = indexStore.load(account)
+        assertEquals(setOf(open.id), stored?.notes?.keys)
+        // The locked note's text never reached the transport.
+        assertTrue(http.calls.none { it.body.contains("topsecret") })
+        assertTrue(
+            http.calls.none {
+                it.body.contains("Secret orchard")
+            },
+        )
+        // And it cannot surface in results.
+        val hits = indexer.search(account, "apple")
+        assertEquals(listOf(open.id), hits.map { it.noteId })
+    }
+
+    @Test
+    fun editReplacesTheNotesVectors() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Fruit bowl", "<p>apple apple</p>")
+        indexer.reconcile(account)
+        val before = indexStore.load(account)!!.notes.getValue(note.id).fingerprint
+
+        notes.updateRichBody(note, "Fruit bowl", "<p>banana banana banana</p>")
+        indexer.reconcile(account)
+
+        val after = indexStore.load(account)!!.notes.getValue(note.id).fingerprint
+        assertNotEquals(before, after)
+        assertEquals(listOf(note.id), indexer.search(account, "banana").map { it.noteId })
+        assertTrue(indexer.search(account, "apple").none { it.noteId == note.id })
+    }
+
+    @Test
+    fun trashAndDeleteRemoveVectors() = runBlocking {
+        saveGeminiKey()
+        val a = notes.createRichNote("A", "<p>apple</p>")
+        val b = notes.createRichNote("B", "<p>banana</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+
+        notes.trash(a)
+        indexer.reconcile(account)
+        assertEquals(setOf(b.id), indexStore.load(account)?.notes?.keys)
+
+        notes.delete(b)
+        indexer.reconcile(account)
+        assertEquals(0, indexer.status(account).indexedNotes)
+        assertNull(indexStore.load(account))
+    }
+
+    @Test
+    fun firstSearchBackfillsAnEmptyIndex() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Orchard", "<p>apple apple</p>")
+        // No reconcile, no rebuild — the search itself builds.
+        val hits = indexer.search(account, "apple")
+        assertEquals(listOf(note.id), hits.map { it.noteId })
+        assertTrue(http.calls.isNotEmpty())
+    }
+
+    @Test
+    fun noKeyMeansSilentNoOp() = runBlocking {
+        // setUp cleared the account: no key saved anywhere.
+        notes.createRichNote("Orchard", "<p>apple apple</p>")
+        indexer.reconcile(account)
+        assertNull(indexStore.load(account))
+        assertTrue(http.calls.isEmpty())
+        assertTrue(indexer.search(account, "apple").isEmpty())
+        assertFalse(indexer.status(account).canIndex)
+    }
+
+    @Test
+    fun embeddingModelChangeInvalidatesAndRebuildsTheSpace() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Orchard", "<p>apple apple</p>")
+        indexer.reconcile(account)
+        assertTrue(
+            indexStore.load(account)!!.signature.contains("gemini-embedding-001"),
+        )
+
+        saveGeminiKey(embeddingModel = "custom-emb-9")
+        assertFalse(indexer.status(account).spaceIsCurrent)
+
+        // The next search repairs the space under the new model…
+        val hits = indexer.search(account, "apple")
+        assertEquals(listOf(note.id), hits.map { it.noteId })
+        assertTrue(indexStore.load(account)!!.signature.contains("custom-emb-9"))
+        assertTrue(http.calls.any { it.url.contains("custom-emb-9") })
+        assertTrue(indexer.status(account).spaceIsCurrent)
+    }
+
+    @Test
+    fun clearAccountDropsTheWholeIndex() = runBlocking {
+        saveGeminiKey()
+        notes.createRichNote("Orchard", "<p>apple apple</p>")
+        indexer.reconcile(account)
+        assertEquals(1, indexer.status(account).indexedNotes)
+
+        indexer.clearAccount(account)
+        assertNull(indexStore.load(account))
+        assertEquals(0, indexer.status(account).indexedNotes)
+    }
+
+    @Test
+    fun providerFailureDegradesReconcileSilentlyButRebuildReports() = runBlocking {
+        saveGeminiKey()
+        notes.createRichNote("Orchard", "<p>apple apple</p>")
+        http.transportFailure = true
+
+        // Reconcile swallows it (a note save path must never see
+        // an indexing failure)…
+        indexer.reconcile(account)
+        assertNull(indexStore.load(account))
+        // …search degrades to keyword-only emptiness…
+        assertTrue(indexer.search(account, "apple").isEmpty())
+        // …but an explicit Rebuild surfaces the mapped failure.
+        try {
+            indexer.rebuild(account)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.OFFLINE, e.kind)
+        }
+    }
+}

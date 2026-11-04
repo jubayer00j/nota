@@ -84,10 +84,22 @@ val appModule = module {
     single {
         AiService(get(), get(), accountIdProvider = { get<DatabaseProvider>().accountId.value })
     }
+    // Phase 4.2 semantic search: the vector store is a device-
+    // local filesDir directory of its own (never Room, never the
+    // attachment store, so no backup can ever read it), and the
+    // indexer orchestrates build/reconcile/query over it.
+    // Registered before AuthManager, which drops an account's
+    // vectors on sign-out alongside its keys.
+    single {
+        app.nota.data.ai.SemanticIndexStore(
+            java.io.File(androidContext().filesDir, "semantic-index"),
+        )
+    }
+    single { app.nota.data.ai.SemanticIndexer(get(), get(), get(), get()) }
     // Phase 3a accounts: identity (Firebase Auth, identity only) +
     // the guest→account library copy.
     single { GuestLibraryTransfer(get(), get(), get()) }
-    single { AuthManager(get(), get(), get(), get()) }
+    single { AuthManager(get(), get(), get(), get(), get()) }
     // Phase 3b Google Drive: authorization (drive.file only), the
     // REST gateway, and the app-scoped operations coordinator.
     single { app.nota.data.drive.DriveAuth(get()) }
@@ -111,5 +123,11 @@ val appModule = module {
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
     viewModel { TemplatesViewModel(get(), get()) }
     viewModel { TodayViewModel(get(), get()) }
-    viewModel { SearchViewModel(get()) }
+    viewModel {
+        SearchViewModel(
+            get(),
+            get(),
+            accountIdProvider = { get<DatabaseProvider>().accountId.value },
+        )
+    }
 }

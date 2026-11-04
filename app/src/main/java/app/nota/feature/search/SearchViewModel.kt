@@ -2,6 +2,7 @@ package app.nota.feature.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.nota.data.ai.SemanticIndexer
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.repository.NoteRepository
@@ -15,12 +16,22 @@ import kotlinx.coroutines.launch
 
 class SearchViewModel(
     private val repository: NoteRepository,
+    private val semanticIndexer: SemanticIndexer? = null,
+    private val accountIdProvider: () -> String = { "" },
 ) : ViewModel() {
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query
 
     private val _results = MutableStateFlow<List<NoteEntity>>(emptyList())
     val results: StateFlow<List<NoteEntity>> = _results
+
+    /** Phase 4.2: "Related by meaning" — semantic hits for the
+     *  current query, best first, excluding anything the keyword
+     *  results already show. Empty whenever semantic search can't
+     *  run (no key, no index, offline, provider error): the
+     *  keyword search is completely unaffected either way. */
+    private val _semanticResults = MutableStateFlow<List<NoteEntity>>(emptyList())
+    val semanticResults: StateFlow<List<NoteEntity>> = _semanticResults
 
     private var searchJob: Job? = null
 
@@ -36,6 +47,7 @@ class SearchViewModel(
         searchJob?.cancel()
         if (value.isBlank()) {
             _results.value = emptyList()
+            _semanticResults.value = emptyList()
             return
         }
         searchJob = viewModelScope.launch {
@@ -43,6 +55,28 @@ class SearchViewModel(
             delay(200)
             val found = repository.searchNotes(value)
             if (_query.value == value) _results.value = found
+            // Semantic pass for the same (still-current) query. It
+            // costs a provider call, so it runs after the keyword
+            // results are already on screen; any failure degrades
+            // to "no related section", silently.
+            _semanticResults.value = emptyList()
+            val indexer = semanticIndexer ?: return@launch
+            val hits = try {
+                indexer.search(accountIdProvider(), value)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                emptyList()
+            }
+            if (_query.value != value) return@launch
+            val keywordIds = found.mapTo(HashSet()) { it.id }
+            val related = ArrayList<NoteEntity>(hits.size)
+            for (hit in hits) {
+                if (hit.noteId in keywordIds) continue
+                val note = repository.getById(hit.noteId) ?: continue
+                if (note.locked || note.trashedAt != null) continue
+                related += note
+            }
+            if (_query.value == value) _semanticResults.value = related
         }
     }
 

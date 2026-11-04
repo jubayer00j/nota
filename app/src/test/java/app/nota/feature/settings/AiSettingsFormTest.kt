@@ -195,4 +195,56 @@ class AiSettingsFormTest {
         assertEquals(listOf("work", "ideas"), outcome.tags)
         assertEquals("SAVED-KEY", http.calls.single().headers["x-goog-api-key"])
     }
+
+    @Test
+    fun embeddingModelFieldLoadsSavesAndDefaultsLikeTheChatModel() = runBlocking {
+        val acct = "form-embedding"
+        val form = formFor(acct)
+        form.load()
+        // Fresh Gemini slot: the embedding default stands in and
+        // the pristine form is not dirty.
+        assertEquals("gemini-embedding-001", form.draft.embeddingModel)
+        assertFalse(form.isDirty)
+
+        // Editing only the embedding model dirties the form, and
+        // Save persists it under its own slot field.
+        form.draft.embeddingModel = "gemini-embedding-exp"
+        form.onEdited()
+        assertTrue(form.isDirty)
+        form.save()
+        assertFalse(form.isDirty)
+        assertEquals(
+            "gemini-embedding-exp",
+            store.slot(acct, AiProviderId.GEMINI).embeddingModel,
+        )
+        // The chat model kept its own value throughout: the
+        // displayed default the save persisted, untouched by the
+        // embedding edits.
+        assertEquals(
+            "gemini-3.5-flash-lite",
+            store.slot(acct, AiProviderId.GEMINI).model,
+        )
+
+        // Clearing the field and saving stores the default back,
+        // exactly like the chat model (the Phase 4.1 Jules rule).
+        form.draft.embeddingModel = ""
+        form.onEdited()
+        assertTrue(form.isDirty)
+        form.save()
+        assertEquals(
+            "gemini-embedding-001",
+            store.slot(acct, AiProviderId.GEMINI).embeddingModel,
+        )
+        assertEquals("gemini-embedding-001", form.draft.embeddingModel)
+        assertFalse(form.isDirty)
+
+        // OpenAI's embedding default is the 1.x large model.
+        form.selectProvider(AiProviderId.OPENAI)
+        assertEquals("text-embedding-3-large", form.draft.embeddingModel)
+        // Custom has no embedding default: blank stays blank.
+        form.selectProvider(AiProviderId.CUSTOM)
+        assertEquals("", form.draft.embeddingModel)
+        form.save()
+        assertEquals("", store.slot(acct, AiProviderId.CUSTOM).embeddingModel)
+    }
 }

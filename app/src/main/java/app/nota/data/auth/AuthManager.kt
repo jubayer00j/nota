@@ -61,6 +61,7 @@ class AuthManager(
     private val preferences: PreferencesRepository,
     private val transfer: GuestLibraryTransfer,
     private val aiSettingsStore: AiSettingsStore,
+    private val semanticIndexer: app.nota.data.ai.SemanticIndexer? = null,
 ) {
     private val auth: FirebaseAuth? by lazy {
         runCatching { FirebaseAuth.getInstance() }.getOrNull()
@@ -123,6 +124,11 @@ class AuthManager(
             if (previousUid != null) {
                 scope.launch {
                     runCatching { aiSettingsStore.clearAccount(previousUid) }
+                    // Phase 4.2: the account's semantic vectors
+                    // drop with its keys — they are derived from
+                    // the account's notes and belong to the same
+                    // sign-in.
+                    runCatching { semanticIndexer?.clearAccount(previousUid) }
                 }
             }
         } else {

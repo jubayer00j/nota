@@ -206,4 +206,87 @@ class GeminiProviderTest {
             assertEquals(AiErrorKind.EMPTY, e.kind)
         }
     }
+
+    // ---- Embeddings (Phase 4.2) -----------------------------------
+
+    private val embedConfig = AiEmbeddingConfig(
+        AiProviderId.GEMINI, apiKey = "TEST-KEY-123", embeddingModel = "",
+    )
+
+    private fun embedOkBody(vararg values: Double): String = JSONObject()
+        .put(
+            "embedding",
+            JSONObject().put(
+                "values",
+                org.json.JSONArray().apply { values.forEach { put(it) } },
+            ),
+        )
+        .toString()
+
+    @Test
+    fun embedRequestShapeAndParse() = runBlocking {
+        http.next = AiHttpResponse(200, embedOkBody(0.25, -0.5, 1.0))
+        val vector = provider.embed(embedConfig, "orchard notes", EmbedKind.DOCUMENT)
+        assertEquals(3, vector.size)
+        assertEquals(0.25f, vector[0])
+        assertEquals(-0.5f, vector[1])
+        assertEquals(1.0f, vector[2])
+        val call = http.calls.single()
+        // Blank configured model → the provider's embedding default.
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models/" +
+                "gemini-embedding-001:embedContent",
+            call.url,
+        )
+        assertEquals("TEST-KEY-123", call.headers["x-goog-api-key"])
+        val body = JSONObject(call.body)
+        assertEquals("RETRIEVAL_DOCUMENT", body.getString("taskType"))
+        val text = body.getJSONObject("content").getJSONArray("parts")
+            .getJSONObject(0).getString("text")
+        assertEquals("orchard notes", text)
+    }
+
+    @Test
+    fun embedQueryUsesQueryTaskType() = runBlocking {
+        http.next = AiHttpResponse(200, embedOkBody(0.1))
+        provider.embed(embedConfig, "q", EmbedKind.QUERY)
+        val body = JSONObject(http.calls.single().body)
+        assertEquals("RETRIEVAL_QUERY", body.getString("taskType"))
+    }
+
+    @Test
+    fun embedBlankKeyFailsBeforeAnyRequest() = runBlocking {
+        try {
+            provider.embed(embedConfig.copy(apiKey = " "), "x", EmbedKind.DOCUMENT)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.NO_KEY, e.kind)
+        }
+        assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun embedErrorMappingAndMalformedBody() = runBlocking {
+        http.next = AiHttpResponse(400, "{}")
+        try {
+            provider.embed(embedConfig, "x", EmbedKind.DOCUMENT)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.INVALID_KEY, e.kind)
+        }
+        http.next = AiHttpResponse(200, """{"embeddings":[]}""")
+        try {
+            provider.embed(embedConfig, "x", EmbedKind.DOCUMENT)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.BAD_RESPONSE, e.kind)
+        }
+        http.next = AiHttpResponse(200, """{"embedding":{"values":[]}}""")
+        try {
+            provider.embed(embedConfig, "x", EmbedKind.DOCUMENT)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.BAD_RESPONSE, e.kind)
+        }
+    }
 }
