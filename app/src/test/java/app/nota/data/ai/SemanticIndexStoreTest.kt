@@ -90,13 +90,17 @@ class SemanticIndexStoreTest {
         // Jules PR #23 P3: the renameTo fallback copy was
         // unwrapped — a mid-copy failure (disk full) propagated
         // AND left a truncated target plus a stale .tmp behind.
-        // A directory squatting on the target path makes renameTo
-        // fail and the fallback copy throw, reproducing that
-        // failure class without any mocking heroics.
+        // A NON-EMPTY directory squatting on the target path
+        // reproduces that failure class without mocking heroics:
+        // renameTo cannot replace it, and the fallback copy's
+        // overwrite cannot delete it, so the copy throws. (An
+        // empty directory would not do: copyTo simply deletes
+        // and replaces it.)
         val store = store()
         val target = store.fileFor("guest")
         target.parentFile.mkdirs()
         target.mkdir()
+        File(target, "squatter").writeBytes(byteArrayOf(1))
         try {
             store.save("guest", sampleIndex())
             fail("expected the copy failure to propagate")

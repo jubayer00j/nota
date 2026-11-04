@@ -196,7 +196,7 @@ override fun sealCipherResult(): StepResult<Cipher> =
         indexer.reconcile("guest")
         assertEquals(setOf(note.id), indexStore.load("guest")?.notes?.keys)
 
-        wiredLockRepo.lockNote(note.id, NoteLockMethod.PIN, "1234")
+        wiredLockRepo.lockNote(note.id, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("1234"))
 
         // No debounce wait and no further reconcile: the vectors
         // are already gone from the on-disk index.
