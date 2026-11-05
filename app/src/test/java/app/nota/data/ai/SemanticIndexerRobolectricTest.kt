@@ -349,4 +349,106 @@ class SemanticIndexerRobolectricTest {
             assertEquals(AiErrorKind.OFFLINE, e.kind)
         }
     }
+
+    @Test
+    fun statusReflectsANewlySavedKeyWithoutAnyIndexingPass() = runBlocking {
+        // The indexer half of the Settings Save wart: status()
+        // reads the SAVED SETTINGS live, so the moment a key is
+        // saved the status can show it — no reconcile or rebuild
+        // needs to run first. (The device failure was the UI
+        // refreshing its snapshot only after its save-triggered
+        // reconcile finished embedding; this pins the contract
+        // the fixed wiring relies on.)
+        notes.createRichNote("Orchard", "<p>apple apple</p>")
+        assertFalse(indexer.status(account).canIndex)
+
+        saveGeminiKey()
+
+        val status = indexer.status(account)
+        assertTrue(status.canIndex)
+        assertEquals(0, status.indexedNotes)
+        assertEquals(1, status.eligibleNotes)
+        assertTrue(http.calls.isEmpty())
+    }
+
+    @Test
+    fun rebuildKeepsServingThePreviousIndexUntilTheSwap() = runBlocking {
+        // The Rebuild wart: the pre-fix build deleted the stored
+        // index first, so the whole build window served nothing
+        // and status read "no notes indexed yet". Build-then-swap
+        // must keep the OLD index serving until the new one lands
+        // whole, and publish honest progress while it runs.
+        saveGeminiKey()
+        val a = notes.createRichNote("A", "<p>apple orchard</p>")
+        val b = notes.createRichNote("B", "<p>banana bread</p>")
+        indexer.reconcile(account)
+        val before = indexStore.load(account)!!
+        assertEquals(setOf(a.id, b.id), before.notes.keys)
+
+        notes.updateRichBody(a, "A", "<p>banana banana</p>")
+        // Inside every embed call of the rebuild, read exactly
+        // what search serves (the stored file) and what the UI
+        // shows (the progress flow). status() itself takes the
+        // indexer mutex the rebuild holds, so it cannot be the
+        // probe here.
+        val servedDuring = mutableListOf<Set<String>>()
+        val progressDuring = mutableListOf<SemanticRebuildProgress?>()
+        http.onCall = {
+            servedDuring += indexStore.load(account)?.notes?.keys ?: emptySet()
+            progressDuring += indexer.rebuildProgress.value
+        }
+        indexer.rebuild(account)
+        http.onCall = null
+
+        assertTrue(servedDuring.isNotEmpty())
+        assertTrue(servedDuring.all { it == setOf(a.id, b.id) })
+        assertTrue(progressDuring.all { it != null && it.total == 2 })
+        assertEquals(
+            listOf(0, 1),
+            progressDuring.filterNotNull().map { it.done }.distinct(),
+        )
+        assertNull(indexer.rebuildProgress.value)
+
+        // …and the swap landed whole: A's vectors were replaced.
+        val after = indexStore.load(account)!!
+        assertEquals(setOf(a.id, b.id), after.notes.keys)
+        assertNotEquals(
+            before.notes.getValue(a.id).fingerprint,
+            after.notes.getValue(a.id).fingerprint,
+        )
+        assertTrue(indexer.search(account, "apple").none { it.noteId == a.id })
+    }
+
+    @Test
+    fun failedRebuildLeavesThePreviousIndexUntouched() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Orchard", "<p>apple apple</p>")
+        indexer.reconcile(account)
+        val before = indexStore.load(account)!!
+        assertEquals(setOf(note.id), before.notes.keys)
+
+        http.transportFailure = true
+        try {
+            indexer.rebuild(account)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.OFFLINE, e.kind)
+        }
+
+        // Build-then-swap: a failed build never reaches the
+        // store, so the previous index is still the one serving —
+        // and the progress flow has cleared.
+        val after = indexStore.load(account)!!
+        assertEquals(before.notes.keys, after.notes.keys)
+        assertEquals(
+            before.notes.getValue(note.id).fingerprint,
+            after.notes.getValue(note.id).fingerprint,
+        )
+        assertNull(indexer.rebuildProgress.value)
+        http.transportFailure = false
+        assertEquals(
+            listOf(note.id),
+            indexer.search(account, "apple").map { it.noteId },
+        )
+    }
 }
