@@ -722,4 +722,56 @@ class DriveRepositoryTest {
         assertEquals(null, drive.encryptionRecordFlow.value?.deviceKeyBase64)
     }
 
+    // ---- Jules PR #24 review: unparseable archive + iterations guard
+
+    @Test
+    fun setupAbortsWhenEncryptedArchiveHeaderIsUnparseable() = runBlocking {
+        // NOMAENC1 magic present, header garbage: a damaged or
+        // half-uploaded archive. Setup must stop and store nothing —
+        // minting a fresh key here would overwrite the archive at the
+        // next backup and lock whatever it holds for good.
+        val headerBytes = "not json!!".toByteArray(Charsets.UTF_8)
+        val corrupt = "NOMAENC1".toByteArray(Charsets.US_ASCII) +
+            byteArrayOf(0, 0, 0, headerBytes.size.toByte()) +
+            headerBytes
+        gateway.canonical =
+            DriveFileMeta("file-1", "Noma Backup.zip", 0L, 0L, null, corrupt.size.toLong())
+        gateway.downloadBytes = corrupt
+        try {
+            drive.setupEncryption("passphrase-1")
+            fail("expected setup to abort on the unparseable archive")
+        } catch (e: DriveError) {
+            assertTrue(e.message!!.contains("damaged or is still uploading"))
+        }
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+    }
+
+    @Test
+    fun setupAdoptsWhenRecordIterationsDifferFromArchive() = runBlocking {
+        seedNote("n-remote", "Elsewhere note")
+        val archiveBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        val archiveHeader = stageEncryptedArchive("archive-pass", archiveBmk)
+        // A record matching the archive on salt + wrappedKey and
+        // holding a device key, but whose iteration count drifted:
+        // NOT "already set up" — setup re-adopts, rewriting the
+        // record from the archive's own header.
+        prefs.setDriveEncryptionRecord(
+            uid,
+            PreferencesRepository.DriveEncryptionRecord(
+                salt = archiveHeader.salt,
+                iterations = archiveHeader.iterations + 1,
+                wrappedKey = archiveHeader.wrappedKey,
+                deviceKeyBase64 = Base64.getEncoder().encodeToString(archiveBmk),
+            ),
+        )
+        drive.setupEncryption("archive-pass")
+        val record = prefs.getDriveEncryptionRecord(uid)!!
+        assertEquals(archiveHeader.iterations, record.iterations)
+        assertEquals(archiveHeader.salt, record.salt)
+        assertEquals(archiveHeader.wrappedKey, record.wrappedKey)
+        val heldBmk = Base64.getDecoder().decode(record.deviceKeyBase64!!)
+        assertTrue(heldBmk.contentEquals(archiveBmk))
+        archiveBmk.fill(0)
+    }
+
 }
