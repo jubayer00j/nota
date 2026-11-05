@@ -3,6 +3,9 @@ package app.nota.data.ai
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NoteEntity
 import java.security.MessageDigest
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -14,6 +17,17 @@ data class SemanticIndexStatus(
     val eligibleNotes: Int,
     val canIndex: Boolean,
     val spaceIsCurrent: Boolean,
+)
+
+/** A running full rebuild's progress, published by
+ *  [SemanticIndexer] so Settings can show an honest count while
+ *  it runs: [done] of the [total] eligible notes the pass set out
+ *  to embed have been processed. Counts the pass itself — never
+ *  an estimate, never a timer. */
+data class SemanticRebuildProgress(
+    val accountId: String,
+    val done: Int,
+    val total: Int,
 )
 
 /**
@@ -54,6 +68,15 @@ class SemanticIndexer(
     private val store: SemanticIndexStore,
 ) {
     private val mutex = Mutex()
+
+    private val _rebuildProgress = MutableStateFlow<SemanticRebuildProgress?>(null)
+
+    /** The running rebuild's progress, or null when no rebuild
+     *  is running. Read WITHOUT the indexer mutex — that is the
+     *  point: the UI keeps reporting while a rebuild holds the
+     *  mutex for its whole pass. */
+    val rebuildProgress: StateFlow<SemanticRebuildProgress?> =
+        _rebuildProgress.asStateFlow()
 
     /** The text fingerprint a note's stored vectors answer for:
      *  a hash of exactly the text that gets chunked, so any edit
@@ -113,44 +136,66 @@ class SemanticIndexer(
     }
 
     /**
-     * Full (re)build: wipes the stored index first — a rebuild
-     * never mixes vectors from a previous space — then embeds
-     * every eligible note. Progress is persisted in groups, so a
-     * provider failure mid-build leaves the notes embedded so
-     * far in place and the exception in the caller's hands
-     * (Settings surfaces it); [reconcile] is the silent repair.
+     * Full (re)build: embeds every eligible note into a
+     * replacement index held in memory, then swaps it in with a
+     * single save at the end. The stored index is NOT touched
+     * while the build runs — it keeps serving [status] and
+     * [search] at its previous count for the whole pass — and a
+     * provider failure mid-build leaves it completely intact,
+     * with the exception in the caller's hands (Settings surfaces
+     * it); [reconcile] is the silent repair. Progress is
+     * published on [rebuildProgress] as the pass advances.
+     *
+     * The pre-fix build deleted the stored index first and
+     * re-persisted in groups, so the entire build window read
+     * as "no notes indexed yet" and search served nothing —
+     * the Settings wart this build-then-swap removes. The swap
+     * still never mixes vectors from a previous space: the
+     * replacement is built from scratch and lands whole.
      */
     suspend fun rebuild(accountId: String) {
         val config = settings.activeEmbeddingConfig(accountId)
             ?: throw AiException.noKey()
         if (accountId != databaseProvider.accountId.value) return
         mutex.withLock {
-            store.delete(accountId)
-            val working = LinkedHashMap<String, StoredNoteVectors>()
-            var dims = 0
-            var sinceSave = 0
-            val noteDao = databaseProvider.current.noteDao()
-            for (desired in desiredNotes().values) {
-                // Snapshot-vs-live re-check (Jules PR #23 P1): the
-                // desired set was computed at pass start; a note
-                // locked, trashed or archived SINCE then must not
-                // be embedded from its stale snapshot — above all
-                // a locked note's plaintext must never reach the
-                // provider.
-                val live = noteDao.getById(desired.note.id)
-                if (live == null || !isIndexEligible(live)) continue
-                val vectors = embedNote(config, desired, dims)
-                if (dims == 0) dims = vectors.first().size
-                working[desired.note.id] = StoredNoteVectors(desired.fingerprint, vectors)
-                if (++sinceSave >= SAVE_EVERY_NOTES) {
-                    store.save(accountId, StoredSemanticIndex(config.spaceSignature(), dims, working))
-                    sinceSave = 0
+            val desired = desiredNotes()
+            _rebuildProgress.value =
+                SemanticRebuildProgress(accountId, done = 0, total = desired.size)
+            try {
+                val working = LinkedHashMap<String, StoredNoteVectors>()
+                var dims = 0
+                val noteDao = databaseProvider.current.noteDao()
+                var done = 0
+                for (want in desired.values) {
+                    // Snapshot-vs-live re-check (Jules PR #23 P1): the
+                    // desired set was computed at pass start; a note
+                    // locked, trashed or archived SINCE then must not
+                    // be embedded from its stale snapshot — above all
+                    // a locked note's plaintext must never reach the
+                    // provider.
+                    val live = noteDao.getById(want.note.id)
+                    if (live != null && isIndexEligible(live)) {
+                        val vectors = embedNote(config, want, dims)
+                        if (dims == 0) dims = vectors.first().size
+                        working[want.note.id] =
+                            StoredNoteVectors(want.fingerprint, vectors)
+                    }
+                    _rebuildProgress.value =
+                        SemanticRebuildProgress(accountId, ++done, desired.size)
                 }
-            }
-            if (working.isEmpty()) {
-                store.delete(accountId)
-            } else {
-                store.save(accountId, StoredSemanticIndex(config.spaceSignature(), dims, working))
+                // The swap: the store's temp-then-rename write
+                // replaces the old index atomically — or the file
+                // goes, when nothing is eligible any more.
+                if (working.isEmpty()) {
+                    store.delete(accountId)
+                } else {
+                    store.save(
+                        accountId,
+                        StoredSemanticIndex(config.spaceSignature(), dims, working),
+                    )
+                }
+            } finally {
+                _rebuildProgress.value = null
             }
         }
     }

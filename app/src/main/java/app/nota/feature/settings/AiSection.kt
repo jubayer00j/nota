@@ -24,6 +24,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,12 +75,22 @@ fun AiSection(
 
     // Phase 4.2: the semantic index's status + rebuild. The index
     // itself lives in SemanticIndexer; this block only reports and
-    // triggers. Status refreshes on entry, after a Save (saving a
-    // key or an embedding model is a backfill trigger), and after
-    // a rebuild.
+    // triggers. Status refreshes on entry, after a provider
+    // switch, immediately after a Save — BEFORE the save-triggered
+    // reconcile starts (see the Save handler), never only after
+    // it — and after a rebuild.
     var indexStatus by remember { mutableStateOf<SemanticIndexStatus?>(null) }
-    var rebuilding by remember { mutableStateOf(false) }
     var rebuildError by remember { mutableStateOf<String?>(null) }
+    // A running rebuild reports through the indexer's OWN progress
+    // flow, not a local flag: it carries the honest "n of N", and
+    // it clears itself however the rebuild ends. Meanwhile the
+    // status above keeps showing the previous count — the stored
+    // index keeps serving until the rebuild swaps it.
+    val rebuildProgress by indexer.rebuildProgress.collectAsState()
+    val activeRebuild = rebuildProgress?.takeIf {
+        it.accountId == databaseProvider.accountId.value
+    }
+    val rebuilding = activeRebuild != null
     fun refreshIndexStatus() {
         scope.launch {
             indexStatus = indexer.status(databaseProvider.accountId.value)
@@ -129,7 +140,13 @@ fun AiSection(
                     },
                     onClick = {
                         providerMenuOpen = false
-                        scope.launch { form.selectProvider(provider) }
+                        scope.launch {
+                            form.selectProvider(provider)
+                            // The semantic section reports on the
+                            // ACTIVE provider's saved key — refresh
+                            // it with the switch, not on next entry.
+                            refreshIndexStatus()
+                        }
                     },
                 )
             }
@@ -212,6 +229,18 @@ fun AiSection(
             onClick = {
                 scope.launch {
                     form.save()
+                    // Show the saved key's effect on the semantic
+                    // section NOW — inline, before the reconcile
+                    // below starts. status() reads the saved
+                    // settings live, so this lands at once; the
+                    // pre-fix order refreshed only after reconcile,
+                    // which can spend tens of seconds embedding
+                    // (and holds the indexer mutex a launched
+                    // refresh would queue behind), leaving the
+                    // section on its pre-save snapshot — "Add an
+                    // API key above", Rebuild disabled — long after
+                    // the form already showed "Saved".
+                    indexStatus = indexer.status(databaseProvider.accountId.value)
                     // Saving a key or an embedding model is a
                     // semantic-index backfill trigger (best-effort;
                     // reconcile never throws).
@@ -292,7 +321,6 @@ fun AiSection(
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedButton(
             onClick = {
-                rebuilding = true
                 rebuildError = null
                 scope.launch {
                     try {
@@ -300,7 +328,6 @@ fun AiSection(
                     } catch (e: app.nota.data.ai.AiException) {
                         rebuildError = e.displayMessage
                     }
-                    rebuilding = false
                     refreshIndexStatus()
                 }
             },
@@ -311,6 +338,20 @@ fun AiSection(
         if (rebuilding) {
             Spacer(Modifier.size(NotaSpacing.sm))
             CircularProgressIndicator(Modifier.size(20.dp))
+            Spacer(Modifier.size(NotaSpacing.sm))
+            Text(
+                // The indexer's real pass count — and the status
+                // line above keeps the previous indexed count for
+                // the whole rebuild, because the stored index is
+                // only swapped when the new one is complete.
+                if (activeRebuild != null && activeRebuild.total > 0) {
+                    "Rebuilding… ${activeRebuild.done} of ${activeRebuild.total}"
+                } else {
+                    "Rebuilding…"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
     rebuildError?.let { message ->
