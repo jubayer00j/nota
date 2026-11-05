@@ -581,4 +581,145 @@ class DriveRepositoryTest {
         )
     }
 
+    // ---- setup adopts the existing archive's key (2026-11-05 fix)
+    //
+    // Device-proven failure: setup minted a FRESH BMK without looking
+    // at Drive, so the device key could never open the archive that
+    // was already there — restore (passphrase path) worked, sync
+    // (device-key path) failed with "couldn't be opened" forever.
+
+    /** Seals the current library under [archiveBmk] (header wrapped by
+     *  [passphrase]) and points the fake gateway at the sealed bytes —
+     *  an encrypted canonical archive as 1.x or another device left it.
+     *  Returns the archive's header. */
+    private suspend fun stageEncryptedArchive(
+        passphrase: String,
+        archiveBmk: ByteArray,
+    ): app.nota.data.backup.BackupCrypto.Header {
+        val plain = File(context.cacheDir, "stage-plain.zip")
+        backups.exportToFile(plain, null)
+        val header = app.nota.data.backup.BackupCrypto.createHeader(passphrase, archiveBmk)
+        val sealed = File(context.cacheDir, "stage-sealed.enc")
+        sealed.outputStream().use { out ->
+            app.nota.data.backup.BackupCrypto.seal(plain, archiveBmk, header, out)
+        }
+        val bytes = sealed.readBytes()
+        gateway.canonical =
+            DriveFileMeta("file-1", "Noma Backup.zip", 0L, 0L, null, bytes.size.toLong())
+        gateway.downloadBytes = bytes
+        return header
+    }
+
+    @Test
+    fun setupAdoptsExistingEncryptedArchiveKey() = runBlocking {
+        seedNote("n-remote", "Elsewhere note")
+        val archiveBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        val archiveHeader = stageEncryptedArchive("archive-pass", archiveBmk)
+
+        drive.setupEncryption("archive-pass")
+
+        val record = prefs.getDriveEncryptionRecord(uid)!!
+        // The record IS the archive's header — not a fresh local wrap.
+        assertEquals(archiveHeader.salt, record.salt)
+        assertEquals(archiveHeader.iterations, record.iterations)
+        assertEquals(archiveHeader.wrappedKey, record.wrappedKey)
+        // …and the held device key is the archive's own BMK, which
+        // opens the staged archive end to end (the sync read path).
+        val heldBmk = Base64.getDecoder().decode(record.deviceKeyBase64!!)
+        assertTrue(heldBmk.contentEquals(archiveBmk))
+        val sealed = File(context.cacheDir, "stage-sealed-open.enc")
+        sealed.writeBytes(gateway.downloadBytes!!)
+        val handle = backups.readBackupWithBmk(sealed, heldBmk)
+        assertEquals(listOf("n-remote"), handle.notes.map { it.id })
+        handle.close()
+        archiveBmk.fill(0)
+    }
+
+    @Test
+    fun setupWrongPassphraseForExistingArchiveChangesNothing() = runBlocking {
+        seedNote("n-remote", "Elsewhere note")
+        val archiveBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        stageEncryptedArchive("archive-pass", archiveBmk)
+        try {
+            drive.setupEncryption("not-the-passphrase")
+            fail("expected the adopt failure to throw")
+        } catch (e: DriveError) {
+            assertTrue(e.message!!.contains("doesn't open the backup already in Drive"))
+        }
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+        archiveBmk.fill(0)
+    }
+
+    @Test
+    fun setupWithNoArchiveMintsFreshKeyAsBefore() = runBlocking {
+        drive.setupEncryption("passphrase-1")
+        val record = prefs.getDriveEncryptionRecord(uid)!!
+        assertNotNull(record.deviceKeyBase64)
+        val unwrapped = app.nota.data.backup.BackupCrypto.unwrapBmk(
+            app.nota.data.backup.BackupCrypto.Header(
+                record.salt, record.iterations, record.wrappedKey,
+            ),
+            "passphrase-1",
+        )
+        assertNotNull(unwrapped)
+        assertTrue(
+            Base64.getDecoder().decode(record.deviceKeyBase64!!).contentEquals(unwrapped!!),
+        )
+    }
+
+    @Test
+    fun setupRepairsDivergentRecordOntoArchiveKey() = runBlocking {
+        // The user's live state (2026-11-05): a record minted by the
+        // pre-fix setup (fresh BMK_B) while Drive holds an archive
+        // sealed under BMK_A — same passphrase, different key.
+        drive.setupEncryption("passphrase-1") // no canonical yet → fresh record
+        val divergent = prefs.getDriveEncryptionRecord(uid)!!
+
+        seedNote("n-remote", "Elsewhere note")
+        val archiveBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        val archiveHeader = stageEncryptedArchive("passphrase-1", archiveBmk)
+        assertTrue(divergent.salt != archiveHeader.salt)
+
+        // NOT "already set up": the passphrase repairs the record
+        // onto the archive's own key.
+        drive.setupEncryption("passphrase-1")
+        val repaired = prefs.getDriveEncryptionRecord(uid)!!
+        assertEquals(archiveHeader.salt, repaired.salt)
+        assertEquals(archiveHeader.wrappedKey, repaired.wrappedKey)
+        val heldBmk = Base64.getDecoder().decode(repaired.deviceKeyBase64!!)
+        assertTrue(heldBmk.contentEquals(archiveBmk))
+        archiveBmk.fill(0)
+    }
+
+    @Test
+    fun setupWithMatchingRecordStaysAlreadySetUp() = runBlocking {
+        seedNote("n-remote", "Elsewhere note")
+        val archiveBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        stageEncryptedArchive("archive-pass", archiveBmk)
+        drive.setupEncryption("archive-pass") // adopts → record matches the archive
+        try {
+            drive.setupEncryption("archive-pass")
+            fail("expected the already-set-up guard")
+        } catch (e: DriveError) {
+            assertEquals("Backup encryption is already set up.", e.message)
+        }
+        archiveBmk.fill(0)
+    }
+
+    @Test
+    fun encryptionRecordFlowEmitsAfterSetup() = runBlocking {
+        assertEquals(null, drive.encryptionRecordFlow.value)
+        drive.setupEncryption("passphrase-1")
+        val emitted = drive.encryptionRecordFlow.value
+        assertNotNull(emitted)
+        val stored = prefs.getDriveEncryptionRecord(uid)!!
+        assertEquals(stored.salt, emitted!!.salt)
+        assertEquals(stored.wrappedKey, emitted.wrappedKey)
+        assertEquals(stored.deviceKeyBase64, emitted.deviceKeyBase64)
+        // Mutations keep flowing: removing the key shows at once.
+        drive.removeDeviceKey()
+        assertNotNull(drive.encryptionRecordFlow.value)
+        assertEquals(null, drive.encryptionRecordFlow.value?.deviceKeyBase64)
+    }
+
 }
