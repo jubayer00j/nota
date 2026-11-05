@@ -75,9 +75,12 @@ fun DriveBackupSection(onOpenSignIn: () -> Unit) {
     val grantKnown by produceState(false, signedIn?.uid, driveState) {
         value = drive.hasGrant()
     }
-    val record by produceState<PreferencesRepository.DriveEncryptionRecord?>(
-        null, signedIn?.uid, driveState,
-    ) { value = drive.encryptionRecord() }
+    // The record comes from the repository's StateFlow, refreshed on
+    // every encryption mutation — a one-shot preferences snapshot here
+    // used to keep showing the pre-setup state ("Off") after a
+    // successful setup until some unrelated Drive state changed.
+    val record by drive.encryptionRecordFlow.collectAsState()
+    LaunchedEffect(signedIn?.uid) { drive.refreshEncryptionRecord() }
     val lastBackup by produceState<Pair<Long, String?>?>(null, signedIn?.uid, driveState) {
         value = signedIn?.uid?.let { prefs.getDriveLastBackup(it) }
     }

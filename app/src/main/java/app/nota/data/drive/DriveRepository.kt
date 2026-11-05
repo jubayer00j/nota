@@ -136,6 +136,7 @@ class DriveRepository(
     suspend fun disconnect() {
         val uid = signedInUid() ?: return
         prefs.clearDriveState(uid)
+        refreshEncryptionRecord()
         _state.value = State.Done("Disconnected from Google Drive. Your backup stays in Drive.")
     }
 
@@ -199,6 +200,7 @@ class DriveRepository(
                                 deviceKeyBase64 = null,
                             ),
                         )
+                        refreshEncryptionRecord()
                     }
                     _state.value = State.Paused(ENCRYPTED_ELSEWHERE_COPY)
                     return
@@ -328,16 +330,98 @@ class DriveRepository(
 
     // ------------------------------------------------------------ encryption record
 
-    suspend fun encryptionRecord(): PreferencesRepository.DriveEncryptionRecord? =
-        signedInUid()?.let { prefs.getDriveEncryptionRecord(it) }
+    private val _encryptionRecord =
+        MutableStateFlow<PreferencesRepository.DriveEncryptionRecord?>(null)
 
-    /** First-time setup: fresh BMK, wrapped by [passphrase]
-     *  (PBKDF2-600k — the NOMAENC1 header slot), and this device
-     *  keeps the key so backups can run unattended (1.x D2/D4, with
-     *  the what-if disclosed in the setup UI). */
+    /**
+     * The current account's backup-encryption record, kept fresh by
+     * EVERY record mutation in this class (setup / unlock / change /
+     * remove-key / disable / disconnect / the backup adopt write) —
+     * Settings collects this flow instead of snapshotting preferences
+     * once, which used to leave the section rendering the stale
+     * pre-setup state ("Off" right after a successful setup —
+     * device-proven 2026-11-05).
+     */
+    val encryptionRecordFlow: StateFlow<PreferencesRepository.DriveEncryptionRecord?> =
+        _encryptionRecord.asStateFlow()
+
+    /** Re-reads the record from preferences into [encryptionRecordFlow]. */
+    suspend fun refreshEncryptionRecord(): PreferencesRepository.DriveEncryptionRecord? {
+        val record = signedInUid()?.let { prefs.getDriveEncryptionRecord(it) }
+        _encryptionRecord.value = record
+        return record
+    }
+
+    suspend fun encryptionRecord(): PreferencesRepository.DriveEncryptionRecord? =
+        refreshEncryptionRecord()
+
+    /** First-time setup (PBKDF2-600k — the NOMAENC1 header slot),
+     *  and this device keeps the key so backups can run unattended
+     *  (1.x D2/D4, with the what-if disclosed in the setup UI).
+     *
+     *  When the canonical Drive archive is ALREADY encrypted — set up
+     *  by 1.x, another device, or an earlier install — setup ADOPTS
+     *  that archive's key: the stored record takes the archive's own
+     *  header and the BMK unwrapped from it with [passphrase]. The
+     *  previous behaviour minted a fresh BMK here without ever looking
+     *  at Drive, leaving the device holding a key that could never
+     *  open the shared archive — every sync then failed with the
+     *  "couldn't be opened" error even though the passphrase was
+     *  correct (device-proven 2026-11-05). A fresh BMK is minted only
+     *  when there is no encrypted archive to adopt.
+     *
+     *  The same adoption REPAIRS a divergent stored record — one whose
+     *  header differs from the archive's (e.g. minted by the pre-fix
+     *  setup while an encrypted archive already existed): the record is
+     *  replaced by the archive's header + unwrapped BMK. A wrong
+     *  passphrase changes nothing and says so. */
     suspend fun setupEncryption(passphrase: String) {
         val uid = signedInUid() ?: throw DriveError("Sign in first.")
-        if (prefs.getDriveEncryptionRecord(uid) != null) {
+        val existing = prefs.getDriveEncryptionRecord(uid)
+
+        val token = ensureAccess()
+        val folderId = gateway.findOrCreateFolder(token)
+        val canonical = gateway.findCanonicalBackup(token, folderId)
+        val archiveHeader = canonical?.let {
+            val prefix = gateway.downloadPrefix(token, it.id, ARCHIVE_PREFIX_BYTES)
+            if (BackupCrypto.isEncryptedPrefix(prefix)) {
+                BackupCrypto.parseHeader(prefix)
+            } else {
+                null
+            }
+        }
+
+        if (archiveHeader != null) {
+            if (existing != null &&
+                existing.salt == archiveHeader.salt &&
+                existing.wrappedKey == archiveHeader.wrappedKey &&
+                existing.deviceKeyBase64 != null
+            ) {
+                throw DriveError("Backup encryption is already set up.")
+            }
+            // No record yet, a keyless record adopted from this
+            // archive, or a divergent record: the passphrase proves
+            // itself against the ARCHIVE's header, not the record's.
+            val bmk = BackupCrypto.unwrapBmk(archiveHeader, passphrase)
+                ?: throw DriveError(
+                    "That passphrase doesn't open the backup already in Drive. " +
+                        "Nothing was changed.",
+                )
+            prefs.setDriveEncryptionRecord(
+                uid,
+                PreferencesRepository.DriveEncryptionRecord(
+                    salt = archiveHeader.salt,
+                    iterations = archiveHeader.iterations,
+                    wrappedKey = archiveHeader.wrappedKey,
+                    deviceKeyBase64 = Base64.getEncoder().encodeToString(bmk),
+                ),
+            )
+            bmk.fill(0)
+            refreshEncryptionRecord()
+            return
+        }
+
+        if (existing != null) {
             throw DriveError("Backup encryption is already set up.")
         }
         val bmk = BackupCrypto.generateBmk()
@@ -352,6 +436,7 @@ class DriveRepository(
             ),
         )
         bmk.fill(0)
+        refreshEncryptionRecord()
     }
 
     /** Passphrase unlock on a device that doesn't hold the key. */
@@ -365,6 +450,7 @@ class DriveRepository(
             record.copy(deviceKeyBase64 = Base64.getEncoder().encodeToString(bmk)),
         )
         bmk.fill(0)
+        refreshEncryptionRecord()
         return true
     }
 
@@ -385,12 +471,14 @@ class DriveRepository(
             ),
         )
         bmk.fill(0)
+        refreshEncryptionRecord()
         return true
     }
 
     suspend fun removeDeviceKey() {
         val uid = signedInUid() ?: return
         prefs.removeDriveDeviceKey(uid)
+        refreshEncryptionRecord()
     }
 
     /** Turn encryption off: the record goes; the cloud backup stays
@@ -398,6 +486,7 @@ class DriveRepository(
     suspend fun disableEncryption() {
         val uid = signedInUid() ?: return
         prefs.clearDriveEncryptionRecord(uid)
+        refreshEncryptionRecord()
     }
 
     private fun friendly(e: Exception, fallback: String): String =
