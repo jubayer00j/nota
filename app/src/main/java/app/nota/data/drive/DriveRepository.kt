@@ -368,7 +368,9 @@ class DriveRepository(
      *  open the shared archive — every sync then failed with the
      *  "couldn't be opened" error even though the passphrase was
      *  correct (device-proven 2026-11-05). A fresh BMK is minted only
-     *  when there is no encrypted archive to adopt.
+     *  when there is no encrypted archive to adopt. An encrypted
+     *  archive whose header won't parse — damaged, or still uploading
+     *  — aborts setup instead of being minted over.
      *
      *  The same adoption REPAIRS a divergent stored record — one whose
      *  header differs from the archive's (e.g. minted by the pre-fix
@@ -385,7 +387,16 @@ class DriveRepository(
         val archiveHeader = canonical?.let {
             val prefix = gateway.downloadPrefix(token, it.id, ARCHIVE_PREFIX_BYTES)
             if (BackupCrypto.isEncryptedPrefix(prefix)) {
+                // Magic present but the header won't parse: the archive
+                // is damaged or still uploading. Never fall through to
+                // the fresh-mint path below — a key minted here would
+                // overwrite the archive at the next backup and lock
+                // whatever it holds for good.
                 BackupCrypto.parseHeader(prefix)
+                    ?: throw DriveError(
+                        "The backup already in Drive looks damaged or is still uploading, " +
+                            "so encryption setup stopped. Nothing was changed.",
+                    )
             } else {
                 null
             }
@@ -394,6 +405,7 @@ class DriveRepository(
         if (archiveHeader != null) {
             if (existing != null &&
                 existing.salt == archiveHeader.salt &&
+                existing.iterations == archiveHeader.iterations &&
                 existing.wrappedKey == archiveHeader.wrappedKey &&
                 existing.deviceKeyBase64 != null
             ) {
