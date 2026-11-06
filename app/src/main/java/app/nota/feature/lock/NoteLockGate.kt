@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -24,6 +25,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -132,11 +134,22 @@ fun NoteLockGate(
     // failed (dead key, missing copy), the fingerprint button stays
     // visible and tapping it SHOWS the reason instead of doing
     // nothing at all.
+    // v0.8.1 fix round (Codex A): the effect is ALSO keyed on the
+    // Boolean lockedOut. The repository refuses to build the cipher
+    // during a lockout (Failed "note is in a temporary lockout"), so
+    // a gate opened mid-lockout held that stale failure for ever —
+    // the promised post-lockout auto-prompt never fired and the
+    // button kept showing the stale lockout message. The Boolean key
+    // flips exactly once when the countdown ends (the 250 ms ticker
+    // keeps it true throughout, so there is no refetch churn), the
+    // previous effect is cancelled so its stale write cannot land
+    // after the flip, and the fresh cipher feeds both the
+    // auto-prompt effect and the button.
     var biometricCipherResult by remember(record, formResetKey) {
         mutableStateOf<app.nota.data.security.StepResult<javax.crypto.Cipher>?>(null)
     }
     var bioError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(record, formResetKey) {
+    LaunchedEffect(record, formResetKey, lockedOut) {
         if (record.biometric) biometricCipherResult = biometricCipherProvider()
     }
 
@@ -164,25 +177,34 @@ fun NoteLockGate(
     }
 
     // Auto-prompt ONCE per gate appearance (v0.8.1, mirrors
-    // LockScreen). The prompted flag is a plain remember — NOT keyed
-    // on record/formResetKey — so a cancelled prompt or a wrong
-    // credential attempt never re-fires it. The effect is keyed on
-    // lockedOut so a gate opened mid-lockout still prompts once when
-    // the countdown ends, and on the cipher's arrival so a slow
-    // prefetch prompts when it lands. A Failed prefetch never
-    // auto-prompts: the button stays the manual path and surfaces
-    // the typed reason on tap. The flag is set BEFORE firing, and
-    // the cipher is single-use per prompt, so the once-only rule is
-    // also what keeps the auto-prompt from reusing a spent cipher.
-    var biometricPrompted by remember { mutableStateOf(false) }
+    // LockScreen). The prompted flag is rememberSaveable — NOT keyed
+    // on record/formResetKey, and (fix round, Jules P2) it also
+    // survives a configuration change, so a cancelled prompt does not
+    // re-fire after a rotation recreates the gate. The effect is
+    // keyed on lockedOut so a gate opened mid-lockout still prompts
+    // once when the countdown ends (the cipher re-prefetch above
+    // feeds it a fresh cipher then), and on the cipher's arrival so
+    // a slow prefetch prompts when it lands. It is ALSO keyed on
+    // unlockInProgress (fix round, Codex B): while a credential
+    // verification is in flight the predicate suppresses the prompt
+    // WITHOUT consuming the flag — the ViewModel silently drops a
+    // biometric result in that window — and when verification
+    // finishes the effect re-evaluates and can still prompt once.
+    // A Failed prefetch never auto-prompts: the button stays the
+    // manual path and surfaces the typed reason on tap. The flag is
+    // set BEFORE firing, and the cipher is single-use per prompt, so
+    // the once-only rule is also what keeps the auto-prompt from
+    // reusing a spent cipher.
+    var biometricPrompted by rememberSaveable { mutableStateOf(false) }
     val biometricCipherReady =
         biometricCipherResult is app.nota.data.security.StepResult.Ok
-    LaunchedEffect(biometricReady, lockedOut, biometricCipherReady) {
+    LaunchedEffect(biometricReady, lockedOut, biometricCipherReady, unlockInProgress) {
         if (shouldAutoPromptNoteUnlock(
                 biometricReady = biometricReady,
                 lockedOut = lockedOut,
                 alreadyPrompted = biometricPrompted,
                 cipherReady = biometricCipherReady,
+                unlockInProgress = unlockInProgress,
             )
         ) {
             biometricPrompted = true
@@ -198,11 +220,14 @@ fun NoteLockGate(
         // v0.8.1: scrollable (mirrors LockScreen) so the fingerprint
         // button below the form is always reachable on smaller
         // screens instead of clipped below the visible area.
+        // Fix round (Jules P3a): imePadding so the PIN/password form
+        // and the button can be scrolled clear of the on-screen
+        // keyboard now that the column scrolls.
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding(),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(NotaSpacing.md))
             Icon(
                 Icons.Filled.Lock,
                 contentDescription = null,
@@ -282,14 +307,19 @@ fun NoteLockGate(
 /**
  * Pure auto-prompt decision for the gate (v0.8.1, unit-tested):
  * fire only when biometric unlock is ready, the gate is not in a
- * lockout, this appearance has not prompted yet, and the prefetched
- * DECRYPT cipher actually arrived. A Failed or still-loading
- * prefetch never auto-prompts — the button remains the manual path
- * and surfaces the typed reason on tap.
+ * lockout, this appearance has not prompted yet, the prefetched
+ * DECRYPT cipher actually arrived, and no credential verification
+ * is in flight. A Failed or still-loading prefetch never
+ * auto-prompts — the button remains the manual path and surfaces
+ * the typed reason on tap. Suppression for an in-flight verify
+ * does not consume the appearance's one prompt: once verification
+ * finishes, the same inputs minus [unlockInProgress] pass.
  */
 internal fun shouldAutoPromptNoteUnlock(
     biometricReady: Boolean,
     lockedOut: Boolean,
     alreadyPrompted: Boolean,
     cipherReady: Boolean,
-): Boolean = biometricReady && !lockedOut && !alreadyPrompted && cipherReady
+    unlockInProgress: Boolean,
+): Boolean =
+    biometricReady && !lockedOut && !alreadyPrompted && cipherReady && !unlockInProgress
