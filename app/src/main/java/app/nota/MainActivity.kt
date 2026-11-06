@@ -50,6 +50,7 @@ class MainActivity : FragmentActivity() {
     private val appLockManager: AppLockManager by inject()
     private val databaseProvider: DatabaseProvider by inject()
     private val pendingNoteOpenStore: app.nota.data.reminders.PendingNoteOpenStore by inject()
+    private val captureIntake: app.nota.data.capture.CaptureIntake by inject()
 
     /**
      * Phase 5.1: a reminder notification's tap lands here with the
@@ -66,10 +67,39 @@ class MainActivity : FragmentActivity() {
         pendingNoteOpenStore.request(noteId, databaseProvider.accountId.value)
     }
 
+    /**
+     * Phase 5.2: every system door lands here — the note-open extra
+     * above (notification + pinned-note taps), shares
+     * (ACTION_SEND / SEND_MULTIPLE) and the launcher-shortcut / QS
+     * tile door intents. Doors and shares are STAGED in
+     * PendingCaptureStore stamped with the account active right now;
+     * the nav shell delivers them only once the app is unlocked, so
+     * nothing is created or shown behind App Lock. Share image bytes
+     * are copied by [captureIntake] immediately — the sender's URI
+     * grant does not survive a relock or a process death.
+     */
+    private fun captureSystemIntent(intent: Intent?) {
+        if (intent == null) return
+        captureNoteOpenIntent(intent)
+        val accountId = databaseProvider.accountId.value
+        if (app.nota.data.capture.ShareIntents.isShare(intent)) {
+            captureIntake.stageShare(intent, accountId)
+            return
+        }
+        val door = app.nota.data.capture.CaptureIntents.doorFrom(intent)
+        if (door != null) {
+            captureIntake.stageDoor(
+                door,
+                app.nota.data.capture.CaptureIntents.sourceFrom(intent),
+                accountId,
+            )
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        captureNoteOpenIntent(intent)
+        captureSystemIntent(intent)
     }
 
     /**
@@ -99,7 +129,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        captureNoteOpenIntent(intent)
+        captureSystemIntent(intent)
         enableEdgeToEdge()
         setContent {
             // Phase 1a: theme choices are persisted in DataStore and

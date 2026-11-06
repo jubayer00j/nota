@@ -51,15 +51,56 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Nota">
 
+        <!-- Phase 5.2: singleTask (1.x's choice) — quick-capture
+             doors (shares, shortcuts, the QS tile, notification and
+             pinned-note taps) must arrive as onNewIntent on the one
+             running activity whose shell can stage them, never as a
+             second stacked shell. -->
         <activity
             android:name="app.nota.MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Phase 5.2 share target: other apps can share text
+                 and images into Nota (mirrors 1.x). Extraction and
+                 staging live in CaptureIntake, fed by MainActivity. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
+
+        <!-- Phase 5.2 Quick Settings tile: capture from the QS panel
+             (reachable from the lock screen on most devices). It
+             stages a new-note capture; App Lock is never bypassed. -->
+        <service
+            android:name="app.nota.feature.capture.NotaCaptureTileService"
+            android:label="@string/tile_label"
+            android:icon="@mipmap/ic_launcher"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="true" />
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="false" />
+        </service>
 
         <!-- Phase 5.1: alarm delivery (only Nota's own PendingIntents
              can reach it) and boot / clock-change rescheduling. -->

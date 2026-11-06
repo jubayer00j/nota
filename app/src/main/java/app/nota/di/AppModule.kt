@@ -139,6 +139,12 @@ val appModule = module {
         app.nota.data.reminders.ReminderFireHandler(androidContext(), get(), get(), get())
     }
     single { app.nota.data.reminders.PendingNoteOpenStore() }
+    // Phase 5.2 quick capture: the durable capture queue (filesDir),
+    // the intake that stages door/share intents into it, and the
+    // deliverer the nav shell consumes the queue with.
+    single { app.nota.data.capture.PendingCaptureStore(androidContext()) }
+    single { app.nota.data.capture.CaptureIntake(androidContext(), get()) }
+    single { app.nota.feature.capture.CaptureDeliverer(get(), get(), get()) }
     viewModel { NotesViewModel(get(), get(), get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get(), get(), get()) }

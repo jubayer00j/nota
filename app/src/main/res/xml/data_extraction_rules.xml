@@ -8,6 +8,9 @@
              backed up; see backup_rules.xml. -->
         <exclude domain="file" path="pending_insert.json" />
         <exclude domain="file" path="pending_insert.json.tmp" />
+        <!-- Quick-capture staging (Phase 5.2) — never backed up;
+             see backup_rules.xml. -->
+        <exclude domain="file" path="pending_captures/" />
         <!-- App Lock verifiers live in the preferences DataStore file
              (Phase 2a) — never backed up; see backup_rules.xml. No
              device-transfer section is declared, exactly as before, so
