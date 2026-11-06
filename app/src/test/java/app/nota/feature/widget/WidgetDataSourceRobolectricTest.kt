@@ -113,9 +113,14 @@ class WidgetDataSourceRobolectricTest {
         db.noteDao().upsert(dailyNote())
         val later = nowMillis + 2 * 3_600_000L
         db.reminderDao().upsert(reminder("r-later", "daily-1", later))
-        // An earlier reminder on a GONE note must be skipped, and a
-        // spent one must never count even when it is earliest.
-        db.reminderDao().upsert(reminder("r-gone", "no-such-note", nowMillis + 60_000L))
+        // An earlier reminder on a TRASHED note must be skipped,
+        // and a spent one must never count even when it is earliest.
+        // (A reminder on a fully deleted note cannot exist — the
+        // reminders table's FK cascades it away with the note.)
+        db.noteDao().upsert(
+            dailyNote(id = "trashed-1", title = "Old", trashedAt = 5_000L),
+        )
+        db.reminderDao().upsert(reminder("r-trashed", "trashed-1", nowMillis + 60_000L))
         db.reminderDao().upsert(reminder("r-spent", "daily-1", nowMillis + 30_000L, enabled = false))
         val state = load()
         assertEquals(WidgetTodayKind.CONTENT, state.todayKind)
