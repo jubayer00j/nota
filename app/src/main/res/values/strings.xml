@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Nota</string>
+    <!-- Phase 5.2 quick capture: launcher shortcut + QS tile labels
+         (1.x's words — the voice strings arrive with Phase 5.4). -->
+    <string name="shortcut_note_short">New note</string>
+    <string name="shortcut_note_long">Create a new note</string>
+    <string name="shortcut_today_short">Today</string>
+    <string name="shortcut_today_long">Open today\'s note</string>
+    <string name="tile_label">New note</string>
 </resources>

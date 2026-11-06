@@ -12,6 +12,11 @@
          state never travels in a platform backup. -->
     <exclude domain="file" path="pending_insert.json" />
     <exclude domain="file" path="pending_insert.json.tmp" />
+    <!-- Quick-capture staging (Phase 5.2): not-yet-delivered shared
+         content + copied image bytes. Transient, and it may belong
+         to whichever account was active when the share arrived —
+         it must never travel into a platform backup. -->
+    <exclude domain="file" path="pending_captures/" />
     <!-- The preferences DataStore file holds the App Lock PBKDF2 verifiers
          (Phase 2a): credential hashes must never leave the device in a
          platform backup, where low-entropy PIN/pattern verifiers could be

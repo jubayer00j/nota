@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phase 5.2 launcher shortcuts — 1.x's static set (res/xml/
+     shortcuts.xml in Noma) minus the voice entry: voice capture is
+     Phase 5.4, and a shortcut whose target doesn't exist yet must
+     not ship. The intents carry the CaptureIntents door extras
+     inline (the XML form of CaptureIntents.doorIntent). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="new_note"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_note_short"
+        android:shortcutLongLabel="@string/shortcut_note_long">
+        <intent
+            android:action="app.nota.action.CAPTURE"
+            android:targetPackage="app.nota.notes"
+            android:targetClass="app.nota.MainActivity">
+            <extra
+                android:name="app.nota.extra.CAPTURE_ACTION"
+                android:value="new-note" />
+            <extra
+                android:name="app.nota.extra.CAPTURE_SOURCE"
+                android:value="shortcut" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="today"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_today_short"
+        android:shortcutLongLabel="@string/shortcut_today_long">
+        <intent
+            android:action="app.nota.action.CAPTURE"
+            android:targetPackage="app.nota.notes"
+            android:targetClass="app.nota.MainActivity">
+            <extra
+                android:name="app.nota.extra.CAPTURE_ACTION"
+                android:value="today" />
+            <extra
+                android:name="app.nota.extra.CAPTURE_SOURCE"
+                android:value="shortcut" />
+        </intent>
+    </shortcut>
+</shortcuts>

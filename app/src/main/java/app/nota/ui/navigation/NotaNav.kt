@@ -110,6 +110,9 @@ fun NotaNavShell(
     pendingInsertStore: PendingInsertStore = koinInject(),
     // Phase 5.1: the reminder-notification tap handoff.
     pendingNoteOpenStore: app.nota.data.reminders.PendingNoteOpenStore = koinInject(),
+    // Phase 5.2: the durable quick-capture queue + its deliverer.
+    pendingCaptureStore: app.nota.data.capture.PendingCaptureStore = koinInject(),
+    captureDeliverer: app.nota.feature.capture.CaptureDeliverer = koinInject(),
     databaseProvider: DatabaseProvider = koinInject(),
     noteRepository: NoteRepository = koinInject(),
 ) {
@@ -196,6 +199,47 @@ fun NotaNavShell(
             navController.openNoteEditor(record.noteId)
         }
         pendingNoteOpenStore.clearIf(record.noteId)
+    }
+    // Phase 5.2: quick captures (share target, launcher shortcuts,
+    // QS tile) staged by MainActivity in PendingCaptureStore. The
+    // shell consumes the HEAD record only while unlocked, under the
+    // PendingCaptureResumer's decisions: a cross-account record is
+    // retired with its staged files; a deliverable record is TAKEN
+    // (removed before anything is created — 1.x's consume-before-
+    // handle, so a capture can never create two notes) and its note
+    // is created on the shell's scope, then opened. The shell only
+    // composes while unlocked, so no capture can create or show
+    // anything behind App Lock.
+    val pendingCaptures by pendingCaptureStore.records.collectAsState()
+    val captureResumer = remember { app.nota.feature.capture.PendingCaptureResumer() }
+    val captureScope = rememberCoroutineScope()
+    var captureDeliveryInFlight by remember { mutableStateOf(false) }
+    LaunchedEffect(isLocked, pendingCaptures.firstOrNull(), currentAccountId, captureDeliveryInFlight) {
+        if (captureDeliveryInFlight) return@LaunchedEffect
+        val record = pendingCaptures.firstOrNull() ?: return@LaunchedEffect
+        when (captureResumer.decide(isLocked, record, currentAccountId)) {
+            app.nota.feature.capture.CaptureDecision.HOLD -> Unit
+            app.nota.feature.capture.CaptureDecision.RETIRE ->
+                pendingCaptureStore.remove(record.id)
+            app.nota.feature.capture.CaptureDecision.DELIVER -> {
+                val taken = pendingCaptureStore.take(record.id)
+                if (taken != null) {
+                    captureDeliveryInFlight = true
+                    captureScope.launch {
+                        try {
+                            val noteId = runCatching {
+                                captureDeliverer.deliver(taken)
+                            }.getOrNull()
+                            if (noteId != null) {
+                                navController.openNoteEditor(noteId)
+                            }
+                        } finally {
+                            captureDeliveryInFlight = false
+                        }
+                    }
+                }
+            }
+        }
     }
     // Today has its own route but lives under the Notes bottom-bar item.
     val showBottomBar = NotaDestination.entries.any { it.route == currentRoute } ||

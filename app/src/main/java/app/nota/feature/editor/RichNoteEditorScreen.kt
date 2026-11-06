@@ -1,6 +1,7 @@
 package app.nota.feature.editor
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AddToHomeScreen
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AttachFile
@@ -102,6 +104,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
@@ -130,6 +133,7 @@ import app.nota.data.attachments.PendingInsertRecord
 import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.reminders.ReminderNotificationText
+import app.nota.feature.capture.NotePinShortcut
 import app.nota.feature.reminders.ReminderDialog
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
@@ -357,6 +361,7 @@ fun RichNoteEditorScreen(
     // process death in the picker would lose them.
     var pickerFlushPending by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
+    val context = LocalContext.current
     // Phase 3.6 (G3): read mode. A note opens for READING (Noma
     // parity); editing is entered deliberately — tap on the body or
     // the pencil — and ✓/back returns here, not out of the note. The
@@ -1342,6 +1347,36 @@ fun RichNoteEditorScreen(
                                 onClick = {
                                     showReminderDialog = true
                                     menuExpanded = false
+                                },
+                            )
+                        }
+                        // Phase 5.2: pin this note to the home
+                        // screen. Like the reminder above it needs
+                        // only the note's id, title and lock state —
+                        // a locked note pins under a generic label
+                        // and opens through its lock gate, so it
+                        // works while the gate is up too.
+                        if (current != null) {
+                            DropdownMenuItem(
+                                text = { Text("Pin to home screen") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.AddToHomeScreen, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    val result = NotePinShortcut.requestPin(
+                                        context,
+                                        current.id,
+                                        current.title,
+                                        current.locked,
+                                    )
+                                    if (result == NotePinShortcut.Result.Unsupported) {
+                                        Toast.makeText(
+                                            context,
+                                            "Your launcher doesn't support pinned shortcuts",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
                                 },
                             )
                         }
