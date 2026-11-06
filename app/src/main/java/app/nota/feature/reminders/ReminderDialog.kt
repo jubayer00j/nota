@@ -39,7 +39,6 @@ import app.nota.data.reminders.ReminderAlertType
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.ui.theme.NotaSpacing
 import java.time.Instant
-import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -107,8 +106,12 @@ fun ReminderDialog(
     fun computeTriggerAt(): Long {
         val dateMillis = datePickerState.selectedDateMillis ?: return initialTrigger
         val date = Instant.ofEpochMilli(dateMillis).atZone(ZoneOffset.UTC).toLocalDate()
-        return LocalDateTime.of(date, LocalTime.of(pickedHour, pickedMinute))
-            .atZone(zone).toInstant().toEpochMilli()
+        // Fix round (Jules P3): the DST rules are explicit in
+        // ReminderTriggerTimes — a picked time inside a spring-forward
+        // gap resolves to the moment the clocks land, not an hour on.
+        return ReminderTriggerTimes.resolveEpochMillis(
+            date, LocalTime.of(pickedHour, pickedMinute), zone,
+        )
     }
 
     fun performSave(finalAlertType: String) {
@@ -159,6 +162,20 @@ fun ReminderDialog(
             return
         }
         error = null
+        if (alertType == ReminderAlertType.PHONE_ALARM &&
+            !ClockAlarmDates.isRepresentable(
+                triggerAt, System.currentTimeMillis(), zone,
+            )
+        ) {
+            // Fix round (Codex P2): the Clock app would ring at the
+            // next occurrence of this time, not on the picked date —
+            // never save a phone-alarm reminder that lies about its
+            // day. The dialog shows the same warning above the fold.
+            error = "A Clock alarm can't ring on that date — it would ring at " +
+                "the next occurrence of the time instead. Choose Notification " +
+                "for that date, or pick the nearer date for a Clock alarm."
+            return
+        }
         if (alertType == ReminderAlertType.PHONE_ALARM) {
             val intent = PhoneAlarmIntents.buildSetAlarmIntent(noteTitle, triggerAt, zone)
             if (PhoneAlarmIntents.canHandle(context, intent)) {
@@ -186,6 +203,28 @@ fun ReminderDialog(
         .format(DateTimeFormatter.ofPattern("EEE, d MMM yyyy", Locale.getDefault()))
     val timeLabel = LocalTime.of(pickedHour, pickedMinute)
         .format(DateTimeFormatter.ofPattern("h:mm a", Locale.getDefault()))
+
+    // Fix round (Codex P2): when "Clock alarm" is picked for a date
+    // the Clock app cannot represent — it rings at the next
+    // occurrence of the time (today if still ahead, else tomorrow),
+    // as flagged by ClockAlarmDates — warn here in the dialog, and
+    // block the phone-alarm save in onSaveClicked.
+    val nowForClockCheck = System.currentTimeMillis()
+    val pickedTriggerAt = computeTriggerAt()
+    val clockAlarmMisdated = alertType == ReminderAlertType.PHONE_ALARM &&
+        pickedTriggerAt > nowForClockCheck &&
+        !ClockAlarmDates.isRepresentable(pickedTriggerAt, nowForClockCheck, zone)
+    val clockAlarmNextLabel = if (clockAlarmMisdated) {
+        Instant.ofEpochMilli(
+            ClockAlarmDates.nextOccurrenceMillis(
+                LocalTime.of(pickedHour, pickedMinute), nowForClockCheck, zone,
+            ),
+        ).atZone(zone).format(
+            DateTimeFormatter.ofPattern("EEE, d MMM 'at' h:mm a", Locale.getDefault()),
+        )
+    } else {
+        null
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -253,6 +292,20 @@ fun ReminderDialog(
                                 "This note already has an alarm in your Clock app. " +
                                     "Changing the time here creates a new one; the old " +
                                     "alarm stays in the Clock app until you remove it there.",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(NotaSpacing.sm),
+                            )
+                        }
+                    }
+                    if (clockAlarmMisdated && clockAlarmNextLabel != null) {
+                        Spacer(Modifier.height(NotaSpacing.sm))
+                        Surface(color = MaterialTheme.colorScheme.tertiaryContainer) {
+                            Text(
+                                "A Clock alarm rings at the next occurrence of " +
+                                    "the time — $clockAlarmNextLabel — not on the " +
+                                    "date you picked. Save as a Notification for " +
+                                    "that date, or pick the nearer date above " +
+                                    "for a Clock alarm.",
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.padding(NotaSpacing.sm),
                             )

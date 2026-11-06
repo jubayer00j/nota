@@ -58,7 +58,9 @@ class AndroidReminderAlarmGateway(context: Context) : ReminderAlarmGateway {
 
     override fun noteArmedReminderIds(ids: Set<String>) {
         runCatching {
-            armedIdsFile.writeText(ids.joinToString(separator = "\n"))
+            // Fix round (Jules P3): atomic write — a crash mid-write
+            // must never truncate the only record of armed alarms.
+            AtomicTextFile.write(armedIdsFile, ids.joinToString(separator = "\n"))
         }
     }
 
