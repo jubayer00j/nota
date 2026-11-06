@@ -129,5 +129,32 @@ class NotaApplication : Application() {
                     }
             }
         }
+        // Phase 4.2: semantic-index maintenance on the same
+        // post-edit rhythm — note-list emissions are re-debounced
+        // at 15 s, then the index reconciles: vectors for locked,
+        // trashed or deleted notes are purged locally and new or
+        // changed notes are embedded when a key is configured.
+        // Best-effort by design (reconcile never throws); it never
+        // blocks or fails a note save.
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                val provider = koin.get<DatabaseProvider>()
+                val indexer = koin.get<app.nota.data.ai.SemanticIndexer>()
+                var debounceJob: kotlinx.coroutines.Job? = null
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                provider.accountId
+                    .flatMapLatest {
+                        provider.current.noteDao().observeActive()
+                    }
+                    .collect {
+                        debounceJob?.cancel()
+                        debounceJob = CoroutineScope(Dispatchers.IO).launch {
+                            kotlinx.coroutines.delay(15_000)
+                            indexer.reconcile(provider.accountId.value)
+                        }
+                    }
+            }
+        }
     }
 }

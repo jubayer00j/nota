@@ -3,11 +3,15 @@ package app.nota.data.ai
 import app.nota.data.preferences.PreferencesRepository
 
 /** One provider's saved slot: its OWN key, model and (for Custom)
- *  endpoint — 1.x #87. A provider only ever receives its own key. */
+ *  endpoint — 1.x #87. A provider only ever receives its own key.
+ *  Phase 4.2 adds [embeddingModel]: semantic search's model, a
+ *  slot field of its own because it names a different model
+ *  family than the chat [model]. */
 data class AiProviderSlot(
     val apiKey: String = "",
     val model: String = "",
     val baseUrl: String = "",
+    val embeddingModel: String = "",
 )
 
 /**
@@ -20,7 +24,8 @@ data class AiProviderSlot(
  *
  * Field vocabulary (per account): "active_provider" plus, per
  * provider storage id, "<id>_key" (sealed), "<id>_model",
- * "<id>_base_url". The store is keyed by account id on every call
+ * "<id>_base_url", "<id>_embedding_model" (Phase 4.2). The store
+ * is keyed by account id on every call
  * (guest included), so two accounts on one device can never read
  * or clobber each other's keys — the Phase 3a scoping rule the
  * note-lock copies follow.
@@ -48,6 +53,7 @@ class AiSettingsStore(
             apiKey = key,
             model = preferences.getAiField(accountId, modelField(provider)) ?: "",
             baseUrl = preferences.getAiField(accountId, baseUrlField(provider)) ?: "",
+            embeddingModel = preferences.getAiField(accountId, embeddingModelField(provider)) ?: "",
         )
     }
 
@@ -74,6 +80,10 @@ class AiSettingsStore(
             accountId, baseUrlField(provider),
             normalizeAiBaseUrl(slot.baseUrl).ifBlank { null },
         )
+        preferences.setAiField(
+            accountId, embeddingModelField(provider),
+            slot.embeddingModel.trim().ifBlank { null },
+        )
     }
 
     /** The effective config for the account's ACTIVE provider,
@@ -95,6 +105,28 @@ class AiSettingsStore(
     suspend fun hasUsableKey(accountId: String): Boolean =
         activeConfig(accountId) != null
 
+    /**
+     * The effective EMBEDDING config for the account's ACTIVE
+     * provider (Phase 4.2), or null when semantic search cannot
+     * run: no saved key, or no resolvable embedding model (a
+     * Custom slot whose embedding model was never filled in).
+     * A null here is the search layer's silent-off state — the
+     * keyword search never notices.
+     */
+    suspend fun activeEmbeddingConfig(accountId: String): AiEmbeddingConfig? {
+        val provider = activeProvider(accountId)
+        val slot = slot(accountId, provider)
+        if (slot.apiKey.isBlank()) return null
+        val config = AiEmbeddingConfig(
+            providerId = provider,
+            apiKey = slot.apiKey,
+            embeddingModel = slot.embeddingModel,
+            baseUrl = slot.baseUrl.ifBlank { null },
+        )
+        if (config.resolvedEmbeddingModel().isBlank()) return null
+        return config
+    }
+
     /** Drops EVERY AI field for the account (sign-out — 1.x
      *  behaviour: keys belong to the sign-in that saved them). */
     suspend fun clearAccount(accountId: String) {
@@ -107,6 +139,7 @@ class AiSettingsStore(
         fun keyField(provider: AiProviderId) = "${provider.storageId}_key"
         fun modelField(provider: AiProviderId) = "${provider.storageId}_model"
         fun baseUrlField(provider: AiProviderId) = "${provider.storageId}_base_url"
+        fun embeddingModelField(provider: AiProviderId) = "${provider.storageId}_embedding_model"
 
         val ALL_FIELDS: List<String> = buildList {
             add(FIELD_ACTIVE)
@@ -114,6 +147,7 @@ class AiSettingsStore(
                 add(keyField(provider))
                 add(modelField(provider))
                 add(baseUrlField(provider))
+                add(embeddingModelField(provider))
             }
         }
     }

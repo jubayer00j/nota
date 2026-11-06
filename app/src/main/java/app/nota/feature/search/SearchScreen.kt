@@ -56,6 +56,7 @@ fun SearchScreen(
 ) {
     val query by viewModel.query.collectAsState()
     val results by viewModel.results.collectAsState()
+    val semanticResults by viewModel.semanticResults.collectAsState()
     val saved by viewModel.savedSearches.collectAsState()
     val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) { focusRequester.requestFocus() }
@@ -115,7 +116,7 @@ fun SearchScreen(
                     NotaSecondaryButton(text = "Save this search", onClick = { showSaveDialog = true })
                 }
                 Spacer(Modifier.height(NotaSpacing.sm))
-                if (results.isEmpty()) {
+                if (results.isEmpty() && semanticResults.isEmpty()) {
                     Text(
                         "No notes match \"$query\".",
                         style = MaterialTheme.typography.bodyLarge,
@@ -136,6 +137,28 @@ fun SearchScreen(
                                 locked = note.locked,
                                 onClick = { onOpenNote(note.id) },
                             )
+                        }
+                        // Phase 4.2: meaning-based matches the
+                        // keyword pass didn't already surface.
+                        if (semanticResults.isNotEmpty()) {
+                            item {
+                                Text(
+                                    "Related by meaning",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    modifier = Modifier.padding(top = NotaSpacing.sm),
+                                )
+                            }
+                            items(semanticResults, key = { "semantic-" + it.id }) { note ->
+                                NoteCard(
+                                    title = note.title,
+                                    snippet = if (note.locked) "" else note.plainText,
+                                    updatedLabel = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(note.updatedAt)),
+                                    pinned = note.pinned,
+                                    favourite = note.favourite,
+                                    locked = note.locked,
+                                    onClick = { onOpenNote(note.id) },
+                                )
+                            }
                         }
                     }
                 }
