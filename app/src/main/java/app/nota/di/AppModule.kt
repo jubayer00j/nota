@@ -125,9 +125,24 @@ val appModule = module {
             provider = get(),
         )
     }
+    // Phase 5.1 Reminders: the repository over the shipped
+    // ReminderEntity, the alarm gateway (AlarmManager + the persisted
+    // armed-id set), the scheduler, the fire handler and the
+    // notification-tap store. The reconciler is started from
+    // NotaApplication; receivers resolve the scheduler/handler here.
+    single { app.nota.data.reminders.ReminderRepository(get()) }
+    single<app.nota.data.reminders.ReminderAlarmGateway> {
+        app.nota.data.reminders.AndroidReminderAlarmGateway(androidContext())
+    }
+    single { app.nota.data.reminders.ReminderScheduler(get(), get()) }
+    single {
+        app.nota.data.reminders.ReminderFireHandler(androidContext(), get(), get(), get())
+    }
+    single { app.nota.data.reminders.PendingNoteOpenStore() }
     viewModel { NotesViewModel(get(), get(), get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
-    viewModel { RichNoteEditorViewModel(get(), get(), get(), get()) }
+    viewModel { RichNoteEditorViewModel(get(), get(), get(), get(), get(), get()) }
+    viewModel { app.nota.feature.reminders.RemindersViewModel(get(), get(), androidContext()) }
     viewModel { TemplatesViewModel(get(), get()) }
     viewModel { TodayViewModel(get(), get()) }
     viewModel {

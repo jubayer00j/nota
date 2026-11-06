@@ -10,6 +10,12 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface NoteDao {
+    /** Phase 5.1: every note incl. trashed/archived — the reminder
+     *  reconciler and the Reminders screen need trash state, which
+     *  observeActive deliberately hides. */
+    @Query("SELECT * FROM notes")
+    fun observeAllNotes(): Flow<List<NoteEntity>>
+
     @Query("SELECT * FROM notes WHERE trashedAt IS NULL AND archived = 0 ORDER BY pinned DESC, updatedAt DESC")
     fun observeActive(): Flow<List<NoteEntity>>
 
@@ -189,6 +195,15 @@ interface ReminderDao {
 
     @Query("SELECT * FROM reminders WHERE noteId = :noteId")
     suspend fun getForNote(noteId: String): List<ReminderEntity>
+
+    /** Phase 5.1: every reminder row (pending + spent), for the
+     *  Reminders screen and the alarm reconciler. */
+    @Query("SELECT * FROM reminders ORDER BY triggerAt ASC")
+    fun observeAll(): Flow<List<ReminderEntity>>
+
+    /** Phase 5.1: a note's reminder rows as they change (editor state). */
+    @Query("SELECT * FROM reminders WHERE noteId = :noteId ORDER BY triggerAt ASC")
+    fun observeForNote(noteId: String): Flow<List<ReminderEntity>>
 
     @Query("DELETE FROM reminders")
     suspend fun deleteAll()

@@ -40,6 +40,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
@@ -128,6 +129,8 @@ import app.nota.data.attachments.PendingInsertMode
 import app.nota.data.attachments.PendingInsertRecord
 import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.reminders.ReminderNotificationText
+import app.nota.feature.reminders.ReminderDialog
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
 import app.nota.data.db.AttachmentEntity
@@ -247,6 +250,7 @@ fun RichNoteEditorScreen(
     val links by viewModel.links.collectAsState()
     val linkableNotes by viewModel.linkableNotes.collectAsState()
     val saveState by viewModel.saveState.collectAsState()
+    val reminder by viewModel.reminder.collectAsState()
     // Phase 2b lock session state.
     val sessionActive by viewModel.sessionActive.collectAsState()
     val sessionHtml by viewModel.sessionHtml.collectAsState()
@@ -287,6 +291,7 @@ fun RichNoteEditorScreen(
     var showOutline by remember { mutableStateOf(false) }
     var outlineItems by remember { mutableStateOf<List<OutlineEntry>>(emptyList()) }
     var showTemplateDialog by remember { mutableStateOf(false) }
+    var showReminderDialog by remember { mutableStateOf(false) }
     var templateName by remember { mutableStateOf("") }
     var insertImageOnPick by remember { mutableStateOf(false) }
     // Phase 3.5 (D4): the toolbar's file action inserts the picked
@@ -1316,6 +1321,30 @@ fun RichNoteEditorScreen(
                                 },
                             )
                         }
+                        // Phase 5.1: the note's reminder. Works even
+                        // while the lock gate is up — setting one needs
+                        // only the note's id + title, never its content.
+                        if (current != null) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (reminder != null) {
+                                            "Reminder · " + ReminderNotificationText
+                                                .formatReminderTime(reminder!!.triggerAt)
+                                        } else {
+                                            "Set reminder"
+                                        },
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Alarm, contentDescription = null)
+                                },
+                                onClick = {
+                                    showReminderDialog = true
+                                    menuExpanded = false
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Archive") },
                             leadingIcon = { Icon(Icons.Filled.Archive, contentDescription = null) },
@@ -2017,6 +2046,25 @@ fun RichNoteEditorScreen(
                 TextButton(onClick = { showTemplateDialog = false }) { Text("Cancel") }
             },
         )
+    }
+
+    if (showReminderDialog) {
+        val noteForReminder = current
+        if (noteForReminder != null) {
+            ReminderDialog(
+                noteTitle = noteForReminder.title,
+                existing = reminder,
+                onDismiss = { showReminderDialog = false },
+                onSave = { triggerAt, alertType ->
+                    viewModel.setReminder(triggerAt, alertType)
+                },
+                onRemove = if (reminder != null) {
+                    { viewModel.removeReminder() }
+                } else {
+                    null
+                },
+            )
+        }
     }
 
     if (showLockDialog) {

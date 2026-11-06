@@ -1,5 +1,6 @@
 package app.nota
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
@@ -48,6 +49,28 @@ class MainActivity : FragmentActivity() {
     private val preferencesRepository: PreferencesRepository by inject()
     private val appLockManager: AppLockManager by inject()
     private val databaseProvider: DatabaseProvider by inject()
+    private val pendingNoteOpenStore: app.nota.data.reminders.PendingNoteOpenStore by inject()
+
+    /**
+     * Phase 5.1: a reminder notification's tap lands here with the
+     * note id as an extra. The request is parked in
+     * [app.nota.data.reminders.PendingNoteOpenStore] (tagged with the
+     * account active right now); the nav shell consumes it once the
+     * app is unlocked, so App Lock and the note's own lock gate apply
+     * exactly as for any other open.
+     */
+    private fun captureNoteOpenIntent(intent: Intent?) {
+        val noteId = intent?.getStringExtra(
+            app.nota.data.reminders.PendingNoteOpenStore.EXTRA_NOTE_ID,
+        ) ?: return
+        pendingNoteOpenStore.request(noteId, databaseProvider.accountId.value)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureNoteOpenIntent(intent)
+    }
 
     /**
      * Recents masking (Phase 2a, Codex PR #7 P1): the system captures the
@@ -76,6 +99,7 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        captureNoteOpenIntent(intent)
         enableEdgeToEdge()
         setContent {
             // Phase 1a: theme choices are persisted in DataStore and

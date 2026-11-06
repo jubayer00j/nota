@@ -108,6 +108,8 @@ fun NotaNavShell(
     pendingRestoreStore: PendingRestoreStore = PendingRestoreStore.shared,
     // Phase 3.6 (G2): the durable picker-insert record and its seams.
     pendingInsertStore: PendingInsertStore = koinInject(),
+    // Phase 5.1: the reminder-notification tap handoff.
+    pendingNoteOpenStore: app.nota.data.reminders.PendingNoteOpenStore = koinInject(),
     databaseProvider: DatabaseProvider = koinInject(),
     noteRepository: NoteRepository = koinInject(),
 ) {
@@ -170,6 +172,30 @@ fun NotaNavShell(
         } else {
             pendingInsertStore.clearIf(record.id)
         }
+    }
+    // Phase 5.1: a reminder notification tap parks its note id in
+    // PendingNoteOpenStore (via MainActivity). Consume it here — the
+    // shell only composes while unlocked, so the tap can never bypass
+    // App Lock, and the note's own lock gate applies inside the
+    // editor. A record from another account is retired, not routed
+    // (its note lives in another library); so is one whose note no
+    // longer exists.
+    val pendingNoteOpen by pendingNoteOpenStore.record.collectAsState()
+    LaunchedEffect(isLocked, pendingNoteOpen, currentAccountId, currentNoteId) {
+        val record = pendingNoteOpen ?: return@LaunchedEffect
+        if (isLocked) return@LaunchedEffect
+        if (record.accountId != currentAccountId) {
+            pendingNoteOpenStore.clearIf(record.noteId)
+            return@LaunchedEffect
+        }
+        if (record.noteId == currentNoteId) {
+            pendingNoteOpenStore.clearIf(record.noteId)
+            return@LaunchedEffect
+        }
+        if (noteRepository.getById(record.noteId) != null) {
+            navController.openNoteEditor(record.noteId)
+        }
+        pendingNoteOpenStore.clearIf(record.noteId)
     }
     // Today has its own route but lives under the Notes bottom-bar item.
     val showBottomBar = NotaDestination.entries.any { it.route == currentRoute } ||
@@ -252,7 +278,11 @@ fun NotaNavShell(
                     },
                 )
             }
-            composable(NotaDestination.Reminders.route) { RemindersScreen() }
+            composable(NotaDestination.Reminders.route) {
+                RemindersScreen(
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
+                )
+            }
             composable(NotaDestination.Settings.route) {
                 SettingsScreen(
                     onOpenDesignSystem = { navController.navigate(NotaRoutes.DESIGN_SYSTEM) },

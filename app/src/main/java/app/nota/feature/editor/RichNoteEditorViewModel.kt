@@ -7,11 +7,14 @@ import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.ReminderEntity
 import app.nota.data.html.DocSegment
 import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
 import app.nota.data.html.TextSegment
+import app.nota.data.reminders.ReminderRepository
+import app.nota.data.reminders.ReminderScheduler
 import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.data.repository.NoteUnlockResult
@@ -52,6 +55,8 @@ class RichNoteEditorViewModel(
     private val attachmentStore: AttachmentStore,
     private val templateRepository: TemplateRepository,
     private val noteLockRepository: NoteLockRepository,
+    private val reminderRepository: ReminderRepository,
+    private val reminderScheduler: ReminderScheduler,
 ) : ViewModel() {
 
     private val _note = MutableStateFlow<NoteEntity?>(null)
@@ -74,6 +79,14 @@ class RichNoteEditorViewModel(
 
     private val _linkedFrom = MutableStateFlow<List<NoteEntity>>(emptyList())
     val linkedFrom: StateFlow<List<NoteEntity>> = _linkedFrom
+
+    /** Phase 5.1: the note's pending reminder (at most one — the 5.1
+     *  contract), or null. Drives the overflow item's label and the
+     *  reminder dialog's initial state. Title/time only: collecting it
+     *  never touches the note's content, so it is safe while the
+     *  per-note lock gate is up. */
+    private val _reminder = MutableStateFlow<ReminderEntity?>(null)
+    val reminder: StateFlow<ReminderEntity?> = _reminder
 
     /** Notes this note links TO via [[title]] (Phase 4.4: the "Links" footer list). */
     private val _links = MutableStateFlow<List<NoteEntity>>(emptyList())
@@ -185,6 +198,34 @@ class RichNoteEditorViewModel(
         }
         viewModelScope.launch {
             repository.observeOutgoing(noteId).collect { _links.value = it }
+        }
+        viewModelScope.launch {
+            reminderRepository.observePendingForNote(noteId).collect { _reminder.value = it }
+        }
+    }
+
+    // --- Reminders (Phase 5.1) ----------------------------------------------
+
+    /** Sets/replaces the note's pending reminder and arms it (the
+     *  scheduler no-ops phone-alarm reminders — the screen hands those
+     *  to the Clock app after this call). */
+    fun setReminder(triggerAt: Long, alertType: String) {
+        val noteId = _note.value?.id ?: return
+        viewModelScope.launch {
+            val saved = reminderRepository.setReminder(noteId, triggerAt, alertType)
+            reminderScheduler.schedule(saved)
+        }
+    }
+
+    /** Removes the note's reminder entirely (row + alarm + any
+     *  posted notification). */
+    fun removeReminder() {
+        val noteId = _note.value?.id ?: return
+        viewModelScope.launch {
+            reminderRepository.pendingForNote(noteId)?.let { pending ->
+                reminderScheduler.cancel(pending.id)
+            }
+            reminderRepository.removeForNote(noteId)
         }
     }
 
