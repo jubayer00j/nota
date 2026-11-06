@@ -2,7 +2,10 @@ package app.nota.feature.ask
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,7 +21,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -39,12 +41,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.Placeholder
-import androidx.compose.ui.text.PlaceholderVerticalAlign
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import app.nota.data.ai.SemanticIndexStatus
 import app.nota.ui.theme.NotaSpacing
 import org.koin.androidx.compose.koinViewModel
@@ -464,29 +462,31 @@ private fun SourceCard(card: AskSourceCard, onClick: () -> Unit) {
 }
 
 /**
- * The answer's text with its validated citations as inline
- * tappable chips — a small numbered circle in the pine
- * colour; tapping opens the cited note. Only numbers the
- * parser validated become chips ([citationSegments] decides);
- * anything else stays literal text.
+ * The answer's text with its validated citations as tappable
+ * chips — a small numbered circle in the pine colour, flowed
+ * inline with the text ([androidx.compose.foundation.layout
+ * .FlowRow], the same pattern as Search's tag chips); tapping
+ * opens the cited note. Only numbers the parser validated
+ * become chips ([citationSegments] decides); anything else
+ * stays literal text.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnswerText(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
     val segments = remember(entry.id) { citationSegments(entry.text, entry.citations) }
-    val inlineContent = remember(entry.id) {
-        val map = mutableMapOf<String, InlineTextContent>()
-        segments.forEachIndexed { index, segment ->
-            if (segment is AskTextSegment.Citation) {
-                map[chipId(entry.id, index)] = InlineTextContent(
-                    Placeholder(
-                        width = if (segment.n < 10) 20.sp else 27.sp,
-                        height = 20.sp,
-                        placeholderVerticalAlign = PlaceholderVerticalAlign.AboveBaseline,
-                    ),
-                ) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        segments.forEach { segment ->
+            when (segment) {
+                is AskTextSegment.Text ->
+                    Text(segment.text, style = MaterialTheme.typography.bodyMedium)
+                is AskTextSegment.Citation ->
                     Box(
                         Modifier
-                            .fillMaxSize()
+                            .size(20.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.primary)
                             .clickable { onOpenNote(segment.noteId) },
@@ -498,27 +498,7 @@ private fun AnswerText(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
                             style = MaterialTheme.typography.labelSmall,
                         )
                     }
-                }
-            }
-        }
-        map
-    }
-    val annotated = remember(entry.id) {
-        buildAnnotatedString {
-            segments.forEachIndexed { index, segment ->
-                when (segment) {
-                    is AskTextSegment.Text -> append(segment.text)
-                    is AskTextSegment.Citation ->
-                        appendInlineContent(chipId(entry.id, index), "[${segment.n}]")
-                }
             }
         }
     }
-    Text(
-        text = annotated,
-        inlineContent = inlineContent,
-        style = MaterialTheme.typography.bodyMedium,
-    )
 }
-
-private fun chipId(entryId: Int, segmentIndex: Int): String = "cite-$entryId-$segmentIndex"
