@@ -213,7 +213,9 @@ fun NotaNavShell(
     val pendingCaptures by pendingCaptureStore.records.collectAsState()
     val captureResumer = remember { app.nota.feature.capture.PendingCaptureResumer() }
     val captureScope = rememberCoroutineScope()
-    LaunchedEffect(isLocked, pendingCaptures.firstOrNull(), currentAccountId) {
+    var captureDeliveryInFlight by remember { mutableStateOf(false) }
+    LaunchedEffect(isLocked, pendingCaptures.firstOrNull(), currentAccountId, captureDeliveryInFlight) {
+        if (captureDeliveryInFlight) return@LaunchedEffect
         val record = pendingCaptures.firstOrNull() ?: return@LaunchedEffect
         when (captureResumer.decide(isLocked, record, currentAccountId)) {
             app.nota.feature.capture.CaptureDecision.HOLD -> Unit
@@ -222,12 +224,17 @@ fun NotaNavShell(
             app.nota.feature.capture.CaptureDecision.DELIVER -> {
                 val taken = pendingCaptureStore.take(record.id)
                 if (taken != null) {
+                    captureDeliveryInFlight = true
                     captureScope.launch {
-                        val noteId = runCatching {
-                            captureDeliverer.deliver(taken)
-                        }.getOrNull()
-                        if (noteId != null) {
-                            navController.openNoteEditor(noteId)
+                        try {
+                            val noteId = runCatching {
+                                captureDeliverer.deliver(taken)
+                            }.getOrNull()
+                            if (noteId != null) {
+                                navController.openNoteEditor(noteId)
+                            }
+                        } finally {
+                            captureDeliveryInFlight = false
                         }
                     }
                 }
