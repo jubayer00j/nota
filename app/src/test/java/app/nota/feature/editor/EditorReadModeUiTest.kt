@@ -138,6 +138,11 @@ class EditorReadModeUiTest {
             AttachmentStore(context, provider),
             TemplateRepository(context),
             lockRepository,
+            app.nota.data.reminders.ReminderRepository(provider),
+            app.nota.data.reminders.ReminderScheduler(
+                app.nota.data.reminders.AndroidReminderAlarmGateway(context),
+                provider,
+            ),
         )
         composeRule.setContent {
             app.nota.ui.theme.NotaTheme {

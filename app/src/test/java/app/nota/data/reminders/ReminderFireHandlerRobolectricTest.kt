@@ -95,7 +95,7 @@ class ReminderFireHandlerRobolectricTest {
 
         val posted = shadowNotifications.allNotifications
         assertEquals(1, posted.size)
-        val notification = posted.single().notification
+        val notification = posted.single()
         assertEquals(
             "Dentist appointment",
             notification.extras.getCharSequence("android.title")?.toString(),
@@ -124,7 +124,7 @@ class ReminderFireHandlerRobolectricTest {
 
         val posted = shadowNotifications.allNotifications
         assertEquals(1, posted.size)
-        val notification = posted.single().notification
+        val notification = posted.single()
         val title = notification.extras.getCharSequence("android.title")?.toString()
         val text = notification.extras.getCharSequence("android.text")?.toString()
         assertEquals("Reminder", title)

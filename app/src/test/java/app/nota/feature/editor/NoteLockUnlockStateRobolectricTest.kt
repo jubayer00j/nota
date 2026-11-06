@@ -148,7 +148,19 @@ override fun sealCipherResult(): StepResult<Cipher> =
 
     private fun newViewModel(): RichNoteEditorViewModel {
         val context = RuntimeEnvironment.getApplication()
-        return RichNoteEditorViewModel(notes, store, TemplateRepository(context), lockRepo)
+        return RichNoteEditorViewModel(
+            notes,
+            store,
+            TemplateRepository(context),
+            lockRepo,
+            app.nota.data.reminders.ReminderRepository(
+                DatabaseProvider.forDatabase(context, db),
+            ),
+            app.nota.data.reminders.ReminderScheduler(
+                app.nota.data.reminders.AndroidReminderAlarmGateway(context),
+                DatabaseProvider.forDatabase(context, db),
+            ),
+        )
     }
 
     /** Pumps the (paused) main looper until [condition] holds. The
