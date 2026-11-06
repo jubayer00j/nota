@@ -127,7 +127,13 @@ class WidgetStateMapperTest {
         val state = map(
             nextReminder = WidgetReminderFacts(trigger, "  Dentist  ", noteLocked = false),
         )
-        assertEquals("Dentist · Fri, 6 Nov, 2:30 PM", state.reminderLine)
+        // Composition is what's under test (trimmed title + the
+        // shared formatter's time); the formatter's own class pins
+        // its exact rendering — CLDR AM/PM casing varies by JVM.
+        val time = app.nota.data.reminders.ReminderNotificationText
+            .formatReminderTime(trigger, zone, locale)
+        assertEquals("Dentist · $time", state.reminderLine)
+        assertTrue(state.reminderLine!!.contains("Fri, 6 Nov"))
     }
 
     @Test
