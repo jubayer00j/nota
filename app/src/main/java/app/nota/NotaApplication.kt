@@ -177,5 +177,39 @@ class NotaApplication : Application() {
                     }
             }
         }
+        // Phase 5.3: keep the home-screen widget in step — the same
+        // account-keyed observation shape as the sync trigger above,
+        // over BOTH tables the glance reads (notes + reminders) and
+        // the App Lock settings (a lock toggle must re-render the
+        // widget immediately: content appears/disappears with the
+        // posture). Emissions are re-debounced at 1 s — a burst of
+        // typing produces one re-render — and the refresh itself is
+        // failure-proof (WidgetRefresher swallows everything; the
+        // provider re-reads the tables when it renders).
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                val provider = koin.get<DatabaseProvider>()
+                val lockManager = koin.get<app.nota.data.security.AppLockManager>()
+                var debounceJob: kotlinx.coroutines.Job? = null
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                provider.accountId
+                    .flatMapLatest {
+                        kotlinx.coroutines.flow.combine(
+                            provider.current.noteDao().observeActive(),
+                            provider.current.reminderDao().observeEnabled(),
+                            lockManager.settings,
+                        ) { _, _, _ -> Unit }
+                    }
+                    .collect {
+                        debounceJob?.cancel()
+                        debounceJob = CoroutineScope(Dispatchers.IO).launch {
+                            kotlinx.coroutines.delay(1_000)
+                            app.nota.feature.widget.WidgetRefresher
+                                .requestUpdate(this@NotaApplication)
+                        }
+                    }
+            }
+        }
     }
 }

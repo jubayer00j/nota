@@ -116,5 +116,22 @@
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
         </receiver>
+
+        <!-- Phase 5.3 Glance home-screen widget: not exported (the
+             widget host reaches it through the system), no configure
+             activity this phase. Renders the ACTIVE account's today
+             glance under the WidgetStateMapper privacy rules — App
+             Lock on means no note content, ever. -->
+        <receiver
+            android:name="app.nota.feature.widget.NotaWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_description">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nota_widget_info" />
+        </receiver>
     </application>
 </manifest>

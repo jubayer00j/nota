@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Phase 5.3 Glance widget metadata. One resizable placement,
+     no configure activity (this phase ships no config screen).
+     updatePeriodMillis is the platform's 30-minute floor: freshness
+     comes from the in-app refresh pushes (note/reminder/account/
+     lock changes), and the period is only the battery-honest
+     backstop that keeps the date and reminder line from going
+     stale — Noma 1.x ran period 0 on the same push discipline.
+     The preview is the static layout itself (sample copy only —
+     never real note content), with the launcher icon as the
+     pre-API-31 fallback image. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="110dp"
+    android:minResizeWidth="180dp"
+    android:minResizeHeight="110dp"
+    android:targetCellWidth="4"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/nota_widget"
+    android:previewLayout="@layout/nota_widget"
+    android:previewImage="@mipmap/ic_launcher"
+    android:description="@string/widget_description"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

@@ -1,0 +1,183 @@
+package app.nota.feature.widget
+
+import androidx.room.Room
+import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.NotaDatabase
+import app.nota.data.db.NoteEntity
+import app.nota.data.db.ReminderEntity
+import java.time.LocalDate
+import java.time.ZoneId
+import java.util.Locale
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
+
+/**
+ * Phase 5.3: the widget data source end-to-end over a real Room
+ * database — today's-note selection (trashed daily notes never
+ * surface), the next-reminder pick (spent / past / trashed-note
+ * reminders skipped), per-account scoping (the source reads ONLY
+ * the database its provider hands it), and the App Lock posture
+ * short-circuit: hidden means the render holds no note data at
+ * all, whatever the tables contain.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
+class WidgetDataSourceRobolectricTest {
+
+    private val zone: ZoneId = ZoneId.of("UTC")
+    private val today: LocalDate = LocalDate.of(2026, 11, 6)
+    private val nowMillis: Long = java.time.ZonedDateTime.of(
+        2026, 11, 6, 9, 0, 0, 0, zone,
+    ).toInstant().toEpochMilli()
+
+    private lateinit var db: NotaDatabase
+    private lateinit var provider: DatabaseProvider
+
+    @Before
+    fun setUp() {
+        val context = RuntimeEnvironment.getApplication()
+        db = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        provider = DatabaseProvider.forDatabase(context, db)
+    }
+
+    @After
+    fun tearDown() {
+        db.close()
+    }
+
+    private fun source(hidden: Boolean = false) = WidgetDataSource(
+        provider = provider,
+        appLockHidden = { hidden },
+    )
+
+    private suspend fun load(hidden: Boolean = false) = source(hidden).load(
+        today = today,
+        zone = zone,
+        locale = Locale.UK,
+        nowMillis = nowMillis,
+    )
+
+    private fun dailyNote(
+        id: String = "daily-1",
+        title: String = "Friday plans",
+        plainText: String = "Buy tickets and pack the bag",
+        locked: Boolean = false,
+        trashedAt: Long? = null,
+    ) = NoteEntity(
+        id = id,
+        title = title,
+        contentHtml = "",
+        plainText = plainText,
+        createdAt = 1_000L,
+        updatedAt = 2_000L,
+        dailyDate = today.toString(),
+        locked = locked,
+        trashedAt = trashedAt,
+    )
+
+    private fun reminder(
+        id: String,
+        noteId: String,
+        triggerAt: Long,
+        enabled: Boolean = true,
+    ) = ReminderEntity(
+        id = id,
+        noteId = noteId,
+        triggerAt = triggerAt,
+        repeatRule = null,
+        enabled = enabled,
+        createdAt = 1_000L,
+    )
+
+    @Test
+    fun emptyLibraryIsTheEmptyState() = runBlocking {
+        val state = load()
+        assertEquals(WidgetTodayKind.EMPTY, state.todayKind)
+        assertNull(state.reminderLine)
+        assertEquals("Friday, 6 November", state.dateLabel)
+    }
+
+    @Test
+    fun dailyNoteAndNextReminderFlowThrough() = runBlocking {
+        db.noteDao().upsert(dailyNote())
+        val later = nowMillis + 2 * 3_600_000L
+        db.reminderDao().upsert(reminder("r-later", "daily-1", later))
+        // An earlier reminder on a GONE note must be skipped, and a
+        // spent one must never count even when it is earliest.
+        db.reminderDao().upsert(reminder("r-gone", "no-such-note", nowMillis + 60_000L))
+        db.reminderDao().upsert(reminder("r-spent", "daily-1", nowMillis + 30_000L, enabled = false))
+        val state = load()
+        assertEquals(WidgetTodayKind.CONTENT, state.todayKind)
+        assertEquals("Friday plans", state.todayTitle)
+        assertEquals("Buy tickets and pack the bag", state.todayExcerpt)
+        assertEquals("daily-1", state.todayNoteId)
+        assertTrue(state.reminderLine!!.startsWith("Friday plans ·"))
+    }
+
+    @Test
+    fun trashedDailyNoteNeverSurfaces() = runBlocking {
+        db.noteDao().upsert(dailyNote(trashedAt = 5_000L))
+        val state = load()
+        assertEquals(WidgetTodayKind.EMPTY, state.todayKind)
+        assertNull(state.todayNoteId)
+    }
+
+    @Test
+    fun lockedDailyNoteIsMaskedAtTheSource() = runBlocking {
+        db.noteDao().upsert(
+            dailyNote(title = "Secret diary", plainText = "", locked = true),
+        )
+        val state = load()
+        assertEquals(WidgetTodayKind.LOCKED, state.todayKind)
+        assertEquals(WidgetStateMapper.LOCKED_LABEL, state.todayTitle)
+        assertNull(state.todayNoteId)
+    }
+
+    @Test
+    fun hiddenPostureShowsNoNoteDataWhateverTheTablesHold() = runBlocking {
+        db.noteDao().upsert(dailyNote())
+        db.reminderDao().upsert(reminder("r1", "daily-1", nowMillis + 3_600_000L))
+        val state = load(hidden = true)
+        assertEquals(WidgetTodayKind.HIDDEN, state.todayKind)
+        assertNull(state.todayNoteId)
+        assertNull(state.reminderLine)
+    }
+
+    @Test
+    fun sourceReadsOnlyItsProvidersDatabase() = runBlocking {
+        // Content lives in THIS database...
+        db.noteDao().upsert(dailyNote())
+        // ...while a second, empty database (another account) sees
+        // the empty state: scoping is by construction, via the
+        // provider the source was handed.
+        val context = RuntimeEnvironment.getApplication()
+        val otherDb = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        try {
+            val otherSource = WidgetDataSource(
+                provider = DatabaseProvider.forDatabase(context, otherDb),
+                appLockHidden = { false },
+            )
+            val state = otherSource.load(
+                today = today, zone = zone, locale = Locale.UK, nowMillis = nowMillis,
+            )
+            assertEquals(WidgetTodayKind.EMPTY, state.todayKind)
+        } finally {
+            otherDb.close()
+        }
+        // And the owning database still shows its note.
+        assertEquals(WidgetTodayKind.CONTENT, load().todayKind)
+    }
+}
