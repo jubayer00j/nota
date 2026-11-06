@@ -8,7 +8,9 @@ import app.nota.data.db.ReminderEntity
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -28,6 +30,12 @@ import org.robolectric.annotation.Config
  * the database its provider hands it), and the App Lock posture
  * short-circuit: hidden means the render holds no note data at
  * all, whatever the tables contain.
+ *
+ * PR #30 fix round (Codex P2) adds the one-snapshot rule: a load
+ * captures the account id + database once, so an account switch
+ * landing mid-load — driven into the load's two switch windows
+ * via the source's midLoadHook test seam, against a REAL
+ * two-account provider — can never publish a mixed render.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -53,7 +61,10 @@ class WidgetDataSourceRobolectricTest {
 
     @After
     fun tearDown() {
-        db.close()
+        // The switch tests hand this database to a provider that
+        // closes it on switchTo — a second close in tearDown must
+        // not fail an otherwise-passing test.
+        runCatching { db.close() }
     }
 
     private fun source(hidden: Boolean = false) = WidgetDataSource(
@@ -184,5 +195,108 @@ class WidgetDataSourceRobolectricTest {
         }
         // And the owning database still shows its note.
         assertEquals(WidgetTodayKind.CONTENT, load().todayKind)
+    }
+
+    // --- PR #30 fix round (Codex P2): one account snapshot per load ---
+
+    /** Pre-creates account B's on-disk library (its own daily
+     *  note + a reminder on it), so a provider switch has real B
+     *  content to land on. Runs on IO: the file-backed database
+     *  does not allow main-thread queries. */
+    private suspend fun seedAccountB(context: android.content.Context) {
+        val bDb = NotaDatabase.build(context, "acct-b")
+        try {
+            bDb.noteDao().upsert(
+                dailyNote(id = "b-daily", title = "B account day"),
+            )
+            bDb.reminderDao().upsert(
+                reminder("b-rem", "b-daily", nowMillis + 3_600_000L),
+            )
+        } finally {
+            bDb.close()
+        }
+    }
+
+    /** A REAL provider whose active account is "acct-a" backed by
+     *  the in-memory fixture db, with "acct-b" seeded on disk —
+     *  [DatabaseProvider.switchTo] can genuinely move it. */
+    private suspend fun switchableProvider(
+        context: android.content.Context,
+    ): DatabaseProvider {
+        val p = DatabaseProvider(context, "acct-a", db)
+        withContext(Dispatchers.IO) { seedAccountB(context) }
+        return p
+    }
+
+    private suspend fun seedAccountA() {
+        db.noteDao().upsert(dailyNote(title = "A account day"))
+        db.reminderDao().upsert(reminder("a-rem", "daily-1", nowMillis + 3_600_000L))
+    }
+
+    @Test
+    fun accountSwitchAfterReadsDiscardsToHidden() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        seedAccountA()
+        val p = switchableProvider(context)
+        val switchSource = WidgetDataSource(provider = p, appLockHidden = { false })
+        var hookCalls = 0
+        switchSource.midLoadHook = {
+            hookCalls++
+            // First window (between the reads): stay on A, so both
+            // reads complete against A. Second window (after the
+            // reads, before publishing): switch to B.
+            if (hookCalls == 2) {
+                withContext(Dispatchers.IO) { p.switchTo("acct-b") }
+            }
+        }
+        val state = withContext(Dispatchers.IO) {
+            switchSource.load(
+                today = today, zone = zone, locale = Locale.UK, nowMillis = nowMillis,
+            )
+        }
+        // Account A's content was fully read — and none of it may
+        // be published once the account has moved on.
+        assertEquals(WidgetTodayKind.HIDDEN, state.todayKind)
+        assertNull(state.todayNoteId)
+        assertNull(state.reminderLine)
+        assertEquals(2, hookCalls)
+        assertEquals("acct-b", p.accountId.value)
+    }
+
+    @Test
+    fun accountSwitchBetweenReadsNeverPublishesMixedContent() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        seedAccountA()
+        val p = switchableProvider(context)
+        val switchSource = WidgetDataSource(provider = p, appLockHidden = { false })
+        var hookCalls = 0
+        switchSource.midLoadHook = {
+            hookCalls++
+            // First window: the switch lands between the daily
+            // read and the reminder read.
+            if (hookCalls == 1) {
+                withContext(Dispatchers.IO) { p.switchTo("acct-b") }
+            }
+        }
+        val outcome = runCatching {
+            withContext(Dispatchers.IO) {
+                switchSource.load(
+                    today = today, zone = zone, locale = Locale.UK, nowMillis = nowMillis,
+                )
+            }
+        }
+        // The switch closes A's database under the in-flight load,
+        // so the snapshot's reminder read may fail outright (in
+        // production NotaWidgetProvider converts any load failure
+        // into the same HIDDEN state). What must NEVER happen is
+        // a published render mixing the two libraries — A's daily
+        // note wearing B's reminder, or any B content at all: a
+        // returned state here can only be the hidden discard.
+        val state = outcome.getOrNull()
+        if (state != null) {
+            assertEquals(WidgetTodayKind.HIDDEN, state.todayKind)
+            assertNull(state.todayNoteId)
+            assertNull(state.reminderLine)
+        }
     }
 }

@@ -1,6 +1,7 @@
 package app.nota.feature.widget
 
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.NotaDatabase
 import app.nota.data.security.AppLockManager
 import java.time.LocalDate
 import java.time.ZoneId
@@ -10,16 +11,29 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Phase 5.3: reads the ACTIVE account's glance facts and maps them
- * through [WidgetStateMapper]. All reads resolve through
- * [DatabaseProvider.current] at call time, so the widget can only
- * ever see the active account's library — the same scoping rule the
- * repositories follow, and a switch swaps what the next render
- * shows (the Application-level refresher re-renders on the switch).
+ * through [WidgetStateMapper]. Each load runs against ONE account
+ * snapshot — the account id and its database, captured together at
+ * the start of the load — so the widget can only ever render one
+ * account's library, whole: a switch landing mid-load can never mix
+ * two accounts into one render, and a load whose account was
+ * switched away from discards its result instead of publishing
+ * stale content (the Application-level refresher re-renders for the
+ * new account right after a switch anyway).
  */
 class WidgetDataSource(
     private val provider: DatabaseProvider,
     private val appLockHidden: suspend () -> Boolean,
 ) {
+
+    /**
+     * Test seam (cf. [DatabaseProvider.forDatabase]): invoked at
+     * the two points where an account switch can interleave with a
+     * load — between the daily read and the reminder read, and
+     * again after the reads, before the result is published — so
+     * tests can drive a real switch into those windows
+     * deterministically. Always null in production.
+     */
+    internal var midLoadHook: (suspend () -> Unit)? = null
 
     suspend fun load(
         today: LocalDate = LocalDate.now(),
@@ -32,15 +46,13 @@ class WidgetDataSource(
         // never even read — there is nothing the render may show
         // from it, so no note data crosses into the widget at all.
         if (hidden) {
-            return WidgetStateMapper.map(
-                today = today,
-                zone = zone,
-                locale = locale,
-                appLockHidden = true,
-                todayNote = null,
-                nextReminder = null,
-            )
+            return hiddenState(today, zone, locale)
         }
+        // The account snapshot: id FIRST, then the database (the
+        // provider publishes a switch as current-then-id; reading
+        // in this order means a switch interleaving the two reads
+        // is always caught by the re-check before publishing).
+        val accountId = provider.accountId.value
         val db = provider.current
         val daily = db.noteDao().observeDaily(today.toString()).first()
             .firstOrNull { it.trashedAt == null }
@@ -52,7 +64,17 @@ class WidgetDataSource(
                 locked = it.locked,
             )
         }
-        val reminderFacts = nextReminderFacts(nowMillis)
+        midLoadHook?.invoke()
+        val reminderFacts = nextReminderFacts(db, nowMillis)
+        midLoadHook?.invoke()
+        // A switch that landed anywhere during the load — even
+        // after the last read — must not publish the old account's
+        // content into the new account's widget. Discard to the
+        // safe hidden state; the account-keyed refresher re-renders
+        // for the new account immediately after anyway.
+        if (provider.accountId.value != accountId) {
+            return hiddenState(today, zone, locale)
+        }
         return WidgetStateMapper.map(
             today = today,
             zone = zone,
@@ -63,11 +85,30 @@ class WidgetDataSource(
         )
     }
 
+    /** The HIDDEN mapping — the only state a load may publish when
+     *  it holds nothing it is allowed to show. */
+    private fun hiddenState(
+        today: LocalDate,
+        zone: ZoneId,
+        locale: Locale,
+    ): WidgetState = WidgetStateMapper.map(
+        today = today,
+        zone = zone,
+        locale = locale,
+        appLockHidden = true,
+        todayNote = null,
+        nextReminder = null,
+    )
+
     /** The earliest enabled, future reminder whose note is live —
      *  spent rows and reminders on trashed/gone notes never surface
-     *  (the ReminderRepository.observeRows rule). */
-    private suspend fun nextReminderFacts(nowMillis: Long): WidgetReminderFacts? {
-        val db = provider.current
+     *  (the ReminderRepository.observeRows rule). Reads run against
+     *  the load's captured snapshot [db] — never a fresh
+     *  [DatabaseProvider.current] resolution (Codex P2, PR #30). */
+    private suspend fun nextReminderFacts(
+        db: NotaDatabase,
+        nowMillis: Long,
+    ): WidgetReminderFacts? {
         val upcoming = db.reminderDao().getAll()
             .filter { it.enabled && it.triggerAt >= nowMillis }
             .sortedBy { it.triggerAt }

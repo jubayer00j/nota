@@ -182,7 +182,14 @@ class NotaApplication : Application() {
         // over BOTH tables the glance reads (notes + reminders) and
         // the App Lock settings (a lock toggle must re-render the
         // widget immediately: content appears/disappears with the
-        // posture). Emissions are re-debounced at 1 s — a burst of
+        // posture). The settings-UNREADABLE flag is observed as its
+        // own flow for a subtle reason: when the persisted settings
+        // become unreadable, AppLockManager flips settingsUnreadable
+        // WITHOUT emitting on settings — so a settings-only observer
+        // would never learn the posture changed, and the widget
+        // would keep its last rendered note content instead of
+        // failing closed to the generic state (Codex P1, PR #30 fix
+        // round). Emissions are re-debounced at 1 s — a burst of
         // typing produces one re-render — and the refresh itself is
         // failure-proof (WidgetRefresher swallows everything; the
         // provider re-reads the tables when it renders).
@@ -199,7 +206,8 @@ class NotaApplication : Application() {
                             provider.current.noteDao().observeActive(),
                             provider.current.reminderDao().observeEnabled(),
                             lockManager.settings,
-                        ) { _, _, _ -> Unit }
+                            lockManager.settingsUnreadable,
+                        ) { _, _, _, _ -> Unit }
                     }
                     .collect {
                         debounceJob?.cancel()
