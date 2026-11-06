@@ -24,6 +24,7 @@ import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.data.templates.TemplateRepository
+import app.nota.feature.ask.AskViewModel
 import app.nota.feature.editor.PlainNoteEditorViewModel
 import app.nota.feature.editor.RichNoteEditorViewModel
 import app.nota.feature.notes.NotesViewModel
@@ -133,6 +134,18 @@ val appModule = module {
             get(),
             get(),
             accountIdProvider = { get<DatabaseProvider>().accountId.value },
+        )
+    }
+    // Phase 4.3 Ask Nota: the thread's orchestration over the
+    // 4.1 service seam and the 4.2 indexer. The account flow
+    // itself (not a snapshot lambda) so the ViewModel can key
+    // its thread to the active identity and clear it on a
+    // switch (PR #25 fix round).
+    viewModel {
+        AskViewModel(
+            get(),
+            get(),
+            accountIdFlow = get<DatabaseProvider>().accountId,
         )
     }
 }
