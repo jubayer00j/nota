@@ -158,14 +158,17 @@ private fun GraphCanvas(
     var pan by remember { mutableStateOf(Offset.Zero) }
     var fittedFor by remember { mutableStateOf<Set<String>?>(null) }
 
-    // Fit the whole map into the viewport once per node set; after
+    // Fit the whole map into the viewport when the node set first
+    // appears or changes, and whenever a changed link structure
+    // spreads the map beyond what the current view covers; after
     // that the transform belongs to the user's fingers. A title
-    // edit keeps the same node set (positions recompute, view
-    // stays), a changed link structure refits.
+    // edit keeps the same node set and layout (view stays), and a
+    // topology change that still fits inside the current view
+    // does not yank it either. (LinkGraphFit holds the rule.)
     LaunchedEffect(viewportSize, graph) {
         if (viewportSize.width == 0 || viewportSize.height == 0) return@LaunchedEffect
         val ids = graph.positions.keys
-        if (ids.isEmpty() || fittedFor == ids) return@LaunchedEffect
+        if (ids.isEmpty()) return@LaunchedEffect
         var minX = Float.MAX_VALUE
         var minY = Float.MAX_VALUE
         var maxX = -Float.MAX_VALUE
@@ -176,6 +179,14 @@ private fun GraphCanvas(
             maxX = max(maxX, point.x)
             maxY = max(maxY, point.y)
         }
+        val exceeds = LinkGraphFit.boundsExceedViewport(
+            minX = minX, minY = minY, maxX = maxX, maxY = maxY,
+            scale = scale, panX = pan.x, panY = pan.y,
+            viewportWidth = viewportSize.width,
+            viewportHeight = viewportSize.height,
+            margin = NODE_RADIUS_UNITS,
+        )
+        if (!LinkGraphFit.shouldFit(fittedFor, ids, exceeds)) return@LaunchedEffect
         val margin = NODE_RADIUS_UNITS + 70f // disc + label room
         val boundsW = max(maxX - minX + 2f * margin, 1f)
         val boundsH = max(maxY - minY + 2f * margin, 1f)

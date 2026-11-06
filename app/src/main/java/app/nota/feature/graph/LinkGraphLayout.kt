@@ -37,6 +37,33 @@ object LinkGraphLayout {
     /** Hard cap on simulation steps so a huge library cannot stall the map. */
     const val MAX_ITERATIONS = 300
 
+    /**
+     * Budget for the total repulsion work of one layout, in
+     * pair-force evaluations (Phase 4.4 fix round). One iteration
+     * costs n·(n−1)/2 pair evaluations, so past a few hundred
+     * nodes the step count scales down to keep the total under
+     * this budget — a 1,000-note map does ~15M pair evaluations
+     * instead of ~150M. The cap is a pure function of the node
+     * count, so determinism is untouched: same input ⇒ same step
+     * count ⇒ same map.
+     */
+    const val MAX_PAIR_OPERATIONS = 15_000_000
+
+    /**
+     * Simulation steps for a graph of [nodeCount] nodes: the
+     * classic `100 + n` schedule, capped by [MAX_ITERATIONS] and
+     * by the [MAX_PAIR_OPERATIONS] work budget. Identical to the
+     * pre-cap schedule for every n up to ~300 nodes, so realistic
+     * libraries lay out exactly as they did before the cap.
+     */
+    fun iterationsFor(nodeCount: Int): Int {
+        if (nodeCount < 2) return 0
+        val scheduled = min(MAX_ITERATIONS, 100 + nodeCount)
+        val pairsPerIteration = nodeCount * (nodeCount - 1) / 2
+        val budgeted = MAX_PAIR_OPERATIONS / pairsPerIteration
+        return min(scheduled, max(1, budgeted))
+    }
+
     fun layout(nodeIds: List<String>, edges: List<LinkGraphEdge>): Map<String, GraphPoint> {
         val ids = nodeIds.distinct()
         val n = ids.size
@@ -63,7 +90,7 @@ object LinkGraphLayout {
         }
 
         val k = IDEAL_EDGE_LENGTH
-        val iterations = min(MAX_ITERATIONS, 100 + n)
+        val iterations = iterationsFor(n)
         val dispX = FloatArray(n)
         val dispY = FloatArray(n)
         repeat(iterations) { step ->
@@ -134,5 +161,36 @@ object LinkGraphLayout {
             out[ids[i]] = GraphPoint(xs[i] - cx, ys[i] - cy)
         }
         return out
+    }
+}
+
+/**
+ * Memoising seam between the graph model and its layout
+ * (Phase 4.4 fix round). The repository flows re-emit whenever
+ * anything in the notes/links tables changes — including writes
+ * that leave the built graph model identical (an unrelated note
+ * edit re-emits the notes flow). Re-running the force simulation
+ * for an unchanged model would burn the O(n²) layout for
+ * nothing, so the last model and its positions are kept, and an
+ * equal model gets the very same positions map back. Because
+ * [LinkGraphLayout] is deterministic, skipping can never change
+ * the resulting map — only how often it is recomputed.
+ *
+ * Used from the ViewModel's single flow chain, whose emissions
+ * are sequential, so no synchronisation is needed.
+ */
+class LinkGraphPositioner {
+    private var lastData: LinkGraphData? = null
+    private var lastPositions: Map<String, GraphPoint> = emptyMap()
+
+    fun positionsFor(data: LinkGraphData): Map<String, GraphPoint> {
+        if (data == lastData) return lastPositions
+        val positions = LinkGraphLayout.layout(
+            nodeIds = data.nodes.map { it.id },
+            edges = data.edges,
+        )
+        lastData = data
+        lastPositions = positions
+        return positions
     }
 }

@@ -32,6 +32,8 @@ jobs:
   # Robolectric suite.)
   # (Phase 4.4: the partition grows to 63 classes — fast-a +2
   # pure-JVM link-graph classes, B3 +1 graph Robolectric suite.)
+  # (PR #26 fix round: the partition grows to 65 classes —
+  # fast-a +2 pure-JVM link-graph fix classes.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -77,7 +79,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 32 of 63 non-UI classes)
+      - name: Run fast unit tests (shard A, 34 of 65 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -90,6 +92,8 @@ jobs:
             --tests "app.nota.feature.ask.AskThreadTest" \
             --tests "app.nota.feature.graph.LinkGraphLayoutTest" \
             --tests "app.nota.feature.graph.LinkGraphTest" \
+            --tests "app.nota.feature.graph.LinkGraphFitTest" \
+            --tests "app.nota.feature.graph.LinkGraphPositionerTest" \
             --tests "app.nota.data.attachments.PendingInsertStoreTest" \
             --tests "app.nota.data.auth.GuestLibraryTransferTest" \
             --tests "app.nota.data.backup.BackupCrossoverRobolectricTest" \

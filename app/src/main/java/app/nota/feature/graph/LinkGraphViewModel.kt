@@ -33,11 +33,16 @@ data class PositionedLinkGraph(
  * default dispatcher (flowOn upstream of the stateIn), never in
  * composition and never on the main thread: a few hundred notes
  * stay a background recomputation, and the screen just renders the
- * latest settled state.
+ * latest settled state. A [LinkGraphPositioner] sits between the
+ * model and the layout, so an emission that rebuilds the identical
+ * model (Room re-emitting on an unrelated write) skips the layout
+ * entirely instead of re-running the O(n²) simulation.
  */
 class LinkGraphViewModel(
     repository: NoteRepository,
 ) : ViewModel() {
+
+    private val positioner = LinkGraphPositioner()
 
     val graph: StateFlow<PositionedLinkGraph> =
         combine(repository.observeAllNotes(), repository.observeAllLinks()) { notes, links ->
@@ -46,10 +51,7 @@ class LinkGraphViewModel(
             .map { data ->
                 PositionedLinkGraph(
                     data = data,
-                    positions = LinkGraphLayout.layout(
-                        nodeIds = data.nodes.map { it.id },
-                        edges = data.edges,
-                    ),
+                    positions = positioner.positionsFor(data),
                 )
             }
             .flowOn(Dispatchers.Default)

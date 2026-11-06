@@ -1,6 +1,7 @@
 package app.nota.feature.graph
 
 import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -115,5 +116,48 @@ class LinkGraphLayoutTest {
                 (p.values.maxOf { it.y } - p.values.minOf { it.y }),
         )
         assertTrue(spread > 0f)
+    }
+
+    @Test
+    fun iterationScheduleMatchesThePreCapScheduleForRealisticSizes() {
+        // The work cap (Phase 4.4 fix round) must not move a
+        // single realistic map: for every size a real library
+        // plausibly reaches, the step count is exactly the
+        // classic min(300, 100 + n).
+        for (n in 2..300) {
+            assertEquals(
+                "n=$n",
+                min(LinkGraphLayout.MAX_ITERATIONS, 100 + n),
+                LinkGraphLayout.iterationsFor(n),
+            )
+        }
+    }
+
+    @Test
+    fun layoutWorkStaysUnderThePairOperationBudget() {
+        for (n in listOf(301, 400, 1_000, 5_000)) {
+            val pairsPerIteration = n.toLong() * (n - 1) / 2
+            val iterations = LinkGraphLayout.iterationsFor(n)
+            val total = pairsPerIteration * iterations
+            assertTrue(
+                "n=$n work $total exceeds the budget",
+                total <= LinkGraphLayout.MAX_PAIR_OPERATIONS,
+            )
+            assertTrue("n=$n must still simulate", iterations >= 1)
+        }
+    }
+
+    @Test
+    fun thousandNodeGraphStaysFiniteAndDeterministic() {
+        val ids = (1..1_000).map { "n$it" }
+        val edges = (1 until 1_000).map { edge("n$it", "n${it + 1}") } +
+            listOf(edge("n1", "n500"), edge("n250", "n750"), edge("n1000", "n1"))
+        val first = LinkGraphLayout.layout(ids, edges)
+        val second = LinkGraphLayout.layout(ids, edges)
+        assertEquals(1_000, first.size)
+        assertEquals(first, second)
+        for (point in first.values) {
+            assertTrue(point.x.isFinite() && point.y.isFinite())
+        }
     }
 }
