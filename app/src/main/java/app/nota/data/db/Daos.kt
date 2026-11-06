@@ -54,6 +54,10 @@ interface NoteDao {
     @Query("SELECT * FROM notes")
     suspend fun getAll(): List<NoteEntity>
 
+    /** Every note, observed (Phase 4.4: the link graph's node metadata). */
+    @Query("SELECT * FROM notes")
+    fun observeAll(): Flow<List<NoteEntity>>
+
     /** Notes that can be the target of a [[backlink]] (not trashed/locked). */
     @Query("SELECT * FROM notes WHERE trashedAt IS NULL AND locked = 0 ORDER BY title COLLATE NOCASE ASC")
     fun observeLinkable(): Flow<List<NoteEntity>>
@@ -248,6 +252,26 @@ interface NoteLinkDao {
         """,
     )
     fun observeIncoming(noteId: String): Flow<List<NoteEntity>>
+
+    /**
+     * Notes that [noteId] links TO ("Links"), newest first. The target
+     * side filters trash only: a locked target stays listed by title,
+     * mirroring how the notes list shows locked notes (opening it
+     * lands on its lock gate).
+     */
+    @Query(
+        """
+        SELECT n.* FROM notes n
+        JOIN note_links l ON l.targetId = n.id
+        WHERE l.sourceId = :noteId AND n.trashedAt IS NULL
+        ORDER BY n.updatedAt DESC
+        """,
+    )
+    fun observeOutgoing(noteId: String): Flow<List<NoteEntity>>
+
+    /** Every stored edge (Phase 4.4: the link graph's raw material). */
+    @Query("SELECT * FROM note_links")
+    fun observeAll(): Flow<List<NoteLinkEntity>>
 
     @Query("SELECT COUNT(*) FROM note_links")
     suspend fun count(): Int

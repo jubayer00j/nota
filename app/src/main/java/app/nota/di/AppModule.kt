@@ -27,6 +27,7 @@ import app.nota.data.templates.TemplateRepository
 import app.nota.feature.ask.AskViewModel
 import app.nota.feature.editor.PlainNoteEditorViewModel
 import app.nota.feature.editor.RichNoteEditorViewModel
+import app.nota.feature.graph.LinkGraphViewModel
 import app.nota.feature.notes.NotesViewModel
 import app.nota.feature.search.SearchViewModel
 import app.nota.feature.templates.TemplatesViewModel
@@ -148,4 +149,7 @@ val appModule = module {
             accountIdFlow = get<DatabaseProvider>().accountId,
         )
     }
+    // Phase 4.4: the link graph map over the repository's
+    // backlink observation seams.
+    viewModel { LinkGraphViewModel(get()) }
 }

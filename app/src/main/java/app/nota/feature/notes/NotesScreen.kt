@@ -101,6 +101,7 @@ private fun emptyText(filter: NotesFilter): String = when (filter) {
 fun NotesScreen(
     onOpenNote: (String) -> Unit = {},
     onOpenSearch: () -> Unit = {},
+    onOpenGraph: () -> Unit = {},
     viewModel: NotesViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -304,6 +305,10 @@ fun NotesScreen(
                                 DropdownMenuItem(
                                     text = { Text("Trash") },
                                     onClick = { viewModel.setFilter(NotesFilter.Trash); overflowExpanded = false },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Link graph") },
+                                    onClick = { onOpenGraph(); overflowExpanded = false },
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Manage folders") },
