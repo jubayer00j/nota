@@ -52,6 +52,18 @@ val MIGRATION_2_3: Migration = object : Migration(2, 3) {
  * statements match TombstoneEntity / SyncMetaEntity exactly so
  * Room's post-migration schema validation passes.
  */
+/**
+ * Phase 5.1 (Reminders) adds the alertType column to reminders —
+ * "notification" vs "phone-alarm" (1.x parity). A plain ADD COLUMN in
+ * the MIGRATION_3_4 style; existing rows default to "notification",
+ * which is exactly how every pre-5.1 reminder behaved.
+ */
+val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `reminders` ADD COLUMN `alertType` TEXT NOT NULL DEFAULT 'notification'")
+    }
+}
+
 val MIGRATION_4_5: Migration = object : Migration(4, 5) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL(

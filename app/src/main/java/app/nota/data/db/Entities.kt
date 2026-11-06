@@ -147,6 +147,16 @@ data class ReminderEntity(
     val repeatRule: String? = null,
     val enabled: Boolean = true,
     val createdAt: Long,
+    /**
+     * Phase 5.1: how the reminder alerts — "notification" (AlarmManager +
+     * notification, the default) or "phone-alarm" (handed to the device
+     * Clock app at set time; never armed locally). Values are the
+     * app.nota.data.reminders.ReminderAlertType constants, mirroring 1.x's
+     * alertType. Device-local by design: the backup crossover (BxReminder)
+     * carries no alertType, so a restored reminder comes back as a
+     * notification reminder (the shipped Phase 2c contract).
+     */
+    val alertType: String = "notification",
 )
 
 /** Local-only version history (never synced/backed up, spec §7). */

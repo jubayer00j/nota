@@ -22,6 +22,24 @@
         android:name="android.hardware.fingerprint"
         android:required="false" />
 
+    <!-- Phase 5.1 Reminders: notifications (runtime-granted on API
+         33+, requested in context when a reminder is first set),
+         exact alarms (API 31+; the app falls back to inexact
+         scheduling and says so when not granted), and boot
+         rescheduling. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Phase 5.1: package visibility for the Clock-app hand-off —
+         resolving ACTION_SET_ALARM on API 30+ needs the intent
+         declared here. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.SET_ALARM" />
+        </intent>
+    </queries>
+
     <application
         android:name="app.nota.NotaApplication"
         android:allowBackup="true"
@@ -42,5 +60,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Phase 5.1: alarm delivery (only Nota's own PendingIntents
+             can reach it) and boot / clock-change rescheduling. -->
+        <receiver
+            android:name="app.nota.data.reminders.ReminderAlarmReceiver"
+            android:exported="false" />
+        <receiver
+            android:name="app.nota.data.reminders.ReminderRescheduleReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

@@ -129,6 +129,27 @@ class NotaApplication : Application() {
                     }
             }
         }
+        // Phase 5.1: reminders. Create the notification channel,
+        // reconcile the device-global alarm set with the active
+        // account's tables at process start (covers alarms lost to a
+        // reboot the boot receiver missed and any drift while the
+        // process was dead), then keep reconciling on every
+        // reminder/note change and account switch via the
+        // ReminderReconciler's table observers.
+        runCatching {
+            app.nota.data.reminders.ReminderNotifications.ensureChannel(this@NotaApplication)
+        }
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val koin = org.koin.core.context.GlobalContext.get()
+                val provider = koin.get<DatabaseProvider>()
+                val scheduler = koin.get<app.nota.data.reminders.ReminderScheduler>()
+                scheduler.rescheduleAll()
+                app.nota.data.reminders.ReminderReconciler.start(
+                    CoroutineScope(Dispatchers.IO), provider, scheduler,
+                )
+            }
+        }
         // Phase 4.2: semantic-index maintenance on the same
         // post-edit rhythm — note-list emissions are re-debounced
         // at 15 s, then the index reconciles: vectors for locked,
