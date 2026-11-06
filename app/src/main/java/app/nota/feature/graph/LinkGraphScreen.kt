@@ -164,6 +164,7 @@ private fun GraphCanvas(
     var scale by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var fittedFor by remember { mutableStateOf<Set<String>?>(null) }
+    var coverageCheckedFor by remember { mutableStateOf<Map<String, GraphPoint>?>(null) }
 
     // Fit the whole map into the viewport when the node set first
     // appears or changes, and whenever a changed link structure
@@ -193,7 +194,15 @@ private fun GraphCanvas(
             viewportHeight = viewportSize.height,
             margin = NODE_RADIUS_UNITS,
         )
-        if (!LinkGraphFit.shouldFit(fittedFor, ids, exceeds)) return@LaunchedEffect
+        // Coverage is only re-checked when a NEW layout lands
+        // (the positioner hands back the same positions instance
+        // for an unchanged model): a title-only re-emission must
+        // not yank a view the user deliberately panned.
+        val layoutChanged = coverageCheckedFor !== graph.positions
+        coverageCheckedFor = graph.positions
+        if (!LinkGraphFit.shouldFit(fittedFor, ids, exceeds && layoutChanged)) {
+            return@LaunchedEffect
+        }
         val margin = NODE_RADIUS_UNITS + 70f // disc + label room
         val boundsW = max(maxX - minX + 2f * margin, 1f)
         val boundsH = max(maxY - minY + 2f * margin, 1f)
