@@ -54,13 +54,9 @@ class CaptureIntake(
             CaptureIntents.DOOR_TODAY -> CaptureRequest.Today(id, source)
             else -> CaptureRequest.NewNote(id, source)
         }
-        scope.launch {
-            stageMutex.withLock {
-                store.stage(
-                    CaptureRecord(id = id, accountId = accountId, request = request),
-                )
-            }
-        }
+        store.stage(
+            CaptureRecord(id = id, accountId = accountId, request = request),
+        )
     }
 
     /** Stages a share intent: parse is cheap (extras only); the
