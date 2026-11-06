@@ -1,8 +1,12 @@
 package app.nota.feature.graph
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,7 +33,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -44,6 +50,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import app.nota.ui.theme.NotaSpacing
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -208,31 +215,31 @@ private fun GraphCanvas(
             .semantics { contentDescription = description }
             .onSizeChanged { viewportSize = it }
             .pointerInput(graph.data) {
-                detectTransformGestures { centroid, panChange, zoomChange, _ ->
-                    val newScale = (scale * zoomChange).coerceIn(0.05f, 6f)
-                    pan = centroid - (centroid - pan) * (newScale / scale) + panChange
-                    scale = newScale
-                }
-            }
-            .pointerInput(graph.data) {
-                detectTapGestures { tap ->
-                    val gx = (tap.x - pan.x) / scale
-                    val gy = (tap.y - pan.y) / scale
-                    val minHitPx = with(density) { 24.dp.toPx() }
-                    val threshold = max(NODE_HIT_RADIUS_UNITS, minHitPx / scale)
-                    var bestId: String? = null
-                    var bestDist = Float.MAX_VALUE
-                    for ((id, point) in graph.positions) {
-                        val dx = point.x - gx
-                        val dy = point.y - gy
-                        val dist = sqrt(dx * dx + dy * dy)
-                        if (dist < bestDist) {
-                            bestDist = dist
-                            bestId = id
+                detectMapGestures(
+                    onTransform = { centroid, panChange, zoomChange ->
+                        val newScale = (scale * zoomChange).coerceIn(0.05f, 6f)
+                        pan = centroid - (centroid - pan) * (newScale / scale) + panChange
+                        scale = newScale
+                    },
+                    onTap = { tap ->
+                        val gx = (tap.x - pan.x) / scale
+                        val gy = (tap.y - pan.y) / scale
+                        val minHitPx = with(density) { 24.dp.toPx() }
+                        val threshold = max(NODE_HIT_RADIUS_UNITS, minHitPx / scale)
+                        var bestId: String? = null
+                        var bestDist = Float.MAX_VALUE
+                        for ((id, point) in graph.positions) {
+                            val dx = point.x - gx
+                            val dy = point.y - gy
+                            val dist = sqrt(dx * dx + dy * dy)
+                            if (dist < bestDist) {
+                                bestDist = dist
+                                bestId = id
+                            }
                         }
-                    }
-                    if (bestId != null && bestDist <= threshold) onOpenNote(bestId)
-                }
+                        if (bestId != null && bestDist <= threshold) onOpenNote(bestId)
+                    },
+                )
             },
     ) {
         fun screen(point: GraphPoint) = Offset(point.x * scale + pan.x, point.y * scale + pan.y)
@@ -277,6 +284,68 @@ private fun GraphCanvas(
                 )
             }
         }
+    }
+}
+
+/**
+ * Pan / pinch-zoom / tap for the map, detected in ONE gesture
+ * stream (Phase 4.4 fix round). Two chained pointerInput blocks —
+ * one transform detector, one tap detector — could both see the
+ * same gesture: a pinch ending with a finger lifting off near a
+ * node registered as a tap and opened a note nobody meant to
+ * open. Here a gesture that crosses the touch slop (the same
+ * rule detectTransformGestures uses) is a transform for good and
+ * can never also fire as a tap; only a clean press-and-release
+ * that never leaves the slop taps.
+ */
+private suspend fun PointerInputScope.detectMapGestures(
+    onTransform: (centroid: Offset, panChange: Offset, zoomChange: Float) -> Unit,
+    onTap: (Offset) -> Unit,
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var pastTouchSlop = false
+        var zoomAccumulator = 1f
+        var panAccumulator = Offset.Zero
+        var upPosition: Offset? = null
+        var cancelled = false
+        do {
+            val event = awaitPointerEvent()
+            cancelled = event.changes.any { it.isConsumed }
+            if (!cancelled) {
+                val zoomChange = event.calculateZoom()
+                val panChange = event.calculatePan()
+                if (!pastTouchSlop) {
+                    zoomAccumulator *= zoomChange
+                    panAccumulator += panChange
+                    val centroidSize = event.calculateCentroidSize(useTouchSlop = false)
+                    val zoomMotion = abs(1f - zoomAccumulator) * centroidSize
+                    val panMotion = panAccumulator.getDistance()
+                    if (zoomMotion > viewConfiguration.touchSlop ||
+                        panMotion > viewConfiguration.touchSlop
+                    ) {
+                        pastTouchSlop = true
+                    }
+                }
+                if (pastTouchSlop) {
+                    val centroid = event.calculateCentroid(useTouchSlop = false)
+                    if (zoomChange != 1f || panChange != Offset.Zero) {
+                        onTransform(centroid, panChange, zoomChange)
+                    }
+                    for (change in event.changes) {
+                        if (change.positionChanged()) change.consume()
+                    }
+                }
+                // Where the tracked finger lifts is the tap point
+                // if this gesture never became a transform.
+                for (change in event.changes) {
+                    if (change.id == down.id && !change.pressed) {
+                        upPosition = change.position
+                    }
+                }
+            }
+        } while (!cancelled && event.changes.any { it.pressed })
+        if (!pastTouchSlop) upPosition?.let(onTap)
     }
 }
 
