@@ -79,6 +79,29 @@ class AskNotaTest {
     }
 
     @Test
+    fun promptBoundsAPathologicalTitleSoTheTotalCapStillHolds() {
+        // Codex PR #25 P2: the title rides into the prompt
+        // untruncated and uncounted, and the shrink passes can
+        // only shrink text and the question — a 30k title
+        // defeated the 24k cap outright.
+        val built = AskNota.buildAskPrompt(
+            "apple?",
+            listOf(excerpt(noteId = "n1", title = "T".repeat(30_000), text = "apple text")),
+        )
+        assertTrue(built.prompt.length <= AI_MAX_INPUT_CHARS)
+        assertEquals(1, built.excerpts.size)
+        assertTrue(built.excerpts[0].title.length <= ASK_TITLE_BUDGET_CHARS)
+        // The citation the model can earn still maps back to
+        // the source note + chunk.
+        val result = AskNota.parseAskAnswer("Answer [1].", built.excerpts)
+        assertTrue(result is AskAnswerResult.Answer)
+        assertEquals(
+            listOf(AskCitation(1, "n1", 0)),
+            (result as AskAnswerResult.Answer).citations,
+        )
+    }
+
+    @Test
     fun promptIncludesThePreviousTurnLabelledAsConversationWhenBudgetRemains() {
         val built = AskNota.buildAskPrompt(
             "follow-up?",

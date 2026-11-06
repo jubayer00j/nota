@@ -49,12 +49,19 @@ class AskNotaRobolectricTest {
         var chatReply: String = ASK_REFUSAL_SENTENCE
         var transportFailure = false
 
+        /** Test hook fired inside every call — lets a test land
+         *  a state change (a lock) in the middle of a retrieval
+         *  or generation call, between the snapshot and the
+         *  response. */
+        var onCall: (suspend () -> Unit)? = null
+
         override suspend fun post(
             url: String,
             headers: Map<String, String>,
             jsonBody: String,
         ): AiHttpResponse {
             calls += Call(url, jsonBody)
+            onCall?.invoke()
             if (transportFailure) throw AiNetworkException(IOException("no route"))
             return when {
                 url.contains(":embedContent") -> {
@@ -225,6 +232,36 @@ class AskNotaRobolectricTest {
         val prompt = http.chatCalls.single().body
         assertFalse(prompt.contains("topsecret"))
         assertFalse(prompt.contains("Secret orchard"))
+    }
+
+    @Test
+    fun noteLockedDuringTheQuestionEmbedContributesNoExcerpt() = runBlocking {
+        // Codex PR #25 P1: candidates were validated BEFORE the
+        // question-embedding call and their pre-request
+        // snapshots used after it, so a lock landing during the
+        // call — seconds on a phone — leaked the note into the
+        // prompt. Retrieval now re-validates after the embed.
+        saveGeminiKey()
+        val open = notes.createRichNote("Open orchard", "<p>apple trees</p>")
+        val secret = notes.createRichNote("Secret orchard", "<p>apple apple topsecret</p>")
+        indexer.reconcile(account)
+
+        var lockLanded = false
+        http.onCall = {
+            if (!lockLanded) {
+                lockLanded = true
+                // The flag-only lock, landed mid-embed: title and
+                // plaintext unchanged, so the fingerprint still
+                // matches and ONLY the eligibility re-check can
+                // keep this note out.
+                val row = notes.getById(secret.id)!!
+                notes.upsert(row.copy(locked = true, lockRecordJson = "{}"))
+            }
+        }
+
+        val excerpts = indexer.retrieveAskExcerpts(account, "apple")
+        assertTrue(lockLanded)
+        assertEquals(listOf(open.id), excerpts.map { it.noteId })
     }
 
     @Test

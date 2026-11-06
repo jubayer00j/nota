@@ -199,4 +199,24 @@ class AskThreadTest {
             sourceCardsFor(sent, citations),
         )
     }
+
+    /* ---------------- Post-generation citation stripping ---------------- */
+
+    @Test
+    fun stripRemovesOnlyTheRemovedNumbersAndKeepsSurvivingOnesUnrenumbered() {
+        assertEquals(
+            "Apples ripen [1]. Bananas ripen .",
+            stripCitationMarkers("Apples ripen [1]. Bananas ripen [2].", setOf(2)),
+        )
+        assertEquals(
+            "Apples ripen [1].",
+            stripCitationMarkers("Apples ripen [1].", emptySet()),
+        )
+        // A bracketed number that was never a citation number
+        // in the removed set stays literal.
+        assertEquals(
+            "See [12] and [1].",
+            stripCitationMarkers("See [12] and [1].", setOf(2)),
+        )
+    }
 }
