@@ -167,10 +167,27 @@ fun NotesScreen(
      * job (a newer swipe took the window over) never runs its
      * resolution block, so no batch can drop another's ids.
      */
-    fun swipeWithUndo(note: NoteEntity, message: String, exclude: Boolean = true, action: () -> Unit) {
-        action()
-        pendingUndo += note
+    // Phase 6.1: list rows are lightweight projections, so the undo
+    // snapshot no longer rides in from the composition — the ViewModel
+    // fetches the pre-op entity and hands it to the [action]'s snapshot
+    // sink before its write lands (see NotesViewModel.swipeOp). The
+    // batching contract above is unchanged: snapshots queue while the
+    // window is live and resolve in reverse order. [undoWindowOpen]
+    // closes the one new hole the async snapshot opens — a snapshot
+    // that somehow arrived after its window resolved must not leak
+    // into the NEXT batch and resurrect state there.
+    var undoWindowOpen by remember { mutableStateOf(false) }
+    fun swipeWithUndo(
+        note: app.nota.data.db.NoteListRow,
+        message: String,
+        exclude: Boolean = true,
+        action: (onSnapshot: (NoteEntity) -> Unit) -> Unit,
+    ) {
         if (exclude) dismissedIds += note.id
+        undoWindowOpen = true
+        action { snapshot ->
+            if (undoWindowOpen) pendingUndo += snapshot
+        }
         undoJob?.cancel()
         undoJob = scope.launch {
             val result = snackbarHostState.showSnackbar(message = message, actionLabel = "Undo")
@@ -179,6 +196,7 @@ fun NotesScreen(
                 pendingUndo.asReversed().forEach { viewModel.upsert(it) }
             }
             pendingUndo.clear()
+            undoWindowOpen = false
             dismissedIds.removeAll(batchIds)
         }
     }
@@ -188,7 +206,7 @@ fun NotesScreen(
     // stripped note and pretend the data came back. No Undo here
     // (re-review fix) — the message says plainly that it is permanent.
     // Phase 3.5: the row still leaves at commit via [dismissedIds].
-    fun swipeNoUndo(note: NoteEntity, message: String, action: () -> Unit) {
+    fun swipeNoUndo(note: app.nota.data.db.NoteListRow, message: String, action: () -> Unit) {
         action()
         dismissedIds += note.id
         scope.launch {
@@ -197,21 +215,21 @@ fun NotesScreen(
     }
 
     /** Performs a resolved swipe behaviour (Phase 3.5, D2/D3). */
-    fun performSwipe(kind: SwipeKind, note: NoteEntity) {
+    fun performSwipe(kind: SwipeKind, note: app.nota.data.db.NoteListRow) {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         when (kind) {
             SwipeKind.ARCHIVE ->
-                swipeWithUndo(note, "Note archived") { viewModel.archive(note) }
+                swipeWithUndo(note, "Note archived") { sink -> viewModel.archive(note, sink) }
             SwipeKind.TRASH ->
-                swipeWithUndo(note, "Note moved to trash") { viewModel.trash(note) }
+                swipeWithUndo(note, "Note moved to trash") { sink -> viewModel.trash(note, sink) }
             SwipeKind.RESTORE ->
-                swipeWithUndo(note, "Note restored") { viewModel.restore(note) }
+                swipeWithUndo(note, "Note restored") { sink -> viewModel.restore(note, sink) }
             SwipeKind.PIN ->
                 swipeWithUndo(
                     note,
                     if (note.pinned) "Note unpinned" else "Note pinned",
                     exclude = false,
-                ) { viewModel.setPinned(note, !note.pinned) }
+                ) { sink -> viewModel.setPinned(note, !note.pinned, sink) }
             SwipeKind.DELETE_FOREVER ->
                 swipeNoUndo(note, "Note deleted permanently") { viewModel.deletePermanently(note) }
         }
@@ -449,7 +467,7 @@ fun NotesScreen(
                         ) {
                             NoteCard(
                                 title = note.title,
-                                snippet = if (note.locked) "" else note.plainText,
+                                snippet = if (note.locked) "" else note.excerpt,
                                 updatedLabel = formatUpdated(note.updatedAt),
                                 folderName = item.folderName,
                                 tagNames = item.tagNames,

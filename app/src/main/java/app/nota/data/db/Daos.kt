@@ -8,6 +8,53 @@ import androidx.room.Query
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
+/**
+ * Phase 6.1: the lightweight note projection every list-shaped surface
+ * renders from. Deliberately NOT a [NoteEntity]: no contentHtml, no
+ * lockEnvelope/lockRecordJson, and the plain text arrives pre-cut to a
+ * snippet ([excerpt], 240 chars in SQL). A locked note's excerpt is
+ * empty by construction (its stored plainText is empty under the seal),
+ * so a row can never leak locked body text.
+ */
+data class NoteListRow(
+    val id: String,
+    val folderId: String?,
+    val title: String,
+    val excerpt: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+    val pinned: Boolean,
+    val favourite: Boolean,
+    val archived: Boolean,
+    val trashedAt: Long?,
+    val colorArgb: Int?,
+    val dailyDate: String?,
+    val locked: Boolean,
+)
+
+/** Phase 6.1: the (id, title, plainText) input of the semantic index's
+ *  eligibility count — the only columns that check reads. */
+data class NoteTextRow(
+    val id: String,
+    val title: String,
+    val plainText: String,
+)
+
+/** Phase 6.1: a [[backlink]] edge endpoint at footer weight — the
+ *  editor's Links / Linked-from lists render titles and open by id. */
+data class NoteLinkRow(
+    val id: String,
+    val title: String,
+    val updatedAt: Long,
+)
+
+/** Phase 6.1: a [[ ]] autocomplete target — id + title are all the
+ *  suggestion list reads. */
+data class NoteLinkTarget(
+    val id: String,
+    val title: String,
+)
+
 @Dao
 interface NoteDao {
     /** Phase 5.1: every note incl. trashed/archived — the reminder
@@ -90,6 +137,101 @@ interface NoteDao {
         """,
     )
     suspend fun searchFts(query: String): List<NoteEntity>
+
+    // --- Phase 6.1: lightweight list rows --------------------------------
+    // The list-shaped surfaces (notes list, Today, search) render title,
+    // a <=3-line snippet, dates and flags only — yet the SELECT * queries
+    // above materialise every note's full HTML body, full plain text and
+    // lock columns on every emission. The row queries below project only
+    // what those surfaces read; the excerpt is cut in SQL so even the
+    // plain-text column crosses the cursor at snippet size. Locked notes
+    // keep the seal trivially: their stored plainText is already empty,
+    // and the excerpt can never contain body text the row did not hold.
+
+    @Query(
+        """
+        SELECT id, folderId, title, substr(plainText, 1, 240) AS excerpt,
+               createdAt, updatedAt, pinned, favourite, archived, trashedAt,
+               colorArgb, dailyDate, locked
+        FROM notes WHERE trashedAt IS NULL AND archived = 0
+        ORDER BY pinned DESC, updatedAt DESC
+        """,
+    )
+    fun observeActiveRows(): Flow<List<NoteListRow>>
+
+    @Query(
+        """
+        SELECT id, folderId, title, substr(plainText, 1, 240) AS excerpt,
+               createdAt, updatedAt, pinned, favourite, archived, trashedAt,
+               colorArgb, dailyDate, locked
+        FROM notes WHERE trashedAt IS NULL AND archived = 1
+        ORDER BY updatedAt DESC
+        """,
+    )
+    fun observeArchivedRows(): Flow<List<NoteListRow>>
+
+    @Query(
+        """
+        SELECT id, folderId, title, substr(plainText, 1, 240) AS excerpt,
+               createdAt, updatedAt, pinned, favourite, archived, trashedAt,
+               colorArgb, dailyDate, locked
+        FROM notes WHERE trashedAt IS NOT NULL
+        ORDER BY trashedAt DESC
+        """,
+    )
+    fun observeTrashedRows(): Flow<List<NoteListRow>>
+
+    @Query(
+        """
+        SELECT id, folderId, title, substr(plainText, 1, 240) AS excerpt,
+               createdAt, updatedAt, pinned, favourite, archived, trashedAt,
+               colorArgb, dailyDate, locked
+        FROM notes WHERE id = :id
+        """,
+    )
+    suspend fun getRowById(id: String): NoteListRow?
+
+    /** FTS keyword search at row weight (Phase 6.1): same match and
+     *  ordering as [searchFts], projected for the search screen. */
+    @Query(
+        """
+        SELECT n.id, n.folderId, n.title, substr(n.plainText, 1, 240) AS excerpt,
+               n.createdAt, n.updatedAt, n.pinned, n.favourite, n.archived,
+               n.trashedAt, n.colorArgb, n.dailyDate, n.locked
+        FROM notes n
+        JOIN notes_fts f ON f.noteId = n.id
+        WHERE notes_fts MATCH :query AND n.trashedAt IS NULL AND n.archived = 0
+        ORDER BY n.updatedAt DESC
+        """,
+    )
+    suspend fun searchFtsRows(query: String): List<NoteListRow>
+
+    /** Change-signal query (Phase 6.1): the process-lifetime background
+     *  triggers in NotaApplication use the active list purely as a
+     *  "something changed" pulse and discard the payload. Observing ids
+     *  keeps Room's invalidation semantics (an emission per notes-table
+     *  write) while collapsing the per-emission cost to one small string
+     *  per note — no bodies, no lock columns. */
+    @Query("SELECT id FROM notes WHERE trashedAt IS NULL AND archived = 0")
+    fun observeActiveIds(): Flow<List<String>>
+
+    /** Semantic-index eligibility input (Phase 6.1): exactly the columns
+     *  the eligibility + blank checks read, for notes that pass the
+     *  lock/trash/archive gate in SQL. Replaces a full-entity getAll()
+     *  on the indexer's status path. */
+    @Query(
+        "SELECT id, title, plainText FROM notes " +
+            "WHERE locked = 0 AND trashedAt IS NULL AND archived = 0",
+    )
+    suspend fun getIndexCandidates(): List<NoteTextRow>
+
+    /** [[ ]] autocomplete targets at (id, title) weight (Phase 6.1):
+     *  same eligibility and ordering as [observeLinkable]. */
+    @Query(
+        "SELECT id, title FROM notes WHERE trashedAt IS NULL AND locked = 0 " +
+            "ORDER BY title COLLATE NOCASE ASC",
+    )
+    fun observeLinkableTargets(): Flow<List<NoteLinkTarget>>
 }
 
 @Dao
@@ -283,6 +425,29 @@ interface NoteLinkDao {
         """,
     )
     fun observeOutgoing(noteId: String): Flow<List<NoteEntity>>
+
+    /** [observeIncoming] at footer weight (Phase 6.1): same join, same
+     *  filters, same order — (id, title, updatedAt) only. */
+    @Query(
+        """
+        SELECT n.id, n.title, n.updatedAt FROM notes n
+        JOIN note_links l ON l.sourceId = n.id
+        WHERE l.targetId = :noteId AND n.trashedAt IS NULL AND n.locked = 0
+        ORDER BY n.updatedAt DESC
+        """,
+    )
+    fun observeIncomingRows(noteId: String): Flow<List<NoteLinkRow>>
+
+    /** [observeOutgoing] at footer weight (Phase 6.1). */
+    @Query(
+        """
+        SELECT n.id, n.title, n.updatedAt FROM notes n
+        JOIN note_links l ON l.targetId = n.id
+        WHERE l.sourceId = :noteId AND n.trashedAt IS NULL
+        ORDER BY n.updatedAt DESC
+        """,
+    )
+    fun observeOutgoingRows(noteId: String): Flow<List<NoteLinkRow>>
 
     /** Every stored edge (Phase 4.4: the link graph's raw material). */
     @Query("SELECT * FROM note_links")

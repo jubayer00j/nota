@@ -1,6 +1,6 @@
 package app.nota.domain
 
-import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteListRow
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -8,21 +8,28 @@ import org.junit.Test
 class SmartFoldersTest {
     private val now = 1_700_000_000_000L
 
+    // Phase 6.1: the predicates run over the lightweight list row now
+    // (the only fields they ever read are the row's flags + updatedAt).
     private fun note(
         updatedAt: Long = now,
         favourite: Boolean = false,
         locked: Boolean = false,
         archived: Boolean = false,
         trashedAt: Long? = null,
-    ) = NoteEntity(
+    ) = NoteListRow(
         id = "n1",
+        folderId = null,
         title = "t",
+        excerpt = "",
         createdAt = now,
         updatedAt = updatedAt,
+        pinned = false,
         favourite = favourite,
-        locked = locked,
         archived = archived,
         trashedAt = trashedAt,
+        colorArgb = null,
+        dailyDate = null,
+        locked = locked,
     )
 
     @Test

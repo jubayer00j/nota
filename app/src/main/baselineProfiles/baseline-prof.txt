@@ -1,0 +1,55 @@
+# Nota baseline profile (Phase 6.1) — HAND-AUTHORED.
+#
+# Why hand-authored: generating a profile needs a device/emulator
+# session (Gradle Managed Devices / a physical device run), which
+# this project's CI cannot provide (no KVM, no J7 in the cloud).
+# These rules cover the two paths that decide how the app FEELS on
+# the J7 Prime: cold start to an interactive notes list, and notes-
+# list scrolling. androidx.profileinstaller (already a dependency)
+# installs the merged profile at first launch; until now the APK
+# shipped with NO profile at all, so a sideloaded install had
+# nothing for ART to pre-compile from.
+#
+# Rule forms used (human-readable format): a bare class descriptor
+# includes the class on the startup path; HSPL-prefixed lines name
+# hot methods. Unknown or stale rules are ignored by ART — the
+# profile is best-effort by design and can never break the app.
+
+# ---- Startup: Application, Koin graph, identity, lock posture ----
+HSPLapp/nota/NotaApplication;->onCreate()V
+Lapp/nota/NotaApplication;
+Lapp/nota/di/AppModuleKt;
+Lapp/nota/data/db/DatabaseProvider;
+Lapp/nota/data/db/NotaDatabase;
+Lapp/nota/data/db/NotaDatabase_Impl;
+Lapp/nota/data/auth/AuthManager;
+Lapp/nota/data/preferences/PreferencesRepository;
+Lapp/nota/data/security/AppLockManager;
+Lapp/nota/data/repository/NoteRepository;
+Lapp/nota/data/repository/LibraryRepository;
+
+# ---- Startup: first frame — activity, theme, nav shell ----
+HSPLapp/nota/MainActivity;->onCreate(Landroid/os/Bundle;)V
+Lapp/nota/MainActivity;
+Lapp/nota/ui/theme/ThemeKt;
+Lapp/nota/ui/theme/ColorKt;
+Lapp/nota/ui/theme/TypeKt;
+Lapp/nota/ui/theme/SpacingKt;
+Lapp/nota/ui/navigation/NotaNavKt;
+
+# ---- Notes list: first screen + scroll path ----
+Lapp/nota/feature/notes/NotesScreenKt;
+Lapp/nota/feature/notes/NotesViewModel;
+Lapp/nota/feature/notes/NotesViewModel$LibrarySnapshot;
+Lapp/nota/feature/notes/SwipeActionsKt;
+Lapp/nota/ui/components/ComponentsKt;
+Lapp/nota/data/db/NoteDao_Impl;
+Lapp/nota/data/db/NoteListRow;
+Lapp/nota/domain/SmartFolders;
+Lapp/nota/domain/SmartFolderKey;
+
+# ---- Room runtime pieces every query walks through ----
+Lapp/nota/data/db/FolderDao_Impl;
+Lapp/nota/data/db/TagDao_Impl;
+Lapp/nota/data/db/AttachmentDao_Impl;
+Lapp/nota/data/db/NoteFtsDao_Impl;

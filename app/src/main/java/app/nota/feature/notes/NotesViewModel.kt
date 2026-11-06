@@ -41,9 +41,13 @@ enum class SortOrder(val label: String) {
     TitleAsc("Title A-Z"),
 }
 
-/** A note enriched with everything its card renders. */
+/** A note enriched with everything its card renders. Phase 6.1: the
+ *  note itself is the lightweight [app.nota.data.db.NoteListRow]
+ *  projection — no body, no lock columns; anything that needs the full
+ *  entity (swipe ops, batch ops, the undo snapshot) fetches it by id
+ *  at action time. */
 data class NoteListItem(
-    val note: NoteEntity,
+    val note: app.nota.data.db.NoteListRow,
     val folderName: String? = null,
     val folderColorArgb: Int? = null,
     val tagNames: List<String> = emptyList(),
@@ -99,9 +103,9 @@ class NotesViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SwipePreferences())
 
     private fun libraryState(): Flow<NotesUiState> = combine(
-        repository.observeActive(),
-        repository.observeArchived(),
-        repository.observeTrashed(),
+        repository.observeActiveRows(),
+        repository.observeArchivedRows(),
+        repository.observeTrashedRows(),
         repository.observeFolders(),
         repository.observeTags(),
     ) { active, archived, trashed, folders, tags -> LibrarySnapshot(active, archived, trashed, folders, tags) }
@@ -124,9 +128,9 @@ class NotesViewModel(
         }
 
     private data class LibrarySnapshot(
-        val active: List<NoteEntity>,
-        val archived: List<NoteEntity>,
-        val trashed: List<NoteEntity>,
+        val active: List<app.nota.data.db.NoteListRow>,
+        val archived: List<app.nota.data.db.NoteListRow>,
+        val trashed: List<app.nota.data.db.NoteListRow>,
         val folders: List<FolderEntity>,
         val tags: List<TagEntity>,
         val crossRefs: List<NoteTagCrossRef> = emptyList(),
@@ -139,7 +143,7 @@ class NotesViewModel(
             val foldersById = folders.associateBy { it.id }
             val tagIdsByNote = crossRefs.groupBy({ it.noteId }, { it.tagId })
             val attachmentsByNote = attachments.groupBy { it.noteId }
-            fun enrich(note: NoteEntity): NoteListItem {
+            fun enrich(note: app.nota.data.db.NoteListRow): NoteListItem {
                 val noteTagIds = tagIdsByNote[note.id].orEmpty().toSet()
                 val noteAttachments = attachmentsByNote[note.id].orEmpty()
                 return NoteListItem(
@@ -202,24 +206,55 @@ class NotesViewModel(
     }
 
     // Single ops (swipe + editor shortcuts)
-    fun archive(note: NoteEntity) { viewModelScope.launch { repository.setArchived(note, true) } }
-    /** Phase 3.5 (D3): the Pin swipe action (the batch bar has its own). */
-    fun setPinned(note: NoteEntity, pinned: Boolean) { viewModelScope.launch { repository.setPinned(note, pinned) } }
-    fun trash(note: NoteEntity) { viewModelScope.launch { repository.trash(note) } }
-    fun restore(note: NoteEntity) { viewModelScope.launch { repository.restore(note) } }
-    fun upsert(note: NoteEntity) { viewModelScope.launch { repository.upsert(note) } }
-    fun deletePermanently(note: NoteEntity) { viewModelScope.launch { repository.deletePermanently(note) } }
-
-    // Batch ops over the current selection
-    private fun selectedNotes(): List<NoteEntity> {
-        val ids = selectionFlow.value
-        return uiState.value.items.map { it.note }.filter { it.id in ids }
+    //
+    // Phase 6.1: list items are lightweight rows now, so a swipe op
+    // fetches the note's full entity by id at action time. Undoable ops
+    // hand the PRE-OP entity to [onSnapshot] BEFORE the write lands —
+    // fetch and write run in one coroutine, so the snapshot is always
+    // the state the op replaced, exactly what the screen's undo batch
+    // re-upserts (the fidelity SwipeUndoFidelityRobolectricTest pins
+    // at the repository layer is preserved end to end).
+    private fun swipeOp(
+        row: app.nota.data.db.NoteListRow,
+        onSnapshot: (NoteEntity) -> Unit,
+        op: suspend (NoteEntity) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val entity = repository.getById(row.id) ?: return@launch
+            onSnapshot(entity)
+            op(entity)
+        }
     }
-    fun batchPin() { val n = selectedNotes(); viewModelScope.launch { n.forEach { repository.setPinned(it, true) }; clearSelection() } }
-    fun batchArchive() { val n = selectedNotes(); viewModelScope.launch { n.forEach { repository.setArchived(it, true) }; clearSelection() } }
-    fun batchTrash() { val n = selectedNotes(); viewModelScope.launch { n.forEach { repository.trash(it) }; clearSelection() } }
-    fun batchRestore() { val n = selectedNotes(); viewModelScope.launch { n.forEach { repository.restore(it) }; clearSelection() } }
-    fun batchDelete() { val n = selectedNotes(); viewModelScope.launch { n.forEach { repository.deletePermanently(it) }; clearSelection() } }
+
+    fun archive(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Unit) =
+        swipeOp(row, onSnapshot) { repository.setArchived(it, true) }
+    /** Phase 3.5 (D3): the Pin swipe action (the batch bar has its own). */
+    fun setPinned(row: app.nota.data.db.NoteListRow, pinned: Boolean, onSnapshot: (NoteEntity) -> Unit) =
+        swipeOp(row, onSnapshot) { repository.setPinned(it, pinned) }
+    fun trash(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Unit) =
+        swipeOp(row, onSnapshot) { repository.trash(it) }
+    fun restore(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Unit) =
+        swipeOp(row, onSnapshot) { repository.restore(it) }
+    fun upsert(note: NoteEntity) { viewModelScope.launch { repository.upsert(note) } }
+    fun deletePermanently(row: app.nota.data.db.NoteListRow) {
+        viewModelScope.launch {
+            repository.getById(row.id)?.let { repository.deletePermanently(it) }
+        }
+    }
+
+    // Batch ops over the current selection (no undo — see the batch
+    // bar). Phase 6.1: entities are fetched by id inside the op.
+    private suspend fun selectedNotes(): List<NoteEntity> {
+        val ids = selectionFlow.value
+        return uiState.value.items.map { it.note.id }
+            .filter { it in ids }
+            .mapNotNull { repository.getById(it) }
+    }
+    fun batchPin() { viewModelScope.launch { selectedNotes().forEach { repository.setPinned(it, true) }; clearSelection() } }
+    fun batchArchive() { viewModelScope.launch { selectedNotes().forEach { repository.setArchived(it, true) }; clearSelection() } }
+    fun batchTrash() { viewModelScope.launch { selectedNotes().forEach { repository.trash(it) }; clearSelection() } }
+    fun batchRestore() { viewModelScope.launch { selectedNotes().forEach { repository.restore(it) }; clearSelection() } }
+    fun batchDelete() { viewModelScope.launch { selectedNotes().forEach { repository.deletePermanently(it) }; clearSelection() } }
 
     // Folder management (overflow dialog)
     fun createFolder(name: String, colorArgb: Int? = null) { if (name.isNotBlank()) viewModelScope.launch { library.createFolder(name, colorArgb) } }

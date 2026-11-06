@@ -3,7 +3,7 @@ package app.nota.feature.today
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.nota.data.db.DatabaseProvider
-import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteListRow
 import app.nota.data.db.ReminderEntity
 import app.nota.data.repository.NoteRepository
 import java.time.LocalDate
@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 data class DueReminder(val reminder: ReminderEntity, val noteTitle: String)
 
 data class TodayUiState(
-    val pinned: List<NoteEntity> = emptyList(),
+    val pinned: List<NoteListRow> = emptyList(),
     val dueToday: List<DueReminder> = emptyList(),
     val todayDate: String = LocalDate.now().toString(),
 )
@@ -28,7 +28,9 @@ class TodayViewModel(
 ) : ViewModel() {
 
     val uiState: StateFlow<TodayUiState> = combine(
-        repository.observeActive(),
+        // Phase 6.1: rows, not full entities — Today renders pinned
+        // titles/excerpts and a reminder title lookup only.
+        repository.observeActiveRows(),
         // Phase 3a: resolved from the active account's database at
         // ViewModel creation; the shell is keyed by account, so this
         // ViewModel is recreated on every account switch.

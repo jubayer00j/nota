@@ -87,6 +87,12 @@ class NotaApplication : Application() {
         // an up-to-date cycle cheap), plus an edit-debounced trigger —
         // note-list emissions are re-debounced at 15 s, so a burst of
         // typing produces ONE cycle, mirroring the 1.x arrangement.
+        // Phase 6.1: all three process-lifetime collectors below (this
+        // sync trigger, the semantic reconcile trigger, the widget
+        // refresh) observe observeActiveIds() — the id-only change
+        // signal. Their payloads were always discarded; the full-entity
+        // observeActive() they used before re-materialised every note
+        // body in the process on every keystroke save.
         CoroutineScope(Dispatchers.IO).launch {
             runCatching {
                 val koin = org.koin.core.context.GlobalContext.get()
@@ -110,7 +116,7 @@ class NotaApplication : Application() {
                     .flatMapLatest {
                         // `current` is re-read at switch time, so the
                         // observed list is always the ACTIVE account's.
-                        provider.current.noteDao().observeActive()
+                        provider.current.noteDao().observeActiveIds()
                     }
                     .collect {
                         // The emission is only a change signal; the
@@ -166,7 +172,7 @@ class NotaApplication : Application() {
                 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
                 provider.accountId
                     .flatMapLatest {
-                        provider.current.noteDao().observeActive()
+                        provider.current.noteDao().observeActiveIds()
                     }
                     .collect {
                         debounceJob?.cancel()
@@ -203,7 +209,7 @@ class NotaApplication : Application() {
                 provider.accountId
                     .flatMapLatest {
                         kotlinx.coroutines.flow.combine(
-                            provider.current.noteDao().observeActive(),
+                            provider.current.noteDao().observeActiveIds(),
                             provider.current.reminderDao().observeEnabled(),
                             lockManager.settings,
                             lockManager.settingsUnreadable,
