@@ -28,6 +28,9 @@
          scheduling and says so when not granted), and boot
          rescheduling. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Phase 5.4: requested in context at first voice use only
+         (never at app start); denial leaves every other flow alone. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
@@ -37,6 +40,12 @@
     <queries>
         <intent>
             <action android:name="android.intent.action.SET_ALARM" />
+        </intent>
+        <!-- Phase 5.4: package visibility for the speech probe —
+             SpeechRecognizer availability and the default service's
+             enabled state are only readable with this on API 30+. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
         </intent>
     </queries>
 
@@ -100,6 +109,25 @@
             <meta-data
                 android:name="android.service.quicksettings.TOGGLEABLE_TILE"
                 android:value="false" />
+        </service>
+
+        <!-- Phase 5.4: the "Voice note" QS tile — stages the voice
+             door; the listening happens in the sheet, in-app. -->
+        <service
+            android:name=".feature.capture.NotaVoiceTileService"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/tile_voice_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="true" />
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="false" />
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <!-- Phase 5.1: alarm delivery (only Nota's own PendingIntents

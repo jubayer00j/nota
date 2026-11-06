@@ -39,6 +39,11 @@ class CaptureDeliverer(
                 is CaptureRequest.NewNote -> noteRepository.createNote().id
                 is CaptureRequest.Today ->
                     noteRepository.ensureDailyNote(LocalDate.now().toString()).id
+                // The shell intercepts VoiceNote records and shows
+                // the listening sheet instead of calling deliver();
+                // if one ever lands here, creating nothing is the
+                // only safe outcome (its staging is still cleaned).
+                is CaptureRequest.VoiceNote -> null
                 is CaptureRequest.Share -> deliverShare(record, request)
             }
         } finally {

@@ -62,10 +62,58 @@ class CaptureDoorIntentsRobolectricTest {
     fun doorFrom_rejectsUnknownDoorsAndForeignIntents() {
         val unknown = CaptureIntents.doorIntent(
             context, CaptureIntents.DOOR_NEW_NOTE, CaptureSource.SHORTCUT,
-        ).apply { putExtra(CaptureIntents.EXTRA_CAPTURE_ACTION, "voice-note") }
+        ).apply { putExtra(CaptureIntents.EXTRA_CAPTURE_ACTION, "dictate") }
         assertNull(CaptureIntents.doorFrom(unknown))
         assertNull(CaptureIntents.doorFrom(Intent(Intent.ACTION_MAIN)))
         assertNull(CaptureIntents.doorFrom(null))
+    }
+
+    // Phase 5.4: the voice door joins the allowlist and stages a
+    // VoiceNote through the same synchronous door path — the note
+    // itself only exists once the shell's listening sheet saves it.
+    @Test
+    fun voiceDoorIntent_carriesVoiceDoorAndSource() {
+        val intent = CaptureIntents.doorIntent(
+            context, CaptureIntents.DOOR_VOICE_NOTE, CaptureSource.TILE,
+        )
+        assertEquals(
+            CaptureIntents.DOOR_VOICE_NOTE,
+            CaptureIntents.doorFrom(intent),
+        )
+        assertEquals(CaptureSource.TILE, CaptureIntents.sourceFrom(intent))
+        val shortcutIntent = CaptureIntents.doorIntent(
+            context, CaptureIntents.DOOR_VOICE_NOTE, CaptureSource.SHORTCUT,
+        )
+        assertEquals(
+            CaptureIntents.DOOR_VOICE_NOTE,
+            CaptureIntents.doorFrom(shortcutIntent),
+        )
+    }
+
+    @Test
+    fun stageDoor_voice_stagesVoiceNoteSynchronously() {
+        val store = store()
+        val intake = CaptureIntake(context, store)
+        intake.stageDoor(
+            CaptureIntents.DOOR_VOICE_NOTE, CaptureSource.TILE, "uid-b",
+        )
+        val record = store.head()
+        assertEquals("uid-b", record?.accountId)
+        assertTrue(record?.request is CaptureRequest.VoiceNote)
+        assertEquals(CaptureSource.TILE, record?.request?.source)
+    }
+
+    @Test
+    fun voiceNoteRecord_jsonRoundTrips() {
+        val store = store()
+        val intake = CaptureIntake(context, store)
+        intake.stageDoor(
+            CaptureIntents.DOOR_VOICE_NOTE, CaptureSource.SHORTCUT, "guest",
+        )
+        val record = store.head()!!
+        val parsed = app.nota.data.capture.CaptureRecord.parse(record.toJson())
+        assertEquals(record, parsed)
+        assertTrue(parsed?.request is CaptureRequest.VoiceNote)
     }
 
     @Test

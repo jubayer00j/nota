@@ -52,6 +52,7 @@ class CaptureIntake(
         val id = UUID.randomUUID().toString()
         val request: CaptureRequest = when (door) {
             CaptureIntents.DOOR_TODAY -> CaptureRequest.Today(id, source)
+            CaptureIntents.DOOR_VOICE_NOTE -> CaptureRequest.VoiceNote(id, source)
             else -> CaptureRequest.NewNote(id, source)
         }
         store.stage(

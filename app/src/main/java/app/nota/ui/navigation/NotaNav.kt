@@ -214,6 +214,10 @@ fun NotaNavShell(
     val captureResumer = remember { app.nota.feature.capture.PendingCaptureResumer() }
     val captureScope = rememberCoroutineScope()
     var captureDeliveryInFlight by remember { mutableStateOf(false) }
+    // Phase 5.4: a taken VoiceNote record opens the listening sheet
+    // instead of creating a note through the deliverer — the note
+    // only exists once something has been said and Done is tapped.
+    var voiceCaptureOpen by remember { mutableStateOf(false) }
     LaunchedEffect(isLocked, pendingCaptures.firstOrNull(), currentAccountId, captureDeliveryInFlight) {
         if (captureDeliveryInFlight) return@LaunchedEffect
         val record = pendingCaptures.firstOrNull() ?: return@LaunchedEffect
@@ -225,21 +229,56 @@ fun NotaNavShell(
                 val taken = pendingCaptureStore.take(record.id)
                 if (taken != null) {
                     captureDeliveryInFlight = true
-                    captureScope.launch {
-                        try {
-                            val noteId = runCatching {
-                                captureDeliverer.deliver(taken)
-                            }.getOrNull()
-                            if (noteId != null) {
-                                navController.openNoteEditor(noteId)
+                    if (taken.request is app.nota.data.capture.CaptureRequest.VoiceNote) {
+                        voiceCaptureOpen = true
+                        captureDeliveryInFlight = false
+                    } else {
+                        captureScope.launch {
+                            try {
+                                val noteId = runCatching {
+                                    captureDeliverer.deliver(taken)
+                                }.getOrNull()
+                                if (noteId != null) {
+                                    navController.openNoteEditor(noteId)
+                                }
+                            } finally {
+                                captureDeliveryInFlight = false
                             }
-                        } finally {
-                            captureDeliveryInFlight = false
                         }
                     }
                 }
             }
         }
+    }
+    if (voiceCaptureOpen) {
+        app.nota.feature.voice.VoiceCaptureSheet(
+            onDismiss = { voiceCaptureOpen = false },
+            onSave = { title, contentHtml ->
+                voiceCaptureOpen = false
+                captureScope.launch {
+                    val note = runCatching {
+                        noteRepository.createRichNote(
+                            title = title,
+                            contentHtml = contentHtml,
+                        )
+                    }.getOrNull()
+                    if (note != null) {
+                        navController.openNoteEditor(note.id)
+                    }
+                }
+            },
+            onTypeInstead = {
+                voiceCaptureOpen = false
+                captureScope.launch {
+                    val note = runCatching {
+                        noteRepository.createNote()
+                    }.getOrNull()
+                    if (note != null) {
+                        navController.openNoteEditor(note.id)
+                    }
+                }
+            },
+        )
     }
     // Today has its own route but lives under the Notes bottom-bar item.
     val showBottomBar = NotaDestination.entries.any { it.route == currentRoute } ||

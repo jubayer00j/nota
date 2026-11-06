@@ -27,6 +27,9 @@ object CaptureIntents {
     const val DOOR_NEW_NOTE = "new-note"
     const val DOOR_TODAY = "today"
 
+    /** The Phase 5.4 voice door: lands in the listening sheet. */
+    const val DOOR_VOICE_NOTE = "voice-note"
+
     /** The intent a door (QS tile today, anything in code tomorrow)
      *  fires at MainActivity. NEW_TASK | CLEAR_TOP, as 1.x's tiles. */
     fun doorIntent(context: Context, door: String, source: CaptureSource): Intent =
@@ -43,7 +46,9 @@ object CaptureIntents {
     fun doorFrom(intent: Intent?): String? {
         if (intent?.action != ACTION_CAPTURE) return null
         return intent.getStringExtra(EXTRA_CAPTURE_ACTION)
-            ?.takeIf { it == DOOR_NEW_NOTE || it == DOOR_TODAY }
+            ?.takeIf {
+                it == DOOR_NEW_NOTE || it == DOOR_TODAY || it == DOOR_VOICE_NOTE
+            }
     }
 
     fun sourceFrom(intent: Intent?): CaptureSource =

@@ -58,6 +58,19 @@ sealed interface CaptureRequest {
         override val source: CaptureSource,
     ) : CaptureRequest
 
+    /**
+     * Phase 5.4: a voice door was tapped. Unlike the other kinds it
+     * carries no content — the transcript does not exist yet. The
+     * record stages and waits/retires exactly like every capture
+     * (lock-safe, exactly-once); when the shell takes it, it
+     * presents the listening sheet instead of calling the
+     * deliverer, and the note is created from what was said.
+     */
+    data class VoiceNote(
+        override val id: String,
+        override val source: CaptureSource,
+    ) : CaptureRequest
+
     /** A share: title + HTML body, images embedded on delivery. */
     data class Share(
         override val id: String,
@@ -92,6 +105,7 @@ data class CaptureRecord(
         when (val r = request) {
             is CaptureRequest.NewNote -> obj.put("kind", KIND_NEW_NOTE)
             is CaptureRequest.Today -> obj.put("kind", KIND_TODAY)
+            is CaptureRequest.VoiceNote -> obj.put("kind", KIND_VOICE_NOTE)
             is CaptureRequest.Share -> {
                 obj.put("kind", KIND_SHARE)
                 obj.put("title", r.title)
@@ -114,6 +128,7 @@ data class CaptureRecord(
     companion object {
         const val KIND_NEW_NOTE = "new-note"
         const val KIND_TODAY = "today"
+        const val KIND_VOICE_NOTE = "voice-note"
         const val KIND_SHARE = "share"
 
         fun parse(json: String): CaptureRecord? = try {
@@ -123,6 +138,7 @@ data class CaptureRecord(
             val request: CaptureRequest = when (obj.getString("kind")) {
                 KIND_NEW_NOTE -> CaptureRequest.NewNote(id, source)
                 KIND_TODAY -> CaptureRequest.Today(id, source)
+                KIND_VOICE_NOTE -> CaptureRequest.VoiceNote(id, source)
                 KIND_SHARE -> {
                     val images = mutableListOf<CaptureImageRef>()
                     val array = obj.optJSONArray("images") ?: JSONArray()
