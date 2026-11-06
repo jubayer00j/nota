@@ -327,7 +327,7 @@ private suspend fun PointerInputScope.detectMapGestures(
                 if (!pastTouchSlop) {
                     zoomAccumulator *= zoomChange
                     panAccumulator += panChange
-                    val centroidSize = event.calculateCentroidSize(useTouchSlop = false)
+                    val centroidSize = event.calculateCentroidSize(useCurrent = true)
                     val zoomMotion = abs(1f - zoomAccumulator) * centroidSize
                     val panMotion = panAccumulator.getDistance()
                     if (zoomMotion > viewConfiguration.touchSlop ||
@@ -337,7 +337,7 @@ private suspend fun PointerInputScope.detectMapGestures(
                     }
                 }
                 if (pastTouchSlop) {
-                    val centroid = event.calculateCentroid(useTouchSlop = false)
+                    val centroid = event.calculateCentroid(useCurrent = true)
                     if (zoomChange != 1f || panChange != Offset.Zero) {
                         onTransform(centroid, panChange, zoomChange)
                     }
