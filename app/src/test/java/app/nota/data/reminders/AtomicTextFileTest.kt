@@ -40,10 +40,8 @@ class AtomicTextFileTest {
     fun noTempFileLeftBehind() {
         AtomicTextFile.write(target, "x")
         AtomicTextFile.write(target, "y")
-        assertEquals(
-            listOf("reminder-armed-ids.txt"),
-            dir.list()?.toList() ?: emptyList(),
-        )
+        val names: List<String> = dir.list()?.toList() ?: emptyList()
+        assertEquals(listOf("reminder-armed-ids.txt"), names)
         assertFalse(File(dir, "reminder-armed-ids.txt.tmp").exists())
     }
 
