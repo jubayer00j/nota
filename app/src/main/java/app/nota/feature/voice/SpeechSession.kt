@@ -138,8 +138,10 @@ sealed interface SpeechSessionEvent {
  * for transition. "no-match" and "speech-timeout" are SOFT: an
  * utterance window closed with nothing recognised — mid-dictation
  * pauses produce them, so they only end the session after
- * [MAX_SOFT_MISSES] in a row (surfaced as NO_SPEECH). Everything
- * else is fatal to the session, with any committed finals preserved.
+ * [MAX_SOFT_MISSES] in a row (surfaced as NO_SPEECH). While STOPPING
+ * they settle the session to IDLE at once instead — Done must
+ * finish, not resume listening. Everything else is fatal to the
+ * session, with any committed finals preserved.
  */
 object SpeechSessionReducer {
 
@@ -220,6 +222,17 @@ object SpeechSessionReducer {
                 session.state != SpeechSessionState.STOPPING
             ) {
                 session
+            } else if (event.kind in SOFT_KINDS &&
+                session.state == SpeechSessionState.STOPPING
+            ) {
+                // Done was tapped and the engine answered with a
+                // soft miss: there is nothing more to hear, so the
+                // session settles — mirroring EngineEnded while
+                // STOPPING — instead of flipping back to LISTENING
+                // (which would restart recognition and leave the
+                // capture sheet waiting for a settle that never
+                // comes). Committed finals are preserved.
+                session.copy(state = SpeechSessionState.IDLE, partial = "")
             } else if (event.kind in SOFT_KINDS) {
                 val softMisses = session.softMisses + 1
                 if (softMisses >= MAX_SOFT_MISSES) {

@@ -934,6 +934,16 @@ fun RichNoteEditorScreen(
     DisposableEffect(speechController) {
         onDispose { speechController.cancel() }
     }
+    // Phase 5.4 fix (Codex PR #31): leaving edit mode must end
+    // dictation too. The toolbar and status strip unmount in read
+    // mode, so a session left running here would keep recording
+    // invisibly, with no way to stop it. Both exit paths — the ✓
+    // button and the BackHandler — funnel through editing = false
+    // (exitToRead), so keying on `editing` covers both. Entering
+    // edit mode never starts anything.
+    LaunchedEffect(editing) {
+        if (!editing) speechController.cancel()
+    }
     var insertedDictationSegments by remember(noteId) { mutableIntStateOf(0) }
     LaunchedEffect(speechSnapshot.committed) {
         val committed = speechSnapshot.committed

@@ -3,6 +3,7 @@ package app.nota.feature.voice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -166,6 +167,66 @@ class SpeechSessionTest {
             SpeechSessionEvent.EngineEnded,
         )
         assertEquals(SpeechSessionState.IDLE, settled.state)
+    }
+
+    @Test
+    fun reducer_noMatchWhileStoppingSettlesToIdlePreservingCommitted() {
+        // Regression (Codex PR #31, P1): Done is tapped during a
+        // pause and stopListening answers NO_MATCH. The session must
+        // settle to IDLE — flipping back to LISTENING would restart
+        // recognition and leave the capture sheet waiting for a
+        // settle that never comes.
+        val listening = SpeechSessionSnapshot(
+            state = SpeechSessionState.LISTENING,
+            committed = listOf("Done soon."),
+            partial = "half-heard",
+        )
+        val stopping = SpeechSessionReducer.reduce(
+            listening,
+            SpeechSessionEvent.StopRequested,
+        )
+        assertEquals(SpeechSessionState.STOPPING, stopping.state)
+        val settled = SpeechSessionReducer.reduce(
+            stopping,
+            SpeechSessionEvent.EngineError(SpeechErrorKind.NO_MATCH),
+        )
+        assertEquals(SpeechSessionState.IDLE, settled.state)
+        assertEquals(listOf("Done soon."), settled.committed)
+        assertEquals("", settled.partial)
+        assertNull(settled.errorKind)
+    }
+
+    @Test
+    fun reducer_speechTimeoutWhileStoppingSettlesToIdlePreservingCommitted() {
+        // Same settle for the other soft kind (Codex PR #31, P1).
+        val stopping = SpeechSessionSnapshot(
+            state = SpeechSessionState.STOPPING,
+            committed = listOf("Kept."),
+        )
+        val settled = SpeechSessionReducer.reduce(
+            stopping,
+            SpeechSessionEvent.EngineError(SpeechErrorKind.SPEECH_TIMEOUT),
+        )
+        assertEquals(SpeechSessionState.IDLE, settled.state)
+        assertEquals(listOf("Kept."), settled.committed)
+        assertNull(settled.errorKind)
+    }
+
+    @Test
+    fun reducer_fatalErrorWhileStoppingStillErrors() {
+        // Only SOFT kinds settle on Done; a fatal error while
+        // stopping still surfaces as the session's error.
+        val stopping = SpeechSessionSnapshot(
+            state = SpeechSessionState.STOPPING,
+            committed = listOf("Kept."),
+        )
+        val errored = SpeechSessionReducer.reduce(
+            stopping,
+            SpeechSessionEvent.EngineError(SpeechErrorKind.NETWORK),
+        )
+        assertEquals(SpeechSessionState.ERROR, errored.state)
+        assertEquals(SpeechErrorKind.NETWORK, errored.errorKind)
+        assertEquals(listOf("Kept."), errored.committed)
     }
 
     @Test

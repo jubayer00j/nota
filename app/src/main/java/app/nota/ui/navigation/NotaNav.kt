@@ -230,8 +230,13 @@ fun NotaNavShell(
                 if (taken != null) {
                     captureDeliveryInFlight = true
                     if (taken.request is app.nota.data.capture.CaptureRequest.VoiceNote) {
+                        // Phase 5.4 fix (Codex PR #31): the gate
+                        // stays HELD while the voice sheet is open —
+                        // the flag is cleared only when the sheet
+                        // closes (see its callbacks below), so no
+                        // further record is taken or delivered
+                        // underneath the sheet.
                         voiceCaptureOpen = true
-                        captureDeliveryInFlight = false
                     } else {
                         captureScope.launch {
                             try {
@@ -252,9 +257,13 @@ fun NotaNavShell(
     }
     if (voiceCaptureOpen) {
         app.nota.feature.voice.VoiceCaptureSheet(
-            onDismiss = { voiceCaptureOpen = false },
+            onDismiss = {
+                voiceCaptureOpen = false
+                captureDeliveryInFlight = false
+            },
             onSave = { title, contentHtml ->
                 voiceCaptureOpen = false
+                captureDeliveryInFlight = false
                 captureScope.launch {
                     val note = runCatching {
                         noteRepository.createRichNote(
@@ -269,6 +278,7 @@ fun NotaNavShell(
             },
             onTypeInstead = {
                 voiceCaptureOpen = false
+                captureDeliveryInFlight = false
                 captureScope.launch {
                     val note = runCatching {
                         noteRepository.createNote()
