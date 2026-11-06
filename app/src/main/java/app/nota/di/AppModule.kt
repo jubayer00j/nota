@@ -145,6 +145,19 @@ val appModule = module {
     single { app.nota.data.capture.PendingCaptureStore(androidContext()) }
     single { app.nota.data.capture.CaptureIntake(androidContext(), get()) }
     single { app.nota.feature.capture.CaptureDeliverer(get(), get(), get()) }
+    // Phase 5.3 Glance widget: the data source the widget provider
+    // renders from — the active account's tables via the provider,
+    // with the App Lock posture resolved (fail-closed) per load.
+    single {
+        app.nota.feature.widget.WidgetDataSource(
+            provider = get(),
+            appLockHidden = {
+                app.nota.feature.widget.WidgetLockPosture.hidden(
+                    get<AppLockManager>(),
+                )
+            },
+        )
+    }
     viewModel { NotesViewModel(get(), get(), get(), get(), get()) }
     viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get(), get(), get()) }

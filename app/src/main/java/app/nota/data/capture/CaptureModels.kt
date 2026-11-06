@@ -23,6 +23,8 @@ enum class CaptureSource(val wire: String) {
     SHORTCUT("shortcut"),
     TILE("tile"),
     ANDROID_SHARE("android-share"),
+    // Phase 5.3: the home-screen widget's capture buttons.
+    WIDGET("widget"),
     ;
 
     companion object {

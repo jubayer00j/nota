@@ -8,4 +8,11 @@
     <string name="shortcut_today_short">Today</string>
     <string name="shortcut_today_long">Open today\'s note</string>
     <string name="tile_label">New note</string>
+    <!-- Phase 5.3 Glance widget: picker description + layout labels.
+         The widget's dynamic text (date, titles, reminder line) is
+         rendered by the provider; these are the static words. -->
+    <string name="widget_description">Today\'s note at a glance, with quick capture</string>
+    <string name="widget_today_label">TODAY</string>
+    <string name="widget_new_note">New note</string>
+    <string name="widget_today_button">Today</string>
 </resources>
