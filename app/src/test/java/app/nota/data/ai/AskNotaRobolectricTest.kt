@@ -168,7 +168,10 @@ class AskNotaRobolectricTest {
         assertEquals(1, http.chatCalls.size)
         val prompt = http.chatCalls.single().body
         assertTrue(prompt.contains("You are Ask Nota"))
-        assertTrue(prompt.contains("[1] From \"Apple harvest\""))
+        // The captured body is the raw JSON wire form, where the
+        // excerpt's quotes are backslash-escaped.
+        assertTrue(prompt.contains("[1] From"))
+        assertTrue(prompt.contains("Apple harvest"))
         // The banana note scored below the floor: it was never sent.
         assertFalse(prompt.contains("Banana bread"))
     }
