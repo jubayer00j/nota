@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
@@ -905,6 +906,73 @@ fun RichNoteEditorScreen(
     }
     DisposableEffect(Unit) {
         onDispose { viewModel.textInserter = null }
+    }
+
+    // Phase 5.4 dictation: one speech session per editor instance
+    // (the screen is keyed by note id in the nav graph, so leaving a
+    // note disposes its session — a transcript can never leak across
+    // notes, and no recogniser runs behind the app). The mic is
+    // offered only when the probe says a recogniser can actually
+    // run; committed finals are inserted at the caret in order,
+    // exactly once each, with 1.x's join rule (one space unless the
+    // character before the caret is whitespace or a block start).
+    val speechContext = LocalContext.current
+    val speechEngine = remember(noteId) {
+        app.nota.feature.voice.AndroidSpeechEngine(speechContext)
+    }
+    app.nota.feature.voice.rememberSpeechPermissionRequester(speechEngine)
+    val speechController = remember(noteId) {
+        app.nota.feature.voice.SpeechSessionController(speechEngine, scope)
+    }
+    var speechAvailable by remember(noteId) { mutableStateOf(false) }
+    val speechSnapshot by speechController.snapshot.collectAsState()
+    LaunchedEffect(speechController) {
+        speechAvailable = app.nota.feature.voice.VoiceProbeUi.fromProbe(
+            runCatching { speechEngine.probe() }.getOrNull(),
+        ) is app.nota.feature.voice.VoiceAvailability.Available
+    }
+    DisposableEffect(speechController) {
+        onDispose { speechController.cancel() }
+    }
+    // Phase 5.4 fix (Codex PR #31): leaving edit mode must end
+    // dictation too. The toolbar and status strip unmount in read
+    // mode, so a session left running here would keep recording
+    // invisibly, with no way to stop it. Both exit paths — the ✓
+    // button and the BackHandler — funnel through editing = false
+    // (exitToRead), so keying on `editing` covers both. Entering
+    // edit mode never starts anything.
+    LaunchedEffect(editing) {
+        if (!editing) speechController.cancel()
+    }
+    var insertedDictationSegments by remember(noteId) { mutableIntStateOf(0) }
+    LaunchedEffect(speechSnapshot.committed) {
+        val committed = speechSnapshot.committed
+        while (insertedDictationSegments < committed.size) {
+            // No caret right now (edit mode left mid-session): the
+            // segment stays pending and drains when the next final
+            // lands with a caret present.
+            val st = activeState ?: break
+            val segment = committed[insertedDictationSegments]
+            insertedDictationSegments += 1
+            val text = st.annotatedString.text
+            val caret = st.selection.end.coerceIn(0, text.length)
+            val beforeChar = if (caret > 0) text.substring(caret - 1, caret) else ""
+            val insertion = app.nota.feature.voice.SpeechText
+                .dictationInsertionText(beforeChar, segment)
+            if (insertion.isNotEmpty()) {
+                viewModel.insertDictatedText(insertion)
+            }
+        }
+    }
+    fun toggleDictation() {
+        when (speechSnapshot.state) {
+            app.nota.feature.voice.SpeechSessionState.LISTENING ->
+                speechController.stop()
+            app.nota.feature.voice.SpeechSessionState.IDLE,
+            app.nota.feature.voice.SpeechSessionState.ERROR,
+            -> speechController.start(Locale.getDefault().toLanguageTag())
+            else -> Unit
+        }
     }
 
     // Autosave tick + stats refresh.
@@ -1890,10 +1958,81 @@ fun RichNoteEditorScreen(
                     }
                 }
             }
+            // Phase 5.4: the dictation status strip, directly above
+            // the toolbar where the link suggestions also live —
+            // "Listening…" + the live partial while dictating, or
+            // the calm error line with a dismiss once it ends badly.
+            if (editing && speechSnapshot.state !=
+                app.nota.feature.voice.SpeechSessionState.IDLE
+            ) {
+                val speechError = speechSnapshot.errorKind?.takeIf {
+                    speechSnapshot.state ==
+                        app.nota.feature.voice.SpeechSessionState.ERROR
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = NotaSpacing.md),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = when {
+                            speechError != null ->
+                                app.nota.feature.voice.SpeechErrorLines
+                                    .line(speechError)
+                            speechSnapshot.state ==
+                                app.nota.feature.voice.SpeechSessionState
+                                    .REQUESTING_PERMISSION ->
+                                "Preparing the microphone…"
+                            speechSnapshot.state ==
+                                app.nota.feature.voice.SpeechSessionState
+                                    .STOPPING ->
+                                "Finishing…"
+                            speechSnapshot.partial.isNotEmpty() ->
+                                speechSnapshot.partial
+                            else -> "Listening…"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (speechError != null) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        fontStyle = if (speechError == null &&
+                            speechSnapshot.partial.isNotEmpty()
+                        ) {
+                            androidx.compose.ui.text.font.FontStyle.Italic
+                        } else {
+                            androidx.compose.ui.text.font.FontStyle.Normal
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (speechError != null) {
+                        IconButton(
+                            onClick = {
+                                speechController.reset()
+                                insertedDictationSegments = 0
+                            },
+                        ) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Dismiss",
+                            )
+                        }
+                    }
+                }
+            }
             if (editing) {
                 EditorToolbar(
                     state = activeState,
                     modifier = Modifier.alpha(chromeAlpha),
+                    micVisible = speechAvailable,
+                    micListening = speechSnapshot.state ==
+                        app.nota.feature.voice.SpeechSessionState.LISTENING,
+                    micBusy = speechSnapshot.state ==
+                        app.nota.feature.voice.SpeechSessionState
+                            .REQUESTING_PERMISSION ||
+                        speechSnapshot.state ==
+                        app.nota.feature.voice.SpeechSessionState.STOPPING,
+                    onMicClick = { toggleDictation() },
                     insertMenuExpanded = insertMenuExpanded,
                     onInsertMenuChange = { insertMenuExpanded = it },
                     onLinkRequest = { showLinkDialog = true },
@@ -3199,6 +3338,10 @@ private fun Swatch(argb: Long, selected: Boolean) {
 private fun EditorToolbar(
     state: RichTextState?,
     modifier: Modifier = Modifier,
+    micVisible: Boolean = false,
+    micListening: Boolean = false,
+    micBusy: Boolean = false,
+    onMicClick: () -> Unit = {},
     insertMenuExpanded: Boolean,
     onInsertMenuChange: (Boolean) -> Unit,
     onLinkRequest: () -> Unit,
@@ -3217,6 +3360,34 @@ private fun EditorToolbar(
             .padding(horizontal = NotaSpacing.xs),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Phase 5.4: the dictation mic leads the toolbar — 1.x puts
+        // its mic in the editor toolbar too. It renders ONLY when
+        // the availability probe passed (never a dead button);
+        // listening wears the selected pill, the in-between states
+        // show a spinner and take no taps.
+        if (micVisible) {
+            IconButton(
+                onClick = onMicClick,
+                enabled = enabled && !micBusy,
+                colors = toolbarIconColors(micListening),
+            ) {
+                if (micBusy) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.Mic,
+                        contentDescription = if (micListening) {
+                            "Stop dictation"
+                        } else {
+                            "Dictate"
+                        },
+                    )
+                }
+            }
+        }
         ToolbarButton("B", enabled, selected = format?.bold == true, bold = true) {
             state?.toggleSpanStyle(SpanStyle(fontWeight = FontWeight.Bold))
         }

@@ -8,6 +8,10 @@
     <string name="shortcut_today_short">Today</string>
     <string name="shortcut_today_long">Open today\'s note</string>
     <string name="tile_label">New note</string>
+    <!-- Phase 5.4 voice: the voice_note shortcut + voice QS tile. -->
+    <string name="shortcut_voice_short">Voice note</string>
+    <string name="shortcut_voice_long">Dictate a new note</string>
+    <string name="tile_voice_label">Voice note</string>
     <!-- Phase 5.3 Glance widget: picker description + layout labels.
          The widget's dynamic text (date, titles, reminder line) is
          rendered by the provider; these are the static words. -->

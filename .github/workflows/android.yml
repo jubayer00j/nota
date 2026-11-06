@@ -48,6 +48,10 @@ jobs:
   # (Phase 5.3: the partition grows to 86 classes — fast-a +1
   # pure-JVM widget state-mapper class, B +1 widget data-source
   # Robolectric suite, B3 +1 widget intents Robolectric suite.)
+  # (Phase 5.4: the partition grows to 89 classes — fast-a +3
+  # pure-JVM voice classes (transcript assembly, session machine,
+  # probe mapping); the voice door cases extend the existing B3
+  # door-intent Robolectric suite, so no new B/B3 class.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -93,7 +97,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 46 of 86 non-UI classes)
+      - name: Run fast unit tests (shard A, 49 of 89 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -140,6 +144,9 @@ jobs:
             --tests "app.nota.feature.capture.PendingCaptureResumerTest" \
             --tests "app.nota.feature.capture.NotePinLabelsTest" \
             --tests "app.nota.feature.widget.WidgetStateMapperTest" \
+            --tests "app.nota.feature.voice.SpeechTextTest" \
+            --tests "app.nota.feature.voice.SpeechSessionTest" \
+            --tests "app.nota.feature.voice.VoiceProbeUiTest" \
             --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
             --tests "app.nota.ui.theme.ThemeSelectionTest" \
             --stacktrace
