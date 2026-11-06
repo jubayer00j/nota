@@ -48,6 +48,32 @@ class AiService(
         return AiSummaryOutcome(text, truncated)
     }
 
+    /**
+     * Ask Nota's one generation call (Phase 4.3). Grounded or
+     * silent: with no eligible excerpts there is nothing to
+     * ground an answer in, so the result is
+     * [AskAnswerResult.NoEvidence] and the provider is never
+     * called — no tokens spent on a guaranteed refusal.
+     * Otherwise the prompt is assembled by [AskNota] inside the
+     * shared budget, the reply is parsed back into a typed
+     * answer/refusal, and provider failures propagate as the
+     * same [AiException] kinds every other AI action surfaces.
+     * Retrieval lives in [SemanticIndexer.retrieveAskExcerpts];
+     * this seam takes the excerpts it validated.
+     */
+    suspend fun ask(
+        question: String,
+        excerpts: List<AskExcerpt>,
+        previousTurn: AskPreviousTurn? = null,
+    ): AskAnswerResult {
+        if (excerpts.isEmpty()) return AskAnswerResult.NoEvidence
+        val config = currentConfig() ?: throw AiException.noKey()
+        val built = AskNota.buildAskPrompt(question, excerpts, previousTurn)
+        val text = AiProviders.create(config.providerId, http)
+            .complete(config, built.prompt)
+        return AskNota.parseAskAnswer(text, built.excerpts)
+    }
+
     suspend fun suggestTags(
         title: String,
         plainText: String,

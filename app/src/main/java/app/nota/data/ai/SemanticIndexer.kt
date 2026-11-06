@@ -94,6 +94,15 @@ class SemanticIndexer(
         val chunks: List<String>,
     )
 
+    /** A note that survived Ask's fresh-passage validation:
+     *  its live row, the chunks of its CURRENT text, and the
+     *  stored vectors those chunks were embedded as. */
+    private data class AskCandidate(
+        val note: NoteEntity,
+        val chunks: List<String>,
+        val vectors: List<FloatArray>,
+    )
+
     /** The index's eligibility rule: a note that is locked,
      *  trashed or archived is never embedded and never surfaces.
      *  (Archived matches every other search surface in the app —
@@ -334,6 +343,102 @@ class SemanticIndexer(
             val note = noteDao.getById(hit.noteId)
             note != null && isIndexEligible(note)
         }
+    }
+
+    /**
+     * Ask Nota's retrieval (Phase 4.3): the best passages for a
+     * question, scored chunk-by-chunk over the stored index —
+     * 1.x's retrieveChunks contract on Nota's index. Returns
+     * empty — and makes NO provider call — when there is
+     * nothing to retrieve from (no key, no index, a foreign
+     * space, or no note passing validation); the caller reads
+     * that as the honest no-evidence state. A failure of the
+     * question-embedding call itself propagates as
+     * [AiException]: offline must surface as an error, never
+     * dress itself up as "nothing matched".
+     *
+     * Fresh-passage validation: a stored vector row is only
+     * ever a claim about the text that produced it, so a note
+     * contributes passages only when its LIVE row is eligible
+     * right now ([isIndexEligible] — locked, trashed, archived
+     * and deleted notes are out, however high they would
+     * score) AND its stored fingerprint still equals the
+     * fingerprint of its current text. Note the granularity:
+     * Nota's index fingerprints a note's whole text (Phase
+     * 4.2's design), where 1.x hashes per chunk and keeps an
+     * edited note's untouched chunks quotable. The native rule
+     * is stricter — an edited note contributes nothing until
+     * the next reconcile re-embeds it (the 15 s post-save
+     * debounce makes that window small) — and it can never
+     * leak: quoted text is re-chunked from the note's CURRENT
+     * text, and the fingerprint match is what licenses pairing
+     * that text with the stored vectors at all.
+     *
+     * Ranking is 1.x's: similarity descending, note id then
+     * chunk index breaking ties so citation numbering is
+     * deterministic; selection caps at [ASK_MAX_EXCERPTS]
+     * passages, at most [ASK_MAX_EXCERPTS_PER_NOTE] per note.
+     */
+    suspend fun retrieveAskExcerpts(accountId: String, question: String): List<AskExcerpt> {
+        if (question.isBlank()) return emptyList()
+        val config = settings.activeEmbeddingConfig(accountId) ?: return emptyList()
+        if (accountId != databaseProvider.accountId.value) return emptyList()
+        val stored = store.load(accountId) ?: return emptyList()
+        if (stored.notes.isEmpty() || stored.signature != config.spaceSignature()) {
+            return emptyList()
+        }
+
+        val noteDao = databaseProvider.current.noteDao()
+        val candidates = ArrayList<AskCandidate>()
+        for ((noteId, storedNote) in stored.notes) {
+            val live = noteDao.getById(noteId) ?: continue
+            if (!isIndexEligible(live)) continue
+            if (fingerprint(live.title, live.plainText) != storedNote.fingerprint) continue
+            val chunks = NoteChunker.chunk(live.title, live.plainText)
+            if (chunks.isEmpty()) continue
+            candidates += AskCandidate(live, chunks, storedNote.chunks)
+        }
+        if (candidates.isEmpty()) return emptyList()
+
+        val queryVector = AiEmbeddings.create(config.providerId, http)
+            .embed(config, question, EmbedKind.QUERY)
+        if (queryVector.size != stored.dims) return emptyList()
+        val floor = SemanticMath.floorFor(config.providerId)
+
+        val scored = ArrayList<AskExcerpt>()
+        for (candidate in candidates) {
+            // The fingerprint match makes chunk and vector
+            // counts equal by construction; the min is a
+            // defensive belt, never the expected path.
+            val count = minOf(candidate.chunks.size, candidate.vectors.size)
+            for (i in 0 until count) {
+                val score = SemanticMath.cosine(queryVector, candidate.vectors[i])
+                if (score >= floor) {
+                    scored += AskExcerpt(
+                        noteId = candidate.note.id,
+                        chunkIndex = i,
+                        title = candidate.note.title,
+                        text = candidate.chunks[i],
+                        similarity = score,
+                    )
+                }
+            }
+        }
+        scored.sortWith(
+            compareByDescending<AskExcerpt> { it.similarity }
+                .thenBy { it.noteId }
+                .thenBy { it.chunkIndex },
+        )
+        val perNote = HashMap<String, Int>()
+        val out = ArrayList<AskExcerpt>(ASK_MAX_EXCERPTS)
+        for (item in scored) {
+            if (out.size >= ASK_MAX_EXCERPTS) break
+            val count = perNote[item.noteId] ?: 0
+            if (count >= ASK_MAX_EXCERPTS_PER_NOTE) continue
+            perNote[item.noteId] = count + 1
+            out += item
+        }
+        return out
     }
 
     /** Drops the account's whole index (sign-out — like its keys,

@@ -202,7 +202,20 @@ fun NotaNavShell(
                     onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
                 )
             }
-            composable(NotaDestination.Ask.route) { AskScreen() }
+            composable(NotaDestination.Ask.route) {
+                AskScreen(
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenSettings = {
+                        navController.navigate(NotaDestination.Settings.route) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
+                )
+            }
             composable(NotaDestination.Reminders.route) { RemindersScreen() }
             composable(NotaDestination.Settings.route) {
                 SettingsScreen(
