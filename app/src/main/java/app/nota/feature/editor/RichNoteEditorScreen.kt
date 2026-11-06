@@ -244,6 +244,7 @@ fun RichNoteEditorScreen(
     val libraryTagNames by viewModel.libraryTagNames.collectAsState()
     val attachments by viewModel.attachments.collectAsState()
     val linkedFrom by viewModel.linkedFrom.collectAsState()
+    val links by viewModel.links.collectAsState()
     val linkableNotes by viewModel.linkableNotes.collectAsState()
     val saveState by viewModel.saveState.collectAsState()
     // Phase 2b lock session state.
@@ -1711,6 +1712,27 @@ fun RichNoteEditorScreen(
                             viewModel.deleteAttachment(attachment)
                         },
                     )
+                }
+                if (links.isNotEmpty()) {
+                    item(key = "links") {
+                        Column {
+                            Text(
+                                "Links",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(top = NotaSpacing.sm),
+                            )
+                            links.forEach { target ->
+                                TextButton(
+                                    onClick = {
+                                        retirePendingInsert()
+                                        persistNow { onOpenNote(target.id) }
+                                    },
+                                ) {
+                                    Text(target.title.ifBlank { "Untitled note" })
+                                }
+                            }
+                        }
+                    }
                 }
                 if (linkedFrom.isNotEmpty()) {
                     item(key = "linked-from") {

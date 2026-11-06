@@ -41,6 +41,7 @@ import app.nota.feature.ask.AskScreen
 import app.nota.feature.settings.UnlockRestoreResumer
 import app.nota.feature.designsystem.DesignSystemScreen
 import app.nota.feature.editor.RichNoteEditorScreen
+import app.nota.feature.graph.LinkGraphScreen
 import app.nota.feature.notes.NotesScreen
 import app.nota.feature.reminders.RemindersScreen
 import app.nota.feature.search.SearchScreen
@@ -64,6 +65,7 @@ object NotaRoutes {
     const val TEMPLATES = "templates"
     const val TODAY = "today"
     const val SEARCH = "search"
+    const val LINK_GRAPH = "link-graph"
     const val SIGN_IN = "sign-in"
     const val NOTE_EDITOR = "note/{noteId}"
     fun noteEditor(noteId: String): String = "note/$noteId"
@@ -181,6 +183,7 @@ fun NotaNavShell(
                 NotesScreen(
                     onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
                     onOpenSearch = { navController.navigate(NotaRoutes.SEARCH) },
+                    onOpenGraph = { navController.navigate(NotaRoutes.LINK_GRAPH) },
                 )
             }
             composable(NotaRoutes.TODAY) {
@@ -192,6 +195,12 @@ fun NotaNavShell(
                 SearchScreen(
                     onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
                     onBack = { navController.popBackStack() },
+                )
+            }
+            composable(NotaRoutes.LINK_GRAPH) {
+                LinkGraphScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
                 )
             }
             composable(NotaRoutes.NOTE_EDITOR) { entry ->

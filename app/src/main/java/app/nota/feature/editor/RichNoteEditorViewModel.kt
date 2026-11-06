@@ -75,6 +75,10 @@ class RichNoteEditorViewModel(
     private val _linkedFrom = MutableStateFlow<List<NoteEntity>>(emptyList())
     val linkedFrom: StateFlow<List<NoteEntity>> = _linkedFrom
 
+    /** Notes this note links TO via [[title]] (Phase 4.4: the "Links" footer list). */
+    private val _links = MutableStateFlow<List<NoteEntity>>(emptyList())
+    val links: StateFlow<List<NoteEntity>> = _links
+
     /** [[ ]] autocomplete candidates (all linkable notes). */
     val linkableNotes: StateFlow<List<NoteEntity>> = repository.observeLinkable()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -178,6 +182,9 @@ class RichNoteEditorViewModel(
         }
         viewModelScope.launch {
             repository.observeLinkedFrom(noteId).collect { _linkedFrom.value = it }
+        }
+        viewModelScope.launch {
+            repository.observeOutgoing(noteId).collect { _links.value = it }
         }
     }
 

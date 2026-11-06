@@ -47,6 +47,9 @@ class NoteRepository(
     fun observeFavourites(): Flow<List<NoteEntity>> = noteDao.observeFavourites()
     fun observeDaily(date: String): Flow<List<NoteEntity>> = noteDao.observeDaily(date)
     fun observeById(id: String): Flow<NoteEntity?> = noteDao.observeById(id)
+
+    /** Every note in the library (Phase 4.4: link graph node metadata). */
+    fun observeAllNotes(): Flow<List<NoteEntity>> = noteDao.observeAll()
     fun observeFolders(): Flow<List<FolderEntity>> = folderDao.observeAll()
     fun observeTags(): Flow<List<TagEntity>> = tagDao.observeAll()
     fun observeTagsForNote(noteId: String): Flow<List<TagEntity>> = tagDao.observeForNote(noteId)
@@ -263,6 +266,12 @@ class NoteRepository(
     // --- Backlinks (Phase 1c) --------------------------------------------------
     /** Notes whose bodies reference [noteId] via [[title]] — "Linked from…". */
     fun observeLinkedFrom(noteId: String): Flow<List<NoteEntity>> = noteLinkDao.observeIncoming(noteId)
+
+    /** Notes that [noteId] links TO via [[title]] — the footer's "Links" list. */
+    fun observeOutgoing(noteId: String): Flow<List<NoteEntity>> = noteLinkDao.observeOutgoing(noteId)
+
+    /** Every stored [[backlink]] edge (Phase 4.4: the link graph map). */
+    fun observeAllLinks(): Flow<List<NoteLinkEntity>> = noteLinkDao.observeAll()
 
     /** Notes eligible as [[ ]] autocomplete targets. */
     fun observeLinkable(): Flow<List<NoteEntity>> = noteDao.observeLinkable()
