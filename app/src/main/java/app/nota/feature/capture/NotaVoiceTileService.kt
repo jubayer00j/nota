@@ -4,9 +4,9 @@ import android.app.PendingIntent
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import app.nota.R
 import app.nota.data.capture.CaptureIntents
 import app.nota.data.capture.CaptureSource
+import app.nota.notes.R
 
 /**
  * Phase 5.4: the "Voice note" quick-settings tile — the second of
