@@ -172,6 +172,25 @@ fun citationSegments(text: String, citations: List<AskCitation>): List<AskTextSe
     return segments
 }
 
+/**
+ * Removes the `[n]` markers for [removed] citation numbers
+ * from parsed answer text — the post-generation counterpart
+ * of the parser's hallucination stripping. Used when a cited
+ * note stops being quotable between generation and rendering
+ * (locked/edited mid-request): its markers come out so
+ * nothing in the rendered answer points at a source the
+ * answer no longer carries, while citations that survived
+ * revalidation keep their numbers (no renumbering — the
+ * remaining markers still match the citation list).
+ */
+fun stripCitationMarkers(text: String, removed: Set<Int>): String {
+    if (removed.isEmpty()) return text
+    val pattern = Regex("\\[(\\d{1,3})\\]")
+    return pattern.replace(text) { match ->
+        if (match.groupValues[1].toInt() in removed) "" else match.value
+    }.replace(Regex("[ \\t]{2,}"), " ").trim()
+}
+
 data class AskSourceCard(
     val noteId: String,
     val chunkIndex: Int,

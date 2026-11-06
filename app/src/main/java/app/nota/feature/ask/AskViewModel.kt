@@ -24,12 +24,30 @@ import kotlinx.coroutines.launch
  * retrieval finds nothing to ground on. The thread is
  * memory-only: it lives in this ViewModel and dies with it,
  * exactly as 1.x keeps no Ask history anywhere.
+ *
+ * Two PR #25 review rounds hardened the thread's edges:
+ * - The thread is KEYED to the active account. It can outlive
+ *   an account switch (the nav graph's saved state keeps the
+ *   Ask destination's ViewModel), so an identity change clears
+ *   it — the previous account's questions, answers and source
+ *   cards never stay on screen, and the previous-turn context
+ *   (derived from the thread) can never leak into the next
+ *   account's prompt. An answer still in flight when the
+ *   switch lands is dropped, never appended.
+ * - A generated answer is REVALIDATED before it renders:
+ *   citations whose note stopped being quotable during the
+ *   generation call are stripped, and an answer left with no
+ *   valid citation at all degrades to the refusal state.
  */
 class AskViewModel(
     private val aiService: AiService,
     private val indexer: SemanticIndexer,
-    private val accountIdProvider: () -> String,
+    private val accountIdFlow: StateFlow<String>,
 ) : ViewModel() {
+
+    /** The active account, read fresh at every call — the
+     *  same discipline as the data layer's DAO resolution. */
+    private val accountId: String get() = accountIdFlow.value
 
     private val _entries = MutableStateFlow<List<AskEntry>>(emptyList())
     val entries: StateFlow<List<AskEntry>> = _entries
@@ -57,7 +75,22 @@ class AskViewModel(
 
     private var nextId = 1
 
+    /** The account the current thread belongs to. Compared
+     *  against every [accountIdFlow] emission after the
+     *  initial one: a change means the thread on screen
+     *  belongs to a different library and is cleared (see the
+     *  class doc). */
+    private var threadAccountId: String = accountIdFlow.value
+
     init {
+        viewModelScope.launch {
+            accountIdFlow.collect { active ->
+                if (active != threadAccountId) {
+                    threadAccountId = active
+                    _entries.value = emptyList()
+                }
+            }
+        }
         refreshGate()
     }
 
@@ -68,7 +101,7 @@ class AskViewModel(
         viewModelScope.launch {
             val hasKey = aiService.currentConfig() != null
             val status = try {
-                indexer.status(accountIdProvider())
+                indexer.status(accountId)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 null
@@ -78,16 +111,23 @@ class AskViewModel(
         }
     }
 
-    /** The gate's Build action — reconcile is the index's
-     *  self-repair: it embeds what's missing and drops what's
-     *  foreign or no longer eligible. Never throws. */
+    /** The gate's Build action — the USER-INITIATED build:
+     *  it embeds what's missing and drops what's foreign or no
+     *  longer eligible, and a provider failure surfaces as
+     *  calm error copy on the gate (mirroring [rebuildIndex])
+     *  instead of the Build button silently re-appearing as
+     *  if nothing had happened (Codex PR #25 P2). Background
+     *  maintenance keeps the indexer's swallow-by-design
+     *  reconcile; this path deliberately does not use it. */
     fun buildIndex() {
         if (_indexBusy.value) return
         _indexBusy.value = true
         _indexError.value = null
         viewModelScope.launch {
             try {
-                indexer.reconcile(accountIdProvider())
+                indexer.buildIndex(accountId)
+            } catch (e: AiException) {
+                _indexError.value = e.displayMessage
             } finally {
                 _indexBusy.value = false
                 refreshGate()
@@ -104,7 +144,7 @@ class AskViewModel(
         _indexError.value = null
         viewModelScope.launch {
             try {
-                indexer.rebuild(accountIdProvider())
+                indexer.rebuild(accountId)
             } catch (e: AiException) {
                 _indexError.value = e.displayMessage
             } finally {
@@ -120,13 +160,20 @@ class AskViewModel(
         // refuses a second submit rather than trusting every
         // caller to disable its button (1.x reducer rule).
         if (question.isEmpty() || _busy.value) return
+        // The account this exchange belongs to, pinned at ask
+        // time: if the active identity changes while it is in
+        // flight, the thread is cleared by the init collector
+        // and this exchange's outcome must never land in the
+        // new account's thread.
+        val askedAccount = accountId
         val previousTurn = previousTurnOf(_entries.value)
         _entries.value = _entries.value + AskEntry.Question(nextId++, question)
         _busy.value = true
         viewModelScope.launch {
             var disclosure: String? = null
             try {
-                val excerpts = indexer.retrieveAskExcerpts(accountIdProvider(), question)
+                val excerpts = indexer.retrieveAskExcerpts(askedAccount, question)
+                if (accountId != askedAccount) return@launch
                 if (excerpts.isEmpty()) {
                     // Nothing eligible cleared the floor — no
                     // provider call is spent (AiService.ask
@@ -148,26 +195,70 @@ class AskViewModel(
                     askProviderName(aiService.currentConfig()?.providerId),
                 )
                 when (val result = aiService.ask(question, excerpts, previousTurn)) {
-                    is AskAnswerResult.Answer -> appendAnswer(
-                        AskAnswerStatus.ANSWER, result.text, result.citations,
-                        sent, disclosure, null,
-                    )
-                    AskAnswerResult.Refusal -> appendAnswer(
-                        AskAnswerStatus.REFUSAL, "", emptyList(),
-                        sent, disclosure, null,
-                    )
-                    AskAnswerResult.NoEvidence -> appendAnswer(
-                        AskAnswerStatus.NO_EVIDENCE, "", emptyList(),
-                        emptyList(), null, null,
-                    )
+                    is AskAnswerResult.Answer -> {
+                        if (accountId != askedAccount) return@launch
+                        // Post-generation revalidation (Jules
+                        // PR #25 P1): the cited notes were valid
+                        // when retrieved, but the generation call
+                        // took seconds — a note locked, archived,
+                        // trashed, deleted or edited in that
+                        // window must not render as quoted.
+                        // Citations to now-invalid notes are
+                        // stripped (markers included, surviving
+                        // numbers unchanged); an answer left with
+                        // no valid citation at all degrades to
+                        // the refusal, the parser's own rule.
+                        val validNoteIds = indexer.revalidateAskNotes(
+                            askedAccount,
+                            result.citations.map { it.noteId }.toSet(),
+                        )
+                        if (accountId != askedAccount) return@launch
+                        val kept = result.citations.filter { it.noteId in validNoteIds }
+                        when {
+                            kept.isEmpty() -> appendAnswer(
+                                AskAnswerStatus.REFUSAL, "", emptyList(),
+                                sent, disclosure, null,
+                            )
+                            kept.size == result.citations.size -> appendAnswer(
+                                AskAnswerStatus.ANSWER, result.text, result.citations,
+                                sent, disclosure, null,
+                            )
+                            else -> {
+                                val removedNumbers =
+                                    result.citations.map { it.n }.toSet() -
+                                        kept.map { it.n }.toSet()
+                                appendAnswer(
+                                    AskAnswerStatus.ANSWER,
+                                    stripCitationMarkers(result.text, removedNumbers),
+                                    kept, sent, disclosure, null,
+                                )
+                            }
+                        }
+                    }
+                    AskAnswerResult.Refusal -> {
+                        if (accountId != askedAccount) return@launch
+                        appendAnswer(
+                            AskAnswerStatus.REFUSAL, "", emptyList(),
+                            sent, disclosure, null,
+                        )
+                    }
+                    AskAnswerResult.NoEvidence -> {
+                        if (accountId != askedAccount) return@launch
+                        appendAnswer(
+                            AskAnswerStatus.NO_EVIDENCE, "", emptyList(),
+                            emptyList(), null, null,
+                        )
+                    }
                 }
             } catch (e: AiException) {
+                if (accountId != askedAccount) return@launch
                 appendAnswer(
                     AskAnswerStatus.ERROR, "", emptyList(),
                     emptyList(), disclosure, e.displayMessage,
                 )
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (accountId != askedAccount) return@launch
                 appendAnswer(
                     AskAnswerStatus.ERROR, "", emptyList(),
                     emptyList(), disclosure, "Something went wrong. Try again.",

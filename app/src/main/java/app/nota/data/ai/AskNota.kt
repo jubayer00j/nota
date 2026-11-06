@@ -42,6 +42,18 @@ const val ASK_MAX_EXCERPTS_PER_NOTE = 2
  *  AI cap. */
 const val ASK_EXCERPT_BUDGET_CHARS = 16_000
 
+/** Character budget for a source note's TITLE inside the
+ *  prompt. A title is interpolated into its excerpt's line,
+ *  so an unbounded one (a pasted document as a "title")
+ *  defeats the total cap no matter how the text budgets shed
+ *  — the shrink passes can only shrink excerpt text and the
+ *  question, never the title. Titles are therefore
+ *  middle-truncated to this before any budget pass runs, and
+ *  the whole-prompt passes measure the assembled prompt with
+ *  titles included, so the cap then holds for every input
+ *  (Codex PR #25 P2). */
+const val ASK_TITLE_BUDGET_CHARS = 200
+
 /** Character cap for the optional previous Q/A pair (context,
  *  never evidence). */
 const val ASK_PREVIOUS_TURN_BUDGET_CHARS = 2_000
@@ -126,24 +138,34 @@ object AskNota {
     ).joinToString("\n")
 
     /**
-     * Assembles the grounded prompt. Budgets, in order: excerpt
+     * Assembles the grounded prompt. Budgets, in order: titles
+     * are bounded to [ASK_TITLE_BUDGET_CHARS] first (see its
+     * doc — the shrink passes below can only shrink excerpt
+     * text and the question, so an unbounded title defeats
+     * them all); excerpt
      * text is capped at [ASK_EXCERPT_BUDGET_CHARS] by dropping
      * the lowest-ranked chunks whole (a chunk is never cut
      * mid-text; a lone chunk that still cannot fit is
      * middle-truncated, elision marker visible to the model);
      * the whole prompt is capped at [AI_MAX_INPUT_CHARS] by the
-     * same shedding, then by truncation. The previous Q/A pair,
-     * when given, is added only with whatever budget remains
-     * after excerpts, truncated to
-     * [ASK_PREVIOUS_TURN_BUDGET_CHARS] and labelled as
-     * conversation — never as evidence.
+     * same shedding, then by truncation — and those passes
+     * measure the ASSEMBLED prompt, titles and framing
+     * included, so the cap holds for ALL inputs, pathological
+     * titles included. The previous Q/A pair, when given, is added
+     * only with whatever budget remains after excerpts,
+     * truncated to [ASK_PREVIOUS_TURN_BUDGET_CHARS] and
+     * labelled as conversation — never as evidence. The
+     * returned excerpts carry the bounded titles, so citation
+     * mapping and source cards describe the real prompt.
      */
     fun buildAskPrompt(
         question: String,
         excerpts: List<AskExcerpt>,
         previousTurn: AskPreviousTurn? = null,
     ): AskPrompt {
-        var used = excerpts.toList()
+        var used = excerpts.map {
+            it.copy(title = truncateTo(it.title, ASK_TITLE_BUDGET_CHARS))
+        }
 
         fun excerptChars(list: List<AskExcerpt>): Int = list.sumOf { it.text.length }
         while (used.size > 1 && excerptChars(used) > ASK_EXCERPT_BUDGET_CHARS) {

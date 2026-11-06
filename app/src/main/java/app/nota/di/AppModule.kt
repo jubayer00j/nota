@@ -137,12 +137,15 @@ val appModule = module {
         )
     }
     // Phase 4.3 Ask Nota: the thread's orchestration over the
-    // 4.1 service seam and the 4.2 indexer.
+    // 4.1 service seam and the 4.2 indexer. The account flow
+    // itself (not a snapshot lambda) so the ViewModel can key
+    // its thread to the active identity and clear it on a
+    // switch (PR #25 fix round).
     viewModel {
         AskViewModel(
             get(),
             get(),
-            accountIdProvider = { get<DatabaseProvider>().accountId.value },
+            accountIdFlow = get<DatabaseProvider>().accountId,
         )
     }
 }

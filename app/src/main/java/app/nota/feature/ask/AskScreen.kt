@@ -9,10 +9,12 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,6 +36,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -239,6 +242,7 @@ private fun GateText(title: String, body: String) {
     )
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ReadyThread(
     entries: List<AskEntry>,
@@ -252,7 +256,23 @@ private fun ReadyThread(
 ) {
     val listState = rememberLazyListState()
     val itemCount = entries.size + if (busy) 1 else 0
-    LaunchedEffect(itemCount) {
+    // Scroll-to-bottom fires not only when an item lands but
+    // when the layout SETTLES around it (Jules PR #25 P3):
+    // the keyboard opening shifts the viewport, and a tall
+    // answer/source card can finish laying out after the
+    // count changed, either of which could leave the newest
+    // content below the fold. The IME's visibility and the
+    // last visible item's laid-out size are the settle
+    // signals — the size only moves while the tail of the
+    // list is on screen, so reading back through history is
+    // never fought.
+    val imeVisible = WindowInsets.isImeVisible
+    val lastVisibleItemSize by remember {
+        derivedStateOf {
+            listState.layoutInfo.visibleItemsInfo.lastOrNull()?.size ?: 0
+        }
+    }
+    LaunchedEffect(itemCount, imeVisible, lastVisibleItemSize) {
         if (itemCount > 0) listState.animateScrollToItem(itemCount - 1)
     }
     var input by remember { mutableStateOf("") }

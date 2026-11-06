@@ -95,12 +95,16 @@ class SemanticIndexer(
     )
 
     /** A note that survived Ask's fresh-passage validation:
-     *  its live row, the chunks of its CURRENT text, and the
-     *  stored vectors those chunks were embedded as. */
+     *  its live row, the chunks of its CURRENT text, the
+     *  stored vectors those chunks were embedded as, and the
+     *  stored fingerprint the vectors answer for (kept so the
+     *  post-embed revalidation can compare the live row
+     *  against exactly what retrieval validated). */
     private data class AskCandidate(
         val note: NoteEntity,
         val chunks: List<String>,
         val vectors: List<FloatArray>,
+        val fingerprint: String,
     )
 
     /** The index's eligibility rule: a note that is locked,
@@ -231,7 +235,25 @@ class SemanticIndexer(
         }
     }
 
-    private suspend fun reconcileLocked(accountId: String) {
+    /**
+     * The USER-INITIATED build (the Ask gate's Build action):
+     * the same maintenance pass as [reconcile], but a provider
+     * failure surfaces to the caller as [AiException] instead
+     * of being swallowed — a person who just tapped Build is
+     * owed an error state, not the Build button silently
+     * re-appearing as if nothing happened (Codex PR #25 P2;
+     * [rebuild] already surfaces this way). Background
+     * triggers keep using [reconcile]: indexing must never
+     * fail a note save, a search, or app start. Partial
+     * progress made before the failure stays persisted,
+     * exactly as in the background pass.
+     */
+    suspend fun buildIndex(accountId: String) {
+        if (accountId != databaseProvider.accountId.value) return
+        mutex.withLock { reconcileLocked(accountId, surfaceFailure = true) }
+    }
+
+    private suspend fun reconcileLocked(accountId: String, surfaceFailure: Boolean = false) {
         val config = settings.activeEmbeddingConfig(accountId)
         val stored = store.load(accountId)
         val desired = desiredNotes()
@@ -282,6 +304,10 @@ class SemanticIndexer(
             val vectors = try {
                 embedNote(config, want, dims)
             } catch (e: AiException) {
+                // Background passes stop quietly and keep what
+                // succeeded; a user-initiated build is owed the
+                // failure itself (see [buildIndex]).
+                if (surfaceFailure) throw e
                 break
             }
             if (dims == 0) dims = vectors.first().size
@@ -372,7 +398,11 @@ class SemanticIndexer(
      * debounce makes that window small) — and it can never
      * leak: quoted text is re-chunked from the note's CURRENT
      * text, and the fingerprint match is what licenses pairing
-     * that text with the stored vectors at all.
+     * that text with the stored vectors at all. The validation
+     * runs TWICE — before the question-embedding call and again
+     * after it returns — because the call takes seconds and a
+     * state change landing inside it must be honoured by the
+     * retrieval already in flight, not just the next one.
      *
      * Ranking is 1.x's: similarity descending, note id then
      * chunk index breaking ties so citation numbering is
@@ -396,7 +426,7 @@ class SemanticIndexer(
             if (fingerprint(live.title, live.plainText) != storedNote.fingerprint) continue
             val chunks = NoteChunker.chunk(live.title, live.plainText)
             if (chunks.isEmpty()) continue
-            candidates += AskCandidate(live, chunks, storedNote.chunks)
+            candidates += AskCandidate(live, chunks, storedNote.chunks, storedNote.fingerprint)
         }
         if (candidates.isEmpty()) return emptyList()
 
@@ -405,8 +435,28 @@ class SemanticIndexer(
         if (queryVector.size != stored.dims) return emptyList()
         val floor = SemanticMath.floorFor(config.providerId)
 
-        val scored = ArrayList<AskExcerpt>()
+        // Post-embed revalidation (Codex PR #25 P1): the
+        // candidates above were validated BEFORE the embedding
+        // call, and that call takes seconds on a phone — a note
+        // locked, archived, trashed, deleted or edited while it
+        // was in flight must not contribute passages from its
+        // pre-request snapshot. Re-check every candidate
+        // against its LIVE row — eligibility AND the stored
+        // fingerprint — exactly as [search] re-checks its hits
+        // after its own embed. A fingerprint that still matches
+        // also proves the snapshot's chunks are still the
+        // note's current text, so scoring proceeds on them.
+        val liveCandidates = ArrayList<AskCandidate>(candidates.size)
         for (candidate in candidates) {
+            val live = noteDao.getById(candidate.note.id) ?: continue
+            if (!isIndexEligible(live)) continue
+            if (fingerprint(live.title, live.plainText) != candidate.fingerprint) continue
+            liveCandidates += candidate
+        }
+        if (liveCandidates.isEmpty()) return emptyList()
+
+        val scored = ArrayList<AskExcerpt>()
+        for (candidate in liveCandidates) {
             // The fingerprint match makes chunk and vector
             // counts equal by construction; the min is a
             // defensive belt, never the expected path.
@@ -439,6 +489,50 @@ class SemanticIndexer(
             out += item
         }
         return out
+    }
+
+    /**
+     * Post-generation revalidation for Ask (Jules PR #25 P1):
+     * of [noteIds], the ones whose note is STILL quotable right
+     * now — live row eligible ([isIndexEligible]) AND its
+     * current text's fingerprint still equal to the stored one,
+     * exactly the validation [retrieveAskExcerpts] applies.
+     * Ask calls this AFTER the generation call returns and
+     * before the answer renders: a note locked, archived,
+     * trashed, deleted or edited while the model was answering
+     * loses its citations (and with them its source card) even
+     * though it was valid when retrieved. Local reads only —
+     * no provider, no config — and fail-closed: a note that
+     * cannot be re-read counts as no longer valid rather than
+     * letting an unverifiable citation render.
+     */
+    suspend fun revalidateAskNotes(
+        accountId: String,
+        noteIds: Collection<String>,
+    ): Set<String> {
+        if (noteIds.isEmpty()) return emptySet()
+        if (accountId != databaseProvider.accountId.value) return emptySet()
+        val stored = try {
+            store.load(accountId)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            return emptySet()
+        } ?: return emptySet()
+        val noteDao = databaseProvider.current.noteDao()
+        val valid = HashSet<String>()
+        for (noteId in noteIds) {
+            val storedNote = stored.notes[noteId] ?: continue
+            val live = try {
+                noteDao.getById(noteId)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                null
+            } ?: continue
+            if (!isIndexEligible(live)) continue
+            if (fingerprint(live.title, live.plainText) != storedNote.fingerprint) continue
+            valid += noteId
+        }
+        return valid
     }
 
     /** Drops the account's whole index (sign-out — like its keys,
