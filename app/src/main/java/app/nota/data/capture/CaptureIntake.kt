@@ -12,6 +12,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Phase 5.2: turns door + share intents (forwarded by MainActivity)
@@ -39,6 +41,9 @@ class CaptureIntake(
     private val appContext: Context = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** Serialises staging so records land in the store in arrival order. */
+    private val stageMutex = Mutex()
+
     @Volatile
     private var lastShareIntent: Intent? = null
 
@@ -49,9 +54,13 @@ class CaptureIntake(
             CaptureIntents.DOOR_TODAY -> CaptureRequest.Today(id, source)
             else -> CaptureRequest.NewNote(id, source)
         }
-        store.stage(
-            CaptureRecord(id = id, accountId = accountId, request = request),
-        )
+        scope.launch {
+            stageMutex.withLock {
+                store.stage(
+                    CaptureRecord(id = id, accountId = accountId, request = request),
+                )
+            }
+        }
     }
 
     /** Stages a share intent: parse is cheap (extras only); the
@@ -64,7 +73,7 @@ class CaptureIntake(
         val parsed = ShareIntents.parse(intent)
         val intentType = intent.type
         scope.launch {
-            runCatching { extractAndStage(parsed, intentType, accountId) }
+            runCatching { stageMutex.withLock { extractAndStage(parsed, intentType, accountId) } }
         }
     }
 
@@ -106,6 +115,25 @@ class CaptureIntake(
             intentType != "image/*"
         ) {
             mimeType = intentType
+        }
+        if (mimeType == null || !mimeType.startsWith("image/")) {
+            // Some senders report no type, or a generic one like
+            // application/octet-stream: trust the display name's
+            // extension when it names a known image type.
+            mimeType = when (
+                queryDisplayName(resolver, uri)
+                    ?.substringAfterLast('.', "")
+                    ?.lowercase()
+            ) {
+                "jpg", "jpeg" -> "image/jpeg"
+                "png" -> "image/png"
+                "gif" -> "image/gif"
+                "webp" -> "image/webp"
+                "heic" -> "image/heic"
+                "heif" -> "image/heif"
+                "bmp" -> "image/bmp"
+                else -> null
+            }
         }
         if (mimeType == null || !mimeType.startsWith("image/")) return null
 
