@@ -39,6 +39,8 @@ jobs:
   # (Phase 5.1: the partition grows to 73 classes — fast-a +4
   # reminder pure-JVM classes, B +2 reminder Robolectric suites,
   # B3 +1 reminder fire-handler Robolectric suite.)
+  # (PR #28 fix round: the partition grows to 76 classes —
+  # fast-a +3 reminder fix classes.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -84,7 +86,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 39 of 73 non-UI classes)
+      - name: Run fast unit tests (shard A, 42 of 76 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -120,9 +122,12 @@ jobs:
             --tests "app.nota.feature.lock.LegacyFingerprintPromptCoordinatorTest" \
             --tests "app.nota.feature.lock.LegacyFingerprintPromptStateMachineTest" \
             --tests "app.nota.feature.lock.NoteLockGateAutoPromptTest" \
+            --tests "app.nota.data.reminders.AtomicTextFileTest" \
             --tests "app.nota.data.reminders.ReminderIdsTest" \
             --tests "app.nota.data.reminders.ReminderNotificationTextTest" \
             --tests "app.nota.data.reminders.ReminderSchedulerTest" \
+            --tests "app.nota.feature.reminders.ClockAlarmDatesTest" \
+            --tests "app.nota.feature.reminders.ReminderTriggerTimesTest" \
             --tests "app.nota.feature.reminders.RemindersSectionTest" \
             --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
             --tests "app.nota.ui.theme.ThemeSelectionTest" \
