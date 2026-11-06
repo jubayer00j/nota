@@ -114,6 +114,9 @@ jobs:
   # (Extras bundle fix round: the partition grows to 116 classes —
   # fast-a +1 (the speech pending-start gate), B +1 (the sync-apply
   # device-local preservation Robolectric suite).)
+  # (Phase 6.1 revival: the partition grows to 118 classes —
+  # fast-a +1 list-rows Robolectric suite, B3 +1 semantic-cache
+  # Robolectric suite.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -192,6 +195,7 @@ jobs:
             --tests "app.nota.data.preferences.PreferencesCorruptionAppLockTest" \
             --tests "app.nota.data.repository.FtsQueryBuilderTest" \
             --tests "app.nota.data.repository.NoteRepositoryRobolectricTest" \
+            --tests "app.nota.data.repository.NoteListRowsRobolectricTest" \
             --tests "app.nota.data.security.AppLockBiometricStoreTest" \
             --tests "app.nota.data.security.AppLockManagerSetupTest" \
             --tests "app.nota.data.security.NoteLockRecordTest" \
@@ -432,6 +436,7 @@ jobs:
             --tests "app.nota.data.ai.OpenAiCompatibleProviderTest" \
             --tests "app.nota.data.ai.SemanticIndexStoreTest" \
             --tests "app.nota.data.ai.SemanticIndexerRobolectricTest" \
+            --tests "app.nota.data.ai.SemanticIndexCacheRobolectricTest" \
             --tests "app.nota.data.ai.AskNotaRobolectricTest" \
             --tests "app.nota.feature.ask.AskViewModelRobolectricTest" \
             --tests "app.nota.feature.search.SearchSemanticHintRobolectricTest" \

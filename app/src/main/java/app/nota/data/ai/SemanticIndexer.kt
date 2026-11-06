@@ -69,6 +69,47 @@ class SemanticIndexer(
 ) {
     private val mutex = Mutex()
 
+    // Phase 6.1: the loaded index, cached in memory. Every read used
+    // to re-read and re-deserialise the whole vector file from disk —
+    // per debounced search keystroke, per Ask question, per status
+    // check. Every write to the store in the app flows through this
+    // class (rebuild, reconcile, persist, evict, clear — verified by
+    // grep over SemanticIndexStore call sites), so the cache can be
+    // kept exactly coherent: [storeIndex] is the ONLY way anything
+    // mutates the store from here, and it refreshes the cache with a
+    // snapshot copy in the same step. The file remains the persistence
+    // copy (survives process death); the cache is the read path.
+    private val cacheLock = Any()
+    @Volatile
+    private var cachedIndex: Pair<String, StoredSemanticIndex?>? = null
+
+    /** The account's index: memory first, disk on a cold cache. */
+    private fun loadIndex(accountId: String): StoredSemanticIndex? {
+        synchronized(cacheLock) {
+            val cached = cachedIndex
+            if (cached != null && cached.first == accountId) return cached.second
+        }
+        val loaded = store.load(accountId)
+        synchronized(cacheLock) { cachedIndex = accountId to loaded }
+        return loaded
+    }
+
+    /** The single mutation path: write the file (or delete it when
+     *  [index] is null) and refresh the cache with a snapshot copy —
+     *  callers keep mutating their working maps after a save, and the
+     *  cache must never alias one. */
+    private fun storeIndex(accountId: String, index: StoredSemanticIndex?) {
+        if (index == null) {
+            store.delete(accountId)
+        } else {
+            store.save(accountId, index)
+        }
+        val snapshot = index?.let {
+            StoredSemanticIndex(it.signature, it.dims, LinkedHashMap(it.notes))
+        }
+        synchronized(cacheLock) { cachedIndex = accountId to snapshot }
+    }
+
     private val _rebuildProgress = MutableStateFlow<SemanticRebuildProgress?>(null)
 
     /** The running rebuild's progress, or null when no rebuild
@@ -133,9 +174,18 @@ class SemanticIndexer(
 
     suspend fun status(accountId: String): SemanticIndexStatus = mutex.withLock {
         val config = settings.activeEmbeddingConfig(accountId)
-        val stored = store.load(accountId)
+        val stored = loadIndex(accountId)
         val eligible = if (accountId == databaseProvider.accountId.value) {
-            desiredNotes().size
+            // Phase 6.1: the eligible COUNT used to cost a full
+            // desiredNotes() pass — every note's entity loaded, its
+            // text chunked and SHA-256-hashed — on every Ask-screen
+            // open and Settings view. The count needs only the
+            // (id, title, plainText) projection and the chunker's own
+            // blank rule: chunk() is empty exactly when embeddedText
+            // is blank.
+            databaseProvider.current.noteDao().getIndexCandidates().count { candidate ->
+                NoteChunker.embeddedText(candidate.title, candidate.plainText).isNotBlank()
+            }
         } else {
             stored?.notes?.size ?: 0
         }
@@ -200,9 +250,9 @@ class SemanticIndexer(
                 // replaces the old index atomically — or the file
                 // goes, when nothing is eligible any more.
                 if (working.isEmpty()) {
-                    store.delete(accountId)
+                    storeIndex(accountId, null)
                 } else {
-                    store.save(
+                    storeIndex(
                         accountId,
                         StoredSemanticIndex(config.spaceSignature(), dims, working),
                     )
@@ -255,7 +305,7 @@ class SemanticIndexer(
 
     private suspend fun reconcileLocked(accountId: String, surfaceFailure: Boolean = false) {
         val config = settings.activeEmbeddingConfig(accountId)
-        val stored = store.load(accountId)
+        val stored = loadIndex(accountId)
         val desired = desiredNotes()
 
         // Foreign-space vectors are dropped wholesale (1.x rule),
@@ -314,7 +364,7 @@ class SemanticIndexer(
             working[noteId] = StoredNoteVectors(want.fingerprint, vectors)
             changed = true
             if (++sinceSave >= SAVE_EVERY_NOTES) {
-                store.save(accountId, StoredSemanticIndex(config.spaceSignature(), dims, working))
+                storeIndex(accountId, StoredSemanticIndex(config.spaceSignature(), dims, working))
                 sinceSave = 0
             }
         }
@@ -336,12 +386,12 @@ class SemanticIndexer(
         if (query.isBlank()) return emptyList()
         val config = settings.activeEmbeddingConfig(accountId) ?: return emptyList()
         if (accountId != databaseProvider.accountId.value) return emptyList()
-        var stored = store.load(accountId)
+        var stored = loadIndex(accountId)
         if (stored == null || stored.notes.isEmpty() ||
             stored.signature != config.spaceSignature()
         ) {
             reconcile(accountId)
-            stored = store.load(accountId)
+            stored = loadIndex(accountId)
         }
         if (stored == null || stored.notes.isEmpty() ||
             stored.signature != config.spaceSignature()
@@ -413,7 +463,7 @@ class SemanticIndexer(
         if (question.isBlank()) return emptyList()
         val config = settings.activeEmbeddingConfig(accountId) ?: return emptyList()
         if (accountId != databaseProvider.accountId.value) return emptyList()
-        val stored = store.load(accountId) ?: return emptyList()
+        val stored = loadIndex(accountId) ?: return emptyList()
         if (stored.notes.isEmpty() || stored.signature != config.spaceSignature()) {
             return emptyList()
         }
@@ -513,7 +563,7 @@ class SemanticIndexer(
         if (noteIds.isEmpty()) return emptySet()
         if (accountId != databaseProvider.accountId.value) return emptySet()
         val stored = try {
-            store.load(accountId)
+            loadIndex(accountId)
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             return emptySet()
@@ -538,7 +588,7 @@ class SemanticIndexer(
     /** Drops the account's whole index (sign-out — like its keys,
      *  an account's vectors belong to the sign-in). */
     suspend fun clearAccount(accountId: String) {
-        mutex.withLock { store.delete(accountId) }
+        mutex.withLock { storeIndex(accountId, null) }
     }
 
     /**
@@ -554,7 +604,7 @@ class SemanticIndexer(
      */
     suspend fun evictNote(accountId: String, noteId: String) {
         mutex.withLock {
-            val stored = store.load(accountId) ?: return
+            val stored = loadIndex(accountId) ?: return
             if (noteId !in stored.notes) return
             val working = LinkedHashMap(stored.notes)
             working.remove(noteId)
@@ -590,9 +640,9 @@ class SemanticIndexer(
         working: Map<String, StoredNoteVectors>,
     ) {
         if (working.isEmpty() || signature == null) {
-            store.delete(accountId)
+            storeIndex(accountId, null)
         } else {
-            store.save(accountId, StoredSemanticIndex(signature, dims, LinkedHashMap(working)))
+            storeIndex(accountId, StoredSemanticIndex(signature, dims, LinkedHashMap(working)))
         }
     }
 

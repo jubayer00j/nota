@@ -8,8 +8,11 @@ plugins {
     alias(libs.plugins.ksp)
     // Baseline Profiles infrastructure (Phase 1a). The plugin only wires
     // the packaging/generation tasks; actually GENERATING a profile still
-    // requires a device/emulator session with a generator target, so no
-    // profile is bundled yet and none is hand-written.
+    // requires a device/emulator session with a generator target, which
+    // CI cannot provide — so Phase 6.1 HAND-AUTHORS the profile instead
+    // (src/main/baselineProfiles/baseline-prof.txt: startup + notes-list
+    // rules), and this plugin merges it into the APK for
+    // profileinstaller to install at first launch.
     alias(libs.plugins.androidx.baselineprofile)
     // Phase 3a: Firebase (identity only — spec §2). The plugin reads
     // app/google-services.json, which is NEVER committed (Noma
@@ -40,8 +43,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 37
-        versionName = "0.24.0"
+        versionCode = 38
+        versionName = "0.25.0"
     }
 
     buildTypes {
