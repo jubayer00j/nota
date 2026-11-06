@@ -34,6 +34,8 @@ jobs:
   # pure-JVM link-graph classes, B3 +1 graph Robolectric suite.)
   # (PR #26 fix round: the partition grows to 65 classes —
   # fast-a +2 pure-JVM link-graph fix classes.)
+  # (v0.8.1: the partition grows to 66 classes — fast-a +1
+  # pure-JVM note-lock gate auto-prompt test.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -79,7 +81,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 34 of 65 non-UI classes)
+      - name: Run fast unit tests (shard A, 35 of 66 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -114,6 +116,7 @@ jobs:
             --tests "app.nota.feature.editor.PendingInsertResumerTest" \
             --tests "app.nota.feature.lock.LegacyFingerprintPromptCoordinatorTest" \
             --tests "app.nota.feature.lock.LegacyFingerprintPromptStateMachineTest" \
+            --tests "app.nota.feature.lock.NoteLockGateAutoPromptTest" \
             --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
             --tests "app.nota.ui.theme.ThemeSelectionTest" \
             --stacktrace
