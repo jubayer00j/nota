@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import app.nota.data.auth.AuthManager
 import app.nota.feature.settings.SignInScreen
 import kotlinx.coroutines.launch
+import androidx.navigation.NavController
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -69,6 +70,34 @@ object NotaRoutes {
     const val SIGN_IN = "sign-in"
     const val NOTE_EDITOR = "note/{noteId}"
     fun noteEditor(noteId: String): String = "note/$noteId"
+}
+
+/**
+ * Opens [noteId] in the editor without ever stacking a second
+ * copy of the same note's editor (Phase 4.4 fix round). Every
+ * open-note site funnels through here. If an editor for this
+ * exact note is already on the back stack — the graph opened
+ * note A, A's link panel chained on to B, B's panel points back
+ * at A — navigating "to" A surfaces that existing editor
+ * (everything above it pops) instead of pushing a duplicate, so
+ * backing out of it leaves the stack exactly as it was before A
+ * was first opened. A note that is not already open navigates
+ * normally, so ordinary chains (Notes → A → B) still back
+ * through B, then A; launchSingleTop covers re-opening the note
+ * already on top.
+ */
+private fun NavController.openNoteEditor(noteId: String) {
+    val existing = currentBackStack.value.lastOrNull { entry ->
+        entry.destination.route == NotaRoutes.NOTE_EDITOR &&
+            entry.arguments?.getString("noteId") == noteId
+    }
+    if (existing == null) {
+        navigate(NotaRoutes.noteEditor(noteId)) { launchSingleTop = true }
+    } else {
+        while (currentBackStackEntry != null && currentBackStackEntry !== existing) {
+            if (!popBackStack()) break
+        }
+    }
 }
 
 @Composable
@@ -137,9 +166,7 @@ fun NotaNavShell(
             isLocked, record, currentAccountId, currentNoteId,
         ) ?: return@LaunchedEffect
         if (noteRepository.getById(target) != null) {
-            navController.navigate(NotaRoutes.noteEditor(target)) {
-                launchSingleTop = true
-            }
+            navController.openNoteEditor(target)
         } else {
             pendingInsertStore.clearIf(record.id)
         }
@@ -181,26 +208,26 @@ fun NotaNavShell(
         ) {
             composable(NotaDestination.Notes.route) {
                 NotesScreen(
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                     onOpenSearch = { navController.navigate(NotaRoutes.SEARCH) },
                     onOpenGraph = { navController.navigate(NotaRoutes.LINK_GRAPH) },
                 )
             }
             composable(NotaRoutes.TODAY) {
                 TodayScreen(
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
             }
             composable(NotaRoutes.SEARCH) {
                 SearchScreen(
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                     onBack = { navController.popBackStack() },
                 )
             }
             composable(NotaRoutes.LINK_GRAPH) {
                 LinkGraphScreen(
                     onBack = { navController.popBackStack() },
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
             }
             composable(NotaRoutes.NOTE_EDITOR) { entry ->
@@ -208,12 +235,12 @@ fun NotaNavShell(
                 RichNoteEditorScreen(
                     noteId = noteId,
                     onBack = { navController.popBackStack() },
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
             }
             composable(NotaDestination.Ask.route) {
                 AskScreen(
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                     onOpenSettings = {
                         navController.navigate(NotaDestination.Settings.route) {
                             popUpTo(navController.graph.findStartDestination().id) {
@@ -240,7 +267,7 @@ fun NotaNavShell(
             composable(NotaRoutes.TEMPLATES) {
                 TemplatesScreen(
                     onBack = { navController.popBackStack() },
-                    onOpenNote = { id -> navController.navigate(NotaRoutes.noteEditor(id)) },
+                    onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
             }
             composable(NotaRoutes.DESIGN_SYSTEM) {
