@@ -171,9 +171,13 @@ class SettingsScreenPolishUiTest {
         composeRule.onNodeWithText("Data · About — arrive with their phases.")
             .assertDoesNotExist()
 
-        // Tapping a category row reports that category.
+        // Tapping a category row reports that category. (The
+        // unmerged tree: clickable rows merge their text into
+        // themselves in the merged tree, so the descendant
+        // matcher only resolves unmerged.)
         composeRule.onNode(
             hasClickAction() and hasAnyDescendant(hasText("Security & privacy")),
+            useUnmergedTree = true,
         ).performClick()
         composeRule.waitForIdle()
         assertEquals(SettingsCategory.SECURITY, clicked)
