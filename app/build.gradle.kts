@@ -115,6 +115,7 @@ val notaUiTestClasses = listOf(
     "app.nota.feature.editor.EditorAutolinkPopupUiTest",
     "app.nota.feature.editor.VersionHistoryUiTest",
     "app.nota.feature.notes.NotesSwipeGhostUiTest",
+    "app.nota.feature.notes.SwipeUndoRaceUiTest",
     "app.nota.feature.settings.BeginnerAiSetupUiTest",
     "app.nota.feature.export.NoteExportUiTest",
     "app.nota.feature.settings.SettingsScreenPolishUiTest",
