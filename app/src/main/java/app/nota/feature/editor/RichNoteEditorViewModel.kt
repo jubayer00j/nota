@@ -77,8 +77,8 @@ class RichNoteEditorViewModel(
     private val _attachments = MutableStateFlow<List<AttachmentEntity>>(emptyList())
     val attachments: StateFlow<List<AttachmentEntity>> = _attachments
 
-    private val _linkedFrom = MutableStateFlow<List<NoteEntity>>(emptyList())
-    val linkedFrom: StateFlow<List<NoteEntity>> = _linkedFrom
+    private val _linkedFrom = MutableStateFlow<List<app.nota.data.db.NoteLinkRow>>(emptyList())
+    val linkedFrom: StateFlow<List<app.nota.data.db.NoteLinkRow>> = _linkedFrom
 
     /** Phase 5.1: the note's pending reminder (at most one — the 5.1
      *  contract), or null. Drives the overflow item's label and the
@@ -89,12 +89,15 @@ class RichNoteEditorViewModel(
     val reminder: StateFlow<ReminderEntity?> = _reminder
 
     /** Notes this note links TO via [[title]] (Phase 4.4: the "Links" footer list). */
-    private val _links = MutableStateFlow<List<NoteEntity>>(emptyList())
-    val links: StateFlow<List<NoteEntity>> = _links
+    private val _links = MutableStateFlow<List<app.nota.data.db.NoteLinkRow>>(emptyList())
+    val links: StateFlow<List<app.nota.data.db.NoteLinkRow>> = _links
 
-    /** [[ ]] autocomplete candidates (all linkable notes). */
-    val linkableNotes: StateFlow<List<NoteEntity>> = repository.observeLinkable()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** [[ ]] autocomplete candidates (all linkable notes). Phase 6.1:
+     *  (id, title) targets — the suggestion list reads nothing else, so
+     *  opening the editor no longer loads every linkable note's body. */
+    val linkableNotes: StateFlow<List<app.nota.data.db.NoteLinkTarget>> =
+        repository.observeLinkableTargets()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _saveState = MutableStateFlow<SaveState>(SaveState.Saved(0))
     val saveState: StateFlow<SaveState> = _saveState
@@ -194,10 +197,10 @@ class RichNoteEditorViewModel(
             repository.observeAttachmentsForNote(noteId).collect { _attachments.value = it }
         }
         viewModelScope.launch {
-            repository.observeLinkedFrom(noteId).collect { _linkedFrom.value = it }
+            repository.observeLinkedFromRows(noteId).collect { _linkedFrom.value = it }
         }
         viewModelScope.launch {
-            repository.observeOutgoing(noteId).collect { _links.value = it }
+            repository.observeOutgoingRows(noteId).collect { _links.value = it }
         }
         viewModelScope.launch {
             reminderRepository.observePendingForNote(noteId).collect { _reminder.value = it }

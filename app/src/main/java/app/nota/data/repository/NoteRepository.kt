@@ -61,6 +61,25 @@ class NoteRepository(
 
     suspend fun getById(id: String): NoteEntity? = noteDao.getById(id)
 
+    // --- Phase 6.1: lightweight rows + change signal ---------------------
+    fun observeActiveRows(): Flow<List<app.nota.data.db.NoteListRow>> =
+        noteDao.observeActiveRows()
+    fun observeArchivedRows(): Flow<List<app.nota.data.db.NoteListRow>> =
+        noteDao.observeArchivedRows()
+    fun observeTrashedRows(): Flow<List<app.nota.data.db.NoteListRow>> =
+        noteDao.observeTrashedRows()
+    suspend fun getRowById(id: String): app.nota.data.db.NoteListRow? =
+        noteDao.getRowById(id)
+
+    /** "Something in the active list changed" pulse for the background
+     *  triggers (sync / semantic / widget in NotaApplication): the
+     *  emission cadence of [observeActive] at id-only weight. */
+    fun observeActiveIds(): Flow<List<String>> = noteDao.observeActiveIds()
+
+    /** [[ ]] autocomplete targets at (id, title) weight (Phase 6.1). */
+    fun observeLinkableTargets(): Flow<List<app.nota.data.db.NoteLinkTarget>> =
+        noteDao.observeLinkableTargets()
+
     // --- Core write path (FTS-synced) --------------------------------------
     suspend fun upsert(note: NoteEntity) {
         db.withTransaction {
@@ -270,6 +289,14 @@ class NoteRepository(
     /** Notes that [noteId] links TO via [[title]] — the footer's "Links" list. */
     fun observeOutgoing(noteId: String): Flow<List<NoteEntity>> = noteLinkDao.observeOutgoing(noteId)
 
+    /** [observeLinkedFrom] at footer weight (Phase 6.1). */
+    fun observeLinkedFromRows(noteId: String): Flow<List<app.nota.data.db.NoteLinkRow>> =
+        noteLinkDao.observeIncomingRows(noteId)
+
+    /** [observeOutgoing] at footer weight (Phase 6.1). */
+    fun observeOutgoingRows(noteId: String): Flow<List<app.nota.data.db.NoteLinkRow>> =
+        noteLinkDao.observeOutgoingRows(noteId)
+
     /** Every stored [[backlink]] edge (Phase 4.4: the link graph map). */
     fun observeAllLinks(): Flow<List<NoteLinkEntity>> = noteLinkDao.observeAll()
 
@@ -369,11 +396,14 @@ class NoteRepository(
     suspend fun deleteSavedSearch(search: SavedSearchEntity) = savedSearchDao.delete(search)
 
     // --- Search ---------------------------------------------------------------------
-    suspend fun searchNotes(raw: String): List<NoteEntity> {
+    /** Keyword search at list-row weight (Phase 6.1): the search
+     *  screen renders title/snippet/date/flags only, so results are
+     *  [app.nota.data.db.NoteListRow]s — same FTS match, same order. */
+    suspend fun searchNotes(raw: String): List<app.nota.data.db.NoteListRow> {
         val match = FtsQueryBuilder.build(raw) ?: return emptyList()
-        return noteDao.searchFts(match)
+        return noteDao.searchFtsRows(match)
     }
 
     /** Phase 0 name, kept as a delegate. */
-    suspend fun search(query: String): List<NoteEntity> = searchNotes(query)
+    suspend fun search(query: String): List<app.nota.data.db.NoteListRow> = searchNotes(query)
 }

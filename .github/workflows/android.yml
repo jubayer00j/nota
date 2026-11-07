@@ -52,6 +52,9 @@ jobs:
   # pure-JVM voice classes (transcript assembly, session machine,
   # probe mapping); the voice door cases extend the existing B3
   # door-intent Robolectric suite, so no new B/B3 class.)
+  # (Phase 6.1: the partition grows to 91 classes — fast-a +1
+  # list-rows Robolectric suite, B3 +1 semantic-cache Robolectric
+  # suite.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -97,7 +100,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 49 of 89 non-UI classes)
+      - name: Run fast unit tests (shard A, 50 of 91 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -122,6 +125,7 @@ jobs:
             --tests "app.nota.data.preferences.NoteLockBiometricCopyScopingTest" \
             --tests "app.nota.data.repository.FtsQueryBuilderTest" \
             --tests "app.nota.data.repository.NoteRepositoryRobolectricTest" \
+            --tests "app.nota.data.repository.NoteListRowsRobolectricTest" \
             --tests "app.nota.data.security.AppLockBiometricStoreTest" \
             --tests "app.nota.data.security.AppLockManagerSetupTest" \
             --tests "app.nota.data.security.NoteLockRecordTest" \
@@ -225,7 +229,7 @@ jobs:
       # it touches no AI code — a fork-composition interaction
       # (Robolectric sandbox/classloader neighbours). B2 keeps
       # its pre-4.1 composition, which was green on main.
-      - name: Run fast unit tests (shard B, 15 of 40 shard-B classes)
+      - name: Run fast unit tests (shard B, 15 of 41 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiBackupExclusionTest" \
@@ -285,7 +289,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B2, 7 of 40 shard-B classes)
+      - name: Run fast unit tests (shard B2, 7 of 41 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.repository.NoteLockRepositoryRobolectricTest" \
@@ -337,7 +341,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B3, 18 of 40 shard-B classes)
+      - name: Run fast unit tests (shard B3, 19 of 41 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiSummaryHtmlTest" \
@@ -345,6 +349,7 @@ jobs:
             --tests "app.nota.data.ai.OpenAiCompatibleProviderTest" \
             --tests "app.nota.data.ai.SemanticIndexStoreTest" \
             --tests "app.nota.data.ai.SemanticIndexerRobolectricTest" \
+            --tests "app.nota.data.ai.SemanticIndexCacheRobolectricTest" \
             --tests "app.nota.data.ai.AskNotaRobolectricTest" \
             --tests "app.nota.feature.ask.AskViewModelRobolectricTest" \
             --tests "app.nota.feature.graph.LinkGraphRobolectricTest" \
