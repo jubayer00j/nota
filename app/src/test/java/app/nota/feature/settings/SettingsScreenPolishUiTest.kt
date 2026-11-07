@@ -1,10 +1,14 @@
 package app.nota.feature.settings
 
+import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.test.core.app.ApplicationProvider
+import androidx.work.Configuration
+import androidx.work.WorkManager
 import app.nota.ui.theme.NotaTheme
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -50,6 +54,14 @@ class SettingsScreenPolishUiTest {
 
     @Before
     fun setUp() {
+        // The Drive section's scheduler effect calls
+        // WorkManager.getInstance: production gets WorkManager from
+        // its manifest ContentProvider, which Robolectric never
+        // installs — initialise it manually (idempotent-guarded).
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        runCatching {
+            WorkManager.initialize(context, Configuration.Builder().build())
+        }
         composeRule.setContent {
             NotaTheme {
                 SettingsScreen(
