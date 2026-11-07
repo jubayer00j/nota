@@ -1,24 +1,17 @@
 package app.nota.feature.settings
 
-import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
-import androidx.test.core.app.ApplicationProvider
-import app.nota.di.appModule
 import app.nota.ui.theme.NotaTheme
-import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.koin.android.ext.koin.androidContext
-import org.koin.core.context.startKoin
-import org.koin.core.context.stopKoin
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
@@ -27,8 +20,11 @@ import org.robolectric.shadows.ShadowLooper
 /**
  * Phase 6 polish: the Settings reorganisation, pinned at the
  * composition level. Composes the REAL [SettingsScreen] over the
- * REAL Koin graph (guest posture — no Firebase under Robolectric,
- * and AuthManager fails safe to Guest) and asserts:
+ * app's own Koin graph — NotaApplication.onCreate starts it under
+ * Robolectric exactly as in production (a second startKoin here
+ * would throw KoinApplicationAlreadyStartedException) — in guest
+ * posture (no Firebase under Robolectric; AuthManager fails safe
+ * to Guest), and asserts:
  *
  *  - the seven sections exist in the approved order (Account →
  *    Sync & backup → Security & privacy → Appearance →
@@ -54,11 +50,6 @@ class SettingsScreenPolishUiTest {
 
     @Before
     fun setUp() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        startKoin {
-            androidContext(context)
-            modules(appModule)
-        }
         composeRule.setContent {
             NotaTheme {
                 SettingsScreen(
@@ -68,11 +59,6 @@ class SettingsScreenPolishUiTest {
                 )
             }
         }
-    }
-
-    @After
-    fun tearDown() {
-        stopKoin()
     }
 
     /** Some sections appear only after async loads (AI settings);

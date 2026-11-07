@@ -50,6 +50,54 @@ internal fun repairedStorePreferences(): Preferences =
         this[PreferencesRepository.KEY_STORE_REPAIRED] = true
     }.toPreferences()
 
+/**
+ * The app store's corruption handler. Extracted as a factory so the
+ * corruption test can build a scratch store with the EXACT
+ * production handler instead of a copy of it.
+ */
+internal fun notaStoreCorruptionHandler(): ReplaceFileCorruptionHandler<Preferences> =
+    ReplaceFileCorruptionHandler(produceNewData = { repairedStorePreferences() })
+
+/**
+ * The App Lock reading of a preferences snapshot — extracted from
+ * [PreferencesRepository.appLockSettings] so the fail-closed rule is
+ * directly testable. Null ("unknown", which the lock manager treats
+ * as stay-locked) for a missing snapshot (an IO error upstream) AND
+ * for a corruption-repaired one ([PreferencesRepository.KEY_STORE_REPAIRED]):
+ * a repaired store has lost whatever credential the damaged file
+ * held, so reading it as a settings object with no credentials —
+ * "App Lock off" — would be a lie.
+ */
+internal fun appLockSettingsOrNull(prefs: Preferences?): AppLockSettings? {
+    if (prefs == null || prefs[PreferencesRepository.KEY_STORE_REPAIRED] == true) return null
+    fun credential(
+        saltKey: Preferences.Key<String>,
+        hashKey: Preferences.Key<String>,
+    ): AppLockCredential? {
+        val salt = prefs[saltKey]
+        val hash = prefs[hashKey]
+        return if (salt != null && hash != null) AppLockCredential(salt, hash) else null
+    }
+    return AppLockSettings(
+        password = credential(
+            PreferencesRepository.KEY_LOCK_PASSWORD_SALT,
+            PreferencesRepository.KEY_LOCK_PASSWORD_HASH,
+        ),
+        pin = credential(
+            PreferencesRepository.KEY_LOCK_PIN_SALT,
+            PreferencesRepository.KEY_LOCK_PIN_HASH,
+        ),
+        pattern = credential(
+            PreferencesRepository.KEY_LOCK_PATTERN_SALT,
+            PreferencesRepository.KEY_LOCK_PATTERN_HASH,
+        ),
+        biometricEnabled = prefs[PreferencesRepository.KEY_LOCK_BIOMETRIC] ?: false,
+        failedAttempts = prefs[PreferencesRepository.KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
+        lockoutUntil = prefs[PreferencesRepository.KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
+        lockTimeoutSeconds = prefs[PreferencesRepository.KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
+    )
+}
+
 private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "nota_preferences",
     // A corrupt file is replaced (see repairedStorePreferences)
@@ -57,9 +105,7 @@ private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStor
     // dataStore.edit throws CorruptionException on a corrupt file,
     // so the read-side catch in PreferencesRepository could never
     // actually recover via a Settings write.
-    corruptionHandler = ReplaceFileCorruptionHandler(
-        produceNewData = { repairedStorePreferences() },
-    ),
+    corruptionHandler = notaStoreCorruptionHandler(),
 )
 
 /**
@@ -177,33 +223,7 @@ class PreferencesRepository(context: Context) {
         .catch { exception ->
             if (exception is IOException) emit(null) else throw exception
         }
-        .map { prefs ->
-            if (prefs == null || prefs[KEY_STORE_REPAIRED] == true) {
-                null
-            } else {
-                fun credential(
-                    saltKey: Preferences.Key<String>,
-                    hashKey: Preferences.Key<String>,
-                ): AppLockCredential? {
-                    val salt = prefs[saltKey]
-                    val hash = prefs[hashKey]
-                    return if (salt != null && hash != null) {
-                        AppLockCredential(salt, hash)
-                    } else {
-                        null
-                    }
-                }
-                AppLockSettings(
-                    password = credential(KEY_LOCK_PASSWORD_SALT, KEY_LOCK_PASSWORD_HASH),
-                    pin = credential(KEY_LOCK_PIN_SALT, KEY_LOCK_PIN_HASH),
-                    pattern = credential(KEY_LOCK_PATTERN_SALT, KEY_LOCK_PATTERN_HASH),
-                    biometricEnabled = prefs[KEY_LOCK_BIOMETRIC] ?: false,
-                    failedAttempts = prefs[KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
-                    lockoutUntil = prefs[KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
-                    lockTimeoutSeconds = prefs[KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
-                )
-            }
-        }
+        .map { prefs -> appLockSettingsOrNull(prefs) }
 
     suspend fun setAppLockCredential(method: AppLockMethod, credential: AppLockCredential) {
         safeEdit {
