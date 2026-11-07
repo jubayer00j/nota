@@ -179,17 +179,49 @@ fun NotesScreen(
     // closes the one new hole the async snapshot opens — a snapshot
     // that somehow arrived after its window resolved must not leak
     // into the NEXT batch and resurrect state there.
+    //
+    // Fix round (Codex, PR #32): the async fetch opened a second hole.
+    // The snackbar runs in parallel with the fetch, so Undo can
+    // resolve while the batch is still EMPTY — resolution closes the
+    // window and the late snapshot is dropped by the guard, but the
+    // write itself still landed: the note was archived/trashed AFTER
+    // Undo appeared to succeed. The sink now answers the ViewModel
+    // (see swipeOp): queue-and-write while THIS batch's window is
+    // live; write-without-queueing when the window closed WITHOUT
+    // Undo (a dismissed snackbar leaves the op standing, exactly as
+    // a queued snapshot's op stands); and VETO the write when Undo
+    // closed this batch first. [batchGeneration] identifies the
+    // batch each swipe belongs to (consecutive swipes share one
+    // generation — one batch — until a resolution closes it), and
+    // [undoVetoedGenerations] records the generations Undo closed,
+    // so a late snapshot learns its batch's fate even if a newer
+    // batch's window has opened since. A vetoed swipe hands its row
+    // back (the id leaves [dismissedIds]): the note never changed
+    // underneath it, so it simply reappears.
     var undoWindowOpen by remember { mutableStateOf(false) }
+    var batchGeneration by remember { mutableStateOf(0) }
+    val undoVetoedGenerations = remember { mutableSetOf<Int>() }
     fun swipeWithUndo(
         note: app.nota.data.db.NoteListRow,
         message: String,
         exclude: Boolean = true,
-        action: (onSnapshot: (NoteEntity) -> Unit) -> Unit,
+        action: (onSnapshot: (NoteEntity) -> Boolean) -> Unit,
     ) {
         if (exclude) dismissedIds += note.id
         undoWindowOpen = true
+        val generation = batchGeneration
         action { snapshot ->
-            if (undoWindowOpen) pendingUndo += snapshot
+            when {
+                undoWindowOpen && generation == batchGeneration -> {
+                    pendingUndo += snapshot
+                    true
+                }
+                generation in undoVetoedGenerations -> {
+                    if (exclude) dismissedIds.remove(note.id)
+                    false
+                }
+                else -> true
+            }
         }
         undoJob?.cancel()
         undoJob = scope.launch {
@@ -197,9 +229,17 @@ fun NotesScreen(
             val batchIds = pendingUndo.map { it.id }
             if (result == SnackbarResult.ActionPerformed) {
                 pendingUndo.asReversed().forEach { viewModel.upsert(it) }
+                // Fetches of this batch still in flight must find
+                // their writes vetoed when they land (sink, above).
+                undoVetoedGenerations += generation
             }
             pendingUndo.clear()
             undoWindowOpen = false
+            batchGeneration++
+            // Only in-flight fetches consult the veto set, and a
+            // fetch outliving a handful of batch resolutions is out
+            // of scope — keep the set from growing without bound.
+            undoVetoedGenerations.removeAll { it < batchGeneration - 8 }
             dismissedIds.removeAll(batchIds)
         }
     }
