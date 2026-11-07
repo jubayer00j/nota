@@ -214,26 +214,33 @@ class NotesViewModel(
     // the state the op replaced, exactly what the screen's undo batch
     // re-upserts (the fidelity SwipeUndoFidelityRobolectricTest pins
     // at the repository layer is preserved end to end).
+    //
+    // Fix round (Codex, PR #32): the fetch is asynchronous while the
+    // screen's Undo snackbar runs in parallel, so Undo can resolve
+    // BEFORE the fetch lands. [onSnapshot] therefore returns whether
+    // the write may proceed: when the sink reports the batch was
+    // already undone, the write is vetoed outright — running it
+    // anyway archived/trashed the note after Undo had appeared to
+    // succeed, with nothing queued to restore it.
     private fun swipeOp(
         row: app.nota.data.db.NoteListRow,
-        onSnapshot: (NoteEntity) -> Unit,
+        onSnapshot: (NoteEntity) -> Boolean,
         op: suspend (NoteEntity) -> Unit,
     ) {
         viewModelScope.launch {
             val entity = repository.getById(row.id) ?: return@launch
-            onSnapshot(entity)
-            op(entity)
+            if (onSnapshot(entity)) op(entity)
         }
     }
 
-    fun archive(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Unit) =
+    fun archive(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Boolean) =
         swipeOp(row, onSnapshot) { repository.setArchived(it, true) }
     /** Phase 3.5 (D3): the Pin swipe action (the batch bar has its own). */
-    fun setPinned(row: app.nota.data.db.NoteListRow, pinned: Boolean, onSnapshot: (NoteEntity) -> Unit) =
+    fun setPinned(row: app.nota.data.db.NoteListRow, pinned: Boolean, onSnapshot: (NoteEntity) -> Boolean) =
         swipeOp(row, onSnapshot) { repository.setPinned(it, pinned) }
-    fun trash(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Unit) =
+    fun trash(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Boolean) =
         swipeOp(row, onSnapshot) { repository.trash(it) }
-    fun restore(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Unit) =
+    fun restore(row: app.nota.data.db.NoteListRow, onSnapshot: (NoteEntity) -> Boolean) =
         swipeOp(row, onSnapshot) { repository.restore(it) }
     fun upsert(note: NoteEntity) { viewModelScope.launch { repository.upsert(note) } }
     fun deletePermanently(row: app.nota.data.db.NoteListRow) {
