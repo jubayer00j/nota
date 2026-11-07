@@ -131,8 +131,10 @@ fun SettingsNotesScreen(
     preferencesRepository: PreferencesRepository = koinInject(),
 ) {
     val startOnToday by preferencesRepository.startOnToday.collectAsState(initial = false)
-    val swipeRight by preferencesRepository.swipeRight.collectAsState(initial = SwipeAction.ARCHIVE)
-    val swipeLeft by preferencesRepository.swipeLeft.collectAsState(initial = SwipeAction.DELETE)
+    val swipeRight by preferencesRepository.swipeRightAction
+        .collectAsState(initial = SwipeAction.ARCHIVE)
+    val swipeLeft by preferencesRepository.swipeLeftAction
+        .collectAsState(initial = SwipeAction.TRASH)
     val scope = rememberCoroutineScope()
 
     SettingsSubScreen(SettingsCategory.NOTES, INTRO_NOTES, onBack) {
@@ -148,16 +150,12 @@ fun SettingsNotesScreen(
             SwipeActionRow(
                 title = "Swipe right",
                 action = swipeRight,
-                onSelect = { action ->
-                    scope.launch { preferencesRepository.setSwipeRight(action) }
-                },
+                onSelect = { scope.launch { preferencesRepository.setSwipeRightAction(it) } },
             )
             SwipeActionRow(
                 title = "Swipe left",
                 action = swipeLeft,
-                onSelect = { action ->
-                    scope.launch { preferencesRepository.setSwipeLeft(action) }
-                },
+                onSelect = { scope.launch { preferencesRepository.setSwipeLeftAction(it) } },
             )
             Text(
                 "Swipes in the notes list. Delete archives the note and shows " +
