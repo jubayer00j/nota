@@ -118,7 +118,10 @@ internal suspend fun writeAppLockCredential(
     method: AppLockMethod,
     credential: AppLockCredential,
 ) {
-    store.edit {
+    // The transform is declared with its receiver type explicitly —
+    // the same shape safeEdit uses — rather than as a trailing
+    // lambda on edit.
+    val transform: suspend MutablePreferences.() -> Unit = {
         // A fresh credential is a post-repair truth: any
         // corruption-repair marker stops applying from here.
         remove(PreferencesRepository.KEY_STORE_REPAIRED)
@@ -137,6 +140,7 @@ internal suspend fun writeAppLockCredential(
             }
         }
     }
+    store.edit(transform)
 }
 
 private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStore(
