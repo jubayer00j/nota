@@ -96,78 +96,81 @@ fun DriveBackupSection() {
 
     var showDisconnectConfirm by remember { mutableStateOf(false) }
 
+    // (Phase 6 presentation redesign) read by both cards below,
+    // so it is derived once, before them.
+    val working = driveState as? DriveRepository.State.Working
+
     Column {
-        Text(
-            "Google Drive",
-            style = MaterialTheme.typography.titleSmall,
-        )
-        if (signedIn == null) {
-            Text(
-                "Nota backs up to the same \"Noma Backups\" folder your other devices use. " +
-                    "You're not signed in — use Sign in in the Account section " +
-                    "at the top of Settings to connect Google Drive for this library.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        } else {
-            val working = driveState as? DriveRepository.State.Working
-            if (working != null) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = NotaSpacing.sm),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    CircularProgressIndicator()
-                    Text(working.label, style = MaterialTheme.typography.bodyMedium)
+        SettingsCard(title = "Google Drive") {
+            if (signedIn == null) {
+                Text(
+                    "Nota backs up to the same \"Noma Backups\" folder your other devices use. " +
+                        "You're not signed in — use Sign in in Account " +
+                        "to connect Google Drive for this library.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                if (working != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = NotaSpacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator()
+                        Text(working.label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                when (val s = driveState) {
+                    is DriveRepository.State.Done ->
+                        DriveStatusText(s.message, MaterialTheme.colorScheme.primary)
+                    is DriveRepository.State.Failed ->
+                        DriveStatusText(s.message, MaterialTheme.colorScheme.error)
+                    is DriveRepository.State.Paused ->
+                        DriveStatusText(s.message, MaterialTheme.colorScheme.tertiary)
+                    else -> {}
+                }
+
+                Text(
+                    when {
+                        !grantKnown ->
+                            "Not connected yet. Nota can only see files it creates in Drive (drive.file)."
+                        lastBackup != null && lastBackup!!.first > 0L ->
+                            "Last backup from this device: ${relativeTime(lastBackup!!.first)}"
+                        else -> "Connected. No backup from this device yet."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                if (!grantKnown) {
+                    Button(
+                        onClick = { drive.startConnect() },
+                        enabled = working == null,
+                        modifier = Modifier.padding(vertical = NotaSpacing.sm),
+                    ) { Text("Connect Google Drive") }
+                } else {
+                    Button(
+                        onClick = { drive.startBackup() },
+                        enabled = working == null,
+                        modifier = Modifier.padding(vertical = NotaSpacing.sm),
+                    ) { Text("Back up now") }
+                    OutlinedButton(
+                        onClick = { drive.startRestore() },
+                        enabled = working == null,
+                    ) { Text("Restore from Drive") }
                 }
             }
-            when (val s = driveState) {
-                is DriveRepository.State.Done ->
-                    DriveStatusText(s.message, MaterialTheme.colorScheme.primary)
-                is DriveRepository.State.Failed ->
-                    DriveStatusText(s.message, MaterialTheme.colorScheme.error)
-                is DriveRepository.State.Paused ->
-                    DriveStatusText(s.message, MaterialTheme.colorScheme.tertiary)
-                else -> {}
-            }
+        }
 
-            Text(
-                when {
-                    !grantKnown ->
-                        "Not connected yet. Nota can only see files it creates in Drive (drive.file)."
-                    lastBackup != null && lastBackup!!.first > 0L ->
-                        "Last backup from this device: ${relativeTime(lastBackup!!.first)}"
-                    else -> "Connected. No backup from this device yet."
-                },
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            if (!grantKnown) {
-                Button(
-                    onClick = { drive.startConnect() },
-                    enabled = working == null,
-                    modifier = Modifier.padding(vertical = NotaSpacing.sm),
-                ) { Text("Connect Google Drive") }
-            } else {
-                Button(
-                    onClick = { drive.startBackup() },
-                    enabled = working == null,
-                    modifier = Modifier.padding(vertical = NotaSpacing.sm),
-                ) { Text("Back up now") }
-                OutlinedButton(
-                    onClick = { drive.startRestore() },
-                    enabled = working == null,
-                ) { Text("Restore from Drive") }
-
-                // ---- automatic mode ----
-                Text(
-                    "Automatic backup",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(top = NotaSpacing.md),
-                )
+        // ---- automatic mode: its own card, rendered exactly
+        // when this block used to appear inline (signed in with
+        // a Drive grant) ----
+        if (signedIn != null && grantKnown) {
+            Spacer(Modifier.height(NotaSpacing.md))
+            SettingsCard(title = "Automatic backup") {
                 DriveModeRow(
                     label = "Off",
                     selected = mode == PreferencesRepository.DRIVE_MODE_OFF,
@@ -258,7 +261,6 @@ fun DriveBackupSection() {
                 }
             }
         }
-        Spacer(Modifier.height(NotaSpacing.sm))
     }
 
     // ---- dialogs ----------------------------------------------------

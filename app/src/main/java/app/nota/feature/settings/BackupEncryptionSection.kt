@@ -76,11 +76,9 @@ fun BackupEncryptionBlock(
     var opError by remember { mutableStateOf<String?>(null) }
     var opBusy by remember { mutableStateOf(false) }
 
-    Text(
-        "Backup encryption",
-        style = MaterialTheme.typography.titleSmall,
-        modifier = Modifier.padding(top = NotaSpacing.md),
-    )
+    // Phase 6 presentation redesign: no header Text here any more —
+    // the Security & privacy sub-screen re-houses this block in a
+    // "Backup encryption" card whose serif title names it.
     when {
         signedIn == null -> {
             Text(

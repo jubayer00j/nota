@@ -190,11 +190,10 @@ fun SecuritySection(
     }
 
     Column {
-        Text(
-            "Security & privacy",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        // Phase 6 presentation redesign: no header Text here any
+        // more — the Security & privacy sub-screen's header names
+        // the category and this section is re-housed in the
+        // "App Lock" card.
         Row(
             Modifier.fillMaxWidth().padding(vertical = NotaSpacing.sm),
             verticalAlignment = Alignment.CenterVertically,
@@ -351,10 +350,12 @@ fun SecuritySection(
             }) { Text("Turn off App Lock") }
         }
 
-        // Phase 6 polish: the backup-encryption controls live here
-        // now — every lock/passphrase control in one section. The
-        // block owns its own state and dialogs.
-        BackupEncryptionBlock()
+        // Phase 6 presentation redesign: BackupEncryptionBlock is
+        // no longer composed at the foot of this section — the
+        // Security & privacy sub-screen places it in its own
+        // "Backup encryption" card right below the App Lock card,
+        // so every lock/passphrase control stays on one screen.
+        // The block still owns its own state and dialogs.
     }
 
     // ---- Method chooser (initial setup) -------------------------------
