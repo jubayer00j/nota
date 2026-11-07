@@ -248,7 +248,16 @@ class AppLockManager(
 
     // ---- Mutations (callers gate these behind re-authorisation) -------
 
-    /** Sets (or replaces) one method's credential. First method = lock on. */
+    /**
+     * Sets (or replaces) one method's credential. First method = lock on.
+     *
+     * Throws if the credential cannot be persisted: the repository's
+     * lock write reports an IO failure instead of swallowing it, and
+     * the setup flows (Settings, and the settings-unreadable recovery
+     * in MainActivity) depend on that — both keep their form open
+     * with an error on failure rather than closing on a save that
+     * never landed (Codex review, PR #33).
+     */
     suspend fun setCredential(method: AppLockMethod, canonicalSecret: String) {
         val credential = withContext(Dispatchers.Default) {
             val salt = AppLockCrypto.generateSalt()

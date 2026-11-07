@@ -98,6 +98,47 @@ internal fun appLockSettingsOrNull(prefs: Preferences?): AppLockSettings? {
     )
 }
 
+/**
+ * The App Lock credential write — the edit
+ * [PreferencesRepository.setAppLockCredential] performs — extracted
+ * so its failure contract is directly testable against a scratch
+ * store, the same reason [appLockSettingsOrNull] exists for reads.
+ *
+ * Unlike ordinary preference writes (safeEdit in
+ * [PreferencesRepository], which swallows [IOException] by design —
+ * "the value simply does not persist"), this write must REPORT
+ * failure: the flows that set a credential (Settings setup, and the
+ * settings-unreadable recovery screen) tell the user the credential
+ * was saved, so a silently dropped write is a false success in a
+ * security flow (Codex review, PR #33). The store's [IOException]
+ * therefore propagates to the caller instead of being caught here.
+ */
+internal suspend fun writeAppLockCredential(
+    store: DataStore<Preferences>,
+    method: AppLockMethod,
+    credential: AppLockCredential,
+) {
+    store.edit {
+        // A fresh credential is a post-repair truth: any
+        // corruption-repair marker stops applying from here.
+        remove(PreferencesRepository.KEY_STORE_REPAIRED)
+        when (method) {
+            AppLockMethod.PASSWORD -> {
+                this[PreferencesRepository.KEY_LOCK_PASSWORD_SALT] = credential.salt
+                this[PreferencesRepository.KEY_LOCK_PASSWORD_HASH] = credential.hash
+            }
+            AppLockMethod.PIN -> {
+                this[PreferencesRepository.KEY_LOCK_PIN_SALT] = credential.salt
+                this[PreferencesRepository.KEY_LOCK_PIN_HASH] = credential.hash
+            }
+            AppLockMethod.PATTERN -> {
+                this[PreferencesRepository.KEY_LOCK_PATTERN_SALT] = credential.salt
+                this[PreferencesRepository.KEY_LOCK_PATTERN_HASH] = credential.hash
+            }
+        }
+    }
+}
+
 private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "nota_preferences",
     // A corrupt file is replaced (see repairedStorePreferences)
@@ -225,26 +266,16 @@ class PreferencesRepository(context: Context) {
         }
         .map { prefs -> appLockSettingsOrNull(prefs) }
 
+    /**
+     * Sets (or replaces) one method's credential. Deliberately NOT
+     * safeEdit: if the store rejects the write, the [IOException]
+     * propagates so the caller can tell the user the credential was
+     * not saved — the setup flows close their form on success, and a
+     * swallowed failure there reads as "saved" while nothing
+     * persisted (Codex review, PR #33). See [writeAppLockCredential].
+     */
     suspend fun setAppLockCredential(method: AppLockMethod, credential: AppLockCredential) {
-        safeEdit {
-            // A fresh credential is a post-repair truth: any
-            // corruption-repair marker stops applying from here.
-            remove(KEY_STORE_REPAIRED)
-            when (method) {
-                AppLockMethod.PASSWORD -> {
-                    this[KEY_LOCK_PASSWORD_SALT] = credential.salt
-                    this[KEY_LOCK_PASSWORD_HASH] = credential.hash
-                }
-                AppLockMethod.PIN -> {
-                    this[KEY_LOCK_PIN_SALT] = credential.salt
-                    this[KEY_LOCK_PIN_HASH] = credential.hash
-                }
-                AppLockMethod.PATTERN -> {
-                    this[KEY_LOCK_PATTERN_SALT] = credential.salt
-                    this[KEY_LOCK_PATTERN_HASH] = credential.hash
-                }
-            }
-        }
+        writeAppLockCredential(dataStore, method, credential)
     }
 
     suspend fun removeAppLockCredential(method: AppLockMethod) {
