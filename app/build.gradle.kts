@@ -108,6 +108,7 @@ val notaUiTestClasses = listOf(
     "app.nota.feature.editor.EditorBlockDragUiTest",
     "app.nota.feature.editor.EditorReadModeUiTest",
     "app.nota.feature.notes.NotesSwipeGhostUiTest",
+    "app.nota.feature.notes.SwipeUndoRaceUiTest",
 )
 
 tasks.withType<Test>().configureEach {
