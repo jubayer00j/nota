@@ -34,16 +34,78 @@ enum class SwipeAction { ARCHIVE, TRASH, PIN, OFF }
  * top level and be instantiated once — multiple DataStore instances for
  * the same file throw at runtime.
  */
+/**
+ * Phase 6 polish (residual (a)): what a corruption repair installs.
+ * NOT a bare empty file: the replacement carries the
+ * [PreferencesRepository.KEY_STORE_REPAIRED] marker, so the App Lock
+ * flow can tell "this store was repaired after damage" apart from
+ * "a fresh, never-locked install" — the two used to be
+ * indistinguishable, and a corrupted file therefore silently read
+ * as App Lock OFF. The marker is removed by the write that sets up
+ * App Lock again (or turns it off) — the moment a post-repair truth
+ * exists, the repair flag has done its job.
+ */
+internal fun repairedStorePreferences(): Preferences =
+    emptyPreferences().toMutablePreferences().apply {
+        this[PreferencesRepository.KEY_STORE_REPAIRED] = true
+    }.toPreferences()
+
+/**
+ * The app store's corruption handler. Extracted as a factory so the
+ * corruption test can build a scratch store with the EXACT
+ * production handler instead of a copy of it.
+ */
+internal fun notaStoreCorruptionHandler(): ReplaceFileCorruptionHandler<Preferences> =
+    ReplaceFileCorruptionHandler(produceNewData = { repairedStorePreferences() })
+
+/**
+ * The App Lock reading of a preferences snapshot — extracted from
+ * [PreferencesRepository.appLockSettings] so the fail-closed rule is
+ * directly testable. Null ("unknown", which the lock manager treats
+ * as stay-locked) for a missing snapshot (an IO error upstream) AND
+ * for a corruption-repaired one ([PreferencesRepository.KEY_STORE_REPAIRED]):
+ * a repaired store has lost whatever credential the damaged file
+ * held, so reading it as a settings object with no credentials —
+ * "App Lock off" — would be a lie.
+ */
+internal fun appLockSettingsOrNull(prefs: Preferences?): AppLockSettings? {
+    if (prefs == null || prefs[PreferencesRepository.KEY_STORE_REPAIRED] == true) return null
+    fun credential(
+        saltKey: Preferences.Key<String>,
+        hashKey: Preferences.Key<String>,
+    ): AppLockCredential? {
+        val salt = prefs[saltKey]
+        val hash = prefs[hashKey]
+        return if (salt != null && hash != null) AppLockCredential(salt, hash) else null
+    }
+    return AppLockSettings(
+        password = credential(
+            PreferencesRepository.KEY_LOCK_PASSWORD_SALT,
+            PreferencesRepository.KEY_LOCK_PASSWORD_HASH,
+        ),
+        pin = credential(
+            PreferencesRepository.KEY_LOCK_PIN_SALT,
+            PreferencesRepository.KEY_LOCK_PIN_HASH,
+        ),
+        pattern = credential(
+            PreferencesRepository.KEY_LOCK_PATTERN_SALT,
+            PreferencesRepository.KEY_LOCK_PATTERN_HASH,
+        ),
+        biometricEnabled = prefs[PreferencesRepository.KEY_LOCK_BIOMETRIC] ?: false,
+        failedAttempts = prefs[PreferencesRepository.KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
+        lockoutUntil = prefs[PreferencesRepository.KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
+        lockTimeoutSeconds = prefs[PreferencesRepository.KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
+    )
+}
+
 private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "nota_preferences",
-    // A corrupt file is replaced with empty preferences (defaults)
+    // A corrupt file is replaced (see repairedStorePreferences)
     // instead of failing every read AND write: without a handler,
     // dataStore.edit throws CorruptionException on a corrupt file,
     // so the read-side catch in PreferencesRepository could never
     // actually recover via a Settings write.
-    corruptionHandler = ReplaceFileCorruptionHandler(
-        produceNewData = { emptyPreferences() },
-    ),
+    corruptionHandler = notaStoreCorruptionHandler(),
 )
 
 /**
@@ -145,45 +207,29 @@ class PreferencesRepository(context: Context) {
      * "unknown" — never an empty settings object, because empty would
      * read as "App Lock off" and open the notes shell on a locked
      * install (Codex review, PR #7). [AppLockManager] treats null as
-     * stay-locked. Corruption is a different path: the store's
-     * ReplaceFileCorruptionHandler repairs the file before this flow
-     * reads it, so a corrupted file surfaces here as a valid read.
+     * stay-locked (its settingsUnreadable posture).
+     *
+     * Corruption lands here as null too (Phase 6 polish, residual
+     * (a)): the store's ReplaceFileCorruptionHandler repairs a
+     * damaged file before this flow reads it, but the replacement it
+     * installs carries [KEY_STORE_REPAIRED] — and a repaired store
+     * has LOST whatever credential was in the damaged file, so the
+     * only honest reading is "unknown", never "off". The user sets
+     * App Lock up again from that state; the setup write removes
+     * the marker (see [setAppLockCredential]).
      */
     val appLockSettings: Flow<AppLockSettings?> = dataStore.data
         .map<Preferences, Preferences?> { prefs -> prefs }
         .catch { exception ->
             if (exception is IOException) emit(null) else throw exception
         }
-        .map { prefs ->
-            if (prefs == null) {
-                null
-            } else {
-                fun credential(
-                    saltKey: Preferences.Key<String>,
-                    hashKey: Preferences.Key<String>,
-                ): AppLockCredential? {
-                    val salt = prefs[saltKey]
-                    val hash = prefs[hashKey]
-                    return if (salt != null && hash != null) {
-                        AppLockCredential(salt, hash)
-                    } else {
-                        null
-                    }
-                }
-                AppLockSettings(
-                    password = credential(KEY_LOCK_PASSWORD_SALT, KEY_LOCK_PASSWORD_HASH),
-                    pin = credential(KEY_LOCK_PIN_SALT, KEY_LOCK_PIN_HASH),
-                    pattern = credential(KEY_LOCK_PATTERN_SALT, KEY_LOCK_PATTERN_HASH),
-                    biometricEnabled = prefs[KEY_LOCK_BIOMETRIC] ?: false,
-                    failedAttempts = prefs[KEY_LOCK_FAILED_ATTEMPTS] ?: 0,
-                    lockoutUntil = prefs[KEY_LOCK_LOCKOUT_UNTIL] ?: 0L,
-                    lockTimeoutSeconds = prefs[KEY_LOCK_TIMEOUT_SECONDS] ?: 0,
-                )
-            }
-        }
+        .map { prefs -> appLockSettingsOrNull(prefs) }
 
     suspend fun setAppLockCredential(method: AppLockMethod, credential: AppLockCredential) {
         safeEdit {
+            // A fresh credential is a post-repair truth: any
+            // corruption-repair marker stops applying from here.
+            remove(KEY_STORE_REPAIRED)
             when (method) {
                 AppLockMethod.PASSWORD -> {
                     this[KEY_LOCK_PASSWORD_SALT] = credential.salt
@@ -220,6 +266,7 @@ class PreferencesRepository(context: Context) {
     /** Removes every credential slot + the biometric flag (App Lock off). */
     suspend fun clearAppLock() {
         safeEdit {
+            remove(KEY_STORE_REPAIRED)
             remove(KEY_LOCK_PASSWORD_SALT); remove(KEY_LOCK_PASSWORD_HASH)
             remove(KEY_LOCK_PIN_SALT); remove(KEY_LOCK_PIN_HASH)
             remove(KEY_LOCK_PATTERN_SALT); remove(KEY_LOCK_PATTERN_HASH)
@@ -511,6 +558,9 @@ class PreferencesRepository(context: Context) {
          *  preferences layer stays free of a db dependency). */
         const val GUEST_ACCOUNT_ID = "guest"
         const val TAG = "PreferencesRepository"
+        /** Set ONLY by the corruption handler's replacement data:
+         *  "this store was repaired after damage" (Phase 6 polish). */
+        val KEY_STORE_REPAIRED = booleanPreferencesKey("store_repaired_from_corruption")
         val KEY_DYNAMIC_COLOUR = booleanPreferencesKey("dynamic_colour")
         val KEY_OLED_BLACK = booleanPreferencesKey("oled_black")
         val KEY_START_ON_TODAY = booleanPreferencesKey("start_on_today")

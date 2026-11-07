@@ -40,14 +40,12 @@ import app.nota.feature.editor.PendingInsertResumer
 import app.nota.data.security.AppLockManager
 import app.nota.feature.ask.AskScreen
 import app.nota.feature.settings.UnlockRestoreResumer
-import app.nota.feature.designsystem.DesignSystemScreen
 import app.nota.feature.editor.RichNoteEditorScreen
 import app.nota.feature.graph.LinkGraphScreen
 import app.nota.feature.notes.NotesScreen
 import app.nota.feature.reminders.RemindersScreen
 import app.nota.feature.search.SearchScreen
 import app.nota.feature.settings.SettingsScreen
-import app.nota.feature.spike.EditorSpikeScreen
 import app.nota.feature.templates.TemplatesScreen
 import app.nota.feature.today.TodayScreen
 import org.koin.compose.koinInject
@@ -61,8 +59,9 @@ enum class NotaDestination(val route: String, val label: String, val icon: Image
 }
 
 object NotaRoutes {
-    const val DESIGN_SYSTEM = "design-system"
-    const val EDITOR_SPIKE = "editor-spike"
+    // Phase 6 polish: the Phase 0 review routes (design-system,
+    // editor-spike) and their destinations are deleted — developer
+    // surfaces, never user settings, gone from the shipped graph.
     const val TEMPLATES = "templates"
     const val TODAY = "today"
     const val SEARCH = "search"
@@ -378,8 +377,6 @@ fun NotaNavShell(
             }
             composable(NotaDestination.Settings.route) {
                 SettingsScreen(
-                    onOpenDesignSystem = { navController.navigate(NotaRoutes.DESIGN_SYSTEM) },
-                    onOpenEditorSpike = { navController.navigate(NotaRoutes.EDITOR_SPIKE) },
                     onOpenTemplates = { navController.navigate(NotaRoutes.TEMPLATES) },
                     onOpenSignIn = { navController.navigate(NotaRoutes.SIGN_IN) },
                 )
@@ -392,12 +389,6 @@ fun NotaNavShell(
                     onBack = { navController.popBackStack() },
                     onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
-            }
-            composable(NotaRoutes.DESIGN_SYSTEM) {
-                DesignSystemScreen(onBack = { navController.popBackStack() })
-            }
-            composable(NotaRoutes.EDITOR_SPIKE) {
-                EditorSpikeScreen(onBack = { navController.popBackStack() })
             }
         }
     }

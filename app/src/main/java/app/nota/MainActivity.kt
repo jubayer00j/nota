@@ -13,26 +13,41 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.fragment.app.FragmentActivity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AppLockManager
+import app.nota.data.security.AppLockMethod
+import app.nota.feature.lock.CredentialSetupForm
 import app.nota.feature.lock.LegacyFingerprintPromptHost
 import app.nota.feature.lock.LockScreen
 import app.nota.notes.R
 import app.nota.ui.navigation.NotaNavShell
 import app.nota.ui.theme.NotaSpacing
 import app.nota.ui.theme.NotaTheme
+import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
 /**
@@ -162,32 +177,10 @@ class MainActivity : FragmentActivity() {
                         )
                     }
                     // Fail closed (Codex PR #7): an unreadable settings
-                    // store must never read as "App Lock off".
-                    lockUnreadable -> Column(
-                        Modifier.fillMaxSize().padding(NotaSpacing.lg),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Spacer(Modifier.height(64.dp))
-                        Image(
-                            painterResource(R.drawable.ic_nota_mark),
-                            contentDescription = null,
-                            modifier = Modifier.size(72.dp),
-                        )
-                        Spacer(Modifier.height(NotaSpacing.md))
-                        Text(
-                            "Nota couldn't read its settings, so it stays locked.",
-                            style = MaterialTheme.typography.headlineSmall,
-                            textAlign = TextAlign.Center,
-                        )
-                        Spacer(Modifier.height(NotaSpacing.xs))
-                        Text(
-                            "Restart the app. If this keeps happening, the " +
-                                "settings file on this device may be damaged.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
+                    // store must never read as "App Lock off". Phase 6
+                    // polish: the screen now offers the recovery —
+                    // set up App Lock again (see below).
+                    lockUnreadable -> UnreadableSettingsScreen(appLockManager)
                     lockSettings.isEnabled && isLocked -> LockScreen()
                     else -> {
                         // Phase 3a: the shell is KEYED by account. A
@@ -212,6 +205,148 @@ class MainActivity : FragmentActivity() {
                 // is active (never on API 28+, where AndroidX is
                 // the executor).
                 LegacyFingerprintPromptHost()
+            }
+        }
+    }
+}
+
+/**
+ * Phase 6 polish (residual (a)): the fail-closed screen for an
+ * unreadable settings store. Two roads lead here: a transient read
+ * failure (a restart genuinely helps — the copy still says so) and a
+ * CORRUPTION REPAIR, where the damaged file was replaced and the App
+ * Lock credential that lived in it is unrecoverable — no restart
+ * brings it back. For that road this screen is the recovery: set up
+ * App Lock again, right here. The setup write is what clears the
+ * repair marker in the store (PreferencesRepository); once it lands,
+ * the manager leaves this state and the user unlocks with the new
+ * credential. Notes are never at risk in either road — only the
+ * settings file was damaged.
+ */
+@Composable
+private fun UnreadableSettingsScreen(appLockManager: AppLockManager) {
+    val scope = rememberCoroutineScope()
+    var chooseMethodOpen by remember { mutableStateOf(false) }
+    var setupMethod by remember { mutableStateOf<AppLockMethod?>(null) }
+    var setupBusy by remember { mutableStateOf(false) }
+    var setupError by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        Modifier.fillMaxSize().padding(NotaSpacing.lg),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(64.dp))
+        Image(
+            painterResource(R.drawable.ic_nota_mark),
+            contentDescription = null,
+            modifier = Modifier.size(72.dp),
+        )
+        Spacer(Modifier.height(NotaSpacing.md))
+        Text(
+            "Nota couldn't read its settings, so it stays locked.",
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(NotaSpacing.xs))
+        Text(
+            "The settings file on this device was damaged and had to be " +
+                "repaired. An App Lock credential saved in it can't be " +
+                "recovered — set up App Lock again to keep using Nota. " +
+                "Your notes are not affected.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(NotaSpacing.md))
+        Button(onClick = { chooseMethodOpen = true }) {
+            Text("Set up App Lock again")
+        }
+        Spacer(Modifier.height(NotaSpacing.sm))
+        Text(
+            "If you never used App Lock, restarting the app may clear " +
+                "a temporary read error instead.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+    }
+
+    // Method chooser + credential setup: the same forms Settings
+    // uses (CredentialSetupForm), hosted here because the nav shell
+    // — Settings included — is never composed in this state.
+    if (chooseMethodOpen) {
+        AlertDialog(
+            onDismissRequest = { chooseMethodOpen = false },
+            title = { Text("Set up App Lock") },
+            text = {
+                Column {
+                    Text("Choose how you'll unlock Nota. You can add the other methods later.")
+                    AppLockMethod.entries.forEach { method ->
+                        TextButton(
+                            onClick = {
+                                chooseMethodOpen = false
+                                setupError = null
+                                setupMethod = method
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text(method.label) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { chooseMethodOpen = false }) { Text("Cancel") }
+            },
+        )
+    }
+    val activeSetupMethod = setupMethod
+    if (activeSetupMethod != null) {
+        Dialog(onDismissRequest = { if (!setupBusy) setupMethod = null }) {
+            Surface(shape = RoundedCornerShape(16.dp)) {
+                Column {
+                    CredentialSetupForm(
+                        method = activeSetupMethod,
+                        busy = setupBusy,
+                        onComplete = { canonicalSecret ->
+                            // One save at a time (the Phase 2.9 J1
+                            // rule): the derivation takes seconds on
+                            // a slow device and the form must not be
+                            // able to fire a second one into it.
+                            if (!setupBusy) {
+                                setupBusy = true
+                                setupError = null
+                                scope.launch {
+                                    try {
+                                        appLockManager.setCredential(
+                                            activeSetupMethod,
+                                            canonicalSecret,
+                                        )
+                                        setupMethod = null
+                                    } catch (e: Exception) {
+                                        setupError =
+                                            "Couldn't save the " +
+                                                "${activeSetupMethod.label.lowercase()} — please try again."
+                                    } finally {
+                                        setupBusy = false
+                                    }
+                                }
+                            }
+                        },
+                        onCancel = { setupMethod = null },
+                    )
+                    if (setupError != null) {
+                        Text(
+                            setupError!!,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(
+                                start = NotaSpacing.md,
+                                end = NotaSpacing.md,
+                                bottom = NotaSpacing.md,
+                            ),
+                        )
+                    }
+                }
             }
         }
     }
