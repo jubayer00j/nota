@@ -2,8 +2,6 @@ package app.nota.data.preferences
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.emptyPreferences
-import androidx.datastore.preferences.core.toMutablePreferences
-import androidx.datastore.preferences.core.toPreferences
 import app.nota.data.security.AppLockCredential
 import app.nota.data.security.AppLockMethod
 import java.io.File
