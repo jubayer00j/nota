@@ -40,8 +40,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 25
-        versionName = "0.12.0"
+        versionCode = 26
+        versionName = "0.13.0"
     }
 
     buildTypes {
@@ -105,6 +105,7 @@ val notaUiTestClasses = listOf(
     "app.nota.feature.editor.EditorBlockDragUiTest",
     "app.nota.feature.editor.EditorReadModeUiTest",
     "app.nota.feature.notes.NotesSwipeGhostUiTest",
+    "app.nota.feature.settings.SettingsScreenPolishUiTest",
 )
 
 tasks.withType<Test>().configureEach {

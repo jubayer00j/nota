@@ -2992,7 +2992,15 @@ private fun TaskListBlock(
                                 TaskListSegment(
                                     list.items.mapIndexed { i, old ->
                                         if (i == index) {
-                                            old.copy(contentHtml = "<p>${escapeCellText(newText)}</p>")
+                                            // Phase 6 polish (N5): the
+                                            // label edit must not flatten
+                                            // the item's inline formatting
+                                            // (the old path rebuilt the
+                                            // item as escaped plain text).
+                                            old.copy(
+                                                contentHtml = NoteDocument
+                                                    .replaceTaskItemText(old.contentHtml, newText),
+                                            )
                                         } else {
                                             old
                                         }

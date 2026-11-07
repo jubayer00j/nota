@@ -154,6 +154,29 @@ fun AiSection(
     }
 
     val draft = form.draft
+    // Phase 6 polish: the endpoint is a PROVIDER-level field, so it
+    // sits directly under the Provider picker — Custom gets the
+    // editable field here, presets show their fixed endpoint as a
+    // read-only line in the same slot (it used to render below the
+    // model fields, as if it belonged to them).
+    if (form.activeProvider == AiProviderId.CUSTOM) {
+        OutlinedTextField(
+            value = draft.baseUrl,
+            onValueChange = { draft.baseUrl = it; form.onEdited() },
+            label = { Text("Endpoint URL") },
+            placeholder = { Text("https://…/v1") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(NotaSpacing.sm))
+    } else if (form.activeProvider != AiProviderId.GEMINI) {
+        Text(
+            "Endpoint: ${form.activeProvider.presetBaseUrl}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(NotaSpacing.sm))
+    }
     var keyVisible by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = draft.key,
@@ -198,24 +221,6 @@ fun AiSection(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Spacer(Modifier.height(NotaSpacing.sm))
-    if (form.activeProvider == AiProviderId.CUSTOM) {
-        OutlinedTextField(
-            value = draft.baseUrl,
-            onValueChange = { draft.baseUrl = it; form.onEdited() },
-            label = { Text("Endpoint URL") },
-            placeholder = { Text("https://…/v1") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(NotaSpacing.sm))
-    } else if (form.activeProvider != AiProviderId.GEMINI) {
-        Text(
-            "Endpoint: ${form.activeProvider.presetBaseUrl}",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(NotaSpacing.sm))
-    }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedButton(
@@ -285,11 +290,13 @@ fun AiSection(
     }
 
     // ---- Semantic search (Phase 4.2) --------------------------------
+    // Phase 6 polish: a sub-group of AI features, so its header is
+    // titleSmall like every other sub-group (it used to wear the
+    // top-level section style, as if it were a peer section).
     Spacer(Modifier.height(NotaSpacing.md))
     Text(
         "Semantic search",
-        style = MaterialTheme.typography.titleMedium,
-        color = MaterialTheme.colorScheme.primary,
+        style = MaterialTheme.typography.titleSmall,
     )
     Text(
         "Notes are turned into vectors by the provider above so search " +

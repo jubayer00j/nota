@@ -34,15 +34,31 @@ enum class SwipeAction { ARCHIVE, TRASH, PIN, OFF }
  * top level and be instantiated once — multiple DataStore instances for
  * the same file throw at runtime.
  */
+/**
+ * Phase 6 polish (residual (a)): what a corruption repair installs.
+ * NOT a bare empty file: the replacement carries the
+ * [PreferencesRepository.KEY_STORE_REPAIRED] marker, so the App Lock
+ * flow can tell "this store was repaired after damage" apart from
+ * "a fresh, never-locked install" — the two used to be
+ * indistinguishable, and a corrupted file therefore silently read
+ * as App Lock OFF. The marker is removed by the write that sets up
+ * App Lock again (or turns it off) — the moment a post-repair truth
+ * exists, the repair flag has done its job.
+ */
+internal fun repairedStorePreferences(): Preferences =
+    emptyPreferences().toMutablePreferences().apply {
+        this[PreferencesRepository.KEY_STORE_REPAIRED] = true
+    }.toPreferences()
+
 private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "nota_preferences",
-    // A corrupt file is replaced with empty preferences (defaults)
+    // A corrupt file is replaced (see repairedStorePreferences)
     // instead of failing every read AND write: without a handler,
     // dataStore.edit throws CorruptionException on a corrupt file,
     // so the read-side catch in PreferencesRepository could never
     // actually recover via a Settings write.
     corruptionHandler = ReplaceFileCorruptionHandler(
-        produceNewData = { emptyPreferences() },
+        produceNewData = { repairedStorePreferences() },
     ),
 )
 
@@ -145,9 +161,16 @@ class PreferencesRepository(context: Context) {
      * "unknown" — never an empty settings object, because empty would
      * read as "App Lock off" and open the notes shell on a locked
      * install (Codex review, PR #7). [AppLockManager] treats null as
-     * stay-locked. Corruption is a different path: the store's
-     * ReplaceFileCorruptionHandler repairs the file before this flow
-     * reads it, so a corrupted file surfaces here as a valid read.
+     * stay-locked (its settingsUnreadable posture).
+     *
+     * Corruption lands here as null too (Phase 6 polish, residual
+     * (a)): the store's ReplaceFileCorruptionHandler repairs a
+     * damaged file before this flow reads it, but the replacement it
+     * installs carries [KEY_STORE_REPAIRED] — and a repaired store
+     * has LOST whatever credential was in the damaged file, so the
+     * only honest reading is "unknown", never "off". The user sets
+     * App Lock up again from that state; the setup write removes
+     * the marker (see [setAppLockCredential]).
      */
     val appLockSettings: Flow<AppLockSettings?> = dataStore.data
         .map<Preferences, Preferences?> { prefs -> prefs }
@@ -155,7 +178,7 @@ class PreferencesRepository(context: Context) {
             if (exception is IOException) emit(null) else throw exception
         }
         .map { prefs ->
-            if (prefs == null) {
+            if (prefs == null || prefs[KEY_STORE_REPAIRED] == true) {
                 null
             } else {
                 fun credential(
@@ -184,6 +207,9 @@ class PreferencesRepository(context: Context) {
 
     suspend fun setAppLockCredential(method: AppLockMethod, credential: AppLockCredential) {
         safeEdit {
+            // A fresh credential is a post-repair truth: any
+            // corruption-repair marker stops applying from here.
+            remove(KEY_STORE_REPAIRED)
             when (method) {
                 AppLockMethod.PASSWORD -> {
                     this[KEY_LOCK_PASSWORD_SALT] = credential.salt
@@ -220,6 +246,7 @@ class PreferencesRepository(context: Context) {
     /** Removes every credential slot + the biometric flag (App Lock off). */
     suspend fun clearAppLock() {
         safeEdit {
+            remove(KEY_STORE_REPAIRED)
             remove(KEY_LOCK_PASSWORD_SALT); remove(KEY_LOCK_PASSWORD_HASH)
             remove(KEY_LOCK_PIN_SALT); remove(KEY_LOCK_PIN_HASH)
             remove(KEY_LOCK_PATTERN_SALT); remove(KEY_LOCK_PATTERN_HASH)
@@ -511,6 +538,9 @@ class PreferencesRepository(context: Context) {
          *  preferences layer stays free of a db dependency). */
         const val GUEST_ACCOUNT_ID = "guest"
         const val TAG = "PreferencesRepository"
+        /** Set ONLY by the corruption handler's replacement data:
+         *  "this store was repaired after damage" (Phase 6 polish). */
+        val KEY_STORE_REPAIRED = booleanPreferencesKey("store_repaired_from_corruption")
         val KEY_DYNAMIC_COLOUR = booleanPreferencesKey("dynamic_colour")
         val KEY_OLED_BLACK = booleanPreferencesKey("oled_black")
         val KEY_START_ON_TODAY = booleanPreferencesKey("start_on_today")

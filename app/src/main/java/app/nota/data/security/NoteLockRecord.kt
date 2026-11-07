@@ -119,6 +119,12 @@ data class NoteLockRecord(
     }
 
     companion object {
+        /** The most PBKDF2 iterations a stored slot may name — the
+         *  same ceiling [app.nota.data.backup.BackupCrypto] applies
+         *  to the backup header (Phase 6 polish). Legitimate records
+         *  use 100k–600k, far below this. */
+        const val MAX_PBKDF2_ITERATIONS = 2_000_000
+
         /** Parses a stored record; null when the text is not a JSON object. */
         fun parse(json: String?): NoteLockRecord? {
             if (json.isNullOrBlank()) return null
@@ -135,7 +141,17 @@ data class NoteLockRecord(
                     val salt = slotObj.optString("salt", "")
                     val iterations = slotObj.optInt("iterations", 0)
                     val wrappedKey = slotObj.optString("wrappedKey", "")
-                    if (salt.isNotEmpty() && iterations > 0 && wrappedKey.isNotEmpty()) {
+                    // Phase 6 polish: the iteration count is CAPPED,
+                    // exactly as BackupCrypto caps the backup header.
+                    // A corrupt or crafted record (e.g. arriving via a
+                    // hostile backup) naming billions of iterations
+                    // would otherwise make an unlock attempt run
+                    // PBKDF2 effectively forever; an over-cap slot is
+                    // rejected here, at parse, like any invalid slot.
+                    if (salt.isNotEmpty() &&
+                        iterations in 1..MAX_PBKDF2_ITERATIONS &&
+                        wrappedKey.isNotEmpty()
+                    ) {
                         slots[method] = NoteLockSlot(salt, iterations, wrappedKey)
                     }
                 }

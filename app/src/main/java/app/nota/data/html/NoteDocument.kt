@@ -871,6 +871,82 @@ object NoteDocument {
         append("</ul>")
     }
 
+    /**
+     * Phase 6 polish (N5): replaces a task item's label text with
+     * [newText] while preserving the item's inline markup. The
+     * editor's label field is a plain-text cell (the table-cell
+     * pattern), and the old edit path rebuilt the item as escaped
+     * plain text — the moment a label was touched, any bold, italic
+     * or link inside it was destroyed.
+     *
+     * The fidelity this guarantees: every element and attribute in
+     * [contentHtml] survives byte-identical, and the (escaped) new
+     * text is carried by the item's first non-blank text run; any
+     * later text runs are emptied (their elements remain). For the
+     * shapes task items actually take — one <p> wrapping plain or
+     * singly-formatted text — that is exactly "same formatting, new
+     * words": <p><strong>Old</strong></p> → <p><strong>New</strong></p>.
+     * For mixed markup (<p><strong>Buy</strong> milk</p>) the text
+     * consolidates into the first run (<p><strong>Buy oat milk</strong></p>):
+     * the structure survives, the formatting coverage of later runs
+     * does not — the honest limit of a plain-text label editor.
+     */
+    fun replaceTaskItemText(contentHtml: String, newText: String): String {
+        val trimmed = contentHtml.trim()
+        // The canonical item shape is a single wrapping <p>: edit
+        // inside it so the paragraph element itself (and any
+        // attributes it carries) stays byte-identical.
+        if (trimmed.startsWith("<p", ignoreCase = true)) {
+            val open = readTag(trimmed, 0)
+            val close = open?.let { findClose(trimmed, it.end, "p") }
+            if (open != null && close != null && close.second == trimmed.length) {
+                val inner = trimmed.substring(open.end, close.first)
+                return trimmed.substring(0, open.end) +
+                    replaceFragmentText(inner, newText) +
+                    trimmed.substring(close.first)
+            }
+        }
+        return replaceFragmentText(trimmed, newText)
+    }
+
+    /** The text-run surgery behind [replaceTaskItemText]: tags are
+     *  copied verbatim; the first non-blank text run is replaced by
+     *  the escaped [newText]; every other text run is dropped. A
+     *  fragment with no text run at all gains the text at its end. */
+    private fun replaceFragmentText(fragment: String, newText: String): String {
+        // Collect the text runs (spans outside any tag).
+        val runs = mutableListOf<IntRange>()
+        var i = 0
+        var runStart = 0
+        while (i < fragment.length) {
+            val lt = fragment.indexOf('<', i)
+            if (lt < 0) break
+            val tag = readTag(fragment, lt)
+            if (tag == null) {
+                i = lt + 1
+                continue
+            }
+            if (lt > runStart) runs += runStart until lt
+            i = tag.end
+            runStart = i
+        }
+        if (fragment.length > runStart) runs += runStart until fragment.length
+
+        val carrier = runs.firstOrNull { fragment.substring(it).isNotBlank() }
+            ?: runs.firstOrNull()
+        if (carrier == null) return fragment + escapeText(newText)
+
+        val out = StringBuilder()
+        var cursor = 0
+        for (run in runs) {
+            out.append(fragment, cursor, run.first)
+            if (run === carrier) out.append(escapeText(newText))
+            cursor = run.last + 1
+        }
+        out.append(fragment, cursor, fragment.length)
+        return out.toString()
+    }
+
     // ---------------------------------------------------------- projections
 
     /** Plain-text projection of the whole document (snippets + FTS + word count). */
@@ -988,10 +1064,35 @@ object NoteDocument {
         return singleQuoted?.let { unescapeAttr(it.groupValues[1]) } ?: ""
     }
 
-    private fun isTaskList(ulAttrs: String, inner: String): Boolean =
-        ulAttrs.contains("taskList", ignoreCase = true) ||
-            inner.contains("data-checked", ignoreCase = true) ||
-            inner.contains("taskItem", ignoreCase = true)
+    /**
+     * Phase 6 polish: classification is STRUCTURAL — it reads the
+     * list's and items' OWN attributes only, never text content. The
+     * previous heuristic substring-searched the whole inner HTML, so
+     * a plain list whose visible text merely mentioned "data-checked"
+     * or "taskItem" (a note about HTML, say) was misclassified as a
+     * task list and silently rewritten in that dialect on save. A
+     * list is a task list when its <ul> carries data-type="taskList"
+     * (the 1.x/Tiptap and Nota serialisation), or when one of its
+     * item elements carries the taskItem type / a data-checked
+     * attribute of its own (dialects that mark items but not the
+     * list).
+     */
+    private fun isTaskList(ulAttrs: String, inner: String): Boolean {
+        if (attr(ulAttrs, "data-type").equals("taskList", ignoreCase = true)) return true
+        var idx = 0
+        while (true) {
+            val liStart = inner.indexOf("<li", idx, ignoreCase = true)
+            if (liStart < 0) return false
+            val liTag = readTag(inner, liStart) ?: return false
+            if (liTag.name == "li" &&
+                (attr(liTag.attrs, "data-type").equals("taskItem", ignoreCase = true) ||
+                    liTag.attrs.contains("data-checked", ignoreCase = true))
+            ) {
+                return true
+            }
+            idx = liTag.end
+        }
+    }
 
     private fun isChartBlock(attrs: String): Boolean =
         attrs.contains("data-nota-block", ignoreCase = true) ||
@@ -1050,10 +1151,13 @@ object NoteDocument {
             val liTag = readTag(inner, liStart) ?: break
             val close = findClose(inner, liTag.end, "li") ?: break
             var content = inner.substring(liTag.end, close.first)
-            val checked = liTag.attrs.contains("data-checked=\"true\"", ignoreCase = true) ||
-                liTag.attrs.contains("data-checked='true'", ignoreCase = true) ||
-                content.contains("checked", ignoreCase = true) &&
-                content.contains("<input", ignoreCase = true)
+            // Phase 6 polish: checked state comes from the item
+            // element's OWN data-checked attribute only. The old
+            // content fallback (the word "checked" plus an <input
+            // anywhere in the item body) marked items checked when
+            // their TEXT talked about checkboxes.
+            val checked = attr(liTag.attrs, "data-checked")
+                .equals("true", ignoreCase = true)
             // Strip Tiptap's checkbox scaffolding: <label>...</label> and bare inputs.
             content = content.replace(Regex("(?is)<label[^>]*>.*?</label>"), "")
             content = content.replace(Regex("(?is)<input[^>]*>"), "")

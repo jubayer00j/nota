@@ -89,7 +89,6 @@ private object PendingExportStaging {
 
 @Composable
 fun BackupSection(
-    onOpenSignIn: () -> Unit = {},
     backupRepository: BackupRepository = koinInject(),
     pendingRestoreStore: PendingRestoreStore = PendingRestoreStore.shared,
 ) {
@@ -180,12 +179,17 @@ fun BackupSection(
             color = MaterialTheme.colorScheme.primary,
         )
         // Phase 3b: Drive is the primary surface (connect, back up,
-        // restore, schedule, encryption); the local-file tools below
-        // remain for manual exports and crossover restores.
-        DriveBackupSection(onOpenSignIn = onOpenSignIn)
+        // restore, schedule); the local-file tools below remain for
+        // manual exports and crossover restores. Phase 6 polish:
+        // both are titled sub-groups of this section now.
+        DriveBackupSection()
         Spacer(Modifier.height(NotaSpacing.md))
         Text(
-            "Local backup file — the same ZIP format as Noma 1.x, so backups move both ways.",
+            "Local backup file",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Text(
+            "The same ZIP format as Noma 1.x, so backups move both ways.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
