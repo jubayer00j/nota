@@ -131,20 +131,22 @@ class NoteListRowsRobolectricTest {
     @Test
     fun activeIdsSignalPulsesOnBodyOnlyEdit() = runBlocking {
         val note = repository.createNote(title = "Alpha", plainBody = "one")
-        val emissions = async {
-            val seen = mutableListOf<List<String>>()
-            withTimeout(10_000) {
-                repository.observeActiveIds().collect { ids ->
-                    seen += ids
-                    if (seen.size >= 2) return@withTimeout seen
-                }
+        val seen = mutableListOf<List<String>>()
+        val firstEmission = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val job = async {
+            repository.observeActiveIds().collect { ids ->
+                seen += ids
+                if (!firstEmission.isCompleted) firstEmission.complete(Unit)
             }
-            seen
         }
-        // Let the collector subscribe before the write lands.
-        kotlinx.coroutines.delay(300)
+        // Subscribe first, THEN write: the second emission can only be
+        // the edit's pulse.
+        firstEmission.await()
         repository.updateBody(note, "Alpha", "two")
-        val seen = emissions.await()
+        withTimeout(10_000) {
+            while (seen.size < 2) kotlinx.coroutines.delay(50)
+        }
+        job.cancel()
         assertTrue(seen.size >= 2)
         assertEquals(listOf(note.id), seen.last())
     }
