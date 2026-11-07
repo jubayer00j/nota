@@ -2,10 +2,13 @@ package app.nota.feature.settings
 
 import android.content.Context
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.semantics.SemanticsNode
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
 import androidx.work.WorkManager
@@ -85,11 +88,28 @@ class SettingsScreenPolishUiTest {
         fail("Timed out waiting for: $description")
     }
 
-    private fun topOf(text: String): Float =
-        composeRule.onNodeWithText(text).fetchSemanticsNode().boundsInRoot.top
-
     private fun exists(text: String): Boolean =
         composeRule.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+
+    /**
+     * Every text in the (unmerged) semantics tree, in traversal
+     * order. The settings column composes its sections top to
+     * bottom, so traversal order IS screen order — unlike
+     * boundsInRoot, which reports 0 for the not-yet-laid-out rows
+     * below the scroll fold under Robolectric.
+     */
+    private fun semanticsTextsInOrder(): List<String> {
+        val root = composeRule.onRoot(useUnmergedTree = true).fetchSemanticsNode()
+        val out = mutableListOf<String>()
+        fun walk(node: SemanticsNode) {
+            val texts = runCatching { node.config[SemanticsProperties.Text] }
+                .getOrNull().orEmpty()
+            texts.forEach { out += it.text }
+            node.children.forEach(::walk)
+        }
+        walk(root)
+        return out
+    }
 
     @Test
     fun settingsSectionsInApprovedOrder_devSurfacesGone_singleSignIn() {
@@ -100,13 +120,16 @@ class SettingsScreenPolishUiTest {
             ).all { exists(it) }
         }
 
-        val tops = listOf(
+        val ordered = semanticsTextsInOrder()
+        val positions = listOf(
             "Account", "Sync & backup", "Security & privacy", "Appearance",
             "Notes & writing", "AI features", "About",
-        ).map { topOf(it) }
+        ).map { ordered.indexOf(it) }
         assertTrue(
-            "section headers must be strictly ordered, got $tops",
-            tops.zipWithNext().all { (a, b) -> a < b },
+            "section headers must appear in order in the semantics tree, " +
+                "got positions $positions in $ordered",
+            positions.all { it >= 0 } &&
+                positions.zipWithNext().all { (a, b) -> a < b },
         )
 
         // The Phase 0 dev surfaces + stale footer are deleted.
@@ -128,7 +151,8 @@ class SettingsScreenPolishUiTest {
         // Backup encryption moved: its header sits below the
         // Security & privacy header (and below Sync & backup's).
         awaitTrue("Backup encryption header composed") { exists("Backup encryption") }
-        assertTrue(topOf("Backup encryption") > topOf("Security & privacy"))
-        assertTrue(topOf("Backup encryption") > topOf("Sync & backup"))
+        val texts = semanticsTextsInOrder()
+        assertTrue(texts.indexOf("Backup encryption") > texts.indexOf("Security & privacy"))
+        assertTrue(texts.indexOf("Backup encryption") > texts.indexOf("Sync & backup"))
     }
 }
