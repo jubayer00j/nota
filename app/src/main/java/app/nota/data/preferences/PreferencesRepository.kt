@@ -164,9 +164,19 @@ private val Context.notaDataStore: DataStore<Preferences> by preferencesDataStor
  *
  * Registered as a Koin single; observed by MainActivity and Settings.
  */
-class PreferencesRepository(context: Context) {
+class PreferencesRepository internal constructor(
+    private val dataStore: DataStore<Preferences>,
+) {
 
-    private val dataStore: DataStore<Preferences> = context.applicationContext.notaDataStore
+    /**
+     * The app-wide repository, over the [Context.notaDataStore]
+     * singleton. The store-taking constructor above exists for the
+     * same reason as the [writeAppLockCredential] /
+     * [appLockSettingsOrNull] seams: so tests can drive the real
+     * repository logic against a scratch store (e.g. one whose reads
+     * fail transiently) instead of the process-wide app store.
+     */
+    constructor(context: Context) : this(context.applicationContext.notaDataStore)
 
     val dynamicColour: Flow<Boolean> = dataStore.safeData.map { prefs ->
         prefs[KEY_DYNAMIC_COLOUR] ?: false

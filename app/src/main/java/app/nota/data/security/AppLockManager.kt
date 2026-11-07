@@ -7,6 +7,7 @@ import app.nota.data.preferences.PreferencesRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,6 +49,11 @@ sealed interface UnlockResult {
 class AppLockManager(
     private val repository: PreferencesRepository,
     private val biometricStore: AppLockBiometricStore,
+    /** Pause before re-observing the lock settings after the
+     *  repository flow completes on a transient read error (see
+     *  init). A constructor seam so tests can run the retry loop
+     *  on a virtual clock instead of waiting in real time. */
+    private val reobserveDelayMillis: Long = REOBSERVE_DELAY_MILLIS,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -78,22 +84,41 @@ class AppLockManager(
 
     init {
         scope.launch {
-            repository.appLockSettings.collect { loaded ->
-                if (loaded == null) {
-                    // Fail closed: an unreadable store is NOT "lock off".
-                    _settingsUnreadable.value = true
-                    _ready.value = true
-                    return@collect
+            // Observation must survive the repository flow
+            // COMPLETING: its fail-closed catch emits null on a
+            // transient IOException and then terminates (catch
+            // semantics), so collecting exactly once would go blind
+            // at exactly the moment the store later recovers — the
+            // recovery screen's successful credential write would
+            // land unobserved and the app would sit on the
+            // settings-unreadable screen until restart (Codex
+            // review, PR #33). Re-collect after a pause instead: a
+            // fresh collection re-reads the store, so a transient
+            // error in the past yields the real settings, and a
+            // persistently failing store is retried gently, never
+            // in a hot loop. Fail-closed throughout: nothing here
+            // clears settingsUnreadable — only a real emission
+            // does. (The production store's flow completes ONLY
+            // via that catch; DataStore.data itself never ends.)
+            while (true) {
+                repository.appLockSettings.collect { loaded ->
+                    if (loaded == null) {
+                        // Fail closed: an unreadable store is NOT "lock off".
+                        _settingsUnreadable.value = true
+                        _ready.value = true
+                        return@collect
+                    }
+                    _settingsUnreadable.value = false
+                    _settings.value = loaded
+                    if (!_ready.value) {
+                        _ready.value = true
+                        if (!loaded.isEnabled) _isLocked.value = false
+                    } else if (!loaded.isEnabled) {
+                        // Lock turned off (or last method removed) while running.
+                        _isLocked.value = false
+                    }
                 }
-                _settingsUnreadable.value = false
-                _settings.value = loaded
-                if (!_ready.value) {
-                    _ready.value = true
-                    if (!loaded.isEnabled) _isLocked.value = false
-                } else if (!loaded.isEnabled) {
-                    // Lock turned off (or last method removed) while running.
-                    _isLocked.value = false
-                }
+                delay(reobserveDelayMillis)
             }
         }
         ProcessLifecycleOwner.get().lifecycle.addObserver(
@@ -302,5 +327,14 @@ class AppLockManager(
 
     suspend fun setLockTimeoutSeconds(seconds: Int) {
         repository.setAppLockTimeoutSeconds(seconds)
+    }
+
+    companion object {
+        /** Default pause between lock-settings re-observations
+         *  after a transient read error (see init): long enough
+         *  that a persistently failing store is retried gently,
+         *  short enough that a recovered store is noticed promptly
+         *  on the recovery screen. */
+        const val REOBSERVE_DELAY_MILLIS = 1_000L
     }
 }
