@@ -20,7 +20,7 @@ package app.nota.data.html
  */
 object HtmlEntities {
 
-    fun decode(value: String): String {
+    fun decode(value: String, inAttribute: Boolean = false): String {
         if ('&' !in value) return value
         val out = StringBuilder(value.length)
         var i = 0
@@ -79,23 +79,83 @@ object HtmlEntities {
                 if (ch == '&') break
                 j++
             }
-            if (semi < 0) {
-                out.append('&')
-                i = amp + 1
-                continue
-            }
-            val body = value.substring(amp + 1, semi)
-            val decoded = decodeReference(body)
-            if (decoded == null) {
-                out.append('&')
-                i = amp + 1
-            } else {
+            val body = if (semi >= 0) value.substring(amp + 1, semi) else null
+            val decoded = body?.let { decodeReference(it) }
+            if (decoded != null) {
                 out.append(decoded)
                 i = semi + 1
+                continue
             }
+            // Legacy semicolonless named references: HTML5
+            // defines a fixed subset of names (LEGACY_NAMES —
+            // "&copy", "&amp", "&not", ...) that browsers
+            // decode even without the ';', so a stored
+            // "&copy" displays as © and the exporters must
+            // agree. The longest matching prefix of the
+            // alphanumeric run wins ("&notit;" is "¬" + "it;").
+            // Inside an attribute value the match is refused
+            // when the character right after the name is
+            // alphanumeric or '=' — the spec's guard that
+            // keeps query strings like "?a=1&copy=2" intact.
+            val legacy = legacyMatch(value, amp + 1)
+            val legacyValue = legacy?.let { BY_NAME[it] }
+            if (legacy != null && legacyValue != null) {
+                val after = value.getOrNull(amp + 1 + legacy.length)
+                if (!inAttribute ||
+                    after == null || (!after.isLetterOrDigit() && after != '=')
+                ) {
+                    out.append(legacyValue)
+                    i = amp + 1 + legacy.length
+                    continue
+                }
+            }
+            out.append('&')
+            i = amp + 1
         }
         return out.toString()
     }
+
+    /**
+     * The longest LEGACY_NAMES prefix of the alphanumeric run
+     * starting at [start], or null. The run is capped at 10
+     * characters — the longest legacy name has 6 — so the
+     * check stays O(1) per ampersand.
+     */
+    private fun legacyMatch(value: String, start: Int): String? {
+        var end = start
+        val limit = minOf(value.length, start + 10)
+        while (end < limit && value[end].isLetterOrDigit()) end++
+        var len = end - start
+        while (len > 0) {
+            val candidate = value.substring(start, start + len)
+            if (candidate in LEGACY_NAMES) return candidate
+            len--
+        }
+        return null
+    }
+
+    // The 106 names HTML5 allows without a trailing semicolon
+    // (the semicolonless keys of the WHATWG entity table).
+    private val LEGACY_NAMES: Set<String> = setOf(
+        "AElig", "AMP", "Aacute", "Acirc", "Agrave", "Aring",
+        "Atilde", "Auml", "COPY", "Ccedil", "ETH", "Eacute",
+        "Ecirc", "Egrave", "Euml", "GT", "Iacute", "Icirc",
+        "Igrave", "Iuml", "LT", "Ntilde", "Oacute", "Ocirc",
+        "Ograve", "Oslash", "Otilde", "Ouml", "QUOT", "REG",
+        "THORN", "Uacute", "Ucirc", "Ugrave", "Uuml", "Yacute",
+        "aacute", "acirc", "acute", "aelig", "agrave", "amp",
+        "aring", "atilde", "auml", "brvbar", "ccedil", "cedil",
+        "cent", "copy", "curren", "deg", "divide", "eacute",
+        "ecirc", "egrave", "eth", "euml", "frac12", "frac14",
+        "frac34", "gt", "iacute", "icirc", "iexcl", "igrave",
+        "iquest", "iuml", "laquo", "lt", "macr", "micro",
+        "middot", "nbsp", "not", "ntilde", "oacute", "ocirc",
+        "ograve", "ordf", "ordm", "oslash", "otilde", "ouml",
+        "para", "plusmn", "pound", "quot", "raquo", "reg",
+        "sect", "shy", "sup1", "sup2", "sup3", "szlig",
+        "thorn", "times", "uacute", "ucirc", "ugrave", "uml",
+        "uuml", "yacute", "yen", "yuml",
+    )
 
     private fun decodeReference(body: String): String? {
         // Named references only: decode() intercepts every
