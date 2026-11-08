@@ -681,4 +681,30 @@ class NoteDocumentTest {
             NoteDocument.replaceTaskItemText("<p><strong>Buy</strong> milk</p>", "Buy oat milk"),
         )
     }
+    @Test
+    fun namedAndNumericEntitiesDecodeAtParse() {
+        // The full HTML5 set decodes where raw markup becomes
+        // text, exactly as a browser reads the stored note.
+        assertEquals(
+            "<p>\u00A9 2026</p>",
+            NoteDocument.serialize(NoteDocument.parse("<p>&copy; 2026</p>")),
+        )
+        assertEquals(
+            "<p>\u00A9 \u00A9 \u00E9</p>",
+            NoteDocument.serialize(
+                NoteDocument.parse("<p>&#169; &#xA9; &eacute;</p>"),
+            ),
+        )
+    }
+
+    @Test
+    fun escapedEntitiesStayLiteralText() {
+        // "&amp;copy;" is the seven literal characters "&copy;"
+        // the author typed — decoding never runs twice.
+        assertEquals(
+            "<p>&amp;copy;</p>",
+            NoteDocument.serialize(NoteDocument.parse("<p>&amp;copy;</p>")),
+        )
+    }
+
 }
