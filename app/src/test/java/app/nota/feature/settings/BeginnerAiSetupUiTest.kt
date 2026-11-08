@@ -10,6 +10,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
 import androidx.work.WorkManager
@@ -101,10 +102,15 @@ class BeginnerAiSetupUiTest {
             .assertExists()
         composeRule.onAllNodesWithText("Embedding model").assertCountEquals(0)
 
-        composeRule.onNode(
+        // The fold header sits below the visible fold of the
+        // scrolling sub-screen — scroll it into view first, or
+        // the click lands outside the window and never toggles.
+        val foldHeader = composeRule.onNode(
             hasClickAction() and hasAnyDescendant(hasText("Advanced — models")),
             useUnmergedTree = true,
-        ).performClick()
+        )
+        foldHeader.performScrollTo()
+        foldHeader.performClick()
         awaitTrue("model fields composed after opening the fold") {
             exists("Embedding model")
         }
@@ -117,7 +123,7 @@ class BeginnerAiSetupUiTest {
     }
 
     @Test
-    fun editorNotice_settingsActionOnlyWhenWired() {
+    fun editorNotice_settingsAction_whenWired_firesCallback() {
         var opened = false
         composeRule.setContent {
             NotaTheme {
@@ -132,8 +138,11 @@ class BeginnerAiSetupUiTest {
         composeRule.onNodeWithText("Open AI settings").performClick()
         composeRule.waitForIdle()
         assertTrue("the settings action must fire its callback", opened)
+    }
 
-        // A plain provider error carries no settings action.
+    @Test
+    fun editorNotice_plainError_hasNoSettingsAction() {
+        // An ordinary provider error: OK only, no way out offered.
         composeRule.setContent {
             NotaTheme {
                 AiNoticeDialog(
