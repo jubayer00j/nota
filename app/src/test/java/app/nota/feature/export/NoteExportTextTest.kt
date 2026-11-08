@@ -105,4 +105,25 @@ class NoteExportTextTest {
         )
         assertEquals(text(), artifact.content)
     }
+    @Test
+    fun entitiesDecodeToCharactersInTextExport() {
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(TextSegment(html = "<p>&copy; 2026 &eacute;t&eacute;</p>")),
+            exportResolver,
+        )
+        assertTrue(out.contains("\u00A9 2026 \u00E9t\u00E9"))
+    }
+
+    @Test
+    fun escapedEntitiesStayLiteralInTextExport() {
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(TextSegment(html = "<p>&amp;copy;</p>")),
+            exportResolver,
+        )
+        assertTrue(out.contains("&copy;"))
+        assertFalse(out.contains("\u00A9"))
+    }
+
 }
