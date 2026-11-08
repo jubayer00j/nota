@@ -266,4 +266,22 @@ class NoteExportMarkdownTest {
             NoteExport.collectAttachmentIds(exportFixture()),
         )
     }
+    @Test
+    fun inlineCodeWithBoundarySpacesIsPadded() {
+        // CommonMark strips one space from each end of a code
+        // span whose content starts AND ends with a space, so
+        // the exporter pads the span to keep the user's spaces.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(TextSegment("<p>Run <code> foo </code> now</p>")),
+        )
+        assertTrue(out.contains("Run `  foo  ` now"))
+        // Ordinary code stays unpadded.
+        val plain = NoteExport.noteToMarkdown(
+            "T",
+            listOf(TextSegment("<p>Run <code>bar</code> now</p>")),
+        )
+        assertTrue(plain.contains("Run `bar` now"))
+    }
+
 }
