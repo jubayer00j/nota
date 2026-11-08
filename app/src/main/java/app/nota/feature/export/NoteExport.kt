@@ -322,7 +322,7 @@ object NoteExport {
                 }
                 el.name == "ul" || el.name == "ol" -> {
                     flushStray()
-                    val list = mdList(el, 0, resolve)
+                    val list = mdList(el, "", resolve)
                     if (list.isNotEmpty()) blocks += list.joinToString("\n")
                 }
                 el.name == "blockquote" -> {
@@ -361,19 +361,20 @@ object NoteExport {
         return blocks
     }
 
-    private fun mdList(list: HtmlElement, depth: Int, resolve: AttachmentResolver): List<String> {
+    private fun mdList(list: HtmlElement, indent: String, resolve: AttachmentResolver): List<String> {
         val isTaskList = list.attrs["data-type"] == "taskList"
         val ordered = list.name == "ol"
         val start = (list.attrs["start"]?.toIntOrNull() ?: 1)
-        val type = list.attrs["type"]
-        val indent = "  ".repeat(depth)
         val lines = mutableListOf<String>()
         var counter = start
         for (li in list.children) {
             if (li !is HtmlElement || li.name != "li") continue
             val marker = when {
                 isTaskList -> if (li.attrs["data-checked"] == "true") "- [x] " else "- [ ] "
-                ordered -> "${orderedMarker(counter, type)}. "
+                // CommonMark ordered markers are digits only, so
+                // a typed list (<ol type="a">) keeps its start and
+                // structure but exports with numeric markers.
+                ordered -> "$counter. "
                 else -> "- "
             }
             counter++
@@ -391,7 +392,12 @@ object NoteExport {
                 }
             }
             lines += indent + marker + mdInline(inlineNodes, resolve).trim()
-            for (sub in nested) lines += mdList(sub, depth + 1, resolve)
+            // A nested list must sit at the parent item's
+            // content column — the marker's width — or strict
+            // renderers detach it from its parent.
+            for (sub in nested) {
+                lines += mdList(sub, indent + " ".repeat(marker.length), resolve)
+            }
         }
         return lines
     }
@@ -870,11 +876,11 @@ object NoteExport {
 
     /** Elements dropped whole: open tag, contents and close tag. */
     private val OPAQUE_DROP_WITH_CONTENTS =
-        Regex("""(?is)<(script|iframe|object|form)\b[^>]*>.*?</\1\s*>""")
+        Regex("""(?is)<(script|iframe|object|form|animatetransform|animatemotion|animate|set)\b[^>]*>.*?</\1\s*>""")
 
     /** Dangerous void elements and any dangling tags of the set. */
     private val OPAQUE_DROP_TAG =
-        Regex("""(?is)</?(script|iframe|object|embed|form|link|meta|base)\b[^>]*>""")
+        Regex("""(?is)</?(script|iframe|object|embed|form|link|meta|base|animatetransform|animatemotion|animate|set)\b[^>]*>""")
 
     private fun sanitizeOpaqueHtml(rawHtml: String): String {
         var out = OPAQUE_DROP_WITH_CONTENTS.replace(rawHtml, "")
@@ -1370,6 +1376,9 @@ object NoteExport {
      */
     private val FRAGMENT_DROP_ELEMENTS = setOf(
         "script", "iframe", "object", "embed", "form", "link", "meta", "base",
+        // SMIL animation can rewrite an anchor's href into a
+        // scriptable URL after attribute checks have passed.
+        "animatetransform", "animatemotion", "animate", "set",
     )
 
     /**
