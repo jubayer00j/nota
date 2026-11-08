@@ -734,8 +734,11 @@ class NoteExportHtmlTest {
             ),
             pngDataResolver,
         )
-        assertFalse(out.contains("src=\"nota-attachment://"))
-        assertTrue(out.contains("data:image/png;base64,iVBORw0KGgo="))
+        // The real src (space-prefixed) now carries the data
+        // URL; before the fix the rewrite landed inside
+        // data-src and the real src kept its attachment URI.
+        assertTrue(out.contains(" src=\"data:image/png;base64,iVBORw0KGgo=\""))
+        assertFalse(out.contains(" src=\"nota-attachment://"))
     }
 
 }
