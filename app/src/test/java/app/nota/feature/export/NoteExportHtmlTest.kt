@@ -8,6 +8,7 @@ import app.nota.data.html.TableSegment
 import app.nota.data.html.TaskItem
 import app.nota.data.html.TaskListSegment
 import app.nota.data.html.TextSegment
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -469,4 +470,55 @@ class NoteExportHtmlTest {
         assertFalse(out.contains("alert(1)"))
         assertTrue(out.contains("[Image]"))
     }
+    @Test
+    fun namedEntitySchemeIsScrubbedInOpaqueBlocks() {
+        // The opaque scrubber decodes entities before checking a
+        // URL's scheme, and browsers know named references the
+        // decoder originally didn't: javascript&colon; must be
+        // recognised as a scriptable scheme and neutralised.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<p><a href=\"javascript&colon;alert(1)\">one</a>" +
+                        "<a href=\"java&Tab;script:alert(2)\">two</a></p>",
+                ),
+            ),
+        )
+        assertFalse(out.lowercase().contains("javascript"))
+        assertFalse(out.contains("&colon;"))
+        assertFalse(out.contains("alert("))
+        assertTrue(out.contains("<a href=\"#\">one</a>"))
+        assertTrue(out.contains("<a href=\"#\">two</a>"))
+    }
+
+    @Test
+    fun benignColonEntityDecodesInText() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(TextSegment("<p>Time&colon; 5 pm</p>")),
+        )
+        assertTrue(out.contains("<p>Time: 5 pm</p>"))
+    }
+
+    @Test
+    fun opaqueAttachmentImagesAreCollectedAndEmbedded() {
+        val segments = listOf(
+            OpaqueSegment(
+                "<picture><img src=\"nota-attachment://img1\" alt=\"Cat\"></picture>",
+            ),
+        )
+        assertEquals(
+            listOf("img1"),
+            NoteExport.collectAttachmentIds(segments),
+        )
+        val out = NoteExport.build(
+            "T", segments, ExportFormat.HTML, pngDataResolver,
+        ).content
+        assertTrue(
+            out.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""),
+        )
+        assertFalse(out.contains("[Image]"))
+    }
+
 }
