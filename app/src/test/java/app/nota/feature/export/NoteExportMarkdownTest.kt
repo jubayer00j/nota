@@ -560,4 +560,21 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains("![Cat]($EXPORT_DATA_URL)"))
     }
 
+    @Test
+    fun nonAsciiAttachmentIdResolvesInFull() {
+        // Restore accepts any non-empty id ("atté" included);
+        // the collector must hand the resolver the whole id.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p><img src=\"nota-attachment://att\u00E9\" alt=\"Dot\"></p>",
+                ),
+            ),
+        ) { id ->
+            if (id == "att\u00E9") "data:image/png;base64,WA==" else null
+        }
+        assertTrue(out.contains("![Dot](data:image/png;base64,WA==)"))
+    }
+
 }
