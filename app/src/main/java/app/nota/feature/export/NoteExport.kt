@@ -233,12 +233,19 @@ object NoteExport {
             }
             is CodeSegment -> listOf(mdFence(segment.text))
             is ImageSegment -> listOf(mdImage(segment.src, segment.alt, resolve))
-            is FileSegment -> listOf("[File: ${segment.fileName}]")
+            // The name is user data: escaped like any other
+            // text, or a name containing "](" would re-parse
+            // as a link and rewrite the placeholder.
+            is FileSegment -> listOf("[File: ${escapeMdText(segment.fileName)}]")
             DividerSegment -> listOf("---")
             is ChartSegment -> listOf(chartPlaceholder(segment))
             is OpaqueSegment -> {
                 val text = textContent(parseFragment(segment.rawHtml)).trim()
-                listOf(if (text.isNotEmpty()) text else "[Block]")
+                // The extracted words are plain text, not
+                // Markdown: escaped like any other text, or a
+                // leading "#" or a "[..](..)" shape would
+                // re-parse as structure the note never had.
+                listOf(if (text.isNotEmpty()) escapeMdText(text) else "[Block]")
             }
         }
 
