@@ -506,6 +506,21 @@ class NoteExportMarkdownTest {
     }
 
     @Test
+    fun droppedSubtreeTextStaysOutOfTextExports() {
+        val segments = listOf(
+            OpaqueSegment(
+                "<picture><script>secret()</script></picture><p>Shown</p>",
+            ),
+        )
+        val md = NoteExport.noteToMarkdown("T", segments) { null }
+        assertTrue(md.contains("Shown"))
+        assertFalse(md.contains("secret"))
+        val text = NoteExport.noteToPlainText("T", segments) { null }
+        assertTrue(text.contains("Shown"))
+        assertFalse(text.contains("secret"))
+    }
+
+    @Test
     fun singleOversizedImageDegradesToPlaceholder() {
         // ~33.7 MB decoded — past the single-image cap.
         val big = "data:image/png;base64," + "A".repeat(45_000_000)
