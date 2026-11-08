@@ -390,4 +390,38 @@ class NoteExportMarkdownTest {
         assertFalse(out.contains("data:image"))
     }
 
+    @Test
+    fun setextUnderlineLinesAreEscaped() {
+        // A literal line of '=' (or a short dash line) after
+        // text is a CommonMark setext heading underline: the
+        // paragraph above would re-parse as a heading.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(html = "<p>Words<br>===</p><p>More<br>--</p>"),
+            ),
+        )
+        assertTrue(out.contains("\\==="))
+        assertTrue(out.contains("\\--"))
+        assertFalse(out.lines().any { it == "===" || it == "--" })
+    }
+
+    @Test
+    fun imageAltBackslashesAreEscaped() {
+        // An alt ending in a backslash would escape the
+        // generated closing bracket; doubling keeps the image
+        // (and the alt) intact.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                ImageSegment(
+                    src = "https://example.com/cat.png",
+                    alt = "Cat\\",
+                ),
+            ),
+        )
+        val expected = "![Cat" + "\\".repeat(2) + "](https://example.com/cat.png)"
+        assertTrue(out.contains(expected))
+    }
+
 }
