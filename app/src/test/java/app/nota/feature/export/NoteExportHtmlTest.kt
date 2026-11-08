@@ -703,4 +703,23 @@ class NoteExportHtmlTest {
         assertTrue(out.contains("href=\"https://example.com/?a=1&amp;copy=2\""))
     }
 
+    @Test
+    fun abruptlyClosedCommentsDoNotHideTagsFromTheScrubber() {
+        // "<!-->" and "<!--->" are complete comments to a
+        // browser, and "--!>" ends a longer one: markup after
+        // them is live, so the scrubber must see the img tag
+        // and strip its handler in every form.
+        for (payload in listOf(
+            "<div><!--><img src=x onerror=alert(1)></div>",
+            "<div><!---><img src=x onerror=alert(1)></div>",
+            "<div><!-- x --!><img src=x onerror=alert(1)></div>",
+        )) {
+            val out = NoteExport.noteToHtml(
+                "T", listOf(OpaqueSegment(payload)),
+            )
+            assertTrue(out.contains("<img"))
+            assertFalse(out.contains("onerror"))
+        }
+    }
+
 }
