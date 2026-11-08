@@ -563,13 +563,15 @@ class NoteExportHtmlTest {
 
     @Test
     fun styleElementsAndCssUrlsDoNotSurviveExport() {
-        val out = html(
+        val out = NoteExport.noteToHtml(
+            "T",
             listOf(
                 TextSegment(
                     html = "<style>body{background:url(https://tracker.example/x)}</style>" +
                         "<p style=\"color:#c0392b;background-image:url(https://tracker.example/y)\">Red</p>",
                 ),
             ),
+            exportResolver,
         )
         assertFalse(out.contains("tracker.example"))
         assertFalse(out.contains("background-image"))
@@ -581,13 +583,15 @@ class NoteExportHtmlTest {
 
     @Test
     fun cleanColourStylesPassVerbatimAndBackgroundAttrsDrop() {
-        val out = html(
+        val out = NoteExport.noteToHtml(
+            "T",
             listOf(
                 TextSegment(
                     html = "<p style=\"color:#c0392b\">Red</p>" +
                         "<p background=\"https://tracker.example/bg.png\">Plain</p>",
                 ),
             ),
+            exportResolver,
         )
         assertTrue(out.contains("style=\"color:#c0392b\""))
         assertFalse(out.contains("tracker.example"))
@@ -596,13 +600,15 @@ class NoteExportHtmlTest {
 
     @Test
     fun opaqueStyleMarkupIsScrubbed() {
-        val out = html(
+        val out = NoteExport.noteToHtml(
+            "T",
             listOf(
                 OpaqueSegment(
                     "<style>.x{background:url(https://tracker.example/z)}</style>" +
                         "<div style=\"background-image:url(https://tracker.example/w);color:#111111\">Kept</div>",
                 ),
             ),
+            exportResolver,
         )
         assertFalse(out.contains("tracker.example"))
         assertFalse(out.contains(".x{"))
@@ -612,7 +618,9 @@ class NoteExportHtmlTest {
 
     @Test
     fun entitiesRenderAsCharactersInHtmlExport() {
-        val out = html(listOf(TextSegment(html = "<p>&copy; 2026</p>")))
+        val out = NoteExport.noteToHtml(
+            "T", listOf(TextSegment(html = "<p>&copy; 2026</p>")), exportResolver,
+        )
         assertTrue(out.contains("\u00A9 2026"))
         assertFalse(out.contains("&amp;copy;"))
     }
