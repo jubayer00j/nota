@@ -424,4 +424,18 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains(expected))
     }
 
+    @Test
+    fun literalTildesAreEscapedButRealStrikethroughIsNot() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p>Use ~~word~~ here</p><p><s>gone</s></p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("\\~\\~word\\~\\~"))
+        assertTrue(out.contains("~~gone~~"))
+    }
+
 }
