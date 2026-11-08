@@ -7,6 +7,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import com.mohamedrejeb.richeditor.annotation.ExperimentalRichTextApi
 import com.mohamedrejeb.richeditor.model.HeadingStyle
+import com.mohamedrejeb.richeditor.model.RichSpanStyle
 import com.mohamedrejeb.richeditor.model.RichTextState
 
 /**
@@ -47,6 +48,13 @@ internal data class ToolbarFormatState(
     val textColor: Color?,
     /** Highlight (background) colour, or null when unhighlighted. */
     val highlightColor: Color?,
+    /**
+     * Phase 6 (Editor Refinement #1, A10): the URL of the link at
+     * the caret/selection, or null when the caret is not in a link.
+     * The link dialog prefills from this and offers Remove link —
+     * before this the dialog opened blank even on an existing link.
+     */
+    val linkUrl: String?,
 )
 
 @OptIn(ExperimentalRichTextApi::class)
@@ -64,5 +72,6 @@ internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
         orderedList = isOrderedList,
         textColor = span.color.takeIf { it != Color.Unspecified },
         highlightColor = span.background.takeIf { it != Color.Unspecified },
+        linkUrl = (currentRichSpanStyle as? RichSpanStyle.Link)?.url,
     )
 }
