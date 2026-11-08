@@ -561,4 +561,60 @@ class NoteExportHtmlTest {
         assertTrue(out.contains("label"))
     }
 
+    @Test
+    fun styleElementsAndCssUrlsDoNotSurviveExport() {
+        val out = html(
+            listOf(
+                TextSegment(
+                    html = "<style>body{background:url(https://tracker.example/x)}</style>" +
+                        "<p style=\"color:#c0392b;background-image:url(https://tracker.example/y)\">Red</p>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("tracker.example"))
+        assertFalse(out.contains("background-image"))
+        assertFalse(out.contains("background:url"))
+        // The colour declaration itself is content and stays,
+        // in the rebuilt form.
+        assertTrue(out.contains("color: #c0392b"))
+    }
+
+    @Test
+    fun cleanColourStylesPassVerbatimAndBackgroundAttrsDrop() {
+        val out = html(
+            listOf(
+                TextSegment(
+                    html = "<p style=\"color:#c0392b\">Red</p>" +
+                        "<p background=\"https://tracker.example/bg.png\">Plain</p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("style=\"color:#c0392b\""))
+        assertFalse(out.contains("tracker.example"))
+        assertFalse(out.contains("background="))
+    }
+
+    @Test
+    fun opaqueStyleMarkupIsScrubbed() {
+        val out = html(
+            listOf(
+                OpaqueSegment(
+                    "<style>.x{background:url(https://tracker.example/z)}</style>" +
+                        "<div style=\"background-image:url(https://tracker.example/w);color:#111111\">Kept</div>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("tracker.example"))
+        assertFalse(out.contains(".x{"))
+        assertTrue(out.contains("color: #111111"))
+        assertTrue(out.contains("Kept"))
+    }
+
+    @Test
+    fun entitiesRenderAsCharactersInHtmlExport() {
+        val out = html(listOf(TextSegment(html = "<p>&copy; 2026</p>")))
+        assertTrue(out.contains("\u00A9 2026"))
+        assertFalse(out.contains("&amp;copy;"))
+    }
+
 }
