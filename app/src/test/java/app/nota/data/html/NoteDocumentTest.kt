@@ -705,4 +705,16 @@ class NoteDocumentTest {
         assertEquals("&copy;", image.alt)
     }
 
+    @Test
+    fun ampersandHeavyTextDecodesLiterallyAndLinearly() {
+        // Thousands of '&' with no reference in sight must
+        // pass through untouched (and the bounded lookahead
+        // keeps the scan linear — this input is the shape
+        // that used to go quadratic), while a real reference
+        // at the very end still decodes.
+        val amps = "&".repeat(5000)
+        assertEquals(amps + "\u00A9", HtmlEntities.decode(amps + "&copy;"))
+        assertEquals("a & b &nope c", HtmlEntities.decode("a & b &nope c"))
+    }
+
 }
