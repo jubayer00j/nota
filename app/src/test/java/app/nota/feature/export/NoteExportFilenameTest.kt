@@ -1,6 +1,7 @@
 package app.nota.feature.export
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -80,5 +81,53 @@ class NoteExportFilenameTest {
             "ঢাকা নোট.html",
             NoteExport.exportFilename("ঢাকা নোট", ExportFormat.HTML),
         )
+    }
+
+    @Test
+    fun emojiTitlesAreCappedByBytesToo() {
+        // 80 emoji pass the 80-code-point cap but are 320 UTF-8
+        // bytes — over the 255-byte file name component limit, so
+        // the share cache write would fail. The byte cap cuts on
+        // code-point boundaries: 63 emoji (252 bytes) + ".md" is
+        // exactly 255.
+        val name = NoteExport.exportFilename(
+            "😀".repeat(80), ExportFormat.MARKDOWN,
+        )
+        assertTrue(name.endsWith(".md"))
+        assertEquals(255, name.toByteArray(Charsets.UTF_8).size)
+        val stem = name.removeSuffix(".md")
+        assertEquals(63, stem.codePointCount(0, stem.length))
+        // No split surrogates: the name round-trips through UTF-8.
+        assertEquals(
+            name,
+            String(name.toByteArray(Charsets.UTF_8), Charsets.UTF_8),
+        )
+        assertFalse(name.contains("�"))
+    }
+
+    @Test
+    fun mixedBengaliEmojiTitlesStayWithinByteLimit() {
+        val name = NoteExport.exportFilename(
+            "ঢাকা " + "😀".repeat(80), ExportFormat.HTML,
+        )
+        assertTrue(name.endsWith(".html"))
+        assertTrue(name.toByteArray(Charsets.UTF_8).size <= 255)
+        // The Bengali prefix is at the front, so truncation keeps it.
+        assertTrue(name.startsWith("ঢাকা "))
+        assertEquals(
+            name,
+            String(name.toByteArray(Charsets.UTF_8), Charsets.UTF_8),
+        )
+    }
+
+    @Test
+    fun byteTruncationReTrimsExposedDots() {
+        // 62 emoji (248 bytes) + "." + more emoji: the byte cut
+        // lands just after the dot, and the re-trim must remove
+        // it so the name does not end "…​..html".
+        val name = NoteExport.exportFilename(
+            "😀".repeat(62) + "." + "😀".repeat(10), ExportFormat.HTML,
+        )
+        assertEquals("😀".repeat(62) + ".html", name)
     }
 }

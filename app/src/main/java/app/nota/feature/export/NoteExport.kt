@@ -77,8 +77,10 @@ object NoteExport {
     /**
      * A filesystem-safe file name from the note title: path-hostile
      * and control characters stripped, whitespace collapsed, capped
-     * at ~80 characters. Unicode letters survive — a Bengali title
-     * stays Bengali. (1.x's exportFilename, verbatim rule.)
+     * at ~80 characters AND at 255 UTF-8 bytes for the whole name,
+     * extension included (see below). Unicode letters survive — a
+     * Bengali title stays Bengali. (1.x's exportFilename, verbatim
+     * rule, plus the byte cap.)
      */
     fun exportFilename(title: String, format: ExportFormat): String {
         val cleaned = exportTitle(title)
@@ -86,11 +88,34 @@ object NoteExport {
             .replace(Regex("\\s+"), " ")
             .trim()
             .trimEnd('.', ' ')
-        val capped = cleaned.codePoints().limit(80).toArray()
+        var capped = cleaned.codePoints().limit(80).toArray()
             .let { String(it, 0, it.size) }
             .trim()
-            .ifBlank { "Untitled note" }
-        return "$capped.${format.extension}"
+        // The character cap alone can still overflow a disk: file
+        // name components are limited to 255 BYTES on the
+        // filesystems Android uses, and 80 four-byte emoji are 320
+        // bytes before the extension — the share cache write then
+        // fails outright. Truncate by whole code points (never
+        // splitting one) until name + extension fits, and re-trim
+        // whatever the cut exposes.
+        val suffix = ".${format.extension}"
+        val budget = 255 - suffix.toByteArray(Charsets.UTF_8).size
+        if (capped.toByteArray(Charsets.UTF_8).size > budget) {
+            val out = StringBuilder()
+            var bytes = 0
+            var i = 0
+            while (i < capped.length) {
+                val cp = capped.codePointAt(i)
+                val cpBytes = String(Character.toChars(cp))
+                    .toByteArray(Charsets.UTF_8).size
+                if (bytes + cpBytes > budget) break
+                out.appendCodePoint(cp)
+                bytes += cpBytes
+                i += Character.charCount(cp)
+            }
+            capped = out.toString().trim().trimEnd('.', ' ')
+        }
+        return "${capped.ifBlank { "Untitled note" }}$suffix"
     }
 
     /**
@@ -1255,10 +1280,54 @@ object NoteExport {
     }
 
     /**
+     * Active elements that never survive HTML export, dropped
+     * whole (contents included) — the fragment-level twin of the
+     * opaque path's drop lists (see sanitizeOpaqueHtml). The
+     * stored fragment can carry foreign inline HTML inside an
+     * ordinary paragraph, quote, task item or table cell; those
+     * containers all serialise through transformFragment, so the
+     * scrub lives here and covers every one of them at once.
+     */
+    private val FRAGMENT_DROP_ELEMENTS = setOf(
+        "script", "iframe", "object", "embed", "form", "link", "meta", "base",
+    )
+
+    /**
+     * The fragment-level twin of scrubExportTag: event-handler
+     * attributes are dropped, scriptable href/src targets are
+     * pointed at "#", everything else passes through untouched.
+     * Attribute values arrive entity-decoded from the parser,
+     * exactly the shape isScriptableUrl expects. When nothing in
+     * the map needs scrubbing the SAME map is returned, so benign
+     * fragments serialise byte-identically to before.
+     */
+    private fun scrubFragmentAttrs(attrs: Map<String, String>): Map<String, String> {
+        fun dirty(name: String, value: String): Boolean {
+            val lower = name.lowercase()
+            return (lower.startsWith("on") && name.length > 2) ||
+                ((lower == "href" || lower == "src") && isScriptableUrl(value))
+        }
+        if (attrs.none { (name, value) -> dirty(name, value) }) return attrs
+        val out = LinkedHashMap<String, String>(attrs.size)
+        for ((name, value) in attrs) {
+            val lower = name.lowercase()
+            when {
+                lower.startsWith("on") && name.length > 2 -> Unit
+                (lower == "href" || lower == "src") && isScriptableUrl(value) ->
+                    out[name] = "#"
+                else -> out[name] = value
+            }
+        }
+        return out
+    }
+
+    /**
      * The HTML-export transform over a parsed fragment (1.x's
      * resolveExportContent): attachment images resolve to data
      * URLs or an "[Image]" placeholder span, note-link chips
      * unwrap to their label, [[Title]] text links become labels.
+     * Active content is scrubbed on the way (see
+     * FRAGMENT_DROP_ELEMENTS and scrubFragmentAttrs).
      */
     private fun transformFragment(
         nodes: List<HtmlNode>,
@@ -1271,13 +1340,15 @@ object NoteExport {
                 is HtmlElement -> {
                     val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
                     when {
+                        node.name in FRAGMENT_DROP_ELEMENTS -> Unit
                         node.name == "img" -> {
                             val src = node.attrs["src"] ?: ""
                             when {
                                 src.startsWith(prefix) -> {
                                     val data = resolve(src.removePrefix(prefix))
                                     if (data != null) {
-                                        val attrs = LinkedHashMap(node.attrs)
+                                        val attrs =
+                                            LinkedHashMap(scrubFragmentAttrs(node.attrs))
                                         attrs["src"] = data
                                         out += HtmlElement("img", attrs, emptyList())
                                     } else {
@@ -1286,7 +1357,9 @@ object NoteExport {
                                         )
                                     }
                                 }
-                                src.isNotBlank() -> out += node
+                                src.isNotBlank() -> out += HtmlElement(
+                                    "img", scrubFragmentAttrs(node.attrs), emptyList(),
+                                )
                                 else -> out += HtmlElement(
                                     "span", emptyMap(), listOf(HtmlText("[Image]")),
                                 )
@@ -1296,7 +1369,7 @@ object NoteExport {
                             out += transformFragment(node.children, resolve)
                         else -> out += HtmlElement(
                             node.name,
-                            node.attrs,
+                            scrubFragmentAttrs(node.attrs),
                             transformFragment(node.children, resolve),
                         )
                     }

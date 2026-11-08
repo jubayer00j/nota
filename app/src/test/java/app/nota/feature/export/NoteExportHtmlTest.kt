@@ -2,8 +2,11 @@ package app.nota.feature.export
 
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.OpaqueSegment
+import app.nota.data.html.QuoteSegment
 import app.nota.data.html.TableCellSpan
 import app.nota.data.html.TableSegment
+import app.nota.data.html.TaskItem
+import app.nota.data.html.TaskListSegment
 import app.nota.data.html.TextSegment
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -193,5 +196,121 @@ class NoteExportHtmlTest {
             "<table class=\"grid\"><tr><td colspan=\"2\">Cell</td></tr></table>"
         val out = NoteExport.noteToHtml("T", listOf(OpaqueSegment(benign)))
         assertTrue(out.contains(benign))
+    }
+
+    @Test
+    fun richTextParagraphIsScrubbedOfActiveContentOnExport() {
+        // Foreign inline HTML can ride inside an ordinary
+        // paragraph, not just an opaque block: the fragment
+        // transform is the shared serialisation path, so active
+        // content must not survive it either.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p>Before <script>alert(1)</script> after</p>" +
+                        "<p><b OnClick=\"evil()\">bold</b> " +
+                        "<a href=\"javascript:alert(2)\">link</a> " +
+                        "<img src=\"https://example.com/x.png\" onerror=\"evil()\"></p>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("<script"))
+        assertFalse(out.contains("alert(1)"))
+        assertFalse(out.contains("alert(2)"))
+        assertFalse(out.lowercase().contains("onclick"))
+        assertFalse(out.contains("onerror"))
+        assertFalse(out.lowercase().contains("javascript:"))
+        // Benign survivors keep their shapes.
+        assertTrue(out.contains("<p>Before  after</p>"))
+        assertTrue(out.contains("<b>bold</b>"))
+        assertTrue(out.contains("<a href=\"#\">link</a>"))
+        assertTrue(out.contains("<img src=\"https://example.com/x.png\">"))
+    }
+
+    @Test
+    fun hostileQuoteInlineIsScrubbedOnExport() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                QuoteSegment(
+                    "<p><script>alert(1)</script>" +
+                        "<em onmouseover=\"evil()\">words</em></p>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("<script"))
+        assertFalse(out.contains("onmouseover"))
+        assertTrue(
+            out.contains(
+                "<blockquote><p><em>words</em></p></blockquote>",
+            ),
+        )
+    }
+
+    @Test
+    fun hostileTaskItemInlineIsScrubbedOnExport() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "Feed <a href=\"data:text/html;base64,AAAA\">the cat</a>" +
+                                "<iframe src=\"https://evil.example\"></iframe>",
+                            checked = false,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertFalse(out.contains("data:text/html"))
+        assertFalse(out.contains("<iframe"))
+        assertTrue(out.contains("<a href=\"#\">the cat</a>"))
+    }
+
+    @Test
+    fun hostileTableCellIsScrubbedOnExport() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TableSegment(
+                    rows = listOf(
+                        listOf(
+                            "<b onclick=\"evil()\">cell</b>" +
+                                "<script>alert(1)</script>",
+                        ),
+                    ),
+                    headerRow = false,
+                ),
+            ),
+        )
+        assertFalse(out.contains("<script"))
+        assertFalse(out.contains("onclick"))
+        assertTrue(out.contains("<td><b>cell</b></td>"))
+    }
+
+    @Test
+    fun benignRichTextExportsByteIdentical() {
+        // Regression pin: the scrub must not reshape the benign
+        // editor dialect — marks, colour spans with style/class/
+        // data-* attributes, links and note-link chips serialise
+        // exactly as they did before it existed.
+        val paragraph =
+            "<p>Rich <strong>bold</strong> " +
+                "<span style=\"color:#c0392b\" class=\"hl\" data-x=\"1\">red</span> " +
+                "<mark>marked</mark> <u>under</u> <code>a &lt; b</code> " +
+                "<a href=\"https://example.com\">site</a> " +
+                "<a href=\"mailto:a@example.com\">mail</a> " +
+                "<span data-note-link=\"42\">Linked note</span></p>"
+        val expected =
+            "<p>Rich <strong>bold</strong> " +
+                "<span style=\"color:#c0392b\" class=\"hl\" data-x=\"1\">red</span> " +
+                "<mark>marked</mark> <u>under</u> <code>a &lt; b</code> " +
+                "<a href=\"https://example.com\">site</a> " +
+                "<a href=\"mailto:a@example.com\">mail</a> " +
+                "Linked note</p>"
+        val out = NoteExport.noteToHtml("T", listOf(TextSegment(paragraph)))
+        assertTrue(out.contains(expected))
     }
 }
