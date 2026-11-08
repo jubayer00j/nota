@@ -376,6 +376,7 @@ fun NotaNavShell(
                 SearchScreen(
                     onOpenNote = { id -> navController.openNoteEditor(id) },
                     onBack = { navController.popBackStack() },
+                    onOpenAiSettings = { navController.navigate(NotaRoutes.SETTINGS_AI) },
                 )
             }
             composable(NotaRoutes.LINK_GRAPH) {
@@ -390,6 +391,7 @@ fun NotaNavShell(
                     noteId = noteId,
                     onBack = { navController.popBackStack() },
                     onOpenNote = { id -> navController.openNoteEditor(id) },
+                    onOpenAiSettings = { navController.navigate(NotaRoutes.SETTINGS_AI) },
                 )
             }
             composable(NotaDestination.Ask.route) {

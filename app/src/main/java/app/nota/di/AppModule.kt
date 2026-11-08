@@ -168,6 +168,7 @@ val appModule = module {
         SearchViewModel(
             get(),
             get(),
+            get(),
             accountIdProvider = { get<DatabaseProvider>().accountId.value },
         )
     }

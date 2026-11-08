@@ -129,6 +129,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextLayoutResult
+import app.nota.data.ai.AiErrorKind
 import app.nota.data.ai.AiException
 import app.nota.data.ai.AiService
 import app.nota.data.ai.AiSummaryHtml
@@ -243,6 +244,9 @@ fun RichNoteEditorScreen(
     noteId: String,
     onBack: () -> Unit = {},
     onOpenNote: (String) -> Unit = {},
+    // Beginner AI Setup #1 (F6): where the no-key notice's
+    // "Open AI settings" action goes (Settings → AI features).
+    onOpenAiSettings: () -> Unit = {},
     viewModel: RichNoteEditorViewModel = koinViewModel(),
     // Phase 3.6 (G2): the durable picker-insert record + the account
     // seam, injected so UI tests can substitute a temp-dir store.
@@ -461,6 +465,10 @@ fun RichNoteEditorScreen(
     var aiJob by remember { mutableStateOf<Job?>(null) }
     var aiBusyLabel by remember { mutableStateOf<String?>(null) }
     var aiNotice by remember { mutableStateOf<String?>(null) }
+    // Beginner AI Setup #1 (F6): whether the current notice is a
+    // setup gap (no key / provider not finished) — only those
+    // notices offer the "Open AI settings" way out.
+    var aiNoticeNeedsSetup by remember { mutableStateOf(false) }
     var aiSummary by remember { mutableStateOf<AiSummaryOutcome?>(null) }
     var aiTags by remember { mutableStateOf<AiTagOutcome?>(null) }
 
@@ -470,6 +478,8 @@ fun RichNoteEditorScreen(
             try {
                 action()
             } catch (e: AiException) {
+                aiNoticeNeedsSetup = e.kind == AiErrorKind.NO_KEY ||
+                    e.kind == AiErrorKind.NOT_CONFIGURED
                 aiNotice = e.displayMessage
             } catch (e: CancellationException) {
                 // The user's Cancel — nothing to report. Rethrow so
@@ -2283,7 +2293,18 @@ fun RichNoteEditorScreen(
         AiProgressDialog(label = aiBusyLabel!!, onCancel = { aiJob?.cancel() })
     }
     aiNotice?.let { message ->
-        AiNoticeDialog(message = message, onDismiss = { aiNotice = null })
+        AiNoticeDialog(
+            message = message,
+            onDismiss = { aiNotice = null },
+            onOpenSettings = if (aiNoticeNeedsSetup) {
+                {
+                    aiNotice = null
+                    onOpenAiSettings()
+                }
+            } else {
+                null
+            },
+        )
     }
     aiSummary?.let { outcome ->
         AiSummarySheet(

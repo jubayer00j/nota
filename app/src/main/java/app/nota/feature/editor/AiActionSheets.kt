@@ -60,15 +60,29 @@ fun AiProgressDialog(label: String, onCancel: () -> Unit) {
 }
 
 /** A one-message dialog: the no-key pointer to Settings, or a
- *  mapped provider error in its calm form. */
+ *  mapped provider error in its calm form. Beginner AI Setup #1
+ *  (F6): when the failure is a setup gap (no key / provider not
+ *  finished), the caller passes [onOpenSettings] and the dialog
+ *  offers the way out — the same Settings → AI features
+ *  destination Ask Nota's gates use — instead of leaving the
+ *  user at a dead end. Other errors keep OK only. */
 @Composable
-fun AiNoticeDialog(message: String, onDismiss: () -> Unit) {
+fun AiNoticeDialog(
+    message: String,
+    onDismiss: () -> Unit,
+    onOpenSettings: (() -> Unit)? = null,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("AI") },
         text = { Text(message) },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("OK") }
+        },
+        dismissButton = onOpenSettings?.let { openSettings ->
+            {
+                TextButton(onClick = openSettings) { Text("Open AI settings") }
+            }
         },
     )
 }

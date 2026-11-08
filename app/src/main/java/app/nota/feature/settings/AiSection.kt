@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
@@ -32,6 +34,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -130,12 +133,27 @@ fun AiSection(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                // Beginner AI Setup #1 (F2): the active provider's
+                // one-line plain description, from AiProviderId so
+                // the picker and every other surface agree.
+                Text(
+                    form.activeProvider.description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             DropdownMenu(expanded = providerMenuOpen, onDismissRequest = { providerMenuOpen = false }) {
                 AiProviderId.entries.forEach { provider ->
                     DropdownMenuItem(
                         text = {
-                            Text((if (provider == form.activeProvider) "✓ " else "") + provider.label)
+                            Column {
+                                Text((if (provider == form.activeProvider) "✓ " else "") + provider.label)
+                                Text(
+                                    provider.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         },
                         onClick = {
                             providerMenuOpen = false
@@ -198,28 +216,98 @@ fun AiSection(
             },
             modifier = Modifier.fillMaxWidth(),
         )
-        Spacer(Modifier.height(NotaSpacing.sm))
-        OutlinedTextField(
-            value = draft.model,
-            onValueChange = { draft.model = it; form.onEdited() },
-            label = { Text("Model") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(NotaSpacing.sm))
-        OutlinedTextField(
-            value = draft.embeddingModel,
-            onValueChange = { draft.embeddingModel = it; form.onEdited() },
-            label = { Text("Embedding model") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        // Beginner AI Setup #1 (F1): "get a key" help for the
+        // SELECTED provider, directly under the field it serves —
+        // one honest line about where the key comes from (any
+        // offer in it is the provider's), the 2–3 short steps,
+        // and a button that opens the provider's own key page.
+        // Custom has no page Nota can point at: its note stands
+        // alone, with no link.
+        val provider = form.activeProvider
         Text(
-            "Used by semantic search to compare notes by meaning.",
+            provider.keyHelpNote,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = NotaSpacing.sm),
         )
+        provider.keySteps.forEachIndexed { index, step ->
+            Text(
+                "${index + 1}. $step",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        provider.keyPageUrl?.let { url ->
+            val uriHandler = LocalUriHandler.current
+            OutlinedButton(
+                onClick = { uriHandler.openUri(url) },
+                modifier = Modifier.padding(top = NotaSpacing.xs),
+            ) {
+                Text("Get a key")
+            }
+        }
         Spacer(Modifier.height(NotaSpacing.sm))
+
+        // Beginner AI Setup #1 (F3+F4): the two model fields move
+        // into a collapsed-by-default "Advanced — models" fold.
+        // The header shows the EFFECTIVE model names (the draft's
+        // value, or the provider default it falls back to), so
+        // the fold hides nothing about what a call will use.
+        // Custom's Endpoint URL stays above, outside the fold —
+        // it is required, not advanced.
+        var advancedOpen by remember { mutableStateOf(false) }
+        Row(
+            Modifier.fillMaxWidth().clickable { advancedOpen = !advancedOpen }
+                .padding(vertical = NotaSpacing.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Advanced — models", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    advancedModelsSummary(
+                        draft.model.ifBlank { provider.defaultModel },
+                        draft.embeddingModel.ifBlank { provider.defaultEmbeddingModel },
+                    ),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                if (advancedOpen) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (advancedOpen) "Hide model fields" else "Show model fields",
+            )
+        }
+        if (advancedOpen) {
+            OutlinedTextField(
+                value = draft.model,
+                onValueChange = { draft.model = it; form.onEdited() },
+                label = { Text("Model") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "The pre-filled model already works — change it only " +
+                    "if you want a different model, and type its exact " +
+                    "model id.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(NotaSpacing.sm))
+            OutlinedTextField(
+                value = draft.embeddingModel,
+                onValueChange = { draft.embeddingModel = it; form.onEdited() },
+                label = { Text("Embedding model") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                "Powers search-by-meaning and Ask Nota. Summarize and " +
+                    "Suggest tags work without it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(NotaSpacing.sm))
+        }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(
@@ -274,7 +362,11 @@ fun AiSection(
         }
         when (val state = form.testState) {
             is AiSettingsForm.TestState.Success -> Text(
-                "Connection works — ${form.activeProvider.label} answered.",
+                // Beginner AI Setup #1 (F5): Test exercises the
+                // chat model only — when no embedding model
+                // resolves for the provider, the success line
+                // says what still won't run. Composition only.
+                aiTestSuccessMessage(form.activeProvider, draft.embeddingModel),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(top = NotaSpacing.xs),
@@ -286,6 +378,22 @@ fun AiSection(
                 modifier = Modifier.padding(top = NotaSpacing.xs),
             )
             else -> Unit
+        }
+        // Beginner AI Setup #1 (F9): the stale-index note ALSO
+        // appears here, in the card where the provider change
+        // happens — the Semantic search card below carries the
+        // full line with its Rebuild button. This reuses the
+        // status state already refreshed on entry, on provider
+        // switch and around Save; no new plumbing.
+        if (indexStaleNoteVisible(indexStatus)) {
+            Text(
+                "Your search index was built with a different provider " +
+                    "or embedding model — rebuild it in the Semantic " +
+                    "search card below to use this one.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = NotaSpacing.xs),
+            )
         }
     }
 
@@ -365,6 +473,48 @@ fun AiSection(
         }
     }
 }
+
+/** Beginner AI Setup #1 (F5): the honest Test-connection success
+ *  line. Test exercises the chat model only, so when no embedding
+ *  model resolves the line adds the one sentence that keeps a
+ *  "Connection works" from over-promising: semantic search and
+ *  Ask Nota also need an embedding model. Resolution mirrors
+ *  AiEmbeddingConfig.resolvedEmbeddingModel — the form field,
+ *  else the provider's default. A preset's blank field still
+ *  resolves (and Save persists the resolved value), so the
+ *  sentence is added only when even the resolved model is blank,
+ *  which today means Custom. Pure composition — the Test itself
+ *  is unchanged. */
+internal fun aiTestSuccessMessage(provider: AiProviderId, formEmbeddingModel: String): String {
+    val effectiveEmbeddingModel =
+        formEmbeddingModel.trim().ifBlank { provider.defaultEmbeddingModel }
+    return "Connection works — ${provider.label} answered." +
+        if (effectiveEmbeddingModel.isBlank()) {
+            " Semantic search and Ask Nota also need an embedding " +
+                "model — that field is empty right now " +
+                "(see Advanced — models)."
+        } else {
+            ""
+        }
+}
+
+/** Beginner AI Setup #1 (F3): the Advanced fold's header summary
+ *  — the EFFECTIVE model names (the caller passes draft-or-
+ *  default), so the collapsed fold hides nothing about what a
+ *  call will use. A side that is still blank (a fresh Custom
+ *  slot) reads "not set". */
+internal fun advancedModelsSummary(model: String, embeddingModel: String): String =
+    listOf(model, embeddingModel)
+        .map { it.ifBlank { "not set" } }
+        .joinToString(" · ")
+
+/** Beginner AI Setup #1 (F9): whether the stale-index one-liner
+ *  shows in the Provider card — exactly the states in which the
+ *  Semantic search card shows its own stale line: indexing can
+ *  run, an index exists, and its vectors belong to a different
+ *  provider or embedding-model space. */
+internal fun indexStaleNoteVisible(status: SemanticIndexStatus?): Boolean =
+    status != null && status.canIndex && status.indexedNotes > 0 && !status.spaceIsCurrent
 
 /** The BYOK explainer that leads the provider card (both states). */
 @Composable

@@ -61,6 +61,11 @@ jobs:
   # palettes/URL validation); the editor refinement UI suite joins
   # the UI shard's class list in app/build.gradle.kts, not this
   # partition.)
+  # (Beginner AI Setup #1: the partition grows to 95 classes —
+  # fast-a +2 pure-JVM AI classes (provider help table; setup
+  # copy compositions), B3 +1 search-hint Robolectric suite; the
+  # beginner-setup UI suite joins the UI shard's class list in
+  # app/build.gradle.kts, not this partition.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -106,16 +111,18 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 50 of 92 non-UI classes)
+      - name: Run fast unit tests (shard A, 52 of 95 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
+            --tests "app.nota.data.ai.AiProviderHelpTest" \
             --tests "app.nota.data.ai.AiSettingsStoreTest" \
             --tests "app.nota.data.ai.AskNotaTest" \
             --tests "app.nota.data.ai.NoteChunkerTest" \
             --tests "app.nota.data.ai.SemanticMathTest" \
             --tests "app.nota.data.ai.TagListParserTest" \
             --tests "app.nota.feature.settings.AiSettingsFormTest" \
+            --tests "app.nota.feature.settings.AiSetupCopyTest" \
             --tests "app.nota.feature.ask.AskThreadTest" \
             --tests "app.nota.feature.graph.LinkGraphLayoutTest" \
             --tests "app.nota.feature.graph.LinkGraphTest" \
@@ -348,7 +355,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B3, 20 of 42 shard-B classes)
+      - name: Run fast unit tests (shard B3, 21 of 43 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiSummaryHtmlTest" \
@@ -358,6 +365,7 @@ jobs:
             --tests "app.nota.data.ai.SemanticIndexerRobolectricTest" \
             --tests "app.nota.data.ai.AskNotaRobolectricTest" \
             --tests "app.nota.feature.ask.AskViewModelRobolectricTest" \
+            --tests "app.nota.feature.search.SearchSemanticHintRobolectricTest" \
             --tests "app.nota.feature.graph.LinkGraphRobolectricTest" \
             --tests "app.nota.feature.editor.NoteLockUnlockStateRobolectricTest" \
             --tests "app.nota.feature.editor.TapBelowContentTest" \

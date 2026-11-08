@@ -46,8 +46,13 @@ private const val INTRO_NOTES =
     "How the notes list behaves: where Nota starts, what a swipe " +
         "does, and the templates you can start a note from."
 private const val INTRO_AI =
-    "Optional, and off until you add a key. Everything in here runs " +
-        "on the provider key you bring."
+    // Beginner AI Setup #1: the key is explained BEFORE the word
+    // is leaned on — a personal pass from the provider, created
+    // on their site. No price promises; the clause stays honest
+    // for free and paid providers alike.
+    "Optional, and off until you add a key — your personal pass " +
+        "from an AI provider, created on their site and pasted in " +
+        "here. Everything in here runs on the provider key you bring."
 private const val INTRO_ABOUT =
     "Which build of Nota is running on this device."
 
