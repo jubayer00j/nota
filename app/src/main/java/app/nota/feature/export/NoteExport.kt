@@ -151,7 +151,12 @@ object NoteExport {
     fun collectAttachmentIds(segments: List<DocSegment>): List<String> {
         val ids = LinkedHashSet<String>()
         val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
-        val inlineRe = Regex("""nota-attachment://([A-Za-z0-9_-]+)""")
+        // The id alphabet mirrors BackupRepository.isSafeId —
+        // dots included: restored backups can carry dotted ids
+        // ("att.2024.01"), and truncating at the first dot made
+        // every resolver lookup miss, exporting the image as a
+        // placeholder.
+        val inlineRe = Regex("""nota-attachment://([A-Za-z0-9._-]+)""")
         fun scan(html: String) {
             for (match in inlineRe.findAll(html)) ids += match.groupValues[1]
         }
