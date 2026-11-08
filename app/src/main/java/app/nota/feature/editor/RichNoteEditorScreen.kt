@@ -1,6 +1,5 @@
 package app.nota.feature.editor
 
-import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -149,6 +148,7 @@ import app.nota.feature.export.ExportFormat
 import app.nota.feature.export.NoteExport
 import app.nota.feature.export.NoteExportDelivery
 import app.nota.feature.export.NoteExportDialog
+import app.nota.feature.export.ExportSaveStore
 import app.nota.feature.reminders.ReminderDialog
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
@@ -1289,49 +1289,6 @@ fun RichNoteEditorScreen(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? -> handlePicked(PendingInsertKind.FILE, uri) }
 
-    // Per-note Export #1: the Save flow's system file picker. The
-    // built artifact waits on the VM (pendingExportSave) — App
-    // Lock's immediate relock on picker return destroys this
-    // composition, and the result is redelivered to this launcher
-    // after unlock with the artifact still on hand.
-    val exportSavePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        val uri = result.data?.data
-        val artifact = viewModel.pendingExportSave
-        viewModel.pendingExportSave = null
-        if (result.resultCode == Activity.RESULT_OK && uri != null) {
-            if (artifact == null) {
-                Toast.makeText(
-                    context,
-                    "Export was interrupted — nothing was written.",
-                    Toast.LENGTH_LONG,
-                ).show()
-            } else {
-                scope.launch {
-                    val failure = withContext(Dispatchers.IO) {
-                        runCatching {
-                            NoteExportDelivery.writeTo(context, uri, artifact)
-                        }.exceptionOrNull()
-                    }
-                    if (failure == null) {
-                        Toast.makeText(
-                            context,
-                            "Saved ${artifact.fileName}",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    } else {
-                        Toast.makeText(
-                            context,
-                            "Couldn't save the export.",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    }
-                }
-            }
-        }
-    }
-
     // Per-note Export #1: build the artifact from the LIVE document
     // (syncSegments — unsaved edits included), resolving attachment
     // images to data URLs off the main thread, then hand it to the
@@ -1373,10 +1330,22 @@ fun RichNoteEditorScreen(
                 exportBusy = false
                 showExportDialog = false
                 if (save) {
-                    viewModel.pendingExportSave = artifact
-                    exportSavePicker.launch(
+                    // The picker launcher and its result live at
+                    // activity level (see ExportSaveStore): App
+                    // Lock can dispose this whole composition
+                    // while the system picker is open.
+                    ExportSaveStore.stage(artifact)
+                    val launched = ExportSaveStore.launch(
                         NoteExportDelivery.createDocumentIntent(artifact),
                     )
+                    if (!launched) {
+                        ExportSaveStore.take()
+                        Toast.makeText(
+                            context,
+                            "Couldn't open the file picker.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
                 } else {
                     runCatching { NoteExportDelivery.share(context, artifact) }
                         .onFailure {
