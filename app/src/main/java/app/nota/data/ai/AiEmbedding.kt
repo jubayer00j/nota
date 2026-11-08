@@ -1,5 +1,7 @@
 package app.nota.data.ai
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 /**
  * Embeddings (Phase 4.2) — the sibling capability the 4.1 provider
  * layer was shaped for. Chat stays [AiProvider.complete]; semantic
@@ -40,6 +42,26 @@ data class AiEmbeddingConfig(
      *  stored one (blank for Custom = not configured). */
     fun resolvedEmbeddingModel(): String =
         embeddingModel.trim().ifBlank { providerId.defaultEmbeddingModel }
+
+    /**
+     * Whether the endpoint an embedding call would use can
+     * actually serve it — the same checks the call itself
+     * performs before sending (see the OpenAI-compatible
+     * embedAll): the resolved endpoint must exist, be https,
+     * and parse as a URL. Gemini is exempt: it calls its
+     * native API and [resolvedBaseUrl] is null by design.
+     * A config can RESOLVE (key + embedding model present —
+     * all the store's completeness check looks at) while this
+     * is false — a Custom slot whose endpoint was left blank
+     * or mistyped — and every embedding call from such a
+     * config fails NOT_CONFIGURED.
+     */
+    fun hasUsableEndpoint(): Boolean {
+        if (providerId == AiProviderId.GEMINI) return true
+        val endpoint = resolvedBaseUrl() ?: return false
+        return endpoint.startsWith("https://") &&
+            endpoint.toHttpUrlOrNull() != null
+    }
 
     /**
      * The identity of the embedding space this config writes

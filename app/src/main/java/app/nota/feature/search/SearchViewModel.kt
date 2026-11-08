@@ -41,12 +41,15 @@ class SearchViewModel(
     val semanticResults: StateFlow<List<NoteEntity>> = _semanticResults
 
     /** Beginner AI Setup #1 (F7), made config-aware in fix
-     *  round 2 (Codex P2): Search's one quiet hint line, driven
-     *  by whether an embedding config actually RESOLVES for the
-     *  active account — the store's own notion of "configured"
-     *  ([AiSettingsStore.activeEmbeddingConfig]):
-     *  - OFF: a config resolves; semantic search can run and
-     *    there is nothing to say.
+     *  round 2 (Codex P2) and endpoint-aware in fix round 3:
+     *  Search's one quiet hint line, driven by whether an
+     *  embedding config for the active account can actually
+     *  SERVE a call — resolving in the store
+     *  ([AiSettingsStore.activeEmbeddingConfig]) plus a usable
+     *  endpoint ([app.nota.data.ai.AiEmbeddingConfig.hasUsableEndpoint]):
+     *  - OFF: a config resolves and its endpoint can serve the
+     *    call; semantic search can run and there is nothing
+     *    to say.
      *  - NEEDS_KEY: no usable key and the active provider is a
      *    preset, whose endpoint and embedding model come
      *    pre-filled — a key alone genuinely completes its
@@ -54,9 +57,12 @@ class SearchViewModel(
      *  - NEEDS_SETUP: every other incomplete state — Custom
      *    with no key yet (a key alone never finishes Custom,
      *    which also needs its endpoint and an embedding model),
-     *    or any provider holding a key whose embedding config
-     *    still doesn't resolve. Its copy promises only that
-     *    finishing setup switches the feature on.
+     *    any provider holding a key whose embedding config
+     *    still doesn't resolve, and a Custom config that
+     *    resolves on paper (key + embedding model) while its
+     *    endpoint is blank or invalid, so every embedding call
+     *    from it would fail NOT_CONFIGURED. Its copy promises
+     *    only that finishing setup switches the feature on.
      *  The first form of this state keyed on `!hasUsableKey`
      *  alone, so saving just a key on Custom retired the hint
      *  while semantic search still couldn't run — the guidance
@@ -77,8 +83,9 @@ class SearchViewModel(
         val store = aiSettingsStore ?: return
         viewModelScope.launch {
             val account = accountIdProvider()
+            val config = store.activeEmbeddingConfig(account)
             _semanticHint.value = when {
-                store.activeEmbeddingConfig(account) != null ->
+                config != null && config.hasUsableEndpoint() ->
                     SemanticHint.OFF
                 !store.hasUsableKey(account) &&
                     store.activeProvider(account) != AiProviderId.CUSTOM ->

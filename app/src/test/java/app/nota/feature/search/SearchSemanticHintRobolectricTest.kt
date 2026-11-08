@@ -36,7 +36,13 @@ import org.robolectric.shadows.ShadowLooper
  *    embedding config still doesn't resolve, is NEEDS_SETUP —
  *    saving just a key on Custom must NOT retire the hint,
  *    because semantic search still can't run;
- *  - a resolved config (any provider) is OFF.
+ *  - fix round 3 (Codex P2): a Custom config can RESOLVE on
+ *    paper (key + embedding model — all the store's check
+ *    looks at) while its endpoint is blank or invalid; every
+ *    embedding call from it fails NOT_CONFIGURED, so it stays
+ *    NEEDS_SETUP until the endpoint is a usable https URL;
+ *  - a resolved config (any provider) with a usable endpoint
+ *    is OFF.
  * Account scoping is pinned too: another account's key changes
  * nothing here. Same harness family as the Ask suite: an
  * in-memory database and the real settings store over the fake
@@ -199,8 +205,9 @@ class SearchSemanticHintRobolectricTest {
 
     @Test
     fun customCompleteConfig_hintOff() {
-        // (e) Key + endpoint + embedding model: the config
-        // resolves and the hint retires.
+        // (e) Key + a valid https endpoint + embedding model:
+        // the config resolves, its endpoint can serve the
+        // call, and the hint retires.
         awaitHint(SemanticHint.NEEDS_KEY, "NEEDS_KEY before setup")
         runBlocking {
             store.setActiveProvider(account, AiProviderId.CUSTOM)
@@ -215,5 +222,63 @@ class SearchSemanticHintRobolectricTest {
         }
         viewModel.refreshSemanticHint()
         awaitHint(SemanticHint.OFF, "hint off once the Custom config resolves")
+    }
+
+    @Test
+    fun customKeyAndModel_blankEndpoint_needsSetup() {
+        // (f) Fix round 3 (Codex P2): key + embedding model
+        // but NO endpoint. The store RESOLVES a config here —
+        // its completeness check covers the key and the model
+        // only (pinned by the assert below) — yet every
+        // embedding call would fail NOT_CONFIGURED on the
+        // missing endpoint, so the hint must not retire.
+        runBlocking {
+            store.setActiveProvider(account, AiProviderId.CUSTOM)
+            store.saveSlot(
+                account, AiProviderId.CUSTOM,
+                AiProviderSlot(apiKey = "key-6", embeddingModel = "embed-1"),
+            )
+            assertTrue(store.activeEmbeddingConfig(account) != null)
+        }
+        viewModel.refreshSemanticHint()
+        awaitHint(SemanticHint.NEEDS_SETUP, "NEEDS_SETUP while the endpoint is blank")
+    }
+
+    @Test
+    fun customKeyAndModel_invalidEndpoint_needsSetup() {
+        // (g) The same gap with an endpoint present but
+        // unusable: the embedding call demands https and a
+        // parseable URL, so neither an http:// address nor a
+        // malformed https one completes the setup. The store
+        // saves the raw text either way (validation lives at
+        // call time), which is exactly how such a slot reaches
+        // a device.
+        runBlocking {
+            store.setActiveProvider(account, AiProviderId.CUSTOM)
+            store.saveSlot(
+                account, AiProviderId.CUSTOM,
+                AiProviderSlot(
+                    apiKey = "key-7",
+                    baseUrl = "http://insecure.example/v1",
+                    embeddingModel = "embed-1",
+                ),
+            )
+            assertTrue(store.activeEmbeddingConfig(account) != null)
+        }
+        viewModel.refreshSemanticHint()
+        awaitHint(SemanticHint.NEEDS_SETUP, "NEEDS_SETUP for an http endpoint")
+        runBlocking {
+            store.saveSlot(
+                account, AiProviderId.CUSTOM,
+                AiProviderSlot(
+                    apiKey = "key-7",
+                    baseUrl = "https://exa mple.invalid/v1",
+                    embeddingModel = "embed-1",
+                ),
+            )
+        }
+        viewModel.refreshSemanticHint()
+        settle()
+        assertEquals(SemanticHint.NEEDS_SETUP, viewModel.semanticHint.value)
     }
 }
