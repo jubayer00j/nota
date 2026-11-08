@@ -373,4 +373,21 @@ class NoteExportMarkdownTest {
         assertFalse(out.contains("\n# literal"))
     }
 
+    @Test
+    fun activeAndScriptableLinkDestinationsDropToLabels() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p><a href=\"javascript:alert(1)\">js</a> and " +
+                        "<a href=\"data:image/svg+xml,<svg/>\">svg</a> and " +
+                        "<a href=\"https://example.com\">ok</a></p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("js and svg and [ok](https://example.com)"))
+        assertFalse(out.contains("javascript:"))
+        assertFalse(out.contains("data:image"))
+    }
+
 }
