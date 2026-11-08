@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import app.nota.ui.theme.NotaSpacing
 import java.io.File
+import java.util.UUID
 
 /**
  * The per-note export dialog (Phase 6, Per-note Export #1) —
@@ -159,13 +160,38 @@ fun NoteExportDialog(
  */
 object NoteExportDelivery {
 
-    /** Writes the artifact to the cache exports dir FileProvider exposes. */
+    /**
+     * Writes the artifact into its OWN subdirectory of the cache
+     * exports dir FileProvider exposes. Exports originally landed
+     * flat as exports/<fileName>, so a second export with the same
+     * sanitised title and format overwrote the file backing an
+     * earlier share's URI — a recipient reading that URI later got
+     * the newer note instead of the one that was shared. The unique
+     * subdirectory keeps every share's file intact while the leaf
+     * name stays the artifact's clean file name (the cache-path
+     * exports/ entry in file_paths.xml covers subdirectories, so
+     * the provider needs no change).
+     */
     fun cacheFile(context: Context, artifact: NoteExportArtifact): File {
-        val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val root = File(context.cacheDir, "exports").apply { mkdirs() }
+        pruneStaleExports(root)
+        val dir = File(root, "share-" + UUID.randomUUID().toString()).apply { mkdirs() }
         val file = File(dir, artifact.fileName)
         file.writeText(artifact.content, Charsets.UTF_8)
         return file
     }
+
+    /** Export subdirectories older than a day are dead weight. */
+    private fun pruneStaleExports(root: File) {
+        val cutoff = System.currentTimeMillis() - EXPORT_STALE_AFTER_MS
+        root.listFiles()?.forEach { child ->
+            if (child.isDirectory && child.lastModified() < cutoff) {
+                child.deleteRecursively()
+            }
+        }
+    }
+
+    private const val EXPORT_STALE_AFTER_MS = 24 * 60 * 60 * 1000L
 
     /** Opens the share sheet with the artifact attached as a real file. */
     fun share(context: Context, artifact: NoteExportArtifact) {
