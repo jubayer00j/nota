@@ -2512,7 +2512,7 @@ private fun SegmentEditor(
                 BasicRichTextEditor(
                     state = state,
                     textStyle = editorTextStyle,
-                    modifier = Modifier.fillMaxWidth().then(
+                    modifier = Modifier.weight(1f).then(
                         if (focusRequester != null) {
                             Modifier.focusRequester(focusRequester)
                         } else {
@@ -2520,6 +2520,17 @@ private fun SegmentEditor(
                         },
                     ),
                 )
+                // Phase 6 (Editor Refinement #1 fix): every block
+                // must be deletable — a quote previously had NO
+                // removal path at all (its onRemove went unwired,
+                // and emptying the text leaves a quote segment that
+                // round-trips forever). The ✕ sits inline at the end
+                // of the quote's own row, the DividerSegment pattern,
+                // and flows through the same removeBlock as every
+                // other block's remove affordance.
+                IconButton(onClick = onRemove) {
+                    Icon(Icons.Filled.Close, contentDescription = "Remove quote")
+                }
             }
         }
         else -> {
@@ -2558,13 +2569,27 @@ private fun SegmentEditor(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        is CodeSegment -> OutlinedTextField(
-                            value = segment.text,
-                            onValueChange = { onChange(CodeSegment(it)) },
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                            modifier = Modifier.fillMaxWidth().then(focusModifier),
-                            minLines = 2,
-                        )
+                        // Phase 6 (Editor Refinement #1 fix): the
+                        // code field previously rendered BARE — its
+                        // onRemove went unwired, so a code block could
+                        // never be removed once inserted (Jubayer's
+                        // device-test bug; his ruling: every block is
+                        // deletable). It now renders inside BlockShell,
+                        // the exact shell File/Chart/Opaque use, whose
+                        // ✕ ("Remove block") flows through removeBlock.
+                        // The field itself — monospace style, minLines,
+                        // focus modifier, write-through — is unchanged.
+                        is CodeSegment -> BlockShell(onRemove) {
+                            OutlinedTextField(
+                                value = segment.text,
+                                onValueChange = { onChange(CodeSegment(it)) },
+                                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                ),
+                                modifier = Modifier.fillMaxWidth().then(focusModifier),
+                                minLines = 2,
+                            )
+                        }
                         DividerSegment -> Row(verticalAlignment = Alignment.CenterVertically) {
                             HorizontalDivider(Modifier.weight(1f))
                             IconButton(onClick = onRemove) {

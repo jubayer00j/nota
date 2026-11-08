@@ -102,6 +102,7 @@ kotlin {
 // the UI shard. With no shard property (local runs) the full suite
 // runs unfiltered.
 val notaUiTestClasses = listOf(
+    "app.nota.feature.editor.EditorBlockDeletionUiTest",
     "app.nota.feature.editor.EditorBlockDragUiTest",
     "app.nota.feature.editor.EditorReadModeUiTest",
     "app.nota.feature.editor.EditorRefinementUiTest",

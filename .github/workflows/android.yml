@@ -128,6 +128,7 @@ jobs:
             --tests "app.nota.data.backup.PendingRestoreStoreTest" \
             --tests "app.nota.data.drive.DriveClientTest" \
             --tests "app.nota.data.html.NoteDocumentFileSegmentTest" \
+            --tests "app.nota.data.html.NoteDocumentBlockDeletionTest" \
             --tests "app.nota.data.preferences.NoteLockBiometricCopyScopingTest" \
             --tests "app.nota.data.preferences.PreferencesCorruptionAppLockTest" \
             --tests "app.nota.data.repository.FtsQueryBuilderTest" \
