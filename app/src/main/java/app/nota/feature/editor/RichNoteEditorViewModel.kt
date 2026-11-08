@@ -678,14 +678,6 @@ class RichNoteEditorViewModel(
 
     // --- Per-note export (Phase 6, Export #1) --------------------------------
 
-    /** The built export file waiting on the system file picker.
-     *  Held here, not in composition state: App Lock's immediate
-     *  relock on picker return destroys the editor composition
-     *  (the same hazard the backup staging store exists for), and
-     *  the artifact must still be writable when the picker result
-     *  is redelivered after unlock. In-memory only — a process
-     *  death mid-picker simply drops the pending save. */
-    var pendingExportSave: NoteExportArtifact? = null
 
     // --- Templates -------------------------------------------------------------
 
