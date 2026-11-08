@@ -722,4 +722,18 @@ class NoteExportHtmlTest {
         }
     }
 
+    @Test
+    fun hyphenatedSrcAttributesAreNotMistakenForTheSource() {
+        val out = html(
+            listOf(
+                OpaqueSegment(
+                    "<img data-src=\"nota-attachment://img1\" " +
+                        "src=\"nota-attachment://img1\" alt=\"Cat\">",
+                ),
+            ),
+        )
+        assertFalse(out.contains("src=\"nota-attachment://"))
+        assertTrue(out.contains("data:image/png;base64,iVBORw0KGgo="))
+    }
+
 }
