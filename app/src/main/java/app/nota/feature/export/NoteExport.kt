@@ -511,9 +511,24 @@ object NoteExport {
                             // scriptable and active-data targets
                             // export as their label only, the
                             // same destinations HTML export
-                            // points at "#".
+                            // points at "#". The destination must
+                            // ALSO be safe after one more decode:
+                            // CommonMark resolves character
+                            // references in destinations at render
+                            // time, so a stored href that the
+                            // attribute parser decoded to
+                            // "&#106;avascript:..." (from a
+                            // double-escaped source) renders as a
+                            // javascript: link unless the decoded
+                            // form is vetted too.
+                            val renderForm = href?.let {
+                                HtmlEntities.decode(it)
+                            }
                             if (!href.isNullOrEmpty() &&
-                                !isScriptableUrl(href) && !isActiveDataUrl(href)
+                                !isScriptableUrl(href) && !isActiveDataUrl(href) &&
+                                renderForm != null &&
+                                !isScriptableUrl(renderForm) &&
+                                !isActiveDataUrl(renderForm)
                             ) {
                                 out.append("[").append(inner).append("](")
                                     .append(mdLinkDestination(href)).append(")")
