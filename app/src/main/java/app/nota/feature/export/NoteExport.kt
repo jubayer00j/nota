@@ -460,7 +460,12 @@ object NoteExport {
 
     /** Escapes the characters that would re-parse as Markdown structure. */
     private fun escapeMdText(text: String): String {
-        val escaped = text.replace(Regex("([\\\\`*_\\[\\]<])"), "\\\\$1")
+        // '~' joins the set for GFM: a literal "~~word~~" in
+        // the note is strikethrough to a renderer unless the
+        // tildes are escaped. (The converter's own strike
+        // markers are added around already-escaped runs, so
+        // real strikethrough is unaffected.)
+        val escaped = text.replace(Regex("([\\\\`*_\\[\\]<~])"), "\\\\$1")
         // Inline escaping is not enough: a literal line that STARTS
         // with a block marker (heading, quote, list, thematic break)
         // would re-parse as that structure instead of the note's
