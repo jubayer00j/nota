@@ -325,7 +325,12 @@ object NoteExport {
                 val nodes = parseFragment(segment.rawHtml)
                 val parts = opaqueParts(nodes)
                 if (parts.none { it is OpaquePart.Image }) {
-                    val text = textContent(nodes).trim()
+                    // From the filtered parts, not the raw nodes:
+                    // dropped subtrees (script/style) contribute
+                    // no text to any format.
+                    val text = parts.joinToString("") { part ->
+                        if (part is OpaquePart.Text) part.text else ""
+                    }.trim()
                     // The extracted words are plain text, not
                     // Markdown: escaped like any other text, or a
                     // leading "#" or a "[..](..)" shape would
@@ -863,7 +868,9 @@ object NoteExport {
             val nodes = parseFragment(segment.rawHtml)
             val parts = opaqueParts(nodes)
             if (parts.none { it is OpaquePart.Image }) {
-                val text = textContent(nodes).trim()
+                val text = parts.joinToString("") { part ->
+                    if (part is OpaquePart.Text) part.text else ""
+                }.trim()
                 listOf(if (text.isNotEmpty()) text else "[Block]")
             } else {
                 val rendered = parts.joinToString("") { part ->
@@ -1420,7 +1427,14 @@ object NoteExport {
             val srcMatch = Regex("""(?i)(?<![\w-])src\s*=\s*"([^"]*)"""").find(tag)
                 ?: Regex("""(?i)(?<![\w-])src\s*=\s*'([^']*)'""").find(tag)
                 ?: Regex("""(?i)(?<![\w-])src\s*=\s*([^\s>]+)""").find(tag)
-            val src = srcMatch?.groupValues?.get(1) ?: return@replace tag
+            val rawSrc = srcMatch?.groupValues?.get(1) ?: return@replace tag
+            // The captured value is raw markup text: an
+            // entity-escaped URI (&#58; for the colon) is the
+            // same attachment address once decoded — the
+            // collector works on decoded attributes, so the
+            // resolver must too, or an image the collector
+            // preloaded stays an app-specific URI in the export.
+            val src = unescapeAttrValue(rawSrc)
             val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
             if (!src.startsWith(prefix)) return@replace tag
             val data = resolve(src.removePrefix(prefix))
