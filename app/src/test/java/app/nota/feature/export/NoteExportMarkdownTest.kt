@@ -486,6 +486,26 @@ class NoteExportMarkdownTest {
     }
 
     @Test
+    fun attachmentIdsAreCollectedOnlyFromImageSources() {
+        val segments = listOf(
+            TextSegment(
+                html = "<p>See nota-attachment://stray1 " +
+                    "<a href=\"nota-attachment://stray2\">a link</a> " +
+                    "<img src=\"nota-attachment://real1\"></p>",
+            ),
+            OpaqueSegment(
+                "<div><!-- nota-attachment://stray3 -->" +
+                    "<script>nota-attachment://stray4</script>" +
+                    "<img src=\"nota-attachment://real2\"></div>",
+            ),
+        )
+        assertEquals(
+            listOf("real1", "real2"),
+            NoteExport.collectAttachmentIds(segments),
+        )
+    }
+
+    @Test
     fun singleOversizedImageDegradesToPlaceholder() {
         // ~33.7 MB decoded — past the single-image cap.
         val big = "data:image/png;base64," + "A".repeat(45_000_000)
