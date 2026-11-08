@@ -389,26 +389,40 @@ object NoteExport {
                 else -> "- "
             }
             counter++
-            val inlineNodes = mutableListOf<HtmlNode>()
-            val nested = mutableListOf<HtmlElement>()
-            for (child in li.children) {
-                when {
-                    child is HtmlElement && (child.name == "ul" || child.name == "ol") ->
-                        nested += child
-                    child is HtmlElement && child.name == "p" ->
-                        inlineNodes += child.children
-                    child is HtmlElement && (child.name == "label" || child.name == "input") ->
-                        Unit // task checkbox chrome, not content
-                    else -> inlineNodes += child
+            // Children are emitted in SOURCE ORDER: text
+            // after a nested list belongs after it, not
+            // gathered onto the item's first line. Inline runs
+            // accumulate until a nested list flushes them —
+            // onto the marker line first, then onto
+            // continuation lines at the item's content column,
+            // the same column the nested list itself uses.
+            val contentIndent = indent + " ".repeat(marker.length)
+            val pending = mutableListOf<HtmlNode>()
+            var onMarkerLine = true
+            fun flushPending() {
+                val text = mdInline(pending, resolve).trim()
+                pending.clear()
+                if (onMarkerLine) {
+                    lines += indent + marker + text
+                    onMarkerLine = false
+                } else if (text.isNotEmpty()) {
+                    lines += contentIndent + text
                 }
             }
-            lines += indent + marker + mdInline(inlineNodes, resolve).trim()
-            // A nested list must sit at the parent item's
-            // content column — the marker's width — or strict
-            // renderers detach it from its parent.
-            for (sub in nested) {
-                lines += mdList(sub, indent + " ".repeat(marker.length), resolve)
+            for (child in li.children) {
+                when {
+                    child is HtmlElement && (child.name == "ul" || child.name == "ol") -> {
+                        flushPending()
+                        lines += mdList(child, contentIndent, resolve)
+                    }
+                    child is HtmlElement && child.name == "p" ->
+                        pending += child.children
+                    child is HtmlElement && (child.name == "label" || child.name == "input") ->
+                        Unit // task checkbox chrome, not content
+                    else -> pending += child
+                }
             }
+            flushPending()
         }
         return lines
     }
@@ -760,22 +774,38 @@ object NoteExport {
                 else -> "- "
             }
             counter++
-            val inlineNodes = mutableListOf<HtmlNode>()
-            val nested = mutableListOf<HtmlElement>()
-            for (child in li.children) {
-                when {
-                    child is HtmlElement && (child.name == "ul" || child.name == "ol") ->
-                        nested += child
-                    child is HtmlElement && child.name == "p" ->
-                        inlineNodes += child.children
-                    child is HtmlElement && (child.name == "label" || child.name == "input") ->
-                        Unit
-                    else -> inlineNodes += child
+            // Source order, as in the Markdown converter:
+            // inline runs flush around nested lists instead
+            // of all gathering onto the item's first line;
+            // text after a nested list continues at the
+            // nested level's indent.
+            val pending = mutableListOf<HtmlNode>()
+            var onMarkerLine = true
+            fun flushPending() {
+                val text = textInline(pending)
+                    .replace(Regex("\\s+"), " ").trim()
+                pending.clear()
+                if (onMarkerLine) {
+                    lines += indent + marker + text
+                    onMarkerLine = false
+                } else if (text.isNotEmpty()) {
+                    lines += "  ".repeat(depth + 1) + text
                 }
             }
-            lines += indent + marker +
-                textInline(inlineNodes).replace(Regex("\\s+"), " ").trim()
-            for (sub in nested) lines += textList(sub, depth + 1)
+            for (child in li.children) {
+                when {
+                    child is HtmlElement && (child.name == "ul" || child.name == "ol") -> {
+                        flushPending()
+                        lines += textList(child, depth + 1)
+                    }
+                    child is HtmlElement && child.name == "p" ->
+                        pending += child.children
+                    child is HtmlElement && (child.name == "label" || child.name == "input") ->
+                        Unit
+                    else -> pending += child
+                }
+            }
+            flushPending()
         }
         return lines
     }
