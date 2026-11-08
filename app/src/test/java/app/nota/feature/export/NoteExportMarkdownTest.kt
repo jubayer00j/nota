@@ -438,4 +438,21 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains("~~gone~~"))
     }
 
+    @Test
+    fun literalCharacterReferencesAreEscapedInMarkdown() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p>Type &amp;copy; and &amp;#169; literally, " +
+                        "but fish &amp; chips stays plain</p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("&amp;copy;"))
+        assertTrue(out.contains("&amp;#169;"))
+        assertTrue(out.contains("fish & chips"))
+        assertFalse(out.contains(" &copy; "))
+    }
+
 }
