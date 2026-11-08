@@ -625,4 +625,40 @@ class NoteExportHtmlTest {
         assertFalse(out.contains("&amp;copy;"))
     }
 
+    @Test
+    fun activeDataUrlsAreBlockedInLinksButNotImages() {
+        // Navigating to an SVG or XHTML data: document runs
+        // its scripts; the same URL as an <img> source renders
+        // in a script-disabled context and stays.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p><a href=\"data:image/svg+xml,<svg><script>alert(1)</script></svg>\">svg link</a></p>" +
+                        "<p><a href=\"data:application/xhtml+xml,<html/>\">xhtml link</a></p>" +
+                        "<p><img src=\"data:image/svg+xml,<svg><rect/></svg>\" alt=\"pic\"></p>",
+                ),
+            ),
+            exportResolver,
+        )
+        assertTrue(out.contains("href=\"#\""))
+        assertFalse(out.contains("alert(1)"))
+        assertTrue(out.contains("data:image/svg+xml,<svg><rect/></svg>"))
+    }
+
+    @Test
+    fun unquotedOpaqueAttachmentSourcesResolve() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<picture><img src=nota-attachment://img1 alt=\"diagram\"></picture>",
+                ),
+            ),
+            exportResolver,
+        )
+        assertTrue(out.contains(CAT_DATA_URL))
+        assertFalse(out.contains("nota-attachment://"))
+    }
+
 }
