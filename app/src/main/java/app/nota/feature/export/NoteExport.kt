@@ -212,7 +212,13 @@ object NoteExport {
         // ("att.2024.01"), and truncating at the first dot made
         // every resolver lookup miss, exporting the image as a
         // placeholder.
-        val inlineRe = Regex("""nota-attachment://([A-Za-z0-9._-]+)""")
+        // The id runs to the next markup delimiter, not to an
+        // assumed alphabet: backup restore accepts any non-empty
+        // attachment id and stores it unchanged (the path-safety
+        // gate applies to the noteId segment, not the attachment
+        // id), so a restored id like "atté" must capture whole or
+        // its inline images never reach the resolver.
+        val inlineRe = Regex("""nota-attachment://([^\s"'<>]+)""")
         fun scan(html: String) {
             for (match in inlineRe.findAll(html)) ids += match.groupValues[1]
         }
