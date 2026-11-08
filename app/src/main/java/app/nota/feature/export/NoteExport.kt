@@ -59,16 +59,40 @@ object NoteExport {
         format: ExportFormat,
         resolveImage: AttachmentResolver = { null },
     ): NoteExportArtifact {
+        // Resolved values are spliced into exported markup and
+        // link destinations, and the data URLs behind them are
+        // built from attachment metadata a restored backup supplies
+        // unvalidated — a crafted mime type can carry an attribute
+        // breakout (`image/png" onerror="…`). Guard the resolver
+        // once, here, so every format and every sink consumes the
+        // same checked resolver.
+        val guarded = guardResolver(resolveImage)
         val content = when (format) {
-            ExportFormat.HTML -> noteToHtml(title, segments, resolveImage)
-            ExportFormat.MARKDOWN -> noteToMarkdown(title, segments, resolveImage)
-            ExportFormat.TEXT -> noteToPlainText(title, segments, resolveImage)
+            ExportFormat.HTML -> noteToHtml(title, segments, guarded)
+            ExportFormat.MARKDOWN -> noteToMarkdown(title, segments, guarded)
+            ExportFormat.TEXT -> noteToPlainText(title, segments, guarded)
         }
         return NoteExportArtifact(
             fileName = exportFilename(title, format),
             mimeType = format.mimeType,
             content = content,
         )
+    }
+
+    /**
+     * Wraps a resolver so only markup-safe values pass: a real
+     * `data:<mime>;base64,<payload>` never contains a quote, an
+     * angle bracket, whitespace or a control character, so a
+     * resolved value carrying any of those is treated as
+     * unresolved (null → the "[Image]" placeholder paths).
+     */
+    private fun guardResolver(resolve: AttachmentResolver): AttachmentResolver = { id ->
+        resolve(id)?.takeIf { value ->
+            value.none { ch ->
+                ch == '"' || ch == '\'' || ch == '<' || ch == '>' ||
+                    ch.isWhitespace() || ch.isISOControl()
+            }
+        }
     }
 
     /** The note's display title (blank falls back, as everywhere in Nota). */
@@ -779,7 +803,7 @@ object NoteExport {
                     segment.src.startsWith(prefix) -> {
                         val data = resolve(segment.src.removePrefix(prefix))
                         if (data != null) {
-                            "<img src=\"$data\" alt=\"$alt\"$width>"
+                            "<img src=\"${escapeHtmlAttr(data)}\" alt=\"$alt\"$width>"
                         } else {
                             "<span>[Image]</span>"
                         }
@@ -1025,7 +1049,7 @@ object NoteExport {
             if (!src.startsWith(prefix)) return@replace tag
             val data = resolve(src.removePrefix(prefix))
             if (data != null) {
-                tag.replaceRange(srcMatch.range, "src=\"$data\"")
+                tag.replaceRange(srcMatch.range, "src=\"${escapeHtmlAttr(data)}\"")
             } else {
                 "<span>[Image]</span>"
             }

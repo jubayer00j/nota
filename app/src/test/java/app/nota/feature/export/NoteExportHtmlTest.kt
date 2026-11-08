@@ -376,4 +376,97 @@ class NoteExportHtmlTest {
         val out = NoteExport.noteToHtml("T", listOf(TextSegment(paragraph)))
         assertTrue(out.contains(expected))
     }
+
+    /**
+     * A resolver value built from a crafted attachment mime type
+     * (`image/png" onerror="…`, the shape a restored backup can
+     * supply unvalidated) must never break out of the exported
+     * markup: build() guards the resolver centrally, so the value
+     * is treated as unresolved and degrades to the placeholder.
+     */
+    private val hostileDataResolver: AttachmentResolver = { id ->
+        if (id == "img1") {
+            "data:image/png\" onerror=\"alert(1);base64,AAAA"
+        } else {
+            null
+        }
+    }
+
+    private val pngDataResolver: AttachmentResolver = { id ->
+        if (id == "img1") "data:image/png;base64,iVBORw0KGgo=" else null
+    }
+
+    @Test
+    fun hostileResolvedDataUrlCannotBreakOutOfImageSegment() {
+        val out = NoteExport.build(
+            "T",
+            listOf(ImageSegment(src = "nota-attachment://img1", alt = "Cat")),
+            ExportFormat.HTML,
+            hostileDataResolver,
+        ).content
+        assertFalse(out.contains("onerror"))
+        assertFalse(out.contains("alert(1)"))
+        assertFalse(out.contains("<img"))
+        assertTrue(out.contains("<span>[Image]</span>"))
+    }
+
+    @Test
+    fun hostileResolvedDataUrlCannotBreakOutOfOpaqueImage() {
+        val out = NoteExport.build(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<div><img src=\"nota-attachment://img1\" alt=\"x\"></div>",
+                ),
+            ),
+            ExportFormat.HTML,
+            hostileDataResolver,
+        ).content
+        assertFalse(out.contains("onerror"))
+        assertFalse(out.contains("alert(1)"))
+        assertTrue(out.contains("<span>[Image]</span>"))
+    }
+
+    @Test
+    fun legitimateDataUrlStillEmbedsVerbatimThroughBuild() {
+        val standalone = NoteExport.build(
+            "T",
+            listOf(ImageSegment(src = "nota-attachment://img1", alt = "Cat")),
+            ExportFormat.HTML,
+            pngDataResolver,
+        ).content
+        assertTrue(
+            standalone.contains(
+                "<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"Cat\">",
+            ),
+        )
+        val opaque = NoteExport.build(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<div><img src=\"nota-attachment://img1\"></div>",
+                ),
+            ),
+            ExportFormat.HTML,
+            pngDataResolver,
+        ).content
+        assertTrue(
+            opaque.contains(
+                "<img src=\"data:image/png;base64,iVBORw0KGgo=\">",
+            ),
+        )
+    }
+
+    @Test
+    fun hostileResolvedDataUrlStaysOutOfMarkdownToo() {
+        val out = NoteExport.build(
+            "T",
+            listOf(ImageSegment(src = "nota-attachment://img1", alt = "Cat")),
+            ExportFormat.MARKDOWN,
+            hostileDataResolver,
+        ).content
+        assertFalse(out.contains("onerror"))
+        assertFalse(out.contains("alert(1)"))
+        assertTrue(out.contains("[Image]"))
+    }
 }
