@@ -207,11 +207,6 @@ object NoteExport {
     fun collectAttachmentIds(segments: List<DocSegment>): List<String> {
         val ids = LinkedHashSet<String>()
         val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
-        // The id alphabet mirrors BackupRepository.isSafeId —
-        // dots included: restored backups can carry dotted ids
-        // ("att.2024.01"), and truncating at the first dot made
-        // every resolver lookup miss, exporting the image as a
-        // placeholder.
         // The id runs to the next markup delimiter, not to an
         // assumed alphabet: backup restore accepts any non-empty
         // attachment id and stores it unchanged (the path-safety
