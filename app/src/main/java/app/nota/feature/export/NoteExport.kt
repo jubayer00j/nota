@@ -292,7 +292,10 @@ object NoteExport {
     }
 
     private fun mdImage(src: String, alt: String, resolve: AttachmentResolver): String {
-        val cleanAlt = alt.replace(Regex("[\\[\\]]"), "")
+        // Brackets would break the image syntax; backslashes
+        // are doubled, or a trailing one escapes the closing
+        // bracket and the image never renders.
+        val cleanAlt = alt.replace(Regex("[\\[\\]]"), "").replace("\\", "\\\\")
         val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
         return when {
             src.startsWith(prefix) -> {
@@ -476,8 +479,17 @@ object NoteExport {
         if (indent.length > 3) return line
         val rest = line.substring(indent.length)
         if (rest.isEmpty()) return line
-        // Thematic break: only -, * or _ (and spaces), three or more.
         val compact = rest.replace(" ", "")
+        // Setext underlines: a line of only '=' (any count),
+        // or of only '-' too short to be a thematic break,
+        // turns the paragraph line above it into a heading —
+        // escaped at any length so the words stay words.
+        if (compact.isNotEmpty() &&
+            (compact.all { it == '=' } || compact.all { it == '-' })
+        ) {
+            return indent + "\\" + rest
+        }
+        // Thematic break: only -, * or _ (and spaces), three or more.
         if (compact.length >= 3 &&
             (compact.all { it == '-' } || compact.all { it == '*' } || compact.all { it == '_' })
         ) {
