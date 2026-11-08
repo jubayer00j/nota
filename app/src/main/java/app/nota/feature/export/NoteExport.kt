@@ -165,6 +165,7 @@ object NoteExport {
                 is QuoteSegment -> scan(segment.innerHtml)
                 is TableSegment -> segment.rows.forEach { row -> row.forEach(::scan) }
                 is TaskListSegment -> segment.items.forEach { scan(it.contentHtml) }
+                is OpaqueSegment -> scan(segment.rawHtml)
                 else -> Unit
             }
         }
@@ -514,7 +515,14 @@ object NoteExport {
     private fun mdCodeSpan(text: String): String {
         val longestRun = Regex("`+").findAll(text).maxOfOrNull { it.value.length } ?: 0
         val fence = "`".repeat(longestRun + 1)
-        return if (text.startsWith("`") || text.endsWith("`")) {
+        // Padding is needed at backtick boundaries (the fence
+        // must not touch a backtick) and at space boundaries:
+        // CommonMark strips one space from each end of a span
+        // whose content starts AND ends with a space, so an
+        // unpadded span holding " foo " would read back as "foo".
+        val needsPadding = text.startsWith("`") || text.endsWith("`") ||
+            (text.startsWith(" ") && text.endsWith(" ") && text.isNotBlank())
+        return if (needsPadding) {
             "$fence $text $fence"
         } else {
             fence + text + fence
@@ -1314,6 +1322,9 @@ object NoteExport {
                 entity == "quot" -> "\""
                 entity == "apos" -> "'"
                 entity == "nbsp" -> " "
+                entity == "colon" -> ":"
+                entity == "Tab" || entity == "tab" -> "\t"
+                entity == "NewLine" || entity == "newline" -> "\n"
                 entity.startsWith("#x") || entity.startsWith("#X") ->
                     entity.substring(2).toIntOrNull(16)?.let { decodeCodePoint(it) }
                 entity.startsWith("#") ->
