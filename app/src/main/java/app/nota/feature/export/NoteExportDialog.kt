@@ -3,6 +3,7 @@ package app.nota.feature.export
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +32,11 @@ import androidx.core.content.FileProvider
 import app.nota.ui.theme.NotaSpacing
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The per-note export dialog (Phase 6, Per-note Export #1) —
@@ -193,26 +199,56 @@ object NoteExportDelivery {
 
     private const val EXPORT_STALE_AFTER_MS = 24 * 60 * 60 * 1000L
 
-    /** Opens the share sheet with the artifact attached as a real file. */
+    /**
+     * Opens the share sheet with the artifact attached as a real
+     * file. Staging the cache file is a real write — an HTML
+     * export with embedded photos can run to megabytes — so it
+     * runs on Dispatchers.IO; only opening the chooser stays on
+     * the main thread. The launch is asynchronous now, so a
+     * staging failure can no longer reach the caller's
+     * runCatching: it toasts here with the same message the
+     * caller used to show.
+     */
     fun share(context: Context, artifact: NoteExportArtifact) {
-        val file = cacheFile(context, artifact)
-        val uri = FileProvider.getUriForFile(
-            context,
-            context.packageName + ".fileprovider",
-            file,
-        )
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = artifact.mimeType
-            putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_TITLE, artifact.fileName)
-            putExtra(Intent.EXTRA_SUBJECT, artifact.fileName)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val appContext = context.applicationContext
+        shareScope.launch {
+            val uri = runCatching {
+                withContext(Dispatchers.IO) {
+                    val file = cacheFile(appContext, artifact)
+                    FileProvider.getUriForFile(
+                        appContext,
+                        appContext.packageName + ".fileprovider",
+                        file,
+                    )
+                }
+            }.getOrNull()
+            if (uri == null) {
+                Toast.makeText(
+                    context, "Couldn't share the export.", Toast.LENGTH_LONG,
+                ).show()
+                return@launch
+            }
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = artifact.mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_TITLE, artifact.fileName)
+                putExtra(Intent.EXTRA_SUBJECT, artifact.fileName)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(intent, "Share note").apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            runCatching { context.startActivity(chooser) }
+                .onFailure {
+                    Toast.makeText(
+                        context, "Couldn't share the export.", Toast.LENGTH_LONG,
+                    ).show()
+                }
         }
-        val chooser = Intent.createChooser(intent, "Share note").apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(chooser)
     }
+
+    /** Delivery work that outlives a single call (see [share]). */
+    private val shareScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     /** The ACTION_CREATE_DOCUMENT intent for the Save flow (per-format MIME). */
     fun createDocumentIntent(artifact: NoteExportArtifact): Intent =
