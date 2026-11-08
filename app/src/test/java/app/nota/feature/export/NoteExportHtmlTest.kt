@@ -521,4 +521,44 @@ class NoteExportHtmlTest {
         assertFalse(out.contains("[Image]"))
     }
 
+    @Test
+    fun svgAnimationElementsAreDroppedFromOpaqueBlocks() {
+        // SMIL can animate an anchor's href into a javascript:
+        // URL after the attribute scrub has passed — the
+        // animation elements themselves must not survive.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<svg><a href=\"https://example.com\">" +
+                        "<animate attributeName=\"href\" " +
+                        "values=\"javascript:alert(1)\"></animate>" +
+                        "label</a></svg>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("<animate"))
+        assertFalse(out.lowercase().contains("javascript:"))
+        assertFalse(out.contains("alert(1)"))
+        assertTrue(out.contains("label"))
+    }
+
+    @Test
+    fun svgAnimationElementsAreDroppedFromRichText() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p><svg><a href=\"https://example.com\">" +
+                        "<set attributeName=\"href\" " +
+                        "to=\"javascript:alert(1)\"></set>" +
+                        "label</a></svg></p>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("<set"))
+        assertFalse(out.lowercase().contains("javascript:"))
+        assertTrue(out.contains("label"))
+    }
+
 }
