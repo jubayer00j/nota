@@ -363,10 +363,10 @@ fun AiSection(
         when (val state = form.testState) {
             is AiSettingsForm.TestState.Success -> Text(
                 // Beginner AI Setup #1 (F5): Test exercises the
-                // chat model only — when the form's embedding
-                // field is blank, the success line says what
-                // still won't run. Composition only.
-                aiTestSuccessMessage(form.activeProvider.label, draft.embeddingModel),
+                // chat model only — when no embedding model
+                // resolves for the provider, the success line
+                // says what still won't run. Composition only.
+                aiTestSuccessMessage(form.activeProvider, draft.embeddingModel),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(top = NotaSpacing.xs),
@@ -475,20 +475,28 @@ fun AiSection(
 }
 
 /** Beginner AI Setup #1 (F5): the honest Test-connection success
- *  line. Test exercises the chat model only, so when the FORM's
- *  embedding field is blank the line adds the one sentence that
- *  keeps a "Connection works" from over-promising: semantic
- *  search and Ask Nota also need an embedding model. Pure
- *  composition — the Test itself is unchanged. */
-internal fun aiTestSuccessMessage(providerLabel: String, formEmbeddingModel: String): String =
-    "Connection works — $providerLabel answered." +
-        if (formEmbeddingModel.isBlank()) {
+ *  line. Test exercises the chat model only, so when no embedding
+ *  model resolves the line adds the one sentence that keeps a
+ *  "Connection works" from over-promising: semantic search and
+ *  Ask Nota also need an embedding model. Resolution mirrors
+ *  AiEmbeddingConfig.resolvedEmbeddingModel — the form field,
+ *  else the provider's default. A preset's blank field still
+ *  resolves (and Save persists the resolved value), so the
+ *  sentence is added only when even the resolved model is blank,
+ *  which today means Custom. Pure composition — the Test itself
+ *  is unchanged. */
+internal fun aiTestSuccessMessage(provider: AiProviderId, formEmbeddingModel: String): String {
+    val effectiveEmbeddingModel =
+        formEmbeddingModel.trim().ifBlank { provider.defaultEmbeddingModel }
+    return "Connection works — ${provider.label} answered." +
+        if (effectiveEmbeddingModel.isBlank()) {
             " Semantic search and Ask Nota also need an embedding " +
                 "model — that field is empty right now " +
                 "(see Advanced — models)."
         } else {
             ""
         }
+}
 
 /** Beginner AI Setup #1 (F3): the Advanced fold's header summary
  *  — the EFFECTIVE model names (the caller passes draft-or-

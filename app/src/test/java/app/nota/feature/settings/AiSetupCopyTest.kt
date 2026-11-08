@@ -1,5 +1,6 @@
 package app.nota.feature.settings
 
+import app.nota.data.ai.AiProviderId
 import app.nota.data.ai.SemanticIndexStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,22 +16,34 @@ import org.junit.Test
 class AiSetupCopyTest {
 
     @Test
-    fun testSuccess_blankEmbedding_addsTheEmbeddingSentence() {
-        val message = aiTestSuccessMessage("Gemini", "")
-        assertTrue(message.startsWith("Connection works — Gemini answered."))
-        assertTrue(
-            message.contains(
-                "Semantic search and Ask Nota also need an embedding model",
-            ),
+    fun testSuccess_presetBlankField_resolvesToDefault_noWarning() {
+        // A preset's blank field resolves to its default embedding
+        // model (and Save persists the resolved value), so the
+        // plain line is the honest one — no warning.
+        assertEquals(
+            "Connection works — Gemini answered.",
+            aiTestSuccessMessage(AiProviderId.GEMINI, ""),
         )
-        assertTrue(message.contains("Advanced — models"))
+    }
+
+    @Test
+    fun testSuccess_customBlankField_addsTheEmbeddingSentence() {
+        // Custom has no default embedding model to resolve to, so
+        // a blank field really does leave semantic search and Ask
+        // without one — the warning is appended, byte-identical.
+        assertEquals(
+            "Connection works — Custom endpoint answered." +
+                " Semantic search and Ask Nota also need an embedding model" +
+                " — that field is empty right now (see Advanced — models).",
+            aiTestSuccessMessage(AiProviderId.CUSTOM, ""),
+        )
     }
 
     @Test
     fun testSuccess_embeddingSet_isThePlainLineOnly() {
         assertEquals(
             "Connection works — OpenAI answered.",
-            aiTestSuccessMessage("OpenAI", "text-embedding-3-large"),
+            aiTestSuccessMessage(AiProviderId.OPENAI, "text-embedding-3-large"),
         )
     }
 
