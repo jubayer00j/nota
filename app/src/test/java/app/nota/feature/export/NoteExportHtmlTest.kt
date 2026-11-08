@@ -685,4 +685,22 @@ class NoteExportHtmlTest {
         assertTrue(out.contains("<a href=\"#\">two</a>"))
     }
 
+    @Test
+    fun semicolonlessLegacyReferencesFollowAttributeRules() {
+        // In text, "&copy" decodes like a browser shows it.
+        // Inside an attribute, "&copy=" must NOT decode —
+        // the spec's guard keeps query strings intact.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p>Fish &copy chips " +
+                        "<a href=\"https://example.com/?a=1&copy=2\">q</a></p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("Fish \u00A9 chips"))
+        assertTrue(out.contains("href=\"https://example.com/?a=1&amp;copy=2\""))
+    }
+
 }
