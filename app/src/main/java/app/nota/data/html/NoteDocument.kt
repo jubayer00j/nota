@@ -1194,11 +1194,11 @@ object NoteDocument {
     private fun escapeAttr(value: String): String = value
         .replace("&", "&amp;").replace("\"", "&quot;")
 
-    private fun unescapeAttr(value: String): String = value
-        .replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+    // Entity decoding is the full HTML5 set, exactly once,
+    // here where raw markup becomes text: "&copy;" parses to
+    // the character a browser shows, and "&amp;copy;" stays
+    // the literal text "&copy;" — never a double decode.
+    private fun unescapeAttr(value: String): String = HtmlEntities.decode(value)
 
-    private fun unescapeText(value: String): String = value
-        .replace("&lt;", "<").replace("&gt;", ">")
-        .replace("&quot;", "\"").replace("&#39;", "'")
-        .replace("&amp;", "&")
+    private fun unescapeText(value: String): String = HtmlEntities.decode(value)
 }
