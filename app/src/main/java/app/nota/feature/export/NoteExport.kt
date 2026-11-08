@@ -1388,9 +1388,14 @@ object NoteExport {
         val imgRe = Regex("""(?is)<img\b[^>]*>""")
         return imgRe.replace(rawHtml) { match ->
             val tag = match.value
-            val srcMatch = Regex("""(?i)\bsrc\s*=\s*"([^"]*)"""").find(tag)
-                ?: Regex("""(?i)\bsrc\s*=\s*'([^']*)'""").find(tag)
-                ?: Regex("""(?i)\bsrc\s*=\s*([^\s>]+)""").find(tag)
+            // The name must be exactly "src": a plain word
+            // boundary also fires inside hyphenated names
+            // ("data-src", "ng-src"), and rewriting that match
+            // corrupts the lazy-load attribute while the real
+            // source keeps its unresolved attachment URI.
+            val srcMatch = Regex("""(?i)(?<![\w-])src\s*=\s*"([^"]*)"""").find(tag)
+                ?: Regex("""(?i)(?<![\w-])src\s*=\s*'([^']*)'""").find(tag)
+                ?: Regex("""(?i)(?<![\w-])src\s*=\s*([^\s>]+)""").find(tag)
             val src = srcMatch?.groupValues?.get(1) ?: return@replace tag
             val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
             if (!src.startsWith(prefix)) return@replace tag
