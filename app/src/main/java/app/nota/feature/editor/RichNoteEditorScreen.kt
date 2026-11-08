@@ -6,7 +6,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -40,6 +39,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.FormatColorFill
+import androidx.compose.material.icons.filled.FormatColorReset
+import androidx.compose.material.icons.filled.FormatColorText
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddToHomeScreen
 import androidx.compose.material.icons.filled.Alarm
@@ -106,6 +109,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
@@ -293,6 +299,16 @@ fun RichNoteEditorScreen(
     var insertMenuExpanded by remember { mutableStateOf(false) }
     var showLinkDialog by remember { mutableStateOf(false) }
     var linkUrl by remember { mutableStateOf("") }
+    // Phase 6 (Editor Refinement #1): the link dialog's honesty
+    // state (A10) — true when it was opened on an existing link, in
+    // which case linkUrl starts prefilled and Remove link is
+    // offered. Plus the two new insert dialogs: table size (A3)
+    // and image-from-URL (A6) with its inline-error flag.
+    var linkDialogExisting by remember { mutableStateOf(false) }
+    var showTableDialog by remember { mutableStateOf(false) }
+    var showImageUrlDialog by remember { mutableStateOf(false) }
+    var imageUrl by remember { mutableStateOf("") }
+    var imageUrlError by remember { mutableStateOf(false) }
     var showOutline by remember { mutableStateOf(false) }
     var outlineItems by remember { mutableStateOf<List<OutlineEntry>>(emptyList()) }
     var showTemplateDialog by remember { mutableStateOf(false) }
@@ -1520,6 +1536,11 @@ fun RichNoteEditorScreen(
                 isActive = ui.id == activeSegmentId,
                 isTrailingCaret = index == segments.lastIndex &&
                     ui.segment is TextSegment,
+                // Phase 6 (Editor Refinement #1): "Start writing…"
+                // belongs to the note's FIRST text segment only —
+                // later empty segments are working space, not the
+                // start of the note (see SegmentEditor).
+                showBodyPlaceholder = index == 0 && ui.segment is TextSegment,
                 trailingFocusRequester = trailingFocusRequester,
                 focusRequester = segmentFocusRequesters
                     .getOrPut(ui.id) { FocusRequester() },
@@ -2035,7 +2056,23 @@ fun RichNoteEditorScreen(
                     onMicClick = { toggleDictation() },
                     insertMenuExpanded = insertMenuExpanded,
                     onInsertMenuChange = { insertMenuExpanded = it },
-                    onLinkRequest = { showLinkDialog = true },
+                    onLinkRequest = {
+                        // Phase 6 (Editor Refinement #1, A10): the
+                        // dialog opens PREFILLED when the caret sits
+                        // in an existing link, and knows it is an
+                        // edit (Remove link is offered) rather than a
+                        // fresh insert.
+                        val existing = activeState?.toolbarFormatState()?.linkUrl
+                        linkUrl = existing ?: ""
+                        linkDialogExisting = existing != null
+                        showLinkDialog = true
+                    },
+                    onInsertTableRequest = { showTableDialog = true },
+                    onInsertImageUrl = {
+                        imageUrl = ""
+                        imageUrlError = false
+                        showImageUrlDialog = true
+                    },
                     onInsertImage = {
                         insertImageOnPick = true
                         // Phase 3.6 (G2): the durable record is staged
@@ -2085,9 +2122,15 @@ fun RichNoteEditorScreen(
     }
 
     if (showLinkDialog) {
+        // Phase 6 (Editor Refinement #1, A10): one dialog, honest
+        // about which job it is doing. Opened on an existing link it
+        // is an EDIT — the field starts with that link's URL (see
+        // onLinkRequest), Save rewrites the link in place via the
+        // library's updateLink, and Remove link unwraps it keeping
+        // the text. Opened anywhere else it is the original insert.
         AlertDialog(
             onDismissRequest = { showLinkDialog = false },
-            title = { Text("Insert link") },
+            title = { Text(if (linkDialogExisting) "Edit link" else "Insert link") },
             text = {
                 OutlinedTextField(
                     value = linkUrl,
@@ -2102,15 +2145,90 @@ fun RichNoteEditorScreen(
                     val st = activeState
                     val url = linkUrl.trim()
                     if (st != null && url.isNotEmpty()) {
-                        if (st.selection.collapsed) st.addLink(text = url, url = url)
-                        else st.addLinkToSelection(url)
+                        when {
+                            linkDialogExisting -> st.updateLink(url)
+                            st.selection.collapsed -> st.addLink(text = url, url = url)
+                            else -> st.addLinkToSelection(url)
+                        }
                     }
                     linkUrl = ""
                     showLinkDialog = false
+                }) { Text(if (linkDialogExisting) "Save" else "Insert") }
+            },
+            dismissButton = {
+                Row {
+                    if (linkDialogExisting) {
+                        TextButton(onClick = {
+                            activeState?.removeLink()
+                            linkUrl = ""
+                            showLinkDialog = false
+                        }) { Text("Remove link") }
+                    }
+                    TextButton(onClick = { showLinkDialog = false }) { Text("Cancel") }
+                }
+            },
+        )
+    }
+
+    if (showTableDialog) {
+        TableInsertDialog(
+            onDismiss = { showTableDialog = false },
+            onInsert = { rows, cols, headerRow ->
+                showTableDialog = false
+                // The insert menu's placement is unchanged: the new
+                // table lands after the active segment, exactly
+                // where the old fixed 2×2 insert put it.
+                insertBlock(TableOps.newTable(rows, cols, headerRow))
+            },
+        )
+    }
+
+    if (showImageUrlDialog) {
+        // Phase 6 (Editor Refinement #1, A6): image from URL. The
+        // URL is validated by parseRemoteImageUrl; an invalid one
+        // shows the inline error and inserts NOTHING. A valid one
+        // becomes a remote ImageSegment at the caret through the
+        // same insertBlockAtCaret funnel the photo picker's insert
+        // ends in (Phase 3.5 discipline) — no attachment is created
+        // for a remote image.
+        AlertDialog(
+            onDismissRequest = { showImageUrlDialog = false },
+            title = { Text("Image from URL") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = imageUrl,
+                        onValueChange = {
+                            imageUrl = it
+                            imageUrlError = false
+                        },
+                        label = { Text("Image URL") },
+                        singleLine = true,
+                        isError = imageUrlError,
+                        modifier = Modifier.fillMaxWidth().testTag("imageUrlField"),
+                    )
+                    if (imageUrlError) {
+                        Text(
+                            "Enter a valid http(s) image URL",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val parsed = parseRemoteImageUrl(imageUrl)
+                    if (parsed == null) {
+                        imageUrlError = true
+                    } else {
+                        showImageUrlDialog = false
+                        insertBlockAtCaret(ImageSegment(src = parsed))
+                    }
                 }) { Text("Insert") }
             },
             dismissButton = {
-                TextButton(onClick = { showLinkDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showImageUrlDialog = false }) { Text("Cancel") }
             },
         )
     }
@@ -2308,6 +2426,12 @@ private fun SegmentEditor(
     ui: UiSegment,
     isActive: Boolean,
     isTrailingCaret: Boolean = false,
+    // Phase 6 (Editor Refinement #1): true only for the note's
+    // first text segment — an empty body there shows the
+    // "Start writing…" placeholder (1.x parity; the foundation
+    // editor has no placeholder slot, so it is an overlay that is
+    // never part of the document and can never be serialised).
+    showBodyPlaceholder: Boolean = false,
     trailingFocusRequester: FocusRequester? = null,
     // Phase 3.5 (D4): per-segment focus requester (caret placement
     // after a split-insert) and the block drag handle's gesture
@@ -2357,11 +2481,20 @@ private fun SegmentEditor(
                 }
                 editorModifier = editorModifier.heightIn(min = 56.dp)
             }
-            BasicRichTextEditor(
-                state = state,
-                textStyle = editorTextStyle,
-                modifier = editorModifier,
-            )
+            Box(Modifier.fillMaxWidth()) {
+                BasicRichTextEditor(
+                    state = state,
+                    textStyle = editorTextStyle,
+                    modifier = editorModifier,
+                )
+                if (showBodyPlaceholder && state.annotatedString.text.isEmpty()) {
+                    Text(
+                        "Start writing…",
+                        style = editorTextStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
         is QuoteSegment -> {
             val state = stateFor()
@@ -2833,6 +2966,11 @@ private fun EditableCellText(
     bodyStyle: Boolean,
     cellTextStates: MutableMap<String, MutableState<String>>,
     modifier: Modifier = Modifier,
+    // Phase 6 (Editor Refinement #1): focus-gain hook — TableBlock
+    // tracks its selected cell (the target of the at-cell row/column
+    // operations) from it. Fires on gain only; losing focus to an
+    // operation button must not clear the selection first.
+    onFocus: () -> Unit = {},
     onEdit: (String) -> Unit,
 ) {
     val textState = cellTextStates.getOrPut(key) { mutableStateOf(initial) }
@@ -2848,7 +2986,7 @@ private fun EditableCellText(
         } else {
             MaterialTheme.typography.bodySmall
         },
-        modifier = modifier,
+        modifier = modifier.onFocusChanged { if (it.isFocused) onFocus() },
     )
 }
 
@@ -2860,6 +2998,12 @@ private fun TableBlock(
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
 ) {
+    // Phase 6 (Editor Refinement #1, A3): the cell the at-cell
+    // row/column operations act on — set when a cell field gains
+    // focus, cleared after every structural change (the change
+    // evicts the block's field states anyway, and a stale
+    // coordinate would aim the next operation at shifted content).
+    var selectedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
@@ -2880,6 +3024,7 @@ private fun TableBlock(
                             bodyStyle = false,
                             cellTextStates = cellTextStates,
                             modifier = Modifier.weight(1f),
+                            onFocus = { selectedCell = r to c },
                             onEdit = { newText ->
                                 val newRows = table.rows.mapIndexed { rr, rowCells ->
                                     if (rr == r) {
@@ -2897,9 +3042,61 @@ private fun TableBlock(
                 }
                 Spacer(Modifier.height(NotaSpacing.xs))
             }
+            // Phase 6 (Editor Refinement #1, A3): operations AT the
+            // selected cell — 1.x's contextual table bar, in the
+            // footer idiom of this block. Every operation goes
+            // through TableOps (contents and spans stay parallel)
+            // and the same eviction discipline as the append/drop
+            // handlers below, then clears the selection: the fields
+            // re-seed after eviction, and a stale coordinate would
+            // aim at shifted content.
+            val sel = selectedCell
+            if (sel != null) {
+                val (sr, sc) = sel
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs),
+                ) {
+                    TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
+                        onChange(TableOps.insertRow(table, sr))
+                        selectedCell = null
+                    }) { Text("Row above") }
+                    TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
+                        onChange(TableOps.insertRow(table, sr + 1))
+                        selectedCell = null
+                    }) { Text("Row below") }
+                    TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
+                        onChange(TableOps.insertColumn(table, sc))
+                        selectedCell = null
+                    }) { Text("Col left") }
+                    TextButton(onClick = {
+                        evictCellTextStates(cellTextStates, blockId)
+                        onChange(TableOps.insertColumn(table, sc + 1))
+                        selectedCell = null
+                    }) { Text("Col right") }
+                    if (table.rows.size > 1) {
+                        TextButton(onClick = {
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TableOps.deleteRow(table, sr))
+                            selectedCell = null
+                        }) { Text("Delete row") }
+                    }
+                    if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
+                        TextButton(onClick = {
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TableOps.deleteColumn(table, sc))
+                            selectedCell = null
+                        }) { Text("Delete col") }
+                    }
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
                     evictCellTextStates(cellTextStates, blockId)
+                    selectedCell = null
                     val cols = table.rows.firstOrNull()?.size ?: 1
                     val newSpans = if (table.cellSpans.isEmpty()) {
                         emptyList()
@@ -2912,6 +3109,7 @@ private fun TableBlock(
                 }) { Text("+ Row") }
                 TextButton(onClick = {
                     evictCellTextStates(cellTextStates, blockId)
+                    selectedCell = null
                     onChange(
                         TableSegment(
                             table.rows.map { it + "" },
@@ -2923,6 +3121,7 @@ private fun TableBlock(
                 if (table.rows.size > 1) {
                     TextButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
+                        selectedCell = null
                         onChange(
                             TableSegment(
                                 table.rows.dropLast(1),
@@ -2935,6 +3134,7 @@ private fun TableBlock(
                 if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
                     TextButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
+                        selectedCell = null
                         onChange(
                             TableSegment(
                                 table.rows.map { it.dropLast(1) },
@@ -3061,39 +3261,24 @@ private fun ImageBlock(
     // directly would freeze the width at drag start and every delta
     // would recompute from the original width (Codex review, PR #6).
     val currentImage by rememberUpdatedState(image)
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape = RoundedCornerShape(8.dp),
-        border = if (selected) {
-            BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-        } else {
-            null
-        },
-        modifier = Modifier.fillMaxWidth(),
+    // Phase 6 (Editor Refinement #1, B1): the edit-mode image wears
+    // NO surfaceVariant card and NO always-on alt header any more —
+    // it renders clean, exactly as read mode renders it, and the
+    // chrome (selection border on the image itself, the existing
+    // width row, remove) appears only while the block is selected.
+    // The pinch gesture and the width drag handle below are
+    // untouched, and how width persists (the width="N%" attribute)
+    // does not change.
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Column(
-            Modifier.padding(NotaSpacing.sm),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    image.alt.ifBlank { "Image" },
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(onClick = onRemove) {
-                    Icon(Icons.Filled.Close, contentDescription = "Remove image")
-                }
-            }
-            val model: Any? = when {
-                attachment != null -> fileFor(attachment)
-                image.src.isNotBlank() -> image.src
-                else -> null
-            }
-            if (model != null) {
+        val model: Any? = when {
+            attachment != null -> fileFor(attachment)
+            image.src.isNotBlank() -> image.src
+            else -> null
+        }
+        if (model != null) {
                 Box(
                     Modifier.fillMaxWidth()
                         .onSizeChanged { areaWidthPx = it.width }
@@ -3106,6 +3291,17 @@ private fun ImageBlock(
                         modifier = Modifier
                             .fillMaxWidth(displayWidthPercent / 100f)
                             .heightIn(max = 320.dp)
+                            .then(
+                                if (selected) {
+                                    Modifier.border(
+                                        2.dp,
+                                        MaterialTheme.colorScheme.primary,
+                                        RoundedCornerShape(8.dp),
+                                    )
+                                } else {
+                                    Modifier
+                                },
+                            )
                             // Phase 3.6 (G4): pinch to resize, like
                             // the gallery — two fingers spread or
                             // squeeze and the width follows the span
@@ -3226,7 +3422,24 @@ private fun ImageBlock(
                                 tint = MaterialTheme.colorScheme.onPrimary,
                             )
                         }
+                        IconButton(onClick = onRemove) {
+                            Icon(Icons.Filled.Close, contentDescription = "Remove image")
+                        }
                     }
+                }
+        } else {
+            // No renderable source (a blank src with no matching
+            // attachment): keep a slim, removable placeholder row
+            // rather than the old card header's remove button.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Image unavailable",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onRemove) {
+                    Icon(Icons.Filled.Close, contentDescription = "Remove image")
                 }
             }
         }
@@ -3293,13 +3506,61 @@ private fun AttachmentsSection(
     }
 }
 
-/** The one highlight colour the toolbar applies (Phase 1c swatch). */
-private const val HIGHLIGHT_ARGB = 0xFFFFEB3B
+/**
+ * Phase 6 (Editor Refinement #1, A2): the text-colour palette,
+ * copied VERBATIM from Noma 1.x's `TEXT_COLORS` (note-editor.tsx).
+ * The hexes ARE the shared HTML format (a span's `color:` style),
+ * so both apps render the same note identically — do not invent
+ * values here. 1.x's remaining entry is "Default" (null), the
+ * clear action, which the toolbar renders as its own menu row.
+ * (Order and names are 1.x's too.)
+ */
+internal val TEXT_COLOR_SWATCHES: List<Pair<String, Long>> = listOf(
+    "Ink" to 0xFF1F1B16,
+    "Slate" to 0xFF4B5563,
+    "Red" to 0xFFB3261E,
+    "Amber" to 0xFFB45309,
+    "Green" to 0xFF15803D,
+    "Blue" to 0xFF1D4ED8,
+    "Violet" to 0xFF6D28D9,
+)
+
+/**
+ * Ditto for highlight/background colour — 1.x's `BG_COLORS`,
+ * stored the same way (a span's `background:` style). 1.x's clear
+ * entry is "None" (null), rendered as the menu's own row.
+ */
+internal val HIGHLIGHT_COLOR_SWATCHES: List<Pair<String, Long>> = listOf(
+    "Sand" to 0xFFF4EAD9,
+    "Rose" to 0xFFFBE0E0,
+    "Peach" to 0xFFFDE4CF,
+    "Lemon" to 0xFFFBF1C7,
+    "Mint" to 0xFFDCF3E4,
+    "Sky" to 0xFFDDE9FB,
+    "Lilac" to 0xFFE8E0FB,
+)
+
+/**
+ * Phase 6 (Editor Refinement #1, A6): the Image-from-URL dialog's
+ * gate. Returns the trimmed URL when it is an absolute http(s) URL
+ * with something after the scheme and no whitespace; null for
+ * anything else (blank, scheme-less, another scheme, a bare
+ * scheme) — the dialog shows its inline error and inserts nothing.
+ */
+internal fun parseRemoteImageUrl(raw: String): String? {
+    val url = raw.trim()
+    if (url.isEmpty() || url.any { it.isWhitespace() }) return null
+    val schemeLength = when {
+        url.startsWith("https://", ignoreCase = true) -> "https://".length
+        url.startsWith("http://", ignoreCase = true) -> "http://".length
+        else -> return null
+    }
+    return if (url.length > schemeLength) url else null
+}
 
 /** Phase 3.6 (G2): how much of the target segment's plain text a
  *  staged picker record keeps as its identity anchor. */
 private const val INSERT_ANCHOR_CHARS = 60
-private val HIGHLIGHT_COLOR = Color(HIGHLIGHT_ARGB)
 
 /**
  * Phase 2.8 (E2): selected treatment for the toolbar's icon buttons —
@@ -3341,6 +3602,65 @@ private fun Swatch(argb: Long, selected: Boolean) {
     }
 }
 
+/**
+ * Phase 6 (Editor Refinement #1, A3): the insert-table dialog —
+ * 1.x's shape (Rows / Columns number fields with its caps, an
+ * "Include header row" checkbox, 3×3 with header as the defaults)
+ * in Nota's dialog idiom. Dimensions are clamped by
+ * [TableOps.newTable] on insert, so out-of-range input can never
+ * mint an oversized table.
+ */
+@Composable
+private fun TableInsertDialog(
+    onDismiss: () -> Unit,
+    onInsert: (rows: Int, cols: Int, headerRow: Boolean) -> Unit,
+) {
+    var rowsText by remember { mutableStateOf("3") }
+    var colsText by remember { mutableStateOf("3") }
+    var headerRow by remember { mutableStateOf(true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Insert table") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = rowsText,
+                    onValueChange = { rowsText = it.filter { ch -> ch.isDigit() }.take(2) },
+                    label = { Text("Rows (max ${TableOps.MAX_ROWS})") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth().testTag("tableRowsField"),
+                )
+                Spacer(Modifier.height(NotaSpacing.sm))
+                OutlinedTextField(
+                    value = colsText,
+                    onValueChange = { colsText = it.filter { ch -> ch.isDigit() }.take(2) },
+                    label = { Text("Columns (max ${TableOps.MAX_COLS})") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth().testTag("tableColsField"),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = headerRow, onCheckedChange = { headerRow = it })
+                    Text("Include header row")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onInsert(
+                    rowsText.toIntOrNull() ?: 3,
+                    colsText.toIntOrNull() ?: 3,
+                    headerRow,
+                )
+            }) { Text("Insert") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
 @OptIn(ExperimentalRichTextApi::class)
 @Composable
 private fun EditorToolbar(
@@ -3354,7 +3674,9 @@ private fun EditorToolbar(
     onInsertMenuChange: (Boolean) -> Unit,
     onLinkRequest: () -> Unit,
     onInsertImage: () -> Unit,
+    onInsertImageUrl: () -> Unit,
     onInsertFile: () -> Unit,
+    onInsertTableRequest: () -> Unit,
     onInsertBlock: (DocSegment) -> Unit,
 ) {
     val enabled = state != null
@@ -3444,21 +3766,103 @@ private fun EditorToolbar(
         ) {
             Icon(Icons.Filled.Link, contentDescription = "Insert link")
         }
-        listOf(0xFFC0392B, 0xFF1D6FB8, 0xFF1E7D4F).forEach { argb ->
+        // Phase 6 (Editor Refinement #1, A2): 1.x's colour palettes
+        // replace the 3-swatch stub and the one fixed yellow. Each
+        // menu holds 1.x's colours (TEXT_COLOR_SWATCHES /
+        // HIGHLIGHT_COLOR_SWATCHES — verbatim hexes) plus its clear
+        // entry ("Default" / "None"). Applying goes through the
+        // same toggleSpanStyle the old swatches used: tapping the
+        // ACTIVE colour also clears it, and the clear entries
+        // toggle the active colour off explicitly.
+        var textColorMenuExpanded by remember { mutableStateOf(false) }
+        Box {
             IconButton(
-                onClick = { state?.toggleSpanStyle(SpanStyle(color = Color(argb))) },
+                onClick = { textColorMenuExpanded = true },
                 enabled = enabled,
+                colors = toolbarIconColors(format?.textColor != null),
             ) {
-                Swatch(argb, selected = format?.textColor == Color(argb))
+                Icon(Icons.Filled.FormatColorText, contentDescription = "Text colour")
+            }
+            DropdownMenu(
+                expanded = textColorMenuExpanded,
+                onDismissRequest = { textColorMenuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Default") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.FormatColorReset, contentDescription = null)
+                    },
+                    trailingIcon = {
+                        if (format?.textColor == null) {
+                            Icon(Icons.Filled.Check, contentDescription = null)
+                        }
+                    },
+                    onClick = {
+                        textColorMenuExpanded = false
+                        format?.textColor?.let { current ->
+                            state?.toggleSpanStyle(SpanStyle(color = current))
+                        }
+                    },
+                )
+                TEXT_COLOR_SWATCHES.forEach { (name, argb) ->
+                    val color = Color(argb)
+                    DropdownMenuItem(
+                        text = { Text(name) },
+                        leadingIcon = {
+                            Swatch(argb, selected = format?.textColor == color)
+                        },
+                        onClick = {
+                            textColorMenuExpanded = false
+                            state?.toggleSpanStyle(SpanStyle(color = color))
+                        },
+                    )
+                }
             }
         }
-        IconButton(
-            onClick = {
-                state?.toggleSpanStyle(SpanStyle(background = HIGHLIGHT_COLOR))
-            },
-            enabled = enabled,
-        ) {
-            Swatch(HIGHLIGHT_ARGB, selected = format?.highlightColor == HIGHLIGHT_COLOR)
+        var highlightMenuExpanded by remember { mutableStateOf(false) }
+        Box {
+            IconButton(
+                onClick = { highlightMenuExpanded = true },
+                enabled = enabled,
+                colors = toolbarIconColors(format?.highlightColor != null),
+            ) {
+                Icon(Icons.Filled.FormatColorFill, contentDescription = "Highlight colour")
+            }
+            DropdownMenu(
+                expanded = highlightMenuExpanded,
+                onDismissRequest = { highlightMenuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("None") },
+                    leadingIcon = {
+                        Icon(Icons.Filled.FormatColorReset, contentDescription = null)
+                    },
+                    trailingIcon = {
+                        if (format?.highlightColor == null) {
+                            Icon(Icons.Filled.Check, contentDescription = null)
+                        }
+                    },
+                    onClick = {
+                        highlightMenuExpanded = false
+                        format?.highlightColor?.let { current ->
+                            state?.toggleSpanStyle(SpanStyle(background = current))
+                        }
+                    },
+                )
+                HIGHLIGHT_COLOR_SWATCHES.forEach { (name, argb) ->
+                    val color = Color(argb)
+                    DropdownMenuItem(
+                        text = { Text(name) },
+                        leadingIcon = {
+                            Swatch(argb, selected = format?.highlightColor == color)
+                        },
+                        onClick = {
+                            highlightMenuExpanded = false
+                            state?.toggleSpanStyle(SpanStyle(background = color))
+                        },
+                    )
+                }
+            }
         }
         Box {
             IconButton(onClick = { onInsertMenuChange(true) }) {
@@ -3474,21 +3878,18 @@ private fun EditorToolbar(
                     onClick = { onInsertMenuChange(false); onInsertImage() },
                 )
                 DropdownMenuItem(
+                    text = { Text("Image from URL…") },
+                    leadingIcon = { Icon(Icons.Filled.Language, contentDescription = null) },
+                    onClick = { onInsertMenuChange(false); onInsertImageUrl() },
+                )
+                DropdownMenuItem(
                     text = { Text("File attachment…") },
                     leadingIcon = { Icon(Icons.Filled.AttachFile, contentDescription = null) },
                     onClick = { onInsertMenuChange(false); onInsertFile() },
                 )
                 DropdownMenuItem(
-                    text = { Text("Table") },
-                    onClick = {
-                        onInsertMenuChange(false)
-                        onInsertBlock(
-                            TableSegment(
-                                listOf(listOf("", ""), listOf("", "")),
-                                headerRow = false,
-                            ),
-                        )
-                    },
+                    text = { Text("Table…") },
+                    onClick = { onInsertMenuChange(false); onInsertTableRequest() },
                 )
                 DropdownMenuItem(
                     text = { Text("Task list") },
