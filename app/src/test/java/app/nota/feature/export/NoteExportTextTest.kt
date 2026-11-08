@@ -165,4 +165,17 @@ class NoteExportTextTest {
         assertTrue(out.contains("Price \u20AC5, range \u2013 ok"))
     }
 
+    @Test
+    fun opaqueBlockImagesBecomeImagePlaceholders() {
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<picture><img src=\"nota-attachment://img1\" alt=\"Cat\"></picture>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("[Image: Cat]"))
+    }
+
 }
