@@ -84,6 +84,20 @@ private fun RichTextState.selectionHasSpanField(
     }
 }
 
+/**
+ * Whether a span-field colour counts as COLOUR IN PLAY. Two
+ * "empty" representations exist: [Color.Unspecified], and
+ * [Color.Transparent] — the library normalises a REMOVED
+ * background to Transparent in the annotated string's span list
+ * (its common-style view reads Unspecified again, which is why
+ * the toolbar's colour value looked clean while a raw span scan
+ * kept reporting a survivor). Transparent is never a palette
+ * colour and is invisible as either text colour or highlight,
+ * so it counts as no colour.
+ */
+private fun Color.isColourInPlay(): Boolean =
+    this != Color.Unspecified && this != Color.Transparent
+
 @OptIn(ExperimentalRichTextApi::class)
 internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
     val span: SpanStyle = currentSpanStyle
@@ -102,9 +116,9 @@ internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
         textColor = textColor,
         highlightColor = highlightColor,
         textColorMixed = textColor == null &&
-            selectionHasSpanField { it.color != Color.Unspecified },
+            selectionHasSpanField { it.color.isColourInPlay() },
         highlightMixed = highlightColor == null &&
-            selectionHasSpanField { it.background != Color.Unspecified },
+            selectionHasSpanField { it.background.isColourInPlay() },
         linkUrl = (currentRichSpanStyle as? RichSpanStyle.Link)?.url,
     )
 }
@@ -137,10 +151,13 @@ internal fun RichTextState.clearHighlightInSelection() {
  * refuses mixed selections up front. The composition that works
  * is the one the uniform toggle-clear itself uses, minus that
  * gate: range-remove EACH distinct value actually present. A
- * removal also restructures the span tree (and can leave the
- * field standing on a restructured span — the background case),
- * so the scan repeats after each pass, bounded, until the
- * selection reports no values of the field.
+ * removal also restructures the span tree, so the scan repeats
+ * after each pass, bounded, until the selection reports no
+ * in-play values of the field. (The scan's notion of "in play"
+ * matters as much as the removal: a removed background is
+ * normalised to Color.Transparent in the annotated string, which
+ * a naive specified-check counts as a survivor forever — see
+ * isColourInPlay.)
  */
 @OptIn(ExperimentalRichTextApi::class)
 private fun RichTextState.clearSpanFieldInSelection(
@@ -155,7 +172,7 @@ private fun RichTextState.clearSpanFieldInSelection(
     }
 }
 
-/** The distinct specified values of one span field across the selection. */
+/** The distinct in-play values of one span field across the selection. */
 private fun RichTextState.distinctSpanFieldValues(
     field: (SpanStyle) -> Color,
 ): List<Color> {
@@ -163,6 +180,6 @@ private fun RichTextState.distinctSpanFieldValues(
     return annotatedString.spanStyles
         .filter { range -> range.start < sel.max && range.end > sel.min }
         .map { field(it.item) }
-        .filter { it != Color.Unspecified }
+        .filter { it.isColourInPlay() }
         .distinct()
 }

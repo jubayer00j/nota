@@ -301,16 +301,7 @@ class ToolbarStateTest {
         state.select(0..7)
         format = state.toolbarFormatState()
         assertNull(format.highlightColor)
-        // Diagnostic (PR #34 fix round): if a background survives
-        // the clear, the failure message must show WHICH span
-        // carries it and what the document serialises to.
-        val leftover = state.annotatedString.spanStyles
-            .filter { it.item.background != Color.Unspecified }
-            .joinToString { "[${it.start},${it.end}) bg=${it.item.background}" }
-        assertTrue(
-            "leftover bg spans: $leftover html=${state.toHtml()}",
-            !format.highlightMixed,
-        )
+        assertFalse(format.highlightMixed)
         assertFalse(state.toHtml().contains("background"))
     }
 }
