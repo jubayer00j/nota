@@ -741,4 +741,19 @@ class NoteExportHtmlTest {
         assertFalse(out.contains(" src=\"nota-attachment://"))
     }
 
+
+    @Test
+    fun entityEscapedAttachmentUrlResolvesInOpaqueBlocks() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<img src=\"nota-attachment&#58;//img1\" alt=\"Cat\">",
+                ),
+            ),
+            pngDataResolver,
+        )
+        assertTrue(out.contains("data:image/png;base64,iVBORw0KGgo="))
+        assertFalse(out.contains("nota-attachment"))
+    }
 }
