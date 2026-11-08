@@ -67,7 +67,7 @@ object NoteExport {
         // breakout (`image/png" onerror="…`). Guard the resolver
         // once, here, so every format and every sink consumes the
         // same checked resolver.
-        val guarded = guardResolver(resolveImage)
+        val guarded = budgetResolver(guardResolver(resolveImage))
         val content = when (format) {
             ExportFormat.HTML -> noteToHtml(title, segments, guarded)
             ExportFormat.MARKDOWN -> noteToMarkdown(title, segments, guarded)
@@ -78,6 +78,62 @@ object NoteExport {
             mimeType = format.mimeType,
             content = content,
         )
+    }
+
+    /**
+     * The most image data one export may embed, decoded bytes:
+     * a single image larger than [MAX_SINGLE_IMAGE_BYTES], or a
+     * cumulative total over [MAX_EMBEDDED_IMAGE_BYTES], degrades
+     * to the unresolved "[Image]" placeholder instead of
+     * embedding. Attachment files are not size-capped (a restored
+     * backup can carry very large photos), and the delivery path
+     * holds every resolved data URL plus the finished artifact in
+     * memory at once — on a small-heap phone an unbounded embed
+     * can kill the export, and the app, mid-build.
+     */
+    internal const val MAX_SINGLE_IMAGE_BYTES = 16L * 1024 * 1024
+    internal const val MAX_EMBEDDED_IMAGE_BYTES = 32L * 1024 * 1024
+
+    /**
+     * Wraps a resolver with the embedding budget above: values
+     * are memoised per attachment id for the duration of one
+     * build (an image used twice embeds, and spends, once), the
+     * decoded size is estimated from the Base64 payload length,
+     * and anything past the budget resolves as null.
+     */
+    private fun budgetResolver(resolve: AttachmentResolver): AttachmentResolver {
+        val cache = HashMap<String, String?>()
+        var spentBytes = 0L
+        return { id ->
+            if (id in cache) {
+                cache[id]
+            } else {
+                val value = resolve(id)
+                val sized = value?.let {
+                    val estimated = estimatedDecodedBytes(it)
+                    if (estimated <= MAX_SINGLE_IMAGE_BYTES &&
+                        spentBytes + estimated <= MAX_EMBEDDED_IMAGE_BYTES
+                    ) {
+                        spentBytes += estimated
+                        it
+                    } else {
+                        null
+                    }
+                }
+                cache[id] = sized
+                sized
+            }
+        }
+    }
+
+    /** Decoded size of a `data:...;base64,<payload>` value. */
+    private fun estimatedDecodedBytes(dataUrl: String): Long {
+        val payload = dataUrl.substringAfter(',', "")
+        return if (payload.isEmpty()) {
+            dataUrl.length.toLong()
+        } else {
+            payload.length * 3L / 4L
+        }
     }
 
     /**
