@@ -468,4 +468,21 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains("- before\n  - child\n  after"))
     }
 
+    @Test
+    fun dottedAttachmentIdsResolveInlineImages() {
+        val segments = listOf(
+            TextSegment(
+                html = "<p><img src=\"nota-attachment://att.2024.01\" alt=\"Dot\"></p>",
+            ),
+        )
+        assertEquals(
+            listOf("att.2024.01"),
+            NoteExport.collectAttachmentIds(segments),
+        )
+        val out = NoteExport.noteToMarkdown("T", segments) { id ->
+            if (id == "att.2024.01") "data:image/png;base64,WA==" else null
+        }
+        assertTrue(out.contains("![Dot](data:image/png;base64,WA==)"))
+    }
+
 }
