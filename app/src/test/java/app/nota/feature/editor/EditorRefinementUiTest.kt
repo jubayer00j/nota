@@ -6,8 +6,9 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
@@ -260,36 +261,38 @@ class EditorRefinementUiTest {
         }
 
         // Insert menu -> Image from URL…
+        // NOTE (harness): the menu and the dialog live in popup
+        // windows, whose nodes exist in the semantics forest but
+        // report no reliable display bounds under Robolectric —
+        // so these steps await EXISTENCE (fetchSemanticsNodes) and
+        // drive the nodes through their semantics actions, never
+        // assertIsDisplayed.
         composeRule.onNodeWithContentDescription("Insert block").performClick()
         awaitTrue("insert menu open") {
-            exists("url item") {
-                composeRule.onNodeWithText("Image from URL…").assertIsDisplayed()
-            }
+            composeRule.onAllNodesWithText("Image from URL…")
+                .fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithText("Image from URL…").performClick()
+        composeRule.onAllNodesWithText("Image from URL…")[0].performClick()
         awaitTrue("url dialog open") {
-            exists("url field") {
-                composeRule.onNodeWithTag("imageUrlField").assertIsDisplayed()
-            }
+            composeRule.onAllNodesWithTag("imageUrlField")
+                .fetchSemanticsNodes().isNotEmpty()
         }
 
         // A scheme-less URL: inline error, dialog stays, and the
         // stored note gains no image.
-        composeRule.onNodeWithTag("imageUrlField")
+        composeRule.onAllNodesWithTag("imageUrlField")[0]
             .performTextInput("example.com/pic.png")
         composeRule.onNodeWithText("Insert").performClick()
         awaitTrue("inline error shown") {
-            exists("error") {
-                composeRule.onNodeWithText("Enter a valid http(s) image URL")
-                    .assertIsDisplayed()
-            }
+            composeRule.onAllNodesWithText("Enter a valid http(s) image URL")
+                .fetchSemanticsNodes().isNotEmpty()
         }
         assertFalse(storedHtml(note.id).contains("example.com"))
 
         // Correct it to a valid https URL: the dialog closes and
         // the remote image lands in the note's HTML (autosave).
-        composeRule.onNodeWithTag("imageUrlField").performTextClearance()
-        composeRule.onNodeWithTag("imageUrlField")
+        composeRule.onAllNodesWithTag("imageUrlField")[0].performTextClearance()
+        composeRule.onAllNodesWithTag("imageUrlField")[0]
             .performTextInput("https://example.com/pic.png")
         composeRule.onNodeWithText("Insert").performClick()
         awaitTrue("image persisted in the note html") {

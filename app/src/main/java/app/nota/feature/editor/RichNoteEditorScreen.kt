@@ -3279,8 +3279,16 @@ private fun ImageBlock(
             else -> null
         }
         if (model != null) {
+                // The min height keeps a body on the block even
+                // when the painter has no size (an unloadable
+                // source lays out at zero height, and a
+                // zero-height block could not be tapped, selected
+                // or drag-grabbed — the old card's header masked
+                // exactly that). A loadable image taller than the
+                // floor is unaffected.
                 Box(
                     Modifier.fillMaxWidth()
+                        .heightIn(min = 96.dp)
                         .onSizeChanged { areaWidthPx = it.width }
                         .clickable { selected = !selected },
                     contentAlignment = Alignment.Center,
