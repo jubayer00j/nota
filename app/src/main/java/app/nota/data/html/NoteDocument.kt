@@ -1198,7 +1198,8 @@ object NoteDocument {
     // here where raw markup becomes text: "&copy;" parses to
     // the character a browser shows, and "&amp;copy;" stays
     // the literal text "&copy;" — never a double decode.
-    private fun unescapeAttr(value: String): String = HtmlEntities.decode(value)
+    private fun unescapeAttr(value: String): String =
+        HtmlEntities.decode(value, inAttribute = true)
 
     private fun unescapeText(value: String): String = HtmlEntities.decode(value)
 }
