@@ -56,6 +56,11 @@ jobs:
   # corruption/App-Lock fail-closed Robolectric suite; the Settings
   # reorganisation UI suite joins the UI shard's class list in
   # app/build.gradle.kts, not this partition.)
+  # (Editor Refinement #1: the partition grows to 92 classes —
+  # B3 +2 pure-JVM editor classes (table operations; refinement
+  # palettes/URL validation); the editor refinement UI suite joins
+  # the UI shard's class list in app/build.gradle.kts, not this
+  # partition.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -101,7 +106,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 50 of 90 non-UI classes)
+      - name: Run fast unit tests (shard A, 50 of 92 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -230,7 +235,7 @@ jobs:
       # it touches no AI code — a fork-composition interaction
       # (Robolectric sandbox/classloader neighbours). B2 keeps
       # its pre-4.1 composition, which was green on main.
-      - name: Run fast unit tests (shard B, 15 of 40 shard-B classes)
+      - name: Run fast unit tests (shard B, 15 of 42 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiBackupExclusionTest" \
@@ -290,7 +295,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B2, 7 of 40 shard-B classes)
+      - name: Run fast unit tests (shard B2, 7 of 42 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.repository.NoteLockRepositoryRobolectricTest" \
@@ -342,7 +347,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B3, 18 of 40 shard-B classes)
+      - name: Run fast unit tests (shard B3, 20 of 42 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiSummaryHtmlTest" \
@@ -356,6 +361,8 @@ jobs:
             --tests "app.nota.feature.editor.NoteLockUnlockStateRobolectricTest" \
             --tests "app.nota.feature.editor.TapBelowContentTest" \
             --tests "app.nota.feature.editor.ToolbarStateTest" \
+            --tests "app.nota.feature.editor.EditorRefinementTest" \
+            --tests "app.nota.feature.editor.TableOpsTest" \
             --tests "app.nota.feature.lock.CredentialSetupFlowTest" \
             --tests "app.nota.feature.notes.SwipeActionsTest" \
             --tests "app.nota.feature.settings.UnlockRestoreResumerTest" \
