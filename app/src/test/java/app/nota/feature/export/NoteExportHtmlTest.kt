@@ -291,6 +291,69 @@ class NoteExportHtmlTest {
     }
 
     @Test
+    fun namespacedUrlAttributeIsScrubbedInFragments() {
+        // xlink:href is href to a browser: the scrub must match
+        // URL attributes by local name, not by exact spelling.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p><svg><a xlink:href=\"javascript:alert(1)\">svg link</a></svg> " +
+                        "<a xlink:href=\"https://example.com\">ok</a></p>",
+                ),
+            ),
+        )
+        assertFalse(out.lowercase().contains("javascript:"))
+        assertTrue(out.contains("<a xlink:href=\"#\">svg link</a>"))
+        // A benign namespaced target survives unchanged.
+        assertTrue(out.contains("<a xlink:href=\"https://example.com\">ok</a>"))
+    }
+
+    @Test
+    fun namespacedUrlAttributeIsScrubbedInOpaqueBlocks() {
+        // The opaque string scrubber gets the same local-name
+        // rule as the fragment scrubber.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<svg><a xlink:href=\"javascript:alert(1)\">x</a>" +
+                        "<a xlink:href=\"https://example.com\">ok</a></svg>",
+                ),
+            ),
+        )
+        assertFalse(out.lowercase().contains("javascript:"))
+        assertTrue(out.contains("<a xlink:href=\"#\">x</a>"))
+        assertTrue(out.contains("<a xlink:href=\"https://example.com\">ok</a>"))
+    }
+
+    @Test
+    fun outOfRangeNumericEntitiesBecomeReplacementCharInEveryFormat() {
+        // &#x110000; and &#1114112; are past the last code point
+        // and &#-1; is negative: Character.toChars throws on all
+        // three, which used to abort the whole export in every
+        // format. They now decode to U+FFFD (HTML5 behaviour)
+        // while valid references still decode normally.
+        val segments = listOf(
+            TextSegment(
+                "<p>hex &#x110000; dec &#1114112; neg &#-1; " +
+                    "ok &#233; emoji &#x1F600;</p>",
+            ),
+        )
+        val outputs = listOf(
+            NoteExport.noteToHtml("T", segments),
+            NoteExport.noteToMarkdown("T", segments),
+            NoteExport.noteToPlainText("T", segments),
+        )
+        for (out in outputs) {
+            assertTrue(out.contains("\uFFFD"))
+            assertTrue(out.contains("\u00E9"))
+            assertTrue(out.contains("\uD83D\uDE00"))
+            assertFalse(out.contains("x110000"))
+        }
+    }
+
+    @Test
     fun benignRichTextExportsByteIdentical() {
         // Regression pin: the scrub must not reshape the benign
         // editor dialect — marks, colour spans with style/class/

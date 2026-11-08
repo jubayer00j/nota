@@ -1,6 +1,7 @@
 package app.nota.feature.export
 
 import app.nota.data.html.CodeSegment
+import app.nota.data.html.ImageSegment
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TextSegment
 import org.junit.Assert.assertEquals
@@ -155,8 +156,48 @@ class NoteExportMarkdownTest {
         )
         assertTrue(out.contains("[unmatched](<https://example.test/path)>)"))
         assertTrue(out.contains("[wiki](<https://en.wikipedia.org/wiki/Foo_(bar)>)"))
-        assertTrue(out.contains("[spaced](<https://example.test/a b>)"))
+        // Whitespace is percent-encoded now, so the spaced
+        // destination needs no angle form (no parentheses left).
+        assertTrue(out.contains("[spaced](https://example.test/a%20b)"))
         assertTrue(out.contains("[plain](https://example.test/plain)"))
+    }
+
+    @Test
+    fun linkDestinationWhitespaceIsPercentEncoded() {
+        // Tab/newline arrive entity-encoded in the attribute and
+        // decode to real whitespace: a line ending is invalid
+        // even inside the angle form, so whitespace is encoded
+        // before the bare/angle decision. Parentheses still force
+        // the angle form around the encoded destination.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p><a href=\"https://example.test/a&#9;b\">tab</a> " +
+                        "<a href=\"https://example.test/a&#10;b\">newline</a> " +
+                        "<a href=\"https://example.test/a b_(c)\">mix</a></p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("[tab](https://example.test/a%09b)"))
+        assertTrue(out.contains("[newline](https://example.test/a%0Ab)"))
+        assertTrue(out.contains("[mix](<https://example.test/a%20b_(c)>)"))
+        assertFalse(out.contains("a b"))
+    }
+
+    @Test
+    fun imageSourceWhitespaceIsPercentEncoded() {
+        // Image sources share mdLinkDestination with links, so
+        // they pick up the same whitespace encoding.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                ImageSegment(
+                    src = "https://example.com/my pic.png", alt = "Pic",
+                ),
+            ),
+        )
+        assertTrue(out.contains("![Pic](https://example.com/my%20pic.png)"))
     }
 
     @Test

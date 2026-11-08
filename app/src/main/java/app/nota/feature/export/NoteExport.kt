@@ -461,16 +461,31 @@ object NoteExport {
     }
 
     /**
-     * A Markdown link destination: bare when plain, the CommonMark
-     * angle form when it carries whitespace or parentheses — a raw
-     * ")" would end the destination early and truncate the target.
+     * A Markdown link destination: whitespace is percent-encoded
+     * first (a spaced destination breaks in several renderers,
+     * and a line ending is invalid even inside the angle form),
+     * then the CommonMark angle form is used when parentheses
+     * remain — a raw ")" would end the destination early and
+     * truncate the target.
      */
-    private fun mdLinkDestination(href: String): String =
-        if (href.any { it.isWhitespace() || it == '(' || it == ')' }) {
-            "<" + href.replace("<", "\\<").replace(">", "\\>") + ">"
-        } else {
-            href
+    private fun mdLinkDestination(href: String): String {
+        val encoded = buildString(href.length) {
+            for (ch in href) {
+                when (ch) {
+                    ' ' -> append("%20")
+                    '\t' -> append("%09")
+                    '\n' -> append("%0A")
+                    '\r' -> append("%0D")
+                    else -> append(ch)
+                }
+            }
         }
+        return if (encoded.any { it == '(' || it == ')' }) {
+            "<" + encoded.replace("<", "\\<").replace(">", "\\>") + ">"
+        } else {
+            encoded
+        }
+    }
 
     private fun mdCodeSpan(text: String): String {
         val longestRun = Regex("`+").findAll(text).maxOfOrNull { it.value.length } ?: 0
@@ -871,9 +886,11 @@ object NoteExport {
 
     /**
      * Scrubs one tag: drops every on* event attribute, and points
-     * href/src values with a scriptable scheme at "#" instead.
-     * Everything else — tag name, attribute order, quoting style,
-     * benign values — is copied byte for byte.
+     * URL-attribute values (href/src/formaction, including
+     * namespaced spellings like xlink:href) with a scriptable
+     * scheme at "#" instead. Everything else — tag name,
+     * attribute order, quoting style, benign values — is copied
+     * byte for byte.
      */
     private fun scrubExportTag(tag: String): String {
         // Closing tags, declarations and processing instructions
@@ -950,7 +967,7 @@ object NoteExport {
             when {
                 // Event handler: dropped, with its leading space.
                 lower.startsWith("on") && name.length > 2 -> Unit
-                (lower == "href" || lower == "src") && valueStart >= 0 &&
+                isUrlAttr(lower) && valueStart >= 0 &&
                     isScriptableUrl(unescapeEntities(tag.substring(valueStart, valueEnd))) -> {
                     out.append(ws)
                     out.append(tag, nameStart, valueStart)
@@ -966,6 +983,17 @@ object NoteExport {
         }
         return out.toString()
     }
+
+    /**
+     * URL-bearing attributes (href, src, formaction), matched by
+     * LOCAL name: a namespaced spelling like xlink:href is the
+     * same attribute to a browser, so it earns the same scheme
+     * check. Callers pass the already-lowercased attribute name.
+     */
+    private fun isUrlAttr(lowerName: String): Boolean =
+        lowerName.substringAfterLast(':') in URL_ATTRS
+
+    private val URL_ATTRS = setOf("href", "src", "formaction")
 
     /**
      * A URL scheme that executes script in the file's context.
@@ -1263,9 +1291,9 @@ object NoteExport {
                 entity == "apos" -> "'"
                 entity == "nbsp" -> " "
                 entity.startsWith("#x") || entity.startsWith("#X") ->
-                    entity.substring(2).toIntOrNull(16)?.let { String(Character.toChars(it)) }
+                    entity.substring(2).toIntOrNull(16)?.let { decodeCodePoint(it) }
                 entity.startsWith("#") ->
-                    entity.substring(1).toIntOrNull()?.let { String(Character.toChars(it)) }
+                    entity.substring(1).toIntOrNull()?.let { decodeCodePoint(it) }
                 else -> null
             }
             if (decoded == null) {
@@ -1278,6 +1306,19 @@ object NoteExport {
         }
         return out.toString()
     }
+
+    /**
+     * One numeric character reference: a valid code point
+     * decodes; an out-of-range one — where Character.toChars
+     * would throw and abort the whole export — becomes U+FFFD
+     * instead (the HTML5 error-handling rule).
+     */
+    private fun decodeCodePoint(codePoint: Int): String =
+        if (codePoint in 0..Character.MAX_CODE_POINT) {
+            String(Character.toChars(codePoint))
+        } else {
+            "\uFFFD"
+        }
 
     /**
      * Active elements that never survive HTML export, dropped
@@ -1294,8 +1335,10 @@ object NoteExport {
 
     /**
      * The fragment-level twin of scrubExportTag: event-handler
-     * attributes are dropped, scriptable href/src targets are
-     * pointed at "#", everything else passes through untouched.
+     * attributes are dropped, scriptable targets of URL
+     * attributes — matched by local name, so namespaced
+     * spellings like xlink:href are checked too — are pointed
+     * at "#", everything else passes through untouched.
      * Attribute values arrive entity-decoded from the parser,
      * exactly the shape isScriptableUrl expects. When nothing in
      * the map needs scrubbing the SAME map is returned, so benign
@@ -1305,7 +1348,7 @@ object NoteExport {
         fun dirty(name: String, value: String): Boolean {
             val lower = name.lowercase()
             return (lower.startsWith("on") && name.length > 2) ||
-                ((lower == "href" || lower == "src") && isScriptableUrl(value))
+                (isUrlAttr(lower) && isScriptableUrl(value))
         }
         if (attrs.none { (name, value) -> dirty(name, value) }) return attrs
         val out = LinkedHashMap<String, String>(attrs.size)
@@ -1313,7 +1356,7 @@ object NoteExport {
             val lower = name.lowercase()
             when {
                 lower.startsWith("on") && name.length > 2 -> Unit
-                (lower == "href" || lower == "src") && isScriptableUrl(value) ->
+                isUrlAttr(lower) && isScriptableUrl(value) ->
                     out[name] = "#"
                 else -> out[name] = value
             }
