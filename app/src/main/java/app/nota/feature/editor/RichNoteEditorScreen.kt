@@ -3069,12 +3069,18 @@ private fun TableBlock(
                     }) { Text("Row below") }
                     TextButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
-                        onChange(TableOps.insertColumn(table, sc))
+                        onChange(TableOps.insertColumn(table, TableOps.visualColumnOf(table, sr, sc)))
                         selectedCell = null
                     }) { Text("Col left") }
                     TextButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
-                        onChange(TableOps.insertColumn(table, sc + 1))
+                        onChange(
+                            TableOps.insertColumn(
+                                table,
+                                TableOps.visualColumnOf(table, sr, sc) +
+                                    TableOps.colSpanOf(table, sr, sc),
+                            ),
+                        )
                         selectedCell = null
                     }) { Text("Col right") }
                     if (table.rows.size > 1) {
@@ -3084,10 +3090,15 @@ private fun TableBlock(
                             selectedCell = null
                         }) { Text("Delete row") }
                     }
-                    if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
+                    if (TableOps.visualColumns(table) > 1) {
                         TextButton(onClick = {
                             evictCellTextStates(cellTextStates, blockId)
-                            onChange(TableOps.deleteColumn(table, sc))
+                            onChange(
+                                TableOps.deleteColumn(
+                                    table,
+                                    TableOps.visualColumnOf(table, sr, sc),
+                                ),
+                            )
                             selectedCell = null
                         }) { Text("Delete col") }
                     }
@@ -3131,15 +3142,17 @@ private fun TableBlock(
                         )
                     }) { Text("− Row") }
                 }
-                if ((table.rows.firstOrNull()?.size ?: 1) > 1) {
+                if (TableOps.visualColumns(table) > 1) {
                     TextButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
                         selectedCell = null
+                        // Through TableOps like "Delete col": a
+                        // trailing MERGED cell must shrink, not be
+                        // dropped whole with its content.
                         onChange(
-                            TableSegment(
-                                table.rows.map { it.dropLast(1) },
-                                table.headerRow,
-                                table.cellSpans.map { it.dropLast(1) },
+                            TableOps.deleteColumn(
+                                table,
+                                TableOps.visualColumns(table) - 1,
                             ),
                         )
                     }) { Text("− Col") }
@@ -3781,13 +3794,19 @@ private fun EditorToolbar(
         // entry ("Default" / "None"). Applying goes through the
         // same toggleSpanStyle the old swatches used: tapping the
         // ACTIVE colour also clears it, and the clear entries
-        // toggle the active colour off explicitly.
+        // toggle the active colour off explicitly — or, for a
+        // MIXED-colour selection (no single active colour), clear
+        // the field across the whole selection via
+        // clearTextColorInSelection / clearHighlightInSelection
+        // (Codex PR #34 P2).
         var textColorMenuExpanded by remember { mutableStateOf(false) }
         Box {
             IconButton(
                 onClick = { textColorMenuExpanded = true },
                 enabled = enabled,
-                colors = toolbarIconColors(format?.textColor != null),
+                colors = toolbarIconColors(
+                    format?.textColor != null || format?.textColorMixed == true,
+                ),
             ) {
                 Icon(Icons.Filled.FormatColorText, contentDescription = "Text colour")
             }
@@ -3801,14 +3820,22 @@ private fun EditorToolbar(
                         Icon(Icons.Filled.FormatColorReset, contentDescription = null)
                     },
                     trailingIcon = {
-                        if (format?.textColor == null) {
+                        // The check means "no colour in play" —
+                        // a MIXED selection has colour in play, so
+                        // it must not wear the check (Codex P2).
+                        if (format?.textColor == null &&
+                            format?.textColorMixed != true
+                        ) {
                             Icon(Icons.Filled.Check, contentDescription = null)
                         }
                     },
                     onClick = {
                         textColorMenuExpanded = false
-                        format?.textColor?.let { current ->
+                        val current = format?.textColor
+                        if (current != null) {
                             state?.toggleSpanStyle(SpanStyle(color = current))
+                        } else if (format?.textColorMixed == true) {
+                            state?.clearTextColorInSelection()
                         }
                     },
                 )
@@ -3832,7 +3859,9 @@ private fun EditorToolbar(
             IconButton(
                 onClick = { highlightMenuExpanded = true },
                 enabled = enabled,
-                colors = toolbarIconColors(format?.highlightColor != null),
+                colors = toolbarIconColors(
+                    format?.highlightColor != null || format?.highlightMixed == true,
+                ),
             ) {
                 Icon(Icons.Filled.FormatColorFill, contentDescription = "Highlight colour")
             }
@@ -3846,14 +3875,19 @@ private fun EditorToolbar(
                         Icon(Icons.Filled.FormatColorReset, contentDescription = null)
                     },
                     trailingIcon = {
-                        if (format?.highlightColor == null) {
+                        if (format?.highlightColor == null &&
+                            format?.highlightMixed != true
+                        ) {
                             Icon(Icons.Filled.Check, contentDescription = null)
                         }
                     },
                     onClick = {
                         highlightMenuExpanded = false
-                        format?.highlightColor?.let { current ->
+                        val current = format?.highlightColor
+                        if (current != null) {
                             state?.toggleSpanStyle(SpanStyle(background = current))
+                        } else if (format?.highlightMixed == true) {
+                            state?.clearHighlightInSelection()
                         }
                     },
                 )

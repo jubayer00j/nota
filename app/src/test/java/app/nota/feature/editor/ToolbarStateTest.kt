@@ -236,4 +236,72 @@ class ToolbarStateTest {
         state.toggleSpanStyle(SpanStyle(fontWeight = FontWeight.Bold))
         assertTrue(state.toolbarFormatState().bold)
     }
+
+    @Test
+    fun uniformColourSelectionIsNotMixed() {
+        val state = stateWith("<p><span style=\"color: #b3261e\">all red here</span></p>")
+        state.select(0..11)
+        val format = state.toolbarFormatState()
+        assertEquals(Color(0xFFB3261E), format.textColor)
+        assertFalse(format.textColorMixed)
+    }
+
+    @Test
+    fun mixedColourSelectionReadsAsMixedAndClearsAcrossTheWholeSelection() {
+        // Codex PR #34 P2: two differently-coloured words under
+        // one selection. The common style reports no colour, but
+        // colour IS present — the state must say "mixed" (so the
+        // menu withholds its misleading "Default" check), and the
+        // clear must strip BOTH colours; the old common-colour
+        // toggle path no-oped on exactly this selection.
+        val state = stateWith(
+            "<p><span style=\"color: #b3261e\">red</span> and " +
+                "<span style=\"color: #1d4ed8\">blue</span></p>",
+        )
+        // text = "red and blue"
+        state.select(0..11)
+        var format = state.toolbarFormatState()
+        assertNull(format.textColor)
+        assertTrue(format.textColorMixed)
+        state.clearTextColorInSelection()
+        state.select(0..11)
+        format = state.toolbarFormatState()
+        assertNull(format.textColor)
+        assertFalse(format.textColorMixed)
+        assertFalse(state.toHtml().contains("color:"))
+    }
+
+    @Test
+    fun mixedColourClearPreservesOtherFormatting() {
+        val state = stateWith(
+            "<p><span style=\"color: #b3261e\"><b>red</b></span> " +
+                "<span style=\"color: #1d4ed8\">blue</span></p>",
+        )
+        // text = "red blue"
+        state.select(0..7)
+        state.clearTextColorInSelection()
+        state.caretAt(1) // inside "red"
+        val format = state.toolbarFormatState()
+        assertNull(format.textColor)
+        assertTrue(format.bold)
+    }
+
+    @Test
+    fun mixedHighlightSelectionReadsAsMixedAndClearsAcrossTheWholeSelection() {
+        val state = stateWith(
+            "<p><span style=\"background: #fbe0e0\">rose</span> " +
+                "<span style=\"background: #dde9fb\">sky</span></p>",
+        )
+        // text = "rose sky"
+        state.select(0..7)
+        var format = state.toolbarFormatState()
+        assertNull(format.highlightColor)
+        assertTrue(format.highlightMixed)
+        state.clearHighlightInSelection()
+        state.select(0..7)
+        format = state.toolbarFormatState()
+        assertNull(format.highlightColor)
+        assertFalse(format.highlightMixed)
+        assertFalse(state.toHtml().contains("background"))
+    }
 }

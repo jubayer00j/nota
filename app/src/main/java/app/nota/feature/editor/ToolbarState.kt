@@ -49,6 +49,18 @@ internal data class ToolbarFormatState(
     /** Highlight (background) colour, or null when unhighlighted. */
     val highlightColor: Color?,
     /**
+     * Phase 6 (Editor Refinement #1, Codex PR #34 P2): true when the
+     * selection carries text colour but no SINGLE common colour
+     * (mixed). [textColor] is null in that case too, so without this
+     * flag the colour menu showed "Default" as active and its clear
+     * action — keyed on the common colour — was a no-op. The menu
+     * uses the flag to withhold the misleading check and to route
+     * the clear through [clearTextColorInSelection].
+     */
+    val textColorMixed: Boolean,
+    /** The highlight twin of [textColorMixed]. */
+    val highlightMixed: Boolean,
+    /**
      * Phase 6 (Editor Refinement #1, A10): the URL of the link at
      * the caret/selection, or null when the caret is not in a link.
      * The link dialog prefills from this and offers Remove link —
@@ -57,9 +69,26 @@ internal data class ToolbarFormatState(
     val linkUrl: String?,
 )
 
+/**
+ * True when a NON-collapsed selection overlaps at least one span
+ * whose [field] is specified — how "mixed" is detected: the common
+ * style reports nothing while colour is genuinely present.
+ */
+private fun RichTextState.selectionHasSpanField(
+    field: (SpanStyle) -> Boolean,
+): Boolean {
+    val sel = selection
+    if (sel.collapsed) return false
+    return annotatedString.spanStyles.any { range ->
+        range.start < sel.max && range.end > sel.min && field(range.item)
+    }
+}
+
 @OptIn(ExperimentalRichTextApi::class)
 internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
     val span: SpanStyle = currentSpanStyle
+    val textColor = span.color.takeIf { it != Color.Unspecified }
+    val highlightColor = span.background.takeIf { it != Color.Unspecified }
     return ToolbarFormatState(
         bold = span.fontWeight == FontWeight.Bold,
         italic = span.fontStyle == FontStyle.Italic,
@@ -70,8 +99,43 @@ internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
         heading = currentHeadingStyle,
         unorderedList = isUnorderedList,
         orderedList = isOrderedList,
-        textColor = span.color.takeIf { it != Color.Unspecified },
-        highlightColor = span.background.takeIf { it != Color.Unspecified },
+        textColor = textColor,
+        highlightColor = highlightColor,
+        textColorMixed = textColor == null &&
+            selectionHasSpanField { it.color != Color.Unspecified },
+        highlightMixed = highlightColor == null &&
+            selectionHasSpanField { it.background != Color.Unspecified },
         linkUrl = (currentRichSpanStyle as? RichSpanStyle.Link)?.url,
     )
+}
+
+/**
+ * Field markers for the range-remove below: the VALUE is
+ * irrelevant — the library's SpanStyle.unmerge clears a field
+ * whenever the marker's field is merely SPECIFIED, whatever the
+ * span's own value is. That is what makes a mixed-colour clear
+ * possible at all: the selection-level removeSpanStyle refuses to
+ * act unless the whole selection already shares one colour.
+ */
+private val TEXT_COLOR_FIELD_MARKER = SpanStyle(color = Color.Black)
+private val HIGHLIGHT_FIELD_MARKER = SpanStyle(background = Color.Black)
+
+/**
+ * Remove text colour from EVERY span in the current selection,
+ * mixed colours included, preserving all other formatting
+ * (Codex PR #34 P2). A collapsed caret is a no-op: there the
+ * common-colour toggle path in the menu already covers clearing,
+ * including the staged typing style.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+internal fun RichTextState.clearTextColorInSelection() {
+    if (selection.collapsed) return
+    removeSpanStyle(TEXT_COLOR_FIELD_MARKER, selection)
+}
+
+/** The highlight twin of [clearTextColorInSelection]. */
+@OptIn(ExperimentalRichTextApi::class)
+internal fun RichTextState.clearHighlightInSelection() {
+    if (selection.collapsed) return
+    removeSpanStyle(HIGHLIGHT_FIELD_MARKER, selection)
 }
