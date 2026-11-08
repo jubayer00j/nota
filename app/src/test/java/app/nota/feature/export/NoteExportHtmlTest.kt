@@ -662,4 +662,27 @@ class NoteExportHtmlTest {
         assertFalse(out.contains("nota-attachment://"))
     }
 
+    @Test
+    fun semicolonlessNumericReferencesCannotSmuggleSchemes() {
+        // Browsers parse "&#58" (no semicolon) as ':' inside
+        // attribute values, so the scheme check must see the
+        // decoded form too.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p><a href=\"javascript&#58alert(1)\">one</a> " +
+                        "<a href=\"&#106avascript:alert(2)\">two</a></p>",
+                ),
+            ),
+        )
+        assertFalse(out.lowercase().contains("javascript:"))
+        assertFalse(out.contains("javascript&#58"))
+        assertFalse(out.contains("&#106avascript"))
+        assertFalse(out.contains("alert(1)"))
+        assertFalse(out.contains("alert(2)"))
+        assertTrue(out.contains("<a href=\"#\">one</a>"))
+        assertTrue(out.contains("<a href=\"#\">two</a>"))
+    }
+
 }
