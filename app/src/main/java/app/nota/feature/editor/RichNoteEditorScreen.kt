@@ -1,5 +1,7 @@
 package app.nota.feature.editor
 
+import android.app.Activity
+import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -59,6 +61,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
@@ -142,6 +145,10 @@ import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.feature.capture.NotePinShortcut
+import app.nota.feature.export.ExportFormat
+import app.nota.feature.export.NoteExport
+import app.nota.feature.export.NoteExportDelivery
+import app.nota.feature.export.NoteExportDialog
 import app.nota.feature.reminders.ReminderDialog
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
@@ -174,14 +181,17 @@ import com.mohamedrejeb.richeditor.model.HeadingStyle
 import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
 import java.text.SimpleDateFormat
+import java.util.Base64
 import java.util.Date
 import kotlin.math.roundToInt
 import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.koin.androidx.compose.koinViewModel
 
 /** One row of the editor's working document (stable id across recompositions). */
@@ -316,6 +326,9 @@ fun RichNoteEditorScreen(
     var showOutline by remember { mutableStateOf(false) }
     var outlineItems by remember { mutableStateOf<List<OutlineEntry>>(emptyList()) }
     var showTemplateDialog by remember { mutableStateOf(false) }
+    // Per-note Export #1: the export dialog + its in-flight build flag.
+    var showExportDialog by remember { mutableStateOf(false) }
+    var exportBusy by remember { mutableStateOf(false) }
     var showReminderDialog by remember { mutableStateOf(false) }
     var templateName by remember { mutableStateOf("") }
     var insertImageOnPick by remember { mutableStateOf(false) }
@@ -1276,6 +1289,108 @@ fun RichNoteEditorScreen(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? -> handlePicked(PendingInsertKind.FILE, uri) }
 
+    // Per-note Export #1: the Save flow's system file picker. The
+    // built artifact waits on the VM (pendingExportSave) — App
+    // Lock's immediate relock on picker return destroys this
+    // composition, and the result is redelivered to this launcher
+    // after unlock with the artifact still on hand.
+    val exportSavePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val uri = result.data?.data
+        val artifact = viewModel.pendingExportSave
+        viewModel.pendingExportSave = null
+        if (result.resultCode == Activity.RESULT_OK && uri != null) {
+            if (artifact == null) {
+                Toast.makeText(
+                    context,
+                    "Export was interrupted — nothing was written.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            } else {
+                scope.launch {
+                    val failure = withContext(Dispatchers.IO) {
+                        runCatching {
+                            NoteExportDelivery.writeTo(context, uri, artifact)
+                        }.exceptionOrNull()
+                    }
+                    if (failure == null) {
+                        Toast.makeText(
+                            context,
+                            "Saved ${artifact.fileName}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "Couldn't save the export.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }
+        }
+    }
+
+    // Per-note Export #1: build the artifact from the LIVE document
+    // (syncSegments — unsaved edits included), resolving attachment
+    // images to data URLs off the main thread, then hand it to the
+    // share sheet or stash it for the file picker.
+    fun deliverExport(format: ExportFormat, save: Boolean) {
+        if (exportBusy) return
+        exportBusy = true
+        val liveSegments = syncSegments()
+        val liveTitle = title
+        val liveAttachments = attachments
+        scope.launch {
+            try {
+                val artifact = withContext(Dispatchers.IO) {
+                    val resolved = HashMap<String, String>()
+                    for (id in NoteExport.collectAttachmentIds(liveSegments)) {
+                        val entity = liveAttachments.firstOrNull { it.id == id }
+                            ?: continue
+                        val dataUrl = runCatching {
+                            val file = viewModel.attachmentFile(entity)
+                            if (!file.exists()) {
+                                null
+                            } else {
+                                "data:${entity.mimeType};base64," +
+                                    Base64.getEncoder()
+                                        .encodeToString(file.readBytes())
+                            }
+                        }.getOrNull()
+                        if (dataUrl != null) resolved[id] = dataUrl
+                    }
+                    NoteExport.build(liveTitle, liveSegments, format) { id ->
+                        resolved[id]
+                    }
+                }
+                exportBusy = false
+                showExportDialog = false
+                if (save) {
+                    viewModel.pendingExportSave = artifact
+                    exportSavePicker.launch(
+                        NoteExportDelivery.createDocumentIntent(artifact),
+                    )
+                } else {
+                    runCatching { NoteExportDelivery.share(context, artifact) }
+                        .onFailure {
+                            Toast.makeText(
+                                context,
+                                "Couldn't share the export.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                exportBusy = false
+                Toast.makeText(context, "Export failed.", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     // [[ backlink autocomplete state, derived from the active editor.
     val linkTrigger: Pair<Int, String>? = run {
         val st = activeState
@@ -1399,6 +1514,23 @@ fun RichNoteEditorScreen(
                                     templateName = title.ifBlank { "Untitled template" }
                                     showTemplateDialog = true
                                     menuExpanded = false
+                                },
+                            )
+                        }
+                        // Per-note Export #1: export lives only here,
+                        // inside the editor — and only with the note's
+                        // content on screen, never behind the lock
+                        // gate (1.x likewise exports the open note;
+                        // there is deliberately no list-menu entry).
+                        if (!gated) {
+                            DropdownMenuItem(
+                                text = { Text("Export note…") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.IosShare, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    showExportDialog = true
                                 },
                             )
                         }
@@ -2363,6 +2495,18 @@ fun RichNoteEditorScreen(
             dismissButton = {
                 TextButton(onClick = { showTemplateDialog = false }) { Text("Cancel") }
             },
+        )
+    }
+
+    // Per-note Export #1: format choice + delivery (Share… / Save
+    // file), built from the live document by deliverExport.
+    if (showExportDialog) {
+        NoteExportDialog(
+            noteTitle = title,
+            busy = exportBusy,
+            onDismiss = { if (!exportBusy) showExportDialog = false },
+            onShare = { format -> deliverExport(format, save = false) },
+            onSave = { format -> deliverExport(format, save = true) },
         )
     }
 

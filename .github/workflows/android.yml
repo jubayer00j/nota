@@ -66,6 +66,11 @@ jobs:
   # copy compositions), B3 +1 search-hint Robolectric suite; the
   # beginner-setup UI suite joins the UI shard's class list in
   # app/build.gradle.kts, not this partition.)
+  # (Per-note Export #1: the partition grows to 99 classes —
+  # fast-a +4 pure-JVM export classes (Markdown / HTML / text
+  # converters and the filename sanitiser); the export UI suite
+  # joins the UI shard's class list in app/build.gradle.kts, not
+  # this partition.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -111,7 +116,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 52 of 95 non-UI classes)
+      - name: Run fast unit tests (shard A, 56 of 99 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -165,6 +170,10 @@ jobs:
             --tests "app.nota.feature.voice.SpeechTextTest" \
             --tests "app.nota.feature.voice.SpeechSessionTest" \
             --tests "app.nota.feature.voice.VoiceProbeUiTest" \
+            --tests "app.nota.feature.export.NoteExportMarkdownTest" \
+            --tests "app.nota.feature.export.NoteExportHtmlTest" \
+            --tests "app.nota.feature.export.NoteExportTextTest" \
+            --tests "app.nota.feature.export.NoteExportFilenameTest" \
             --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
             --tests "app.nota.ui.theme.ThemeSelectionTest" \
             --stacktrace
