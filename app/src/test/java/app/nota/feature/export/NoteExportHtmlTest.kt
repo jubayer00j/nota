@@ -657,7 +657,7 @@ class NoteExportHtmlTest {
             ),
             exportResolver,
         )
-        assertTrue(out.contains(CAT_DATA_URL))
+        assertTrue(out.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""))
         assertFalse(out.contains("nota-attachment://"))
     }
 
