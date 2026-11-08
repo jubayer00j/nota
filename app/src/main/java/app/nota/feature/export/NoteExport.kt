@@ -302,12 +302,28 @@ object NoteExport {
             DividerSegment -> listOf("---")
             is ChartSegment -> listOf(chartPlaceholder(segment))
             is OpaqueSegment -> {
-                val text = textContent(parseFragment(segment.rawHtml)).trim()
-                // The extracted words are plain text, not
-                // Markdown: escaped like any other text, or a
-                // leading "#" or a "[..](..)" shape would
-                // re-parse as structure the note never had.
-                listOf(if (text.isNotEmpty()) escapeMdText(text) else "[Block]")
+                val nodes = parseFragment(segment.rawHtml)
+                val parts = opaqueParts(nodes)
+                if (parts.none { it is OpaquePart.Image }) {
+                    val text = textContent(nodes).trim()
+                    // The extracted words are plain text, not
+                    // Markdown: escaped like any other text, or a
+                    // leading "#" or a "[..](..)" shape would
+                    // re-parse as structure the note never had.
+                    listOf(if (text.isNotEmpty()) escapeMdText(text) else "[Block]")
+                } else {
+                    // Images inside foreign markup export
+                    // through the same image path as modelled
+                    // ones; the surrounding text stays escaped.
+                    val rendered = parts.joinToString("") { part ->
+                        when (part) {
+                            is OpaquePart.Text -> escapeMdText(part.text)
+                            is OpaquePart.Image ->
+                                mdImage(part.src, part.alt, resolve)
+                        }
+                    }.trim()
+                    listOf(rendered.ifEmpty { "[Block]" })
+                }
             }
         }
 
@@ -350,6 +366,53 @@ object NoteExport {
             (listOf(renderRow(emptyList()), separator) + grid.map(::renderRow))
                 .joinToString("\n")
         }
+    }
+
+    /** One exportable part of an opaque fragment. */
+    private sealed interface OpaquePart {
+        data class Text(val text: String) : OpaquePart
+        data class Image(val src: String, val alt: String) : OpaquePart
+    }
+
+    /**
+     * The exportable parts of an opaque fragment, in document
+     * order: text runs (accumulated exactly as [textContent]
+     * joins them) and the images embedded in the markup.
+     * Opaque blocks are foreign HTML Nota preserves without
+     * modelling; their text already reached every format, but
+     * their images were silently dropped even though
+     * [collectAttachmentIds] resolves them — an imported
+     * picture element lost its photo entirely.
+     */
+    private fun opaqueParts(nodes: List<HtmlNode>): List<OpaquePart> {
+        val parts = mutableListOf<OpaquePart>()
+        val pending = StringBuilder()
+        fun flushText() {
+            if (pending.isNotEmpty()) {
+                parts += OpaquePart.Text(pending.toString())
+                pending.clear()
+            }
+        }
+        fun walk(list: List<HtmlNode>) {
+            for (node in list) {
+                when (node) {
+                    is HtmlText -> pending.append(node.text)
+                    is HtmlElement ->
+                        if (node.name == "img") {
+                            flushText()
+                            parts += OpaquePart.Image(
+                                node.attrs["src"] ?: "",
+                                node.attrs["alt"] ?: "",
+                            )
+                        } else {
+                            walk(node.children)
+                        }
+                }
+            }
+        }
+        walk(nodes)
+        flushText()
+        return parts
     }
 
     private fun mdImage(src: String, alt: String, resolve: AttachmentResolver): String {
@@ -772,8 +835,20 @@ object NoteExport {
         DividerSegment -> listOf("---")
         is ChartSegment -> listOf(chartPlaceholder(segment))
         is OpaqueSegment -> {
-            val text = textContent(parseFragment(segment.rawHtml)).trim()
-            listOf(if (text.isNotEmpty()) text else "[Block]")
+            val nodes = parseFragment(segment.rawHtml)
+            val parts = opaqueParts(nodes)
+            if (parts.none { it is OpaquePart.Image }) {
+                val text = textContent(nodes).trim()
+                listOf(if (text.isNotEmpty()) text else "[Block]")
+            } else {
+                val rendered = parts.joinToString("") { part ->
+                    when (part) {
+                        is OpaquePart.Text -> part.text
+                        is OpaquePart.Image -> textImage(part.alt)
+                    }
+                }.trim()
+                listOf(rendered.ifEmpty { "[Block]" })
+            }
         }
     }
 
