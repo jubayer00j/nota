@@ -110,32 +110,48 @@ internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
 }
 
 /**
- * Field markers for the range-remove below: the VALUE is
- * irrelevant — the library's SpanStyle.unmerge clears a field
- * whenever the marker's field is merely SPECIFIED, whatever the
- * span's own value is. That is what makes a mixed-colour clear
- * possible at all: the selection-level removeSpanStyle refuses to
- * act unless the whole selection already shares one colour.
- */
-private val TEXT_COLOR_FIELD_MARKER = SpanStyle(color = Color.Black)
-private val HIGHLIGHT_FIELD_MARKER = SpanStyle(background = Color.Black)
-
-/**
  * Remove text colour from EVERY span in the current selection,
  * mixed colours included, preserving all other formatting
  * (Codex PR #34 P2). A collapsed caret is a no-op: there the
  * common-colour toggle path in the menu already covers clearing,
  * including the staged typing style.
+ *
+ * Why per-colour: the library's style engine only honours a
+ * removal for a span whose full style EQUALS the requested style
+ * on the requested fields (handleUpdatingRichSpan's branch), so
+ * no single call can clear an unknown colour — a "field marker"
+ * matches nothing and silently no-ops (the first cut of this fix
+ * proved exactly that, in its own tests). The working composition
+ * is the one the uniform toggle-clear itself uses, minus the
+ * selection-level gate: range-remove EACH distinct colour that
+ * is actually present, enumerated from the same span scan that
+ * detects "mixed".
  */
 @OptIn(ExperimentalRichTextApi::class)
 internal fun RichTextState.clearTextColorInSelection() {
     if (selection.collapsed) return
-    removeSpanStyle(TEXT_COLOR_FIELD_MARKER, selection)
+    distinctSpanFieldValues { it.color }.forEach { color ->
+        removeSpanStyle(SpanStyle(color = color), selection)
+    }
 }
 
 /** The highlight twin of [clearTextColorInSelection]. */
 @OptIn(ExperimentalRichTextApi::class)
 internal fun RichTextState.clearHighlightInSelection() {
     if (selection.collapsed) return
-    removeSpanStyle(HIGHLIGHT_FIELD_MARKER, selection)
+    distinctSpanFieldValues { it.background }.forEach { color ->
+        removeSpanStyle(SpanStyle(background = color), selection)
+    }
+}
+
+/** The distinct specified values of one span field across the selection. */
+private fun RichTextState.distinctSpanFieldValues(
+    field: (SpanStyle) -> Color,
+): List<Color> {
+    val sel = selection
+    return annotatedString.spanStyles
+        .filter { range -> range.start < sel.max && range.end > sel.min }
+        .map { field(it.item) }
+        .filter { it != Color.Unspecified }
+        .distinct()
 }
