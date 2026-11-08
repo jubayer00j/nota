@@ -515,4 +515,35 @@ class NoteExportMarkdownTest {
         assertEquals(2, artifact.content.split("data:image/png").size - 1)
     }
 
+    @Test
+    fun doubleEscapedScriptDestinationIsLabelOnly() {
+        // The attribute parser decodes "&amp;#106;" once, to
+        // "&#106;avascript:..." — safe-looking here, but a
+        // Markdown renderer decodes the reference in the
+        // destination and lands on javascript:.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p><a href=\"&amp;#106;avascript:alert(1)\">x</a></p>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("]("))
+        assertTrue(out.contains("x"))
+    }
+
+    @Test
+    fun entityBearingSafeDestinationStillLinks() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p><a href=\"https://example.com/?a=1&amp;b=2\">y</a></p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("[y]("))
+    }
+
 }
