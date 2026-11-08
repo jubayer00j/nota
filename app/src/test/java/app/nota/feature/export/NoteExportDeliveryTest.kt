@@ -1,6 +1,7 @@
 package app.nota.feature.export
 
 import android.content.Context
+import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
 import org.junit.Assert.assertEquals
@@ -61,4 +62,29 @@ class NoteExportDeliveryTest {
         assertTrue(fresh.exists())
         assertEquals("new", fresh.readText())
     }
+    @org.junit.After
+    fun clearExportSaveStore() {
+        ExportSaveStore.take()
+        ExportSaveStore.launcher = null
+    }
+
+    @Test
+    fun exportSaveStoreStagesAndTakesOnce() {
+        val artifact = NoteExportArtifact("A.md", "text/markdown", "body")
+        ExportSaveStore.stage(artifact)
+        assertEquals(artifact, ExportSaveStore.take())
+        assertEquals(null, ExportSaveStore.take())
+    }
+
+    @Test
+    fun exportSaveStoreLaunchNeedsAnInstalledLauncher() {
+        ExportSaveStore.launcher = null
+        assertFalse(ExportSaveStore.launch(Intent(Intent.ACTION_CREATE_DOCUMENT)))
+        var received: Intent? = null
+        ExportSaveStore.launcher = { received = it }
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        assertTrue(ExportSaveStore.launch(intent))
+        assertEquals(intent, received)
+    }
+
 }
