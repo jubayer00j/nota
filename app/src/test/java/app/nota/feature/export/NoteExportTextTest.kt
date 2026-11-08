@@ -126,4 +126,17 @@ class NoteExportTextTest {
         assertFalse(out.contains("\u00A9"))
     }
 
+    @Test
+    fun listItemTextAfterANestedListKeepsItsPosition() {
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<ul><li>before<ul><li>child</li></ul>after</li></ul>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("- before\n  - child\n  after"))
+    }
+
 }
