@@ -2,6 +2,7 @@ package app.nota.feature.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.nota.data.ai.AiProviderId
 import app.nota.data.ai.AiSettingsStore
 import app.nota.data.ai.SemanticIndexer
 import app.nota.data.db.NoteEntity
@@ -14,6 +15,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** Which "search by meaning is off" guidance Search shows, if
+ *  any — see [SearchViewModel.semanticHint]. */
+enum class SemanticHint { OFF, NEEDS_KEY, NEEDS_SETUP }
 
 class SearchViewModel(
     private val repository: NoteRepository,
@@ -35,29 +40,51 @@ class SearchViewModel(
     private val _semanticResults = MutableStateFlow<List<NoteEntity>>(emptyList())
     val semanticResults: StateFlow<List<NoteEntity>> = _semanticResults
 
-    /** Beginner AI Setup #1 (F7): true when search-by-meaning is
-     *  off SPECIFICALLY because the active provider has no saved
-     *  key — the state behind Search's one quiet hint line. It is
-     *  deliberately NOT "semantic search can't run" in general: a
-     *  key with no resolvable embedding model (a fresh Custom
-     *  slot) also can't run, but "add an API key" would be the
-     *  wrong advice there, so the hint stays hidden then too. */
-    private val _semanticNeedsKey = MutableStateFlow(false)
-    val semanticNeedsKey: StateFlow<Boolean> = _semanticNeedsKey
+    /** Beginner AI Setup #1 (F7), made config-aware in fix
+     *  round 2 (Codex P2): Search's one quiet hint line, driven
+     *  by whether an embedding config actually RESOLVES for the
+     *  active account — the store's own notion of "configured"
+     *  ([AiSettingsStore.activeEmbeddingConfig]):
+     *  - OFF: a config resolves; semantic search can run and
+     *    there is nothing to say.
+     *  - NEEDS_KEY: no usable key and the active provider is a
+     *    preset, whose endpoint and embedding model come
+     *    pre-filled — a key alone genuinely completes its
+     *    setup, so this stage may promise exactly that.
+     *  - NEEDS_SETUP: every other incomplete state — Custom
+     *    with no key yet (a key alone never finishes Custom,
+     *    which also needs its endpoint and an embedding model),
+     *    or any provider holding a key whose embedding config
+     *    still doesn't resolve. Its copy promises only that
+     *    finishing setup switches the feature on.
+     *  The first form of this state keyed on `!hasUsableKey`
+     *  alone, so saving just a key on Custom retired the hint
+     *  while semantic search still couldn't run — the guidance
+     *  disappeared before the feature worked. */
+    private val _semanticHint = MutableStateFlow(SemanticHint.OFF)
+    val semanticHint: StateFlow<SemanticHint> = _semanticHint
 
     init {
         refreshSemanticHint()
     }
 
-    /** Re-reads the key state: once at construction and again
+    /** Re-reads the setup state: once at construction and again
      *  when the screen (re)composes, so returning from AI
-     *  settings with a fresh key retires the hint without a
+     *  settings with setup finished retires the hint without a
      *  restart. A missing store (bare test constructions)
      *  leaves the hint off. */
     fun refreshSemanticHint() {
         val store = aiSettingsStore ?: return
         viewModelScope.launch {
-            _semanticNeedsKey.value = !store.hasUsableKey(accountIdProvider())
+            val account = accountIdProvider()
+            _semanticHint.value = when {
+                store.activeEmbeddingConfig(account) != null ->
+                    SemanticHint.OFF
+                !store.hasUsableKey(account) &&
+                    store.activeProvider(account) != AiProviderId.CUSTOM ->
+                    SemanticHint.NEEDS_KEY
+                else -> SemanticHint.NEEDS_SETUP
+            }
         }
     }
 

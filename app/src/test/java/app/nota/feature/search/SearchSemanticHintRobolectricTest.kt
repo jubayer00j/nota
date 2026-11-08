@@ -11,6 +11,7 @@ import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.NoteRepository
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -22,12 +23,24 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.shadows.ShadowLooper
 
 /**
- * Beginner AI Setup #1 (F7): Search's "search by meaning is off"
- * state is true exactly while the ACTIVE account's active
- * provider has no saved key — another account's key must not
- * retire it, and a key saved for this account retires it on
- * refresh. Same harness family as the Ask suite: an in-memory
- * database and the real settings store over the fake cipher.
+ * Beginner AI Setup #1 (F7), config-aware since fix round 2
+ * (Codex P2): Search's "search by meaning is off" hint follows
+ * whether an embedding config actually RESOLVES for the ACTIVE
+ * account:
+ *  - a preset with no key is NEEDS_KEY (a key completes a
+ *    preset's setup — its endpoint and embedding model are
+ *    pre-filled, which is also why a preset slot whose stored
+ *    embedding field is blank still resolves: the provider
+ *    default fills it);
+ *  - Custom at any incomplete stage, and any key whose
+ *    embedding config still doesn't resolve, is NEEDS_SETUP —
+ *    saving just a key on Custom must NOT retire the hint,
+ *    because semantic search still can't run;
+ *  - a resolved config (any provider) is OFF.
+ * Account scoping is pinned too: another account's key changes
+ * nothing here. Same harness family as the Ask suite: an
+ * in-memory database and the real settings store over the fake
+ * cipher.
  */
 @RunWith(RobolectricTestRunner::class)
 class SearchSemanticHintRobolectricTest {
@@ -85,6 +98,9 @@ class SearchSemanticHintRobolectricTest {
         fail("Timed out waiting for: $description")
     }
 
+    private fun awaitHint(stage: SemanticHint, description: String) =
+        awaitTrue(description) { viewModel.semanticHint.value == stage }
+
     /** Gives pending main-looper work every chance to land, for
      *  assertions that a state did NOT change. */
     private fun settle() {
@@ -95,18 +111,23 @@ class SearchSemanticHintRobolectricTest {
     }
 
     @Test
-    fun noKey_hintOn_thenKeySaved_hintOffAfterRefresh() {
-        awaitTrue("hint on with no key saved") { viewModel.semanticNeedsKey.value }
+    fun presetNoKey_needsKey_thenKeySaved_hintOffAfterRefresh() {
+        // (a) The default active provider is the Gemini preset:
+        // no key yet, and a key is all a preset is missing.
+        awaitHint(SemanticHint.NEEDS_KEY, "NEEDS_KEY with no key saved")
         runBlocking {
             store.saveSlot(account, AiProviderId.GEMINI, AiProviderSlot(apiKey = "key-1"))
         }
         viewModel.refreshSemanticHint()
-        awaitTrue("hint off once a key exists") { !viewModel.semanticNeedsKey.value }
+        // (e) The saved key completes the preset's config — its
+        // embedding model resolves from the provider default
+        // even though the slot stored none — so the hint retires.
+        awaitHint(SemanticHint.OFF, "hint off once the preset config resolves")
     }
 
     @Test
     fun keyForAnotherAccount_doesNotRetireTheHint() {
-        awaitTrue("hint on with no key saved") { viewModel.semanticNeedsKey.value }
+        awaitHint(SemanticHint.NEEDS_KEY, "NEEDS_KEY with no key saved")
         runBlocking {
             store.saveSlot(
                 "someone-else", AiProviderId.GEMINI,
@@ -118,8 +139,8 @@ class SearchSemanticHintRobolectricTest {
         }
         viewModel.refreshSemanticHint()
         settle()
-        // …so this account's hint survives the refresh.
-        assertTrue(viewModel.semanticNeedsKey.value)
+        // …so this account's hint survives the refresh, unmoved.
+        assertEquals(SemanticHint.NEEDS_KEY, viewModel.semanticHint.value)
     }
 
     @Test
@@ -128,6 +149,71 @@ class SearchSemanticHintRobolectricTest {
         val bare = SearchViewModel(
             repository = NoteRepository(DatabaseProvider.forDatabase(context, db)),
         )
-        assertFalse(bare.semanticNeedsKey.value)
+        assertEquals(SemanticHint.OFF, bare.semanticHint.value)
+    }
+
+    @Test
+    fun customNoKey_needsSetup() {
+        // (b) Custom with nothing saved: a key alone would NOT
+        // switch semantic search on (endpoint and embedding
+        // model are missing too), so the honest stage is
+        // NEEDS_SETUP from the start.
+        runBlocking { store.setActiveProvider(account, AiProviderId.CUSTOM) }
+        viewModel.refreshSemanticHint()
+        awaitHint(SemanticHint.NEEDS_SETUP, "NEEDS_SETUP for a fresh Custom provider")
+    }
+
+    @Test
+    fun customKeyOnly_staysNeedsSetup() {
+        // (c) The Codex scenario: on Custom, saving ONLY a key
+        // must not retire the guidance — the embedding config
+        // still doesn't resolve, so semantic search still
+        // can't run.
+        runBlocking { store.setActiveProvider(account, AiProviderId.CUSTOM) }
+        viewModel.refreshSemanticHint()
+        awaitHint(SemanticHint.NEEDS_SETUP, "NEEDS_SETUP before the key")
+        runBlocking {
+            store.saveSlot(account, AiProviderId.CUSTOM, AiProviderSlot(apiKey = "key-3"))
+            assertTrue(store.hasUsableKey(account))
+        }
+        viewModel.refreshSemanticHint()
+        settle()
+        assertEquals(SemanticHint.NEEDS_SETUP, viewModel.semanticHint.value)
+    }
+
+    @Test
+    fun customKeyAndEndpoint_noEmbeddingModel_needsSetup() {
+        // (d) A key AND the endpoint, but the embedding model
+        // was never filled in: Custom has no default to fall
+        // back to, so the config is still incomplete.
+        runBlocking {
+            store.setActiveProvider(account, AiProviderId.CUSTOM)
+            store.saveSlot(
+                account, AiProviderId.CUSTOM,
+                AiProviderSlot(apiKey = "key-4", baseUrl = "https://example.com/v1"),
+            )
+        }
+        viewModel.refreshSemanticHint()
+        awaitHint(SemanticHint.NEEDS_SETUP, "NEEDS_SETUP while the embedding model is missing")
+    }
+
+    @Test
+    fun customCompleteConfig_hintOff() {
+        // (e) Key + endpoint + embedding model: the config
+        // resolves and the hint retires.
+        awaitHint(SemanticHint.NEEDS_KEY, "NEEDS_KEY before setup")
+        runBlocking {
+            store.setActiveProvider(account, AiProviderId.CUSTOM)
+            store.saveSlot(
+                account, AiProviderId.CUSTOM,
+                AiProviderSlot(
+                    apiKey = "key-5",
+                    baseUrl = "https://example.com/v1",
+                    embeddingModel = "embed-1",
+                ),
+            )
+        }
+        viewModel.refreshSemanticHint()
+        awaitHint(SemanticHint.OFF, "hint off once the Custom config resolves")
     }
 }
