@@ -877,7 +877,7 @@ object NoteExport {
             if (tag.name in VOID_ELEMENTS || tag.selfClosing) {
                 current += HtmlElement(tag.name, tag.attrs, emptyList())
             } else {
-                stack += mutableListOf()
+                stack += mutableListOf<HtmlNode>()
                 openNames += tag.name
                 openAttrs += tag.attrs
                 current = stack.last()
