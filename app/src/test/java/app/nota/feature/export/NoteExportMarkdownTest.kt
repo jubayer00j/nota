@@ -284,4 +284,21 @@ class NoteExportMarkdownTest {
         assertTrue(plain.contains("Run `bar` now"))
     }
 
+    @Test
+    fun codeBlockTrailingBlankLinesSurvive() {
+        // A code block can end with blank lines; the fence keeps
+        // them instead of trimming the block's tail away.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(CodeSegment("first\n\n\n")),
+        )
+        assertTrue(out.contains("```\nfirst\n\n\n```"))
+        // Ordinary code without a trailing newline is unchanged.
+        val plain = NoteExport.noteToMarkdown(
+            "T",
+            listOf(CodeSegment("plain")),
+        )
+        assertTrue(plain.contains("```\nplain\n```"))
+    }
+
 }
