@@ -455,4 +455,17 @@ class NoteExportMarkdownTest {
         assertFalse(out.contains(" &copy; "))
     }
 
+    @Test
+    fun listItemTextAfterANestedListKeepsItsPosition() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<ul><li>before<ul><li>child</li></ul>after</li></ul>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("- before\n  - child\n  after"))
+    }
+
 }
