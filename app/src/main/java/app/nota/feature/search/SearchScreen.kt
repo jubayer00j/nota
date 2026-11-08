@@ -1,5 +1,6 @@
 package app.nota.feature.search
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -52,14 +53,21 @@ import org.koin.androidx.compose.koinViewModel
 fun SearchScreen(
     onOpenNote: (String) -> Unit = {},
     onBack: () -> Unit = {},
+    // Beginner AI Setup #1 (F7): where the "search by meaning is
+    // off" hint goes (Settings → AI features).
+    onOpenAiSettings: () -> Unit = {},
     viewModel: SearchViewModel = koinViewModel(),
 ) {
     val query by viewModel.query.collectAsState()
     val results by viewModel.results.collectAsState()
     val semanticResults by viewModel.semanticResults.collectAsState()
+    val semanticNeedsKey by viewModel.semanticNeedsKey.collectAsState()
     val saved by viewModel.savedSearches.collectAsState()
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        viewModel.refreshSemanticHint()
+    }
     var showSaveDialog by remember { mutableStateOf(false) }
     var saveName by remember { mutableStateOf("") }
 
@@ -83,6 +91,20 @@ fun SearchScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().focusRequester(focusRequester),
             )
+            // Beginner AI Setup #1 (F7): ONE quiet tappable line,
+            // present only while search-by-meaning is off for want
+            // of a key — absent whenever a key exists, so the
+            // results layout below is exactly as it was.
+            if (semanticNeedsKey) {
+                Text(
+                    "Search by meaning is off — add an API key to switch it on",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .clickable { onOpenAiSettings() }
+                        .padding(top = NotaSpacing.sm, bottom = NotaSpacing.xs),
+                )
+            }
             if (saved.isNotEmpty()) {
                 Spacer(Modifier.height(NotaSpacing.sm))
                 Text("Saved searches", style = MaterialTheme.typography.titleSmall)

@@ -2,6 +2,7 @@ package app.nota.feature.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.nota.data.ai.AiSettingsStore
 import app.nota.data.ai.SemanticIndexer
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.SavedSearchEntity
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 class SearchViewModel(
     private val repository: NoteRepository,
     private val semanticIndexer: SemanticIndexer? = null,
+    private val aiSettingsStore: AiSettingsStore? = null,
     private val accountIdProvider: () -> String = { "" },
 ) : ViewModel() {
     private val _query = MutableStateFlow("")
@@ -32,6 +34,32 @@ class SearchViewModel(
      *  keyword search is completely unaffected either way. */
     private val _semanticResults = MutableStateFlow<List<NoteEntity>>(emptyList())
     val semanticResults: StateFlow<List<NoteEntity>> = _semanticResults
+
+    /** Beginner AI Setup #1 (F7): true when search-by-meaning is
+     *  off SPECIFICALLY because the active provider has no saved
+     *  key — the state behind Search's one quiet hint line. It is
+     *  deliberately NOT "semantic search can't run" in general: a
+     *  key with no resolvable embedding model (a fresh Custom
+     *  slot) also can't run, but "add an API key" would be the
+     *  wrong advice there, so the hint stays hidden then too. */
+    private val _semanticNeedsKey = MutableStateFlow(false)
+    val semanticNeedsKey: StateFlow<Boolean> = _semanticNeedsKey
+
+    init {
+        refreshSemanticHint()
+    }
+
+    /** Re-reads the key state: once at construction and again
+     *  when the screen (re)composes, so returning from AI
+     *  settings with a fresh key retires the hint without a
+     *  restart. A missing store (bare test constructions)
+     *  leaves the hint off. */
+    fun refreshSemanticHint() {
+        val store = aiSettingsStore ?: return
+        viewModelScope.launch {
+            _semanticNeedsKey.value = !store.hasUsableKey(accountIdProvider())
+        }
+    }
 
     private var searchJob: Job? = null
 
