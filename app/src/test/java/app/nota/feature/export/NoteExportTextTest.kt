@@ -1,6 +1,7 @@
 package app.nota.feature.export
 
 import app.nota.data.html.TextSegment
+import app.nota.data.html.OpaqueSegment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
