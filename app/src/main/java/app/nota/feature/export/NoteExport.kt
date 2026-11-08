@@ -243,13 +243,17 @@ object NoteExport {
         }
 
     private fun mdFence(text: String): String {
-        val content = text.trimEnd('\n')
         // The fence must outrun the longest backtick run inside the
         // code, or that run closes the block early — the rule
         // mdCodeSpan already applies to inline code.
-        val longestRun = Regex("`+").findAll(content).maxOfOrNull { it.value.length } ?: 0
+        val longestRun = Regex("`+").findAll(text).maxOfOrNull { it.value.length } ?: 0
         val fence = "`".repeat(maxOf(3, longestRun + 1))
-        return "$fence\n$content\n$fence"
+        // Trailing line feeds are part of the code (a block can end
+        // with blank lines) — keep them, and add the separator
+        // newline before the closing fence only when the code
+        // doesn't already end with one.
+        val separator = if (text.endsWith("\n")) "" else "\n"
+        return "$fence\n$text$separator$fence"
     }
 
     private fun mdTable(segment: TableSegment, resolve: AttachmentResolver): String {
