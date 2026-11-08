@@ -459,13 +459,31 @@ object NoteExport {
     }
 
     /** Escapes the characters that would re-parse as Markdown structure. */
+    private val MD_REFERENCE =
+        Regex("&(#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]{0,31});")
+
     private fun escapeMdText(text: String): String {
+        // A literal "&copy;" in the note (typed as text, so it
+        // arrives here as those exact characters) would be
+        // decoded AGAIN by a Markdown renderer's character-
+        // reference pass and stop matching the note. Escape the
+        // ampersand of anything that spells a valid reference;
+        // validity is the entity decoder's own call. A bare '&'
+        // that starts no reference stays raw.
+        val refsEscaped = MD_REFERENCE.replace(text) { m ->
+            val whole = m.value
+            if (HtmlEntities.decode(whole) != whole) {
+                "&amp;" + whole.substring(1)
+            } else {
+                whole
+            }
+        }
         // '~' joins the set for GFM: a literal "~~word~~" in
         // the note is strikethrough to a renderer unless the
         // tildes are escaped. (The converter's own strike
         // markers are added around already-escaped runs, so
         // real strikethrough is unaffected.)
-        val escaped = text.replace(Regex("([\\\\`*_\\[\\]<~])"), "\\\\$1")
+        val escaped = refsEscaped.replace(Regex("([\\\\`*_\\[\\]<~])"), "\\\\$1")
         // Inline escaping is not enough: a literal line that STARTS
         // with a block marker (heading, quote, list, thematic break)
         // would re-parse as that structure instead of the note's
