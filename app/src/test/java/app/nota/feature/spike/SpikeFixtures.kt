@@ -2,7 +2,10 @@ package app.nota.feature.spike
 
 /**
  * HTML fixtures shaped like real Noma 1.x note bodies (Tiptap output), used by
- * both the spike screen and the round-trip unit tests. Noma's editor emits:
+ * the round-trip unit tests. (Phase 6 polish: this object lived in the MAIN
+ * source set feeding the Phase 0 spike screen; the screen is deleted and the
+ * fixtures — genuine NoteDocument regression data — moved here, to the test
+ * source set, so nothing test-only ships in the app.) Noma's editor emits:
  * paragraphs, h1–h3, strong/em/u/s/code spans, `mark` highlights, coloured
  * spans with inline styles, bullet/ordered lists, task lists
  * (`ul[data-type=taskList]` / `li[data-type=taskItem][data-checked]`),

@@ -79,11 +79,9 @@ fun AccountSection(
         pending is PendingRestoreState.Applying
 
     Column {
-        Text(
-            "Account",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        // Phase 6 presentation redesign: no header Text here any
+        // more — the Account sub-screen's header names the
+        // category and this section is re-housed in its card.
         when (val current = session) {
             is Session.Guest -> {
                 Text(

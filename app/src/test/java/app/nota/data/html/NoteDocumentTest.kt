@@ -1,6 +1,7 @@
 package app.nota.data.html
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -587,5 +588,97 @@ class NoteDocumentTest {
     fun imageWidthSingleQuotedAttribute() {
         val segments = NoteDocument.parse("<p><img src='x' width='45%'></p>")
         assertEquals(45, (segments.single() as ImageSegment).widthPercent)
+    }
+
+    // ---- Phase 6 polish: structural task-list classification ------
+    // isTaskList used to substring-search the list's inner HTML for
+    // "data-checked"/"taskItem", so VISIBLE TEXT containing those
+    // words turned a plain list into a task list on save.
+
+    @Test
+    fun plainListWithTaskWordsInTextStaysPlain() {
+        val html = "<ul><li><p>Document the data-checked attribute</p></li>" +
+            "<li><p>taskItem notes</p></li></ul>"
+        val segments = NoteDocument.parse(html)
+        assertTrue(segments.none { it is TaskListSegment })
+        val saved = NoteDocument.serialize(segments)
+        assertFalse(saved.contains("data-type=\"taskList\""))
+    }
+
+    @Test
+    fun structuralTaskListWithoutUlDataTypeStillParses() {
+        // Tiptap variants where the <ul> carries no data-type but the
+        // items themselves carry the structural markers.
+        val html = "<ul><li data-type=\"taskItem\" data-checked=\"true\"><p>Done one</p></li>" +
+            "<li data-type=\"taskItem\" data-checked=\"false\"><p>Open one</p></li></ul>"
+        val segments = NoteDocument.parse(html)
+        val list = segments.filterIsInstance<TaskListSegment>().single()
+        assertEquals(2, list.items.size)
+        assertTrue(list.items[0].checked)
+        assertFalse(list.items[1].checked)
+    }
+
+    @Test
+    fun taskItemCheckedComesFromAttributeNotContent() {
+        // Genuine task list (ul data-type). The item's CONTENT says
+        // "checked" and carries a literal <input>, but the li's own
+        // data-checked says false — the old content fallback
+        // ("checked" + "<input" substrings) would have ticked it.
+        val html = "<ul data-type=\"taskList\">" +
+            "<li data-type=\"taskItem\" data-checked=\"false\">" +
+            "<p>checked <input type=\"text\"> in text</p></li></ul>"
+        val segments = NoteDocument.parse(html)
+        val list = segments.filterIsInstance<TaskListSegment>().single()
+        assertFalse(list.items.single().checked)
+    }
+
+    // ---- Phase 6 polish (N5): label edits preserve formatting -----
+
+    @Test
+    fun replaceTaskItemText_keepsStrongWrapper() {
+        assertEquals(
+            "<p><strong>New label</strong></p>",
+            NoteDocument.replaceTaskItemText("<p><strong>Old label</strong></p>", "New label"),
+        )
+    }
+
+    @Test
+    fun replaceTaskItemText_keepsLinkAroundNewText() {
+        val out = NoteDocument.replaceTaskItemText(
+            "<p><a href=\"https://example.com/page\">Old label</a></p>",
+            "New label",
+        )
+        assertEquals("<p><a href=\"https://example.com/page\">New label</a></p>", out)
+    }
+
+    @Test
+    fun replaceTaskItemText_plainAndEscaping() {
+        assertEquals(
+            "<p>New</p>",
+            NoteDocument.replaceTaskItemText("<p>Old</p>", "New"),
+        )
+        assertEquals(
+            "<p>A &amp; B</p>",
+            NoteDocument.replaceTaskItemText("<p>Old</p>", "A & B"),
+        )
+        assertEquals(
+            "<p>New</p>",
+            NoteDocument.replaceTaskItemText("<p></p>", "New"),
+        )
+        assertEquals(
+            "<strong>New</strong>",
+            NoteDocument.replaceTaskItemText("<strong>Old</strong>", "New"),
+        )
+    }
+
+    @Test
+    fun replaceTaskItemText_mixedMarkupConsolidatesIntoFirstRun() {
+        // The documented fidelity limit: elements survive byte-
+        // identical; the new label consolidates into the first text
+        // run (its formatting), later runs are emptied.
+        assertEquals(
+            "<p><strong>Buy oat milk</strong></p>",
+            NoteDocument.replaceTaskItemText("<p><strong>Buy</strong> milk</p>", "Buy oat milk"),
+        )
     }
 }

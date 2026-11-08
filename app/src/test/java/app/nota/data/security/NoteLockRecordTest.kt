@@ -100,4 +100,24 @@ class NoteLockRecordTest {
         val reparsed = NoteLockRecord.parse(record.toJson())!!
         assertEquals(record, reparsed)
     }
+
+    // Phase 6 polish: the iteration ceiling (same cap BackupCrypto
+    // applies to the backup header). An over-cap slot is rejected at
+    // parse, so a corrupt or crafted record can never make an unlock
+    // attempt run PBKDF2 effectively forever.
+    @Test
+    fun parse_rejectsSlotAboveIterationCap() {
+        val json = """{"v":1,"slots":{"password":{"salt":"AA==","iterations":2000001,"wrappedKey":"BB=="}},"biometric":false,"failedAttempts":0,"lockoutUntil":null,"lockedAt":1}"""
+        val record = NoteLockRecord.parse(json)!!
+        assertTrue(record.slots.isEmpty())
+        val absurd = """{"v":1,"slots":{"password":{"salt":"AA==","iterations":2147483647,"wrappedKey":"BB=="}},"biometric":false,"failedAttempts":0,"lockoutUntil":null,"lockedAt":1}"""
+        assertTrue(NoteLockRecord.parse(absurd)!!.slots.isEmpty())
+    }
+
+    @Test
+    fun parse_acceptsSlotAtIterationCap() {
+        val json = """{"v":1,"slots":{"password":{"salt":"AA==","iterations":2000000,"wrappedKey":"BB=="}},"biometric":false,"failedAttempts":0,"lockoutUntil":null,"lockedAt":1}"""
+        val record = NoteLockRecord.parse(json)!!
+        assertEquals(2_000_000, record.slots[NoteLockMethod.PASSWORD]?.iterations)
+    }
 }

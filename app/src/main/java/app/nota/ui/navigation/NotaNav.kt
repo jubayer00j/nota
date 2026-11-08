@@ -40,14 +40,20 @@ import app.nota.feature.editor.PendingInsertResumer
 import app.nota.data.security.AppLockManager
 import app.nota.feature.ask.AskScreen
 import app.nota.feature.settings.UnlockRestoreResumer
-import app.nota.feature.designsystem.DesignSystemScreen
 import app.nota.feature.editor.RichNoteEditorScreen
 import app.nota.feature.graph.LinkGraphScreen
 import app.nota.feature.notes.NotesScreen
 import app.nota.feature.reminders.RemindersScreen
 import app.nota.feature.search.SearchScreen
+import app.nota.feature.settings.SettingsAboutScreen
+import app.nota.feature.settings.SettingsAccountScreen
+import app.nota.feature.settings.SettingsAiScreen
+import app.nota.feature.settings.SettingsAppearanceScreen
+import app.nota.feature.settings.SettingsCategory
+import app.nota.feature.settings.SettingsNotesScreen
 import app.nota.feature.settings.SettingsScreen
-import app.nota.feature.spike.EditorSpikeScreen
+import app.nota.feature.settings.SettingsSecurityScreen
+import app.nota.feature.settings.SettingsSyncScreen
 import app.nota.feature.templates.TemplatesScreen
 import app.nota.feature.today.TodayScreen
 import org.koin.compose.koinInject
@@ -61,8 +67,9 @@ enum class NotaDestination(val route: String, val label: String, val icon: Image
 }
 
 object NotaRoutes {
-    const val DESIGN_SYSTEM = "design-system"
-    const val EDITOR_SPIKE = "editor-spike"
+    // Phase 6 polish: the Phase 0 review routes (design-system,
+    // editor-spike) and their destinations are deleted — developer
+    // surfaces, never user settings, gone from the shipped graph.
     const val TEMPLATES = "templates"
     const val TODAY = "today"
     const val SEARCH = "search"
@@ -70,7 +77,30 @@ object NotaRoutes {
     const val SIGN_IN = "sign-in"
     const val NOTE_EDITOR = "note/{noteId}"
     fun noteEditor(noteId: String): String = "note/$noteId"
+
+    // Phase 6 presentation redesign: one sub-route per Settings
+    // category. The Settings tab destination itself is the ROOT
+    // (the category list); a sub-screen's back returns to it.
+    const val SETTINGS_ACCOUNT = "settings/account"
+    const val SETTINGS_SYNC = "settings/sync"
+    const val SETTINGS_SECURITY = "settings/security"
+    const val SETTINGS_APPEARANCE = "settings/appearance"
+    const val SETTINGS_NOTES = "settings/notes"
+    const val SETTINGS_AI = "settings/ai"
+    const val SETTINGS_ABOUT = "settings/about"
 }
+
+/** The sub-route for a Settings category (root row taps + deep landings). */
+private fun settingsRouteFor(category: SettingsCategory): String =
+    when (category) {
+        SettingsCategory.ACCOUNT -> NotaRoutes.SETTINGS_ACCOUNT
+        SettingsCategory.SYNC -> NotaRoutes.SETTINGS_SYNC
+        SettingsCategory.SECURITY -> NotaRoutes.SETTINGS_SECURITY
+        SettingsCategory.APPEARANCE -> NotaRoutes.SETTINGS_APPEARANCE
+        SettingsCategory.NOTES -> NotaRoutes.SETTINGS_NOTES
+        SettingsCategory.AI -> NotaRoutes.SETTINGS_AI
+        SettingsCategory.ABOUT -> NotaRoutes.SETTINGS_ABOUT
+    }
 
 /**
  * Opens [noteId] in the editor without ever stacking a second
@@ -127,7 +157,11 @@ fun NotaNavShell(
     // surface behind the lock; the resumer (remembered for the
     // shell's lifetime = one unlocked session) fires exactly once
     // per restore per unlock — walking away from Settings does not
-    // get overridden.
+    // get overridden. Phase 6 presentation redesign: BackupSection
+    // now lives on the Sync & backup sub-screen, so the resumer
+    // lands on the Settings ROOT first (tab-style) and then pushes
+    // the Sync sub-screen — the restore surfaces exactly as
+    // before, and back returns to the root.
     val isLocked by appLockManager.isLocked.collectAsState()
     val pendingRestore by pendingRestoreStore.state.collectAsState()
     val restoreResumer = remember { UnlockRestoreResumer() }
@@ -140,6 +174,7 @@ fun NotaNavShell(
                 launchSingleTop = true
                 restoreState = true
             }
+            navController.navigate(NotaRoutes.SETTINGS_SYNC)
         }
     }
     // Phase 3.6 (G2): a picker insert staged before the app locked /
@@ -377,11 +412,50 @@ fun NotaNavShell(
                 )
             }
             composable(NotaDestination.Settings.route) {
+                // Phase 6 presentation redesign: the Settings tab
+                // IS the root category list; each row pushes its
+                // sub-screen, and back returns here.
                 SettingsScreen(
-                    onOpenDesignSystem = { navController.navigate(NotaRoutes.DESIGN_SYSTEM) },
-                    onOpenEditorSpike = { navController.navigate(NotaRoutes.EDITOR_SPIKE) },
-                    onOpenTemplates = { navController.navigate(NotaRoutes.TEMPLATES) },
+                    onOpenCategory = { category ->
+                        navController.navigate(settingsRouteFor(category))
+                    },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_ACCOUNT) {
+                SettingsAccountScreen(
+                    onBack = { navController.popBackStack() },
                     onOpenSignIn = { navController.navigate(NotaRoutes.SIGN_IN) },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_SYNC) {
+                SettingsSyncScreen(
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_SECURITY) {
+                SettingsSecurityScreen(
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_APPEARANCE) {
+                SettingsAppearanceScreen(
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_NOTES) {
+                SettingsNotesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenTemplates = { navController.navigate(NotaRoutes.TEMPLATES) },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_AI) {
+                SettingsAiScreen(
+                    onBack = { navController.popBackStack() },
+                )
+            }
+            composable(NotaRoutes.SETTINGS_ABOUT) {
+                SettingsAboutScreen(
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(NotaRoutes.SIGN_IN) {
@@ -392,12 +466,6 @@ fun NotaNavShell(
                     onBack = { navController.popBackStack() },
                     onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
-            }
-            composable(NotaRoutes.DESIGN_SYSTEM) {
-                DesignSystemScreen(onBack = { navController.popBackStack() })
-            }
-            composable(NotaRoutes.EDITOR_SPIKE) {
-                EditorSpikeScreen(onBack = { navController.popBackStack() })
             }
         }
     }

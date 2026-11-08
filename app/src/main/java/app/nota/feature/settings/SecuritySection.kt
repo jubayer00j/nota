@@ -44,7 +44,9 @@ import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 
 /**
- * Settings → Security (Phase 2a): App Lock setup and management.
+ * Settings → Security & privacy (Phase 2a; renamed Phase 6 polish):
+ * App Lock setup and management, plus the backup-encryption block
+ * ([BackupEncryptionBlock]) that moved here from Sync & backup.
  *
  * EVERY mutation while App Lock is on (set/change/remove a method,
  * biometric toggle, timeout change, turn off) first requires verifying
@@ -188,11 +190,10 @@ fun SecuritySection(
     }
 
     Column {
-        Text(
-            "Security",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        // Phase 6 presentation redesign: no header Text here any
+        // more — the Security & privacy sub-screen's header names
+        // the category and this section is re-housed in the
+        // "App Lock" card.
         Row(
             Modifier.fillMaxWidth().padding(vertical = NotaSpacing.sm),
             verticalAlignment = Alignment.CenterVertically,
@@ -348,6 +349,13 @@ fun SecuritySection(
                 requestAuthorized { scope.launch { appLockManager.disableAll() } }
             }) { Text("Turn off App Lock") }
         }
+
+        // Phase 6 presentation redesign: BackupEncryptionBlock is
+        // no longer composed at the foot of this section — the
+        // Security & privacy sub-screen places it in its own
+        // "Backup encryption" card right below the App Lock card,
+        // so every lock/passphrase control stays on one screen.
+        // The block still owns its own state and dialogs.
     }
 
     // ---- Method chooser (initial setup) -------------------------------

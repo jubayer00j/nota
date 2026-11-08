@@ -89,7 +89,6 @@ private object PendingExportStaging {
 
 @Composable
 fun BackupSection(
-    onOpenSignIn: () -> Unit = {},
     backupRepository: BackupRepository = koinInject(),
     pendingRestoreStore: PendingRestoreStore = PendingRestoreStore.shared,
 ) {
@@ -174,75 +173,75 @@ fun BackupSection(
     }
 
     Column {
-        Text(
-            "Sync & backup",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        // Phase 3b: Drive is the primary surface (connect, back up,
-        // restore, schedule, encryption); the local-file tools below
-        // remain for manual exports and crossover restores.
-        DriveBackupSection(onOpenSignIn = onOpenSignIn)
+        // Phase 6 presentation redesign: no header Text here any
+        // more — the Sync & backup sub-screen's header names the
+        // category. Drive is the primary surface (connect, back up,
+        // restore, schedule) and renders its own cards in
+        // DriveBackupSection; the local-file tools below sit in
+        // their own card of the same treatment.
+        DriveBackupSection()
         Spacer(Modifier.height(NotaSpacing.md))
-        Text(
-            "Local backup file — the same ZIP format as Noma 1.x, so backups move both ways.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        if (busy || restoreBusy) {
-            Spacer(Modifier.height(NotaSpacing.sm))
-            CircularProgressIndicator()
-        }
-        TextButton(
-            onClick = {
-                pendingPassphrase = null
-                PendingExportStaging.stage(null)
-                exportLauncher.launch("Noma Backup.zip")
-            },
-            enabled = !busy,
-        ) { Text("Export backup") }
-        TextButton(
-            onClick = { showEncryptedExportDialog = true },
-            enabled = !busy,
-        ) { Text("Export encrypted backup") }
-        TextButton(
-            onClick = {
-                restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
-            },
-            enabled = !busy && !restoreBusy &&
-                (pending is PendingRestoreState.Idle ||
-                    pending is PendingRestoreState.Completed ||
-                    pending is PendingRestoreState.Failed),
-        ) { Text("Restore backup") }
-        if (message != null) {
+        SettingsCard(title = "Local backup file") {
             Text(
-                message!!,
+                "The same ZIP format as Noma 1.x, so backups move both ways.",
                 style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-        }
-        // Terminal restore outcomes come from the store, so they are
-        // still here — visible — after a lock cycle, and stay until
-        // the user dismisses them. No restore attempt ends silently.
-        when (val outcome = pending) {
-            is PendingRestoreState.Completed -> {
+            if (busy || restoreBusy) {
+                Spacer(Modifier.height(NotaSpacing.sm))
+                CircularProgressIndicator()
+            }
+            TextButton(
+                onClick = {
+                    pendingPassphrase = null
+                    PendingExportStaging.stage(null)
+                    exportLauncher.launch("Noma Backup.zip")
+                },
+                enabled = !busy,
+            ) { Text("Export backup") }
+            TextButton(
+                onClick = { showEncryptedExportDialog = true },
+                enabled = !busy,
+            ) { Text("Export encrypted backup") }
+            TextButton(
+                onClick = {
+                    restoreLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                },
+                enabled = !busy && !restoreBusy &&
+                    (pending is PendingRestoreState.Idle ||
+                        pending is PendingRestoreState.Completed ||
+                        pending is PendingRestoreState.Failed),
+            ) { Text("Restore backup") }
+            if (message != null) {
                 Text(
-                    outcome.message,
+                    message!!,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(vertical = NotaSpacing.xs),
                 )
-                TextButton(onClick = { pendingRestoreStore.acknowledge() }) { Text("Dismiss") }
             }
-            is PendingRestoreState.Failed -> {
-                Text(
-                    outcome.message,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(vertical = NotaSpacing.xs),
-                )
-                TextButton(onClick = { pendingRestoreStore.acknowledge() }) { Text("Dismiss") }
+            // Terminal restore outcomes come from the store, so they are
+            // still here — visible — after a lock cycle, and stay until
+            // the user dismisses them. No restore attempt ends silently.
+            when (val outcome = pending) {
+                is PendingRestoreState.Completed -> {
+                    Text(
+                        outcome.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                    )
+                    TextButton(onClick = { pendingRestoreStore.acknowledge() }) { Text("Dismiss") }
+                }
+                is PendingRestoreState.Failed -> {
+                    Text(
+                        outcome.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                    )
+                    TextButton(onClick = { pendingRestoreStore.acknowledge() }) { Text("Dismiss") }
+                }
+                else -> Unit
             }
-            else -> Unit
         }
     }
 
