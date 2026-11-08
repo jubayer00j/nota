@@ -152,4 +152,17 @@ class NoteExportTextTest {
         assertTrue(out.contains("Fish \u00A9 chips, \u00ACit; today"))
     }
 
+    @Test
+    fun c1NumericReferencesRemapThroughWindows1252() {
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p>Price &#128;5, range &#150; ok</p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("Price \u20AC5, range \u2013 ok"))
+    }
+
 }
