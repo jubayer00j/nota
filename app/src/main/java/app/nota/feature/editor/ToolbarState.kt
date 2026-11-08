@@ -115,32 +115,43 @@ internal fun RichTextState.toolbarFormatState(): ToolbarFormatState {
  * (Codex PR #34 P2). A collapsed caret is a no-op: there the
  * common-colour toggle path in the menu already covers clearing,
  * including the staged typing style.
- *
- * Why per-colour: the library's style engine only honours a
- * removal for a span whose full style EQUALS the requested style
- * on the requested fields (handleUpdatingRichSpan's branch), so
- * no single call can clear an unknown colour — a "field marker"
- * matches nothing and silently no-ops (the first cut of this fix
- * proved exactly that, in its own tests). The working composition
- * is the one the uniform toggle-clear itself uses, minus the
- * selection-level gate: range-remove EACH distinct colour that
- * is actually present, enumerated from the same span scan that
- * detects "mixed".
  */
 @OptIn(ExperimentalRichTextApi::class)
 internal fun RichTextState.clearTextColorInSelection() {
-    if (selection.collapsed) return
-    distinctSpanFieldValues { it.color }.forEach { color ->
-        removeSpanStyle(SpanStyle(color = color), selection)
-    }
+    clearSpanFieldInSelection({ it.color }) { SpanStyle(color = it) }
 }
 
 /** The highlight twin of [clearTextColorInSelection]. */
 @OptIn(ExperimentalRichTextApi::class)
 internal fun RichTextState.clearHighlightInSelection() {
+    clearSpanFieldInSelection({ it.background }) { SpanStyle(background = it) }
+}
+
+/**
+ * Why per-value, and why re-scanning: the library's style engine
+ * only honours a removal for a span whose full style EQUALS the
+ * requested style on the requested field
+ * (handleUpdatingRichSpan's branch), so no single call can clear
+ * an unknown colour — a generic "field marker" matches nothing
+ * and silently no-ops, and the selection-level removeSpanStyle
+ * refuses mixed selections up front. The composition that works
+ * is the one the uniform toggle-clear itself uses, minus that
+ * gate: range-remove EACH distinct value actually present. A
+ * removal also restructures the span tree (and can leave the
+ * field standing on a restructured span — the background case),
+ * so the scan repeats after each pass, bounded, until the
+ * selection reports no values of the field.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+private fun RichTextState.clearSpanFieldInSelection(
+    field: (SpanStyle) -> Color,
+    styleOf: (Color) -> SpanStyle,
+) {
     if (selection.collapsed) return
-    distinctSpanFieldValues { it.background }.forEach { color ->
-        removeSpanStyle(SpanStyle(background = color), selection)
+    repeat(4) {
+        val values = distinctSpanFieldValues(field)
+        if (values.isEmpty()) return
+        values.forEach { value -> removeSpanStyle(styleOf(value), selection) }
     }
 }
 
