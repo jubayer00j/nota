@@ -3133,13 +3133,10 @@ private fun TableBlock(
                     TextButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
                         selectedCell = null
-                        onChange(
-                            TableSegment(
-                                table.rows.dropLast(1),
-                                table.headerRow,
-                                table.cellSpans.dropLast(1),
-                            ),
-                        )
+                        // Through TableOps like "Delete row": a
+                        // rowspan crossing the dropped row must
+                        // shrink, not outlive it.
+                        onChange(TableOps.deleteRow(table, table.rows.size - 1))
                     }) { Text("− Row") }
                 }
                 if (TableOps.visualColumns(table) > 1) {

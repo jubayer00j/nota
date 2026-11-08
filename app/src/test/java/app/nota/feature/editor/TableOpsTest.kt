@@ -200,4 +200,52 @@ class TableOpsTest {
         val rowInserted = TableOps.insertRow(parsed, 1)
         assertEquals(3, rowInserted.rows[1].size)
     }
+
+    @Test
+    fun rowSpanShrinksWhenACrossedRowIsDeletedAndGrowsWhenOneIsInserted() {
+        // Codex PR #34 re-review P2, the vertical twin of the
+        // merged-column fix: "Tall" spans rows 0–1. Deleting row 1
+        // must shrink it to rowspan 1 — otherwise the saved table
+        // keeps a cell claiming a span into a row that no longer
+        // exists. Inserting a row at the crossed boundary grows
+        // it instead, and the new row is narrower by the covered
+        // columns.
+        val parsed = NoteDocument.parse(
+            "<table><tbody>" +
+                "<tr><td rowspan=\"2\">Tall</td><td>B</td></tr>" +
+                "<tr><td>C</td></tr>" +
+                "<tr><td>D</td><td>E</td></tr>" +
+                "</tbody></table>",
+        ).single() as TableSegment
+        assertEquals(2, parsed.cellSpans[0][0].rowSpan)
+        assertEquals(listOf("C"), parsed.rows[1])
+
+        val crossed = TableOps.deleteRow(parsed, 1)
+        assertEquals(listOf(listOf("Tall", "B"), listOf("D", "E")), crossed.rows)
+        assertEquals(1, crossed.cellSpans[0][0].rowSpan)
+        assertFalse(NoteDocument.serialize(listOf(crossed)).contains("rowspan"))
+        assertEquals(
+            crossed.rows,
+            (NoteDocument.parse(NoteDocument.serialize(listOf(crossed)))
+                .single() as TableSegment).rows,
+        )
+
+        // Deleting a row BELOW the span's reach leaves it alone.
+        val below = TableOps.deleteRow(parsed, 2)
+        assertEquals(2, below.rows.size)
+        assertEquals(2, below.cellSpans[0][0].rowSpan)
+
+        // Inserting at the crossed boundary: the span grows, and
+        // the blank row covers only the uncovered visual column.
+        val grown = TableOps.insertRow(parsed, 1)
+        assertEquals(4, grown.rows.size)
+        assertEquals(3, grown.cellSpans[0][0].rowSpan)
+        assertEquals(listOf(""), grown.rows[1])
+        assertEquals(grown.rows.map { it.size }, grown.cellSpans.map { it.size })
+
+        // Appending never grows a span.
+        val appended = TableOps.insertRow(parsed, 3)
+        assertEquals(2, appended.cellSpans[0][0].rowSpan)
+        assertEquals(2, appended.rows[3].size)
+    }
 }

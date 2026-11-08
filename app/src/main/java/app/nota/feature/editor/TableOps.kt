@@ -77,14 +77,35 @@ internal object TableOps {
     /** Insert a blank row BEFORE row index [at] (at == row count appends). */
     fun insertRow(table: TableSegment, at: Int): TableSegment {
         if (at !in 0..table.rows.size) return table
-        val cols = visualColumns(table)
+        // Cells in rows above whose rowspan CROSSES the insertion
+        // boundary grow by one — the new row passes underneath
+        // them (Codex PR #34 re-review, the insert twin of the
+        // delete-row span fix) — and the blank row is narrower by
+        // their combined colspan, since they already cover those
+        // visual columns of the new row.
+        var coveredCols = 0
+        for (r in 0 until minOf(at, table.cellSpans.size)) {
+            for (span in table.cellSpans[r]) {
+                if (at < r + span.rowSpan) coveredCols += span.colSpan
+            }
+        }
+        val cols = (visualColumns(table) - coveredCols).coerceAtLeast(0)
         val rows = table.rows.toMutableList().apply { add(at, List(cols) { "" }) }
         // Mirror the pre-existing "+ Row" handler: an empty spans
-        // list stays empty; a parallel one gains the same row.
+        // list stays empty; a parallel one gains the same row,
+        // with crossing rowspans grown.
         val spans = if (table.cellSpans.isEmpty()) {
             emptyList()
         } else {
-            table.cellSpans.toMutableList().apply { add(at, List(cols) { TableCellSpan() }) }
+            table.cellSpans.mapIndexed { r, rowSpans ->
+                rowSpans.map { span ->
+                    if (r < at && at < r + span.rowSpan) {
+                        span.copy(rowSpan = span.rowSpan + 1)
+                    } else {
+                        span
+                    }
+                }
+            }.toMutableList().apply { add(at, List(cols) { TableCellSpan() }) }
         }
         return TableSegment(rows, table.headerRow, spans)
     }
@@ -95,7 +116,19 @@ internal object TableOps {
         return TableSegment(
             table.rows.filterIndexed { i, _ -> i != at },
             table.headerRow,
-            table.cellSpans.filterIndexed { i, _ -> i != at },
+            // A surviving cell whose rowspan CROSSES the deleted
+            // row shrinks by one (Codex PR #34 re-review P2):
+            // without this the saved table keeps a cell claiming
+            // a span into a row that no longer exists.
+            table.cellSpans.mapIndexed { r, rowSpans ->
+                rowSpans.map { span ->
+                    if (r < at && at < r + span.rowSpan) {
+                        span.copy(rowSpan = span.rowSpan - 1)
+                    } else {
+                        span
+                    }
+                }
+            }.filterIndexed { i, _ -> i != at },
         )
     }
 
