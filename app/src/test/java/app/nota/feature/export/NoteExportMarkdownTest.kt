@@ -499,18 +499,20 @@ class NoteExportMarkdownTest {
 
     @Test
     fun embeddingBudgetIsCumulativeAcrossImages() {
-        // ~17.25 MB decoded each: the first embeds, the second
-        // would take the total past the 32 MB budget.
-        val mid = "data:image/png;base64," + "A".repeat(23_000_000)
+        // ~12 MB decoded each — under the 16 MB single-image
+        // cap — but three of them pass the 32 MB total budget:
+        // the first two embed, the third degrades.
+        val mid = "data:image/png;base64," + "A".repeat(16_000_000)
         val artifact = NoteExport.build(
             "T",
             listOf(
                 ImageSegment(src = "nota-attachment://one", alt = "One"),
                 ImageSegment(src = "nota-attachment://two", alt = "Two"),
+                ImageSegment(src = "nota-attachment://three", alt = "Three"),
             ),
             ExportFormat.MARKDOWN,
         ) { mid }
-        assertEquals(1, artifact.content.split("data:image/png").size - 1)
+        assertEquals(2, artifact.content.split("data:image/png").size - 1)
     }
 
 }
