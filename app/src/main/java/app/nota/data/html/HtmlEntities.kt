@@ -174,8 +174,26 @@ object HtmlEntities {
         ) {
             "\uFFFD"
         } else {
-            String(Character.toChars(code))
+            // HTML5 remaps numeric references in the C1 range
+            // (0x80-0x9F) through Windows-1252 — "&#128;" is
+            // the euro sign, not U+0080 — exactly as a browser
+            // renders them. The five code points the table
+            // maps to themselves are absent here and pass
+            // through unchanged.
+            String(Character.toChars(C1_REMAP[code] ?: code))
         }
+
+    private val C1_REMAP: Map<Int, Int> = mapOf(
+        0x80 to 0x20AC, 0x82 to 0x201A, 0x83 to 0x0192,
+        0x84 to 0x201E, 0x85 to 0x2026, 0x86 to 0x2020,
+        0x87 to 0x2021, 0x88 to 0x02C6, 0x89 to 0x2030,
+        0x8A to 0x0160, 0x8B to 0x2039, 0x8C to 0x0152,
+        0x8E to 0x017D, 0x91 to 0x2018, 0x92 to 0x2019,
+        0x93 to 0x201C, 0x94 to 0x201D, 0x95 to 0x2022,
+        0x96 to 0x2013, 0x97 to 0x2014, 0x98 to 0x02DC,
+        0x99 to 0x2122, 0x9A to 0x0161, 0x9B to 0x203A,
+        0x9C to 0x0153, 0x9E to 0x017E, 0x9F to 0x0178,
+    )
 
     private val BY_NAME: Map<String, String> by lazy {
         val map = HashMap<String, String>(2200)
