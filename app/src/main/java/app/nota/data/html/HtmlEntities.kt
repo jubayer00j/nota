@@ -31,6 +31,34 @@ object HtmlEntities {
                 break
             }
             out.append(value, i, amp)
+            // Numeric references are decoded with OR without
+            // the trailing semicolon: HTML5 parses "&#58" in
+            // text and attribute values alike, so a URL check
+            // that only understood the semicolon form would
+            // wave "javascript&#58alert(1)" through as an
+            // unknown scheme while the browser navigates it
+            // as javascript:. The digit run is consumed as far
+            // as it is valid; one optional ';' after it goes too.
+            if (value.getOrNull(amp + 1) == '#') {
+                var j = amp + 2
+                val hex = value.getOrNull(j).let { it == 'x' || it == 'X' }
+                if (hex) j++
+                val digitsStart = j
+                while (j < value.length &&
+                    (if (hex) isHexDigit(value[j]) else value[j].isDigit())
+                ) {
+                    j++
+                }
+                if (j > digitsStart) {
+                    val code = value.substring(digitsStart, j)
+                        .toIntOrNull(if (hex) 16 else 10)
+                    out.append(codePointOrReplacement(code))
+                    i = if (value.getOrNull(j) == ';') j + 1 else j
+                    continue
+                }
+                // "&#" with no digits is not a reference; fall
+                // through and let the named path leave it literal.
+            }
             // The longest HTML5 name is 31 characters and a
             // numeric reference at most 10, so the closing ';'
             // — if this is a reference at all — sits within
@@ -70,24 +98,24 @@ object HtmlEntities {
     }
 
     private fun decodeReference(body: String): String? {
+        // Named references only: decode() intercepts every
+        // numeric form (semicolon or not) before this is called.
         if (body.isEmpty()) return null
-        if (body[0] == '#') {
-            val code = if (body.length > 2 && (body[1] == 'x' || body[1] == 'X')) {
-                body.substring(2).toIntOrNull(16)
-            } else {
-                body.substring(1).toIntOrNull()
-            }
-            return if (code == null || code !in 1..0x10FFFF ||
-                code in 0xD800..0xDFFF
-            ) {
-                "\uFFFD"
-            } else {
-                String(Character.toChars(code))
-            }
-        }
         if (!body.all { it.isLetterOrDigit() }) return null
         return BY_NAME[body]
     }
+
+    private fun isHexDigit(ch: Char): Boolean =
+        ch in '0'..'9' || ch in 'a'..'f' || ch in 'A'..'F'
+
+    private fun codePointOrReplacement(code: Int?): String =
+        if (code == null || code !in 1..0x10FFFF ||
+            code in 0xD800..0xDFFF
+        ) {
+            "\uFFFD"
+        } else {
+            String(Character.toChars(code))
+        }
 
     private val BY_NAME: Map<String, String> by lazy {
         val map = HashMap<String, String>(2200)
