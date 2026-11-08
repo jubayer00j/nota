@@ -207,16 +207,30 @@ object NoteExport {
     fun collectAttachmentIds(segments: List<DocSegment>): List<String> {
         val ids = LinkedHashSet<String>()
         val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
-        // The id runs to the next markup delimiter, not to an
-        // assumed alphabet: backup restore accepts any non-empty
-        // attachment id and stores it unchanged (the path-safety
-        // gate applies to the noteId segment, not the attachment
-        // id), so a restored id like "atté" must capture whole or
-        // its inline images never reach the resolver.
-        val inlineRe = Regex("""nota-attachment://([^\s"'<>]+)""")
-        fun scan(html: String) {
-            for (match in inlineRe.findAll(html)) ids += match.groupValues[1]
+        // IDs come only from image source attributes — the same
+        // positions the converters resolve. A URI that merely
+        // appears in a comment, a script, a link href or literal
+        // text is not an image: collecting it would make the
+        // editor preload the attachment and charge it against
+        // the embed budget ahead of real images. Attribute
+        // values are taken whole (no assumed alphabet): backup
+        // restore accepts any non-empty attachment id and stores
+        // it unchanged, so a restored id like "atté" must reach
+        // the resolver intact.
+        fun collectFrom(nodes: List<HtmlNode>) {
+            for (node in nodes) {
+                if (node is HtmlElement) {
+                    if (node.name == "img") {
+                        val src = node.attrs["src"]
+                        if (src != null && src.startsWith(prefix)) {
+                            ids += src.removePrefix(prefix)
+                        }
+                    }
+                    collectFrom(node.children)
+                }
+            }
         }
+        fun scan(html: String) = collectFrom(parseFragment(html))
         for (segment in segments) {
             when (segment) {
                 is ImageSegment -> {
@@ -228,7 +242,12 @@ object NoteExport {
                 is QuoteSegment -> scan(segment.innerHtml)
                 is TableSegment -> segment.rows.forEach { row -> row.forEach(::scan) }
                 is TaskListSegment -> segment.items.forEach { scan(it.contentHtml) }
-                is OpaqueSegment -> scan(segment.rawHtml)
+                // Opaque blocks are collected from the sanitised
+                // fragment, so sources inside dropped elements
+                // (scripts, comments) never queue.
+                is OpaqueSegment -> collectFrom(
+                    parseFragment(sanitizeOpaqueHtml(segment.rawHtml)),
+                )
                 else -> Unit
             }
         }
@@ -399,7 +418,12 @@ object NoteExport {
                 when (node) {
                     is HtmlText -> pending.append(node.text)
                     is HtmlElement ->
-                        if (node.name == "img") {
+                        if (node.name in FRAGMENT_DROP_ELEMENTS) {
+                            // Dropped with its subtree, matching the
+                            // HTML path: script/style content is not
+                            // note text and its images never resolve.
+                            Unit
+                        } else if (node.name == "img") {
                             flushText()
                             parts += OpaquePart.Image(
                                 node.attrs["src"] ?: "",
