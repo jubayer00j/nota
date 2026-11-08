@@ -45,6 +45,16 @@ class SearchSemanticHintRobolectricTest {
             .allowMainThreadQueries()
             .build()
         store = AiSettingsStore(PreferencesRepository(context), FakeAiKeyCipher())
+        // The store sits on the app-wide DataStore, which outlives
+        // each method: a key one test saves would otherwise still be
+        // there for the next, making outcomes depend on run order.
+        // Wipe both accounts this suite uses BEFORE the view model
+        // exists, so its first state read sees the pristine no-key
+        // state (clearing after construction could race that read).
+        runBlocking {
+            store.clearAccount(account)
+            store.clearAccount("someone-else")
+        }
         viewModel = SearchViewModel(
             repository = NoteRepository(DatabaseProvider.forDatabase(context, db)),
             semanticIndexer = null,
@@ -55,6 +65,13 @@ class SearchSemanticHintRobolectricTest {
 
     @After
     fun tearDown() {
+        // Leave the shared DataStore as setUp found it: nothing a
+        // test saved may leak into a later method (JUnit runs this
+        // even when the test itself fails).
+        runBlocking {
+            store.clearAccount(account)
+            store.clearAccount("someone-else")
+        }
         db.close()
     }
 
