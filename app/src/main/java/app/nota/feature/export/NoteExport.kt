@@ -1023,6 +1023,42 @@ object NoteExport {
     private val OPAQUE_DROP_TAG =
         Regex("""(?is)</?(script|style|iframe|object|embed|form|link|meta|base|animatetransform|animatemotion|animate|set)\b[^>]*>""")
 
+/**
+     * The index just past the end of the HTML comment starting
+     * at [lt] (which points at a "<!--"), following the HTML5
+     * tokenizer rather than a plain "-->" search: "<!-->" and
+     * "<!--->" close abruptly, "-->" or "--!>" ends a longer
+     * comment, and an unterminated comment runs to the end of
+     * the input. A scanner that only knows "-->" treats the
+     * rest of the block as comment where a browser sees live
+     * markup — the abrupt forms hid active tags from the
+     * scrubber entirely.
+     */
+    private fun commentEnd(html: String, lt: Int): Int {
+        val start = lt + 4
+        if (start < html.length && html[start] == '>') return start + 1
+        if (start + 1 < html.length && html[start] == '-' &&
+            html[start + 1] == '>'
+        ) {
+            return start + 2
+        }
+        var i = start
+        while (true) {
+            val dash = html.indexOf("--", i)
+            if (dash < 0) return html.length
+            val after = dash + 2
+            if (after < html.length && html[after] == '>') {
+                return after + 1
+            }
+            if (after + 1 < html.length && html[after] == '!' &&
+                html[after + 1] == '>'
+            ) {
+                return after + 2
+            }
+            i = dash + 1
+        }
+    }
+
     private fun sanitizeOpaqueHtml(rawHtml: String): String {
         var out = OPAQUE_DROP_WITH_CONTENTS.replace(rawHtml, "")
         out = OPAQUE_DROP_TAG.replace(out, "")
@@ -1038,8 +1074,7 @@ object NoteExport {
             }
             result.append(out, i, lt)
             if (out.startsWith("<!--", lt)) {
-                val end = out.indexOf("-->", lt + 4)
-                val stop = if (end < 0) out.length else end + 3
+                val stop = commentEnd(out, lt)
                 result.append(out, lt, stop)
                 i = stop
                 continue
@@ -1387,8 +1422,7 @@ object NoteExport {
             }
             text.append(html.substring(i, lt))
             if (html.startsWith("<!--", lt)) {
-                val end = html.indexOf("-->", lt + 4)
-                i = if (end < 0) html.length else end + 3
+                i = commentEnd(html, lt)
                 continue
             }
             val tag = readTag(html, lt)
