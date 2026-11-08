@@ -301,4 +301,37 @@ class NoteExportMarkdownTest {
         assertTrue(plain.contains("```\nplain\n```"))
     }
 
+    @Test
+    fun typedOrderedListsExportWithNumericMarkers() {
+        // CommonMark has no lettered markers: a typed list keeps
+        // its start and structure with numeric markers instead
+        // of degrading into plain paragraphs.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    "<ol type=\"a\" start=\"3\"><li>third</li><li>fourth</li></ol>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("3. third\n4. fourth"))
+        assertFalse(out.contains("c. third"))
+    }
+
+    @Test
+    fun nestedListIndentsPastTheParentMarker() {
+        // Under "10. " the content column is 4 — a child indented
+        // by only two spaces detaches in strict renderers.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    "<ol start=\"10\"><li>ten<ul><li>child</li></ul></li>" +
+                        "<li>eleven</li></ol>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("10. ten\n    - child\n11. eleven"))
+    }
+
 }
