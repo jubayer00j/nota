@@ -1,6 +1,7 @@
 package app.nota.feature.export
 
 import app.nota.data.html.ImageSegment
+import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.TableCellSpan
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TextSegment
@@ -143,7 +144,54 @@ class NoteExportHtmlTest {
         assertTrue(
             out.contains("<p class=\"noma-chart-placeholder\">[Bar chart]</p>"),
         )
-        // Opaque blocks are preserved verbatim (their contract).
+        // Benign opaque blocks are preserved as stored.
         assertTrue(out.contains("<div class=\"embed\"><p>Embedded words</p></div>"))
+    }
+
+    @Test
+    fun opaqueHtmlIsScrubbedOfActiveContentOnExport() {
+        // The in-note round-trip keeps foreign HTML byte-faithful,
+        // but the exported standalone file is opened in a browser:
+        // active content must not survive the export path.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<div class=\"embed\">" +
+                        "<script>alert(1)</script>" +
+                        "<p onclick=\"evil()\">Hi</p>" +
+                        "<img src=\"https://example.com/x.png\" onerror=\"evil()\">" +
+                        "<a href=\"JaVaScRiPt:alert(1)\">click</a>" +
+                        "<a href=\"data:text/html;base64,PHNjcmlwdD4=\">data</a>" +
+                        "<iframe src=\"https://evil.example\"></iframe>" +
+                        "<form action=\"https://evil.example\">" +
+                        "<input type=\"text\"></form>" +
+                        "<p>Safe &amp; sound</p>" +
+                        "</div>",
+                ),
+            ),
+        )
+        assertFalse(out.contains("<script"))
+        assertFalse(out.contains("alert(1)"))
+        assertFalse(out.contains("onclick"))
+        assertFalse(out.contains("onerror"))
+        assertFalse(out.lowercase().contains("javascript:"))
+        assertFalse(out.contains("data:text/html"))
+        assertFalse(out.contains("<iframe"))
+        assertFalse(out.contains("<form"))
+        // Scriptable targets are neutralised, not dropped silently.
+        assertTrue(out.contains("<a href=\"#\">click</a>"))
+        // Benign markup survives scrubbing unchanged.
+        assertTrue(out.contains("<div class=\"embed\">"))
+        assertTrue(out.contains("<p>Hi</p>"))
+        assertTrue(out.contains("<p>Safe &amp; sound</p>"))
+    }
+
+    @Test
+    fun benignOpaqueHtmlPassesThroughByteStable() {
+        val benign =
+            "<table class=\"grid\"><tr><td colspan=\"2\">Cell</td></tr></table>"
+        val out = NoteExport.noteToHtml("T", listOf(OpaqueSegment(benign)))
+        assertTrue(out.contains(benign))
     }
 }

@@ -1,5 +1,6 @@
 package app.nota.feature.export
 
+import app.nota.data.html.CodeSegment
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TextSegment
 import org.junit.Assert.assertEquals
@@ -90,6 +91,72 @@ class NoteExportMarkdownTest {
     fun codeWithBackticksUsesALongerFence() {
         val out = md()
         assertTrue(out.contains("````\nval x = \"a ``` b\" // <not> a tag\n````"))
+    }
+
+    @Test
+    fun codeWithLongBacktickRunsGetsAnEvenLongerFence() {
+        // Runs of four and six backticks inside the code would
+        // close a three- or four-backtick fence early; the fence
+        // must outrun the longest run.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(CodeSegment("before\n````\nmiddle\n``````\nafter")),
+        )
+        assertTrue(
+            out.contains("```````\nbefore\n````\nmiddle\n``````\nafter\n```````"),
+        )
+    }
+
+    @Test
+    fun literalBlockMarkersStayLiteral() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p># not a heading</p>" +
+                        "<p>> not a quote</p>" +
+                        "<p>- not a list</p>" +
+                        "<p>+ not a bullet</p>" +
+                        "<p>1. not a list either</p>" +
+                        "<p>2) also not a list</p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("\\# not a heading"))
+        assertTrue(out.contains("\\> not a quote"))
+        assertTrue(out.contains("\\- not a list"))
+        assertTrue(out.contains("\\+ not a bullet"))
+        assertTrue(out.contains("1\\. not a list either"))
+        assertTrue(out.contains("2\\) also not a list"))
+        assertFalse(out.contains("\n# not a heading"))
+    }
+
+    @Test
+    fun markersMidLineAreNotEscaped() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(TextSegment("<p>a # b and 1. mid and - mid</p>")),
+        )
+        assertTrue(out.contains("a # b and 1. mid and - mid"))
+    }
+
+    @Test
+    fun linkDestinationsWithDelimitersUseTheAngleForm() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TextSegment(
+                    "<p><a href=\"https://example.test/path)\">unmatched</a> " +
+                        "<a href=\"https://en.wikipedia.org/wiki/Foo_(bar)\">wiki</a> " +
+                        "<a href=\"https://example.test/a b\">spaced</a> " +
+                        "<a href=\"https://example.test/plain\">plain</a></p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("[unmatched](<https://example.test/path)>)"))
+        assertTrue(out.contains("[wiki](<https://en.wikipedia.org/wiki/Foo_(bar)>)"))
+        assertTrue(out.contains("[spaced](<https://example.test/a b>)"))
+        assertTrue(out.contains("[plain](https://example.test/plain)"))
     }
 
     @Test

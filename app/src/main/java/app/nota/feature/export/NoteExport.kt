@@ -194,7 +194,11 @@ object NoteExport {
 
     private fun mdFence(text: String): String {
         val content = text.trimEnd('\n')
-        val fence = if (content.contains("```")) "````" else "```"
+        // The fence must outrun the longest backtick run inside the
+        // code, or that run closes the block early — the rule
+        // mdCodeSpan already applies to inline code.
+        val longestRun = Regex("`+").findAll(content).maxOfOrNull { it.value.length } ?: 0
+        val fence = "`".repeat(maxOf(3, longestRun + 1))
         return "$fence\n$content\n$fence"
     }
 
@@ -231,9 +235,9 @@ object NoteExport {
         return when {
             src.startsWith(prefix) -> {
                 val data = resolve(src.removePrefix(prefix))
-                if (data != null) "![$cleanAlt]($data)" else "[Image]"
+                if (data != null) "![$cleanAlt](${mdLinkDestination(data)})" else "[Image]"
             }
-            src.isNotBlank() -> "![$cleanAlt]($src)"
+            src.isNotBlank() -> "![$cleanAlt](${mdLinkDestination(src)})"
             else -> "[Image]"
         }
     }
@@ -358,7 +362,8 @@ object NoteExport {
                         "a" -> {
                             val href = node.attrs["href"]
                             if (!href.isNullOrEmpty()) {
-                                out.append("[").append(inner).append("](").append(href).append(")")
+                                out.append("[").append(inner).append("](")
+                                    .append(mdLinkDestination(href)).append(")")
                             } else {
                                 out.append(inner)
                             }
@@ -376,8 +381,71 @@ object NoteExport {
     }
 
     /** Escapes the characters that would re-parse as Markdown structure. */
-    private fun escapeMdText(text: String): String =
-        text.replace(Regex("([\\\\`*_\\[\\]<])"), "\\\\$1")
+    private fun escapeMdText(text: String): String {
+        val escaped = text.replace(Regex("([\\\\`*_\\[\\]<])"), "\\\\$1")
+        // Inline escaping is not enough: a literal line that STARTS
+        // with a block marker (heading, quote, list, thematic break)
+        // would re-parse as that structure instead of the note's
+        // words, so each line's leading marker is escaped too.
+        return escaped.split('\n').joinToString("\n") { escapeMdLineStart(it) }
+    }
+
+    /**
+     * Escapes a block-level marker at a line start (up to three
+     * leading spaces, per CommonMark). Markers mid-line, and marker
+     * characters that would not form a block construct ("#tag",
+     * "1.5"), are left alone.
+     */
+    private fun escapeMdLineStart(line: String): String {
+        val indent = line.takeWhile { it == ' ' }
+        if (indent.length > 3) return line
+        val rest = line.substring(indent.length)
+        if (rest.isEmpty()) return line
+        // Thematic break: only -, * or _ (and spaces), three or more.
+        val compact = rest.replace(" ", "")
+        if (compact.length >= 3 &&
+            (compact.all { it == '-' } || compact.all { it == '*' } || compact.all { it == '_' })
+        ) {
+            return indent + "\\" + rest
+        }
+        val first = rest[0]
+        // Block markers bind when followed by a space or end of line.
+        fun markerBinds(end: Int): Boolean =
+            end >= rest.length || rest[end] == ' ' || rest[end] == '\t'
+        return when {
+            first == '#' -> {
+                val hashes = rest.takeWhile { it == '#' }.length
+                if (hashes <= 6 && markerBinds(hashes)) indent + "\\" + rest else line
+            }
+            first == '>' -> indent + "\\" + rest
+            first == '-' || first == '+' ->
+                if (markerBinds(1)) indent + "\\" + rest else line
+            first.isDigit() -> {
+                val digits = rest.takeWhile { it.isDigit() }.length
+                val punct = digits
+                if (digits <= 9 && punct < rest.length &&
+                    (rest[punct] == '.' || rest[punct] == ')') && markerBinds(punct + 1)
+                ) {
+                    indent + rest.substring(0, punct) + "\\" + rest.substring(punct)
+                } else {
+                    line
+                }
+            }
+            else -> line
+        }
+    }
+
+    /**
+     * A Markdown link destination: bare when plain, the CommonMark
+     * angle form when it carries whitespace or parentheses — a raw
+     * ")" would end the destination early and truncate the target.
+     */
+    private fun mdLinkDestination(href: String): String =
+        if (href.any { it.isWhitespace() || it == '(' || it == ')' }) {
+            "<" + href.replace("<", "\\<").replace(">", "\\>") + ">"
+        } else {
+            href
+        }
 
     private fun mdCodeSpan(text: String): String {
         val longestRun = Regex("`+").findAll(text).maxOfOrNull { it.value.length } ?: 0
@@ -685,7 +753,7 @@ object NoteExport {
             DividerSegment -> "<hr>"
             is ChartSegment ->
                 "<p class=\"noma-chart-placeholder\">${chartPlaceholder(segment)}</p>"
-            is OpaqueSegment -> resolveOpaqueImages(segment.rawHtml, resolve)
+            is OpaqueSegment -> resolveOpaqueImages(sanitizeOpaqueHtml(segment.rawHtml), resolve)
         }
 
     private fun htmlTable(segment: TableSegment, resolve: AttachmentResolver): String {
@@ -713,10 +781,185 @@ object NoteExport {
         return out.toString()
     }
 
+    // ------------------------------------------------- Opaque scrubbing
+    //
+    // Opaque segments preserve foreign HTML byte-faithfully in the
+    // note (that round-trip contract stands, untouched), but an
+    // exported standalone HTML file gets opened in a browser by
+    // whoever receives it — so on THIS path only, active content
+    // is scrubbed out before anything is emitted: script-bearing
+    // elements dropped whole, event-handler attributes stripped,
+    // scriptable href/src targets neutralised. Benign markup
+    // passes through byte-stable apart from the scrubbed bits.
+
+    /** Elements dropped whole: open tag, contents and close tag. */
+    private val OPAQUE_DROP_WITH_CONTENTS =
+        Regex("""(?is)<(script|iframe|object|form)\b[^>]*>.*?</\1\s*>""")
+
+    /** Dangerous void elements and any dangling tags of the set. */
+    private val OPAQUE_DROP_TAG =
+        Regex("""(?is)</?(script|iframe|object|embed|form|link|meta|base)\b[^>]*>""")
+
+    private fun sanitizeOpaqueHtml(rawHtml: String): String {
+        var out = OPAQUE_DROP_WITH_CONTENTS.replace(rawHtml, "")
+        out = OPAQUE_DROP_TAG.replace(out, "")
+        // Walk the surviving tags (quote-aware) and scrub their
+        // attributes; text between tags is copied verbatim.
+        val result = StringBuilder(out.length)
+        var i = 0
+        while (i < out.length) {
+            val lt = out.indexOf('<', i)
+            if (lt < 0) {
+                result.append(out.substring(i))
+                break
+            }
+            result.append(out, i, lt)
+            if (out.startsWith("<!--", lt)) {
+                val end = out.indexOf("-->", lt + 4)
+                val stop = if (end < 0) out.length else end + 3
+                result.append(out, lt, stop)
+                i = stop
+                continue
+            }
+            var j = lt + 1
+            var quote: Char? = null
+            while (j < out.length) {
+                val ch = out[j]
+                if (quote != null) {
+                    if (ch == quote) quote = null
+                } else if (ch == '"' || ch == '\'') {
+                    quote = ch
+                } else if (ch == '>') {
+                    break
+                }
+                j++
+            }
+            if (j >= out.length) {
+                result.append(out.substring(lt))
+                break
+            }
+            result.append(scrubExportTag(out.substring(lt, j + 1)))
+            i = j + 1
+        }
+        return result.toString()
+    }
+
     /**
-     * Opaque blocks are preserved verbatim (that is their contract);
-     * only attachment image sources are rewritten — resolved ones to
-     * data URLs, unresolved ones to the "[Image]" placeholder span.
+     * Scrubs one tag: drops every on* event attribute, and points
+     * href/src values with a scriptable scheme at "#" instead.
+     * Everything else — tag name, attribute order, quoting style,
+     * benign values — is copied byte for byte.
+     */
+    private fun scrubExportTag(tag: String): String {
+        // Closing tags, declarations and processing instructions
+        // carry no attributes worth scrubbing.
+        if (tag.length < 3 || tag[1] == '/' || tag[1] == '!' || tag[1] == '?') return tag
+        val out = StringBuilder(tag.length)
+        var i = 0
+        // Copy "<name".
+        while (i < tag.length && !tag[i].isWhitespace() && tag[i] != '>' && tag[i] != '/') {
+            out.append(tag[i])
+            i++
+        }
+        while (i < tag.length) {
+            // Buffer the whitespace run in front of the next token:
+            // it is emitted only if what follows survives scrubbing.
+            val wsStart = i
+            while (i < tag.length && tag[i].isWhitespace()) i++
+            val ws = tag.substring(wsStart, i)
+            if (i >= tag.length) {
+                out.append(ws)
+                break
+            }
+            val ch = tag[i]
+            if (ch == '>') {
+                out.append(ws)
+                out.append(tag.substring(i))
+                break
+            }
+            if (ch == '/') {
+                out.append(ws)
+                out.append(ch)
+                i++
+                continue
+            }
+            // One attribute: name, then an optional = value.
+            val nameStart = i
+            while (i < tag.length && !tag[i].isWhitespace() &&
+                tag[i] != '=' && tag[i] != '>' && tag[i] != '/'
+            ) {
+                i++
+            }
+            val name = tag.substring(nameStart, i)
+            if (name.isEmpty()) {
+                out.append(ws)
+                out.append(tag[i])
+                i++
+                continue
+            }
+            var j = i
+            while (j < tag.length && tag[j].isWhitespace()) j++
+            var valueStart = -1
+            var valueEnd = -1
+            var valueQuote: Char? = null
+            if (j < tag.length && tag[j] == '=') {
+                j++
+                while (j < tag.length && tag[j].isWhitespace()) j++
+                if (j < tag.length && (tag[j] == '"' || tag[j] == '\'')) {
+                    valueQuote = tag[j]
+                    valueStart = j + 1
+                    var k = valueStart
+                    while (k < tag.length && tag[k] != valueQuote) k++
+                    valueEnd = k
+                    j = if (k < tag.length) k + 1 else k
+                } else {
+                    valueStart = j
+                    var k = j
+                    while (k < tag.length && !tag[k].isWhitespace() && tag[k] != '>') k++
+                    valueEnd = k
+                    j = k
+                }
+            }
+            val attrEnd = if (valueStart >= 0) j else i
+            val lower = name.lowercase()
+            when {
+                // Event handler: dropped, with its leading space.
+                lower.startsWith("on") && name.length > 2 -> Unit
+                (lower == "href" || lower == "src") && valueStart >= 0 &&
+                    isScriptableUrl(unescapeEntities(tag.substring(valueStart, valueEnd))) -> {
+                    out.append(ws)
+                    out.append(tag, nameStart, valueStart)
+                    out.append('#')
+                    if (valueQuote != null && valueEnd < tag.length) out.append(tag[valueEnd])
+                }
+                else -> {
+                    out.append(ws)
+                    out.append(tag, nameStart, attrEnd)
+                }
+            }
+            i = attrEnd
+        }
+        return out.toString()
+    }
+
+    /**
+     * A URL scheme that executes script in the file's context.
+     * Whitespace and control characters are ignored for the check
+     * (browsers strip them inside URLs), and the value is
+     * entity-decoded first ("&#106;avascript:" is still
+     * "javascript:" to a browser).
+     */
+    private fun isScriptableUrl(value: String): Boolean {
+        val compact = value.filter { it > ' ' }.lowercase()
+        return compact.startsWith("javascript:") || compact.startsWith("data:text/html")
+    }
+
+    /**
+     * Attachment image sources in an opaque block are rewritten —
+     * resolved ones to data URLs, unresolved ones to the "[Image]"
+     * placeholder span. The block arrives here already scrubbed of
+     * active content (see sanitizeOpaqueHtml); benign markup is
+     * otherwise emitted as preserved.
      */
     private fun resolveOpaqueImages(rawHtml: String, resolve: AttachmentResolver): String {
         val imgRe = Regex("""(?is)<img\b[^>]*>""")
