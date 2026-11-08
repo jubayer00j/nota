@@ -248,4 +248,46 @@ class TableOpsTest {
         assertEquals(2, appended.cellSpans[0][0].rowSpan)
         assertEquals(2, appended.rows[3].size)
     }
+
+    @Test
+    fun columnsAddressThePlacedGridWhenRowspansShiftCells() {
+        // Codex PR #34 re-review P2: column addressing must come
+        // from the placed grid, not a per-row scan. Here Tall
+        // (rowspan 2) occupies visual column 0 of BOTH rows, so
+        // row 1's only cell, C, sits at visual column 1 — a
+        // per-row scan restarts at 0 and would address C as
+        // column 0, aiming operations at Tall's column instead.
+        val parsed = NoteDocument.parse(
+            "<table><tbody>" +
+                "<tr><td rowspan=\"2\">Tall</td><td>B</td></tr>" +
+                "<tr><td>C</td></tr>" +
+                "</tbody></table>",
+        ).single() as TableSegment
+
+        assertEquals(2, TableOps.visualColumns(parsed))
+        assertEquals(0, TableOps.visualColumnOf(parsed, 0, 0)) // Tall
+        assertEquals(1, TableOps.visualColumnOf(parsed, 0, 1)) // B
+        assertEquals(1, TableOps.visualColumnOf(parsed, 1, 0)) // C
+
+        // Deleting C's real column (visual 1) removes C and B;
+        // Tall, covering only column 0, is untouched. (Pre-fix,
+        // "C is column 0" made this call destroy Tall and C.)
+        val deleted = TableOps.deleteColumn(parsed, 1)
+        assertEquals(listOf(listOf("Tall"), emptyList<String>()), deleted.rows)
+        assertEquals(2, deleted.cellSpans[0][0].rowSpan)
+
+        // Deleting visual column 0 removes Tall — it sits exactly
+        // there in both rows — and leaves B and C aligned at 0.
+        val deleted0 = TableOps.deleteColumn(parsed, 0)
+        assertEquals(listOf(listOf("B"), listOf("C")), deleted0.rows)
+
+        // Inserting at visual 0 puts a blank before every row's
+        // first cell; Tall's descent follows it to column 1 and
+        // pushes C to column 2 in the re-placed grid.
+        val inserted = TableOps.insertColumn(parsed, 0)
+        assertEquals(listOf("", "Tall", "B"), inserted.rows[0])
+        assertEquals(listOf("", "C"), inserted.rows[1])
+        assertEquals(1, TableOps.visualColumnOf(inserted, 0, 1))
+        assertEquals(2, TableOps.visualColumnOf(inserted, 1, 1))
+    }
 }

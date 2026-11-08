@@ -1539,8 +1539,13 @@ fun RichNoteEditorScreen(
                 // Phase 6 (Editor Refinement #1): "Start writing…"
                 // belongs to the note's FIRST text segment only —
                 // later empty segments are working space, not the
-                // start of the note (see SegmentEditor).
-                showBodyPlaceholder = index == 0 && ui.segment is TextSegment,
+                // start of the note (see SegmentEditor). First
+                // TEXT segment, not document index 0 (Codex PR #34
+                // P3): a note that starts with a block — an image
+                // inserted into an empty note — has its first text
+                // segment at index 1 and must still show it.
+                showBodyPlaceholder = ui.segment is TextSegment &&
+                    segments.take(index).none { it.segment is TextSegment },
                 trailingFocusRequester = trailingFocusRequester,
                 focusRequester = segmentFocusRequesters
                     .getOrPut(ui.id) { FocusRequester() },
