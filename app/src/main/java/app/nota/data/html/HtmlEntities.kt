@@ -31,11 +31,27 @@ object HtmlEntities {
                 break
             }
             out.append(value, i, amp)
-            val semi = value.indexOf(';', amp + 1)
-            // The longest HTML5 name is 31 characters; a numeric
-            // reference is at most 10. Anything longer between
-            // '&' and ';' is not a reference.
-            if (semi < 0 || semi - amp > 34) {
+            // The longest HTML5 name is 31 characters and a
+            // numeric reference at most 10, so the closing ';'
+            // — if this is a reference at all — sits within
+            // the next 34 characters. The scan is bounded on
+            // purpose: hunting through the whole remaining
+            // suffix for every '&' would make ampersand-heavy
+            // text (a long code block full of & operators)
+            // quadratic to decode.
+            var semi = -1
+            val limit = minOf(value.length, amp + 35)
+            var j = amp + 1
+            while (j < limit) {
+                val ch = value[j]
+                if (ch == ';') {
+                    semi = j
+                    break
+                }
+                if (ch == '&') break
+                j++
+            }
+            if (semi < 0) {
                 out.append('&')
                 i = amp + 1
                 continue
