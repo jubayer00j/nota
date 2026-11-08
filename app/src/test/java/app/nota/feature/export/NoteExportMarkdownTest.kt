@@ -1,6 +1,8 @@
 package app.nota.feature.export
 
 import app.nota.data.html.CodeSegment
+import app.nota.data.html.FileSegment
+import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TextSegment
@@ -332,6 +334,43 @@ class NoteExportMarkdownTest {
             ),
         )
         assertTrue(out.contains("10. ten\n    - child\n11. eleven"))
+    }
+
+    @Test
+    fun fileNamesAreEscapedInMarkdownPlaceholders() {
+        // A file name is user data: unescaped, a name holding
+        // "](" would turn the placeholder into a clickable link.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                FileSegment(
+                    attachmentId = "f1",
+                    fileName = "a](https://example.test) b.pdf",
+                ),
+            ),
+        )
+        assertTrue(
+            out.contains("[File: a\\](https://example.test) b.pdf]"),
+        )
+        assertFalse(out.contains("[File: a](https://example.test)"))
+    }
+
+    @Test
+    fun opaqueTextIsEscapedInMarkdown() {
+        // An opaque block's extracted words are plain text: a
+        // leading "#" or a link shape must not re-parse as
+        // Markdown structure.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<p># literal and [label](https://example.test)</p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("\\# literal"))
+        assertTrue(out.contains("\\[label\\]"))
+        assertFalse(out.contains("\n# literal"))
     }
 
 }
