@@ -429,7 +429,14 @@ object NoteExport {
                         "code" -> out.append(mdCodeSpan(textContent(node.children)))
                         "a" -> {
                             val href = node.attrs["href"]
-                            if (!href.isNullOrEmpty()) {
+                            // A Markdown link is a navigation:
+                            // scriptable and active-data targets
+                            // export as their label only, the
+                            // same destinations HTML export
+                            // points at "#".
+                            if (!href.isNullOrEmpty() &&
+                                !isScriptableUrl(href) && !isActiveDataUrl(href)
+                            ) {
                                 out.append("[").append(inner).append("](")
                                     .append(mdLinkDestination(href)).append(")")
                             } else {
@@ -1045,7 +1052,10 @@ object NoteExport {
                     }
                 }
                 isUrlAttr(lower) && valueStart >= 0 &&
-                    isScriptableUrl(unescapeEntities(tag.substring(valueStart, valueEnd))) -> {
+                    isBlockedUrl(
+                        lower,
+                        unescapeEntities(tag.substring(valueStart, valueEnd)),
+                    ) -> {
                     out.append(ws)
                     out.append(tag, nameStart, valueStart)
                     out.append('#')
@@ -1085,6 +1095,37 @@ object NoteExport {
     }
 
     /**
+     * A data: URL whose document can script when NAVIGATED
+     * to: an SVG or XHTML payload opened as a top-level
+     * document runs its scripts, unlike the same URL in an
+     * <img>, where the browser renders it in a script-disabled
+     * context. Checked on navigation attributes only (href,
+     * formaction); image sources keep data: URLs that are
+     * safe there, including SVG pictures and the resolved
+     * attachment payloads.
+     */
+    private fun isActiveDataUrl(value: String): Boolean {
+        val compact = value.filter { it > ' ' }.lowercase()
+        if (!compact.startsWith("data:")) return false
+        val mediaType = compact.substring(5).takeWhile { it != ';' && it != ',' }
+        return mediaType in ACTIVE_DATA_TYPES
+    }
+
+    private val ACTIVE_DATA_TYPES =
+        setOf("text/html", "image/svg+xml", "application/xhtml+xml")
+
+    /** Attributes that navigate when activated. */
+    private fun isNavAttr(lowerName: String): Boolean =
+        lowerName.substringAfterLast(':') in NAV_ATTRS
+
+    private val NAV_ATTRS = setOf("href", "formaction")
+
+    /** The full URL scrub test for one attribute. */
+    private fun isBlockedUrl(lowerName: String, value: String): Boolean =
+        isScriptableUrl(value) ||
+            (isNavAttr(lowerName) && isActiveDataUrl(value))
+
+    /**
      * Attachment image sources in an opaque block are rewritten —
      * resolved ones to data URLs, unresolved ones to the "[Image]"
      * placeholder span. The block arrives here already scrubbed of
@@ -1097,6 +1138,7 @@ object NoteExport {
             val tag = match.value
             val srcMatch = Regex("""(?i)\bsrc\s*=\s*"([^"]*)"""").find(tag)
                 ?: Regex("""(?i)\bsrc\s*=\s*'([^']*)'""").find(tag)
+                ?: Regex("""(?i)\bsrc\s*=\s*([^\s>]+)""").find(tag)
             val src = srcMatch?.groupValues?.get(1) ?: return@replace tag
             val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
             if (!src.startsWith(prefix)) return@replace tag
@@ -1387,7 +1429,7 @@ object NoteExport {
         fun dirty(name: String, value: String): Boolean {
             val lower = name.lowercase()
             return (lower.startsWith("on") && name.length > 2) ||
-                (isUrlAttr(lower) && isScriptableUrl(value)) ||
+                (isUrlAttr(lower) && isBlockedUrl(lower, value)) ||
                 lower == "background" ||
                 (lower == "style" && styleNeedsRewrite(value))
         }
@@ -1400,7 +1442,7 @@ object NoteExport {
                 lower == "background" -> Unit
                 lower == "style" ->
                     sanitizeStyleAttr(value)?.let { out[name] = it }
-                isUrlAttr(lower) && isScriptableUrl(value) ->
+                isUrlAttr(lower) && isBlockedUrl(lower, value) ->
                     out[name] = "#"
                 else -> out[name] = value
             }
