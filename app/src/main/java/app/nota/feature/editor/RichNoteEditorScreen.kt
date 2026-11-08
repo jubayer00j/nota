@@ -1303,6 +1303,7 @@ fun RichNoteEditorScreen(
             try {
                 val artifact = withContext(Dispatchers.IO) {
                     val resolved = HashMap<String, String>()
+                    var readImageBytes = 0L
                     // Plain text never embeds images (named placeholders
                     // only, and the text converter never consults the
                     // resolver), so skip the attachment reads entirely.
@@ -1312,9 +1313,20 @@ fun RichNoteEditorScreen(
                                 ?: continue
                             val dataUrl = runCatching {
                                 val file = viewModel.attachmentFile(entity)
-                                if (!file.exists()) {
+                                // Never even read a file the export
+                                // budget would refuse (see NoteExport's
+                                // embedding budget): one huge photo
+                                // must not spike memory only to be
+                                // rejected after the fact.
+                                if (!file.exists() ||
+                                    file.length() >
+                                        NoteExport.MAX_SINGLE_IMAGE_BYTES ||
+                                    readImageBytes + file.length() >
+                                        NoteExport.MAX_EMBEDDED_IMAGE_BYTES
+                                ) {
                                     null
                                 } else {
+                                    readImageBytes += file.length()
                                     "data:${entity.mimeType};base64," +
                                         Base64.getEncoder()
                                             .encodeToString(file.readBytes())
