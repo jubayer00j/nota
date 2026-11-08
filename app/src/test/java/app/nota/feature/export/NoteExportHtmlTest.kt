@@ -643,7 +643,8 @@ class NoteExportHtmlTest {
         )
         assertTrue(out.contains("href=\"#\""))
         assertFalse(out.contains("alert(1)"))
-        assertTrue(out.contains("data:image/svg+xml,<svg><rect/></svg>"))
+        assertTrue(out.contains("data:image/svg+xml,"))
+        assertFalse(out.contains("href=\"data:"))
     }
 
     @Test
@@ -655,7 +656,7 @@ class NoteExportHtmlTest {
                     "<picture><img src=nota-attachment://img1 alt=\"diagram\"></picture>",
                 ),
             ),
-            exportResolver,
+            pngDataResolver,
         )
         assertTrue(out.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""))
         assertFalse(out.contains("nota-attachment://"))
