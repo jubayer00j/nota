@@ -1104,10 +1104,10 @@ object NoteExport {
                 // a clean colour style copies verbatim below.
                 lower == "style" && valueStart >= 0 &&
                     styleNeedsRewrite(
-                        unescapeEntities(tag.substring(valueStart, valueEnd)),
+                        unescapeAttrValue(tag.substring(valueStart, valueEnd)),
                     ) -> {
                     val clean = sanitizeStyleAttr(
-                        unescapeEntities(tag.substring(valueStart, valueEnd)),
+                        unescapeAttrValue(tag.substring(valueStart, valueEnd)),
                     )
                     if (clean != null) {
                         out.append(ws)
@@ -1124,7 +1124,7 @@ object NoteExport {
                 isUrlAttr(lower) && valueStart >= 0 &&
                     isBlockedUrl(
                         lower,
-                        unescapeEntities(tag.substring(valueStart, valueEnd)),
+                        unescapeAttrValue(tag.substring(valueStart, valueEnd)),
                     ) -> {
                     out.append(ws)
                     out.append(tag, nameStart, valueStart)
@@ -1445,7 +1445,7 @@ object NoteExport {
                         }
                     }
                     if (attrName.isNotEmpty()) {
-                        attrs[attrName] = unescapeEntities(attrValue)
+                        attrs[attrName] = unescapeAttrValue(attrValue)
                     }
                 }
             }
@@ -1463,6 +1463,9 @@ object NoteExport {
      * references outside the Unicode range become U+FFFD.
      */
     private fun unescapeEntities(text: String): String = HtmlEntities.decode(text)
+
+    private fun unescapeAttrValue(text: String): String =
+        HtmlEntities.decode(text, inAttribute = true)
 
     /**
      * Active elements that never survive HTML export, dropped
