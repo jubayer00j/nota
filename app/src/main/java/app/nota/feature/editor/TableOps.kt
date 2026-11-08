@@ -20,8 +20,19 @@ import app.nota.data.html.TableSegment
  * deletions therefore mirror rows and spans together — an insert
  * into an empty spans list must stay empty (padding just one row
  * would break the parallel), and a non-empty list gains/loses the
- * same cells the rows do. Cell CONTENT is never touched: inserting
- * adds blank cells, deleting drops exactly the addressed row/column.
+ * same cells the rows do.
+ *
+ * Column addressing is VISUAL (grid) addressing: a cell with
+ * colSpan 2 covers two columns. Deleting one of those columns
+ * shrinks the cell's span and KEEPS its content; only a column a
+ * span-1 cell sits in removes that cell (Codex PR #34 P2 — the
+ * first cut addressed raw cell indices and deleting the left half
+ * of a merged header cell destroyed the whole cell). Inserting a
+ * column strictly inside a merged cell grows its span instead of
+ * splitting it. For span-free tables visual columns ARE the cell
+ * indices, so behaviour there is unchanged. Row addressing is by
+ * row index as before (a rowspan cell lives in its starting row in
+ * this model — the pre-existing discipline).
  */
 internal object TableOps {
 
@@ -39,10 +50,34 @@ internal object TableOps {
         return TableSegment(List(r) { List(c) { "" } }, headerRow)
     }
 
+    /** The colSpan of the cell at ([row], [cellIndex]); 1 when span-free. */
+    fun colSpanOf(table: TableSegment, row: Int, cellIndex: Int): Int =
+        table.cellSpans.getOrNull(row)?.getOrNull(cellIndex)?.colSpan
+            ?.coerceAtLeast(1) ?: 1
+
+    /**
+     * The VISUAL column at which the cell at ([row], [cellIndex])
+     * starts — the summed colspans of the cells before it in its row.
+     */
+    fun visualColumnOf(table: TableSegment, row: Int, cellIndex: Int): Int {
+        val cells = table.rows.getOrNull(row) ?: return 0
+        var visual = 0
+        for (i in 0 until minOf(cellIndex, cells.size)) {
+            visual += colSpanOf(table, row, i)
+        }
+        return visual
+    }
+
+    /** The table's visual column count (max over rows of summed colspans). */
+    fun visualColumns(table: TableSegment): Int =
+        table.rows.indices.maxOfOrNull { row ->
+            table.rows[row].indices.sumOf { colSpanOf(table, row, it) }
+        } ?: 0
+
     /** Insert a blank row BEFORE row index [at] (at == row count appends). */
     fun insertRow(table: TableSegment, at: Int): TableSegment {
         if (at !in 0..table.rows.size) return table
-        val cols = table.rows.firstOrNull()?.size ?: 0
+        val cols = visualColumns(table)
         val rows = table.rows.toMutableList().apply { add(at, List(cols) { "" }) }
         // Mirror the pre-existing "+ Row" handler: an empty spans
         // list stays empty; a parallel one gains the same row.
@@ -64,27 +99,110 @@ internal object TableOps {
         )
     }
 
-    /** Insert a blank column BEFORE column index [at] (at == col count appends). */
+    /**
+     * Insert a blank column BEFORE visual column [at] (at == the
+     * visual column count appends). A row whose merged cell strictly
+     * spans over [at] grows that cell's span by one instead of
+     * gaining a cell — the merged cell's content is never split.
+     */
     fun insertColumn(table: TableSegment, at: Int): TableSegment {
-        val cols = table.rows.firstOrNull()?.size ?: 0
-        if (at !in 0..cols) return table
+        if (at !in 0..visualColumns(table)) return table
+        val newRows = ArrayList<List<String>>(table.rows.size)
+        val newSpans = ArrayList<List<TableCellSpan>>(table.rows.size)
+        for (r in table.rows.indices) {
+            val row = table.rows[r]
+            val spans = table.cellSpans.getOrNull(r)
+            var visual = 0
+            var insertIndex = row.size // default: append at the row's end
+            var grownIndex = -1
+            for (i in row.indices) {
+                val span = colSpanOf(table, r, i)
+                if (at in (visual + 1) until (visual + span)) {
+                    grownIndex = i
+                    break
+                }
+                if (visual >= at) {
+                    insertIndex = i
+                    break
+                }
+                visual += span
+            }
+            if (grownIndex >= 0) {
+                newRows += row
+                if (spans != null) {
+                    newSpans += spans.mapIndexed { i, s ->
+                        if (i == grownIndex) s.copy(colSpan = s.colSpan + 1) else s
+                    }
+                }
+            } else {
+                newRows += row.toMutableList().apply { add(insertIndex, "") }
+                if (spans != null) {
+                    newSpans += spans.toMutableList().apply {
+                        add(insertIndex, TableCellSpan())
+                    }
+                }
+            }
+        }
         return TableSegment(
-            table.rows.map { row -> row.toMutableList().apply { add(at, "") } },
+            newRows,
             table.headerRow,
-            table.cellSpans.map { row ->
-                row.toMutableList().apply { add(at, TableCellSpan()) }
-            },
+            if (table.cellSpans.isEmpty()) emptyList() else newSpans,
         )
     }
 
-    /** Delete column [at]; a no-op on a one-column table or a bad index. */
+    /**
+     * Delete visual column [at]; a no-op on a one-visual-column
+     * table or a bad index. The cell covering [at] in each row is
+     * dropped when its colSpan is 1, or kept with its span shrunk
+     * by one when merged — merged content is never destroyed by
+     * deleting only part of it.
+     */
     fun deleteColumn(table: TableSegment, at: Int): TableSegment {
-        val cols = table.rows.firstOrNull()?.size ?: 0
-        if (cols <= 1 || at !in 0 until cols) return table
+        if (visualColumns(table) <= 1 || at !in 0 until visualColumns(table)) {
+            return table
+        }
+        val newRows = ArrayList<List<String>>(table.rows.size)
+        val newSpans = ArrayList<List<TableCellSpan>>(table.rows.size)
+        for (r in table.rows.indices) {
+            val row = table.rows[r]
+            val spans = table.cellSpans.getOrNull(r)
+            var visual = 0
+            var hitIndex = -1
+            var hitSpan = 1
+            for (i in row.indices) {
+                val span = colSpanOf(table, r, i)
+                if (at in visual until (visual + span)) {
+                    hitIndex = i
+                    hitSpan = span
+                    break
+                }
+                visual += span
+            }
+            when {
+                hitIndex < 0 -> {
+                    newRows += row
+                    if (spans != null) newSpans += spans
+                }
+                hitSpan > 1 -> {
+                    newRows += row
+                    if (spans != null) {
+                        newSpans += spans.mapIndexed { i, s ->
+                            if (i == hitIndex) s.copy(colSpan = s.colSpan - 1) else s
+                        }
+                    }
+                }
+                else -> {
+                    newRows += row.filterIndexed { i, _ -> i != hitIndex }
+                    if (spans != null) {
+                        newSpans += spans.filterIndexed { i, _ -> i != hitIndex }
+                    }
+                }
+            }
+        }
         return TableSegment(
-            table.rows.map { row -> row.filterIndexed { i, _ -> i != at } },
+            newRows,
             table.headerRow,
-            table.cellSpans.map { row -> row.filterIndexed { i, _ -> i != at } },
+            if (table.cellSpans.isEmpty()) emptyList() else newSpans,
         )
     }
 }

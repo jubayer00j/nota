@@ -131,9 +131,12 @@ class TableOpsTest {
 
         val colDeleted = TableOps.deleteColumn(parsed, 0)
         assertEquals(colDeleted.rows.map { it.size }, colDeleted.cellSpans.map { it.size })
-        // Row 0 held two header cells ("Head" spanning 2, "Side");
-        // dropping column 0 removes exactly "Head".
-        assertEquals(listOf("Side"), colDeleted.rows[0])
+        // Deleting VISUAL column 0 (Codex PR #34 P2): row 1's
+        // span-1 cell there ("a") is dropped, but row 0's "Head"
+        // spans columns 0–1, so it SHRINKS to span 1 and keeps its
+        // content — the cell-index first cut destroyed it here.
+        assertEquals(listOf("Head", "Side"), colDeleted.rows[0])
+        assertEquals(1, colDeleted.cellSpans[0][0].colSpan)
         assertEquals(listOf("b", "c"), colDeleted.rows[1])
 
         val rowDeleted = TableOps.deleteRow(parsed, 0)
@@ -145,5 +148,56 @@ class TableOpsTest {
         val reparsed = NoteDocument.parse(html).single() as TableSegment
         assertEquals(colDeleted.rows, reparsed.rows)
         assertEquals(html, NoteDocument.serialize(listOf(reparsed)))
+    }
+
+    @Test
+    fun mergedCellColumnOpsUseVisualAddressing() {
+        // The Codex PR #34 P2 fixture: "Head" merged across visual
+        // columns 0–1. Column ops address VISUAL columns, so a
+        // merged cell is only ever shrunk or grown — never dropped
+        // or split by an operation aimed at part of it.
+        val parsed = NoteDocument.parse(
+            "<table><tbody>" +
+                "<tr><th colspan=\"2\">Head</th><th>Side</th></tr>" +
+                "<tr><td>a</td><td>b</td><td>c</td></tr>" +
+                "</tbody></table>",
+        ).single() as TableSegment
+
+        assertEquals(3, TableOps.visualColumns(parsed))
+        assertEquals(0, TableOps.visualColumnOf(parsed, 0, 0))
+        assertEquals(2, TableOps.visualColumnOf(parsed, 0, 1))
+        assertEquals(2, TableOps.colSpanOf(parsed, 0, 0))
+        assertEquals(1, TableOps.colSpanOf(parsed, 0, 1))
+
+        // Deleting the second visual column also only shrinks Head.
+        val midDeleted = TableOps.deleteColumn(parsed, 1)
+        assertEquals(listOf("Head", "Side"), midDeleted.rows[0])
+        assertEquals(1, midDeleted.cellSpans[0][0].colSpan)
+        assertEquals(listOf("a", "c"), midDeleted.rows[1])
+
+        // Deleting the last visual column removes exactly the
+        // span-1 cells sitting in it and leaves the merged cell.
+        val lastDeleted = TableOps.deleteColumn(parsed, 2)
+        assertEquals(listOf("Head"), lastDeleted.rows[0])
+        assertEquals(2, lastDeleted.cellSpans[0][0].colSpan)
+        assertEquals(listOf("a", "b"), lastDeleted.rows[1])
+
+        // Inserting a column INSIDE the merged cell's span grows
+        // the span; the plain row gains a real blank cell there.
+        val grown = TableOps.insertColumn(parsed, 1)
+        assertEquals(listOf("Head", "Side"), grown.rows[0])
+        assertEquals(3, grown.cellSpans[0][0].colSpan)
+        assertEquals(listOf("a", "", "b", "c"), grown.rows[1])
+        assertEquals(grown.rows.map { it.size }, grown.cellSpans.map { it.size })
+
+        // Inserting at the merged cell's left edge inserts BEFORE it.
+        val edged = TableOps.insertColumn(parsed, 0)
+        assertEquals(listOf("", "Head", "Side"), edged.rows[0])
+        assertEquals(listOf("", "a", "b", "c"), edged.rows[1])
+
+        // A row inserted into a merged table spans the full
+        // visual width, not the first row's cell count.
+        val rowInserted = TableOps.insertRow(parsed, 1)
+        assertEquals(3, rowInserted.rows[1].size)
     }
 }
