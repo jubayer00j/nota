@@ -5,6 +5,7 @@ import app.nota.data.html.CodeSegment
 import app.nota.data.html.DividerSegment
 import app.nota.data.html.DocSegment
 import app.nota.data.html.FileSegment
+import app.nota.data.html.HtmlEntities
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
 import app.nota.data.html.OpaqueSegment
@@ -883,11 +884,11 @@ object NoteExport {
 
     /** Elements dropped whole: open tag, contents and close tag. */
     private val OPAQUE_DROP_WITH_CONTENTS =
-        Regex("""(?is)<(script|iframe|object|form|animatetransform|animatemotion|animate|set)\b[^>]*>.*?</\1\s*>""")
+        Regex("""(?is)<(script|style|iframe|object|form|animatetransform|animatemotion|animate|set)\b[^>]*>.*?</\1\s*>""")
 
     /** Dangerous void elements and any dangling tags of the set. */
     private val OPAQUE_DROP_TAG =
-        Regex("""(?is)</?(script|iframe|object|embed|form|link|meta|base|animatetransform|animatemotion|animate|set)\b[^>]*>""")
+        Regex("""(?is)</?(script|style|iframe|object|embed|form|link|meta|base|animatetransform|animatemotion|animate|set)\b[^>]*>""")
 
     private fun sanitizeOpaqueHtml(rawHtml: String): String {
         var out = OPAQUE_DROP_WITH_CONTENTS.replace(rawHtml, "")
@@ -1016,6 +1017,33 @@ object NoteExport {
             when {
                 // Event handler: dropped, with its leading space.
                 lower.startsWith("on") && name.length > 2 -> Unit
+                // Presentational background: dropped, with its
+                // leading space — its only modern effect is
+                // fetching the URL.
+                lower == "background" -> Unit
+                // A style attribute that carries more than
+                // colours is rebuilt from its colour
+                // declarations (or dropped when none survive);
+                // a clean colour style copies verbatim below.
+                lower == "style" && valueStart >= 0 &&
+                    styleNeedsRewrite(
+                        unescapeEntities(tag.substring(valueStart, valueEnd)),
+                    ) -> {
+                    val clean = sanitizeStyleAttr(
+                        unescapeEntities(tag.substring(valueStart, valueEnd)),
+                    )
+                    if (clean != null) {
+                        out.append(ws)
+                        out.append(tag, nameStart, valueStart)
+                        if (valueQuote == null) out.append('"')
+                        out.append(clean)
+                        if (valueQuote != null && valueEnd < tag.length) {
+                            out.append(tag[valueEnd])
+                        } else if (valueQuote == null) {
+                            out.append('"')
+                        }
+                    }
+                }
                 isUrlAttr(lower) && valueStart >= 0 &&
                     isScriptableUrl(unescapeEntities(tag.substring(valueStart, valueEnd))) -> {
                     out.append(ws)
@@ -1314,63 +1342,15 @@ object NoteExport {
         return ParsedTag(name, attrs, closing, selfClosing, i)
     }
 
-    private fun unescapeEntities(text: String): String {
-        if (!text.contains('&')) return text
-        val out = StringBuilder()
-        var i = 0
-        while (i < text.length) {
-            val amp = text.indexOf('&', i)
-            if (amp < 0) {
-                out.append(text.substring(i))
-                break
-            }
-            out.append(text, i, amp)
-            val semi = text.indexOf(';', amp)
-            if (semi < 0 || semi - amp > 10) {
-                out.append('&')
-                i = amp + 1
-                continue
-            }
-            val entity = text.substring(amp + 1, semi)
-            val decoded: String? = when {
-                entity == "amp" -> "&"
-                entity == "lt" -> "<"
-                entity == "gt" -> ">"
-                entity == "quot" -> "\""
-                entity == "apos" -> "'"
-                entity == "nbsp" -> " "
-                entity == "colon" -> ":"
-                entity == "Tab" || entity == "tab" -> "\t"
-                entity == "NewLine" || entity == "newline" -> "\n"
-                entity.startsWith("#x") || entity.startsWith("#X") ->
-                    entity.substring(2).toIntOrNull(16)?.let { decodeCodePoint(it) }
-                entity.startsWith("#") ->
-                    entity.substring(1).toIntOrNull()?.let { decodeCodePoint(it) }
-                else -> null
-            }
-            if (decoded == null) {
-                out.append('&')
-                i = amp + 1
-            } else {
-                out.append(decoded)
-                i = semi + 1
-            }
-        }
-        return out.toString()
-    }
-
     /**
-     * One numeric character reference: a valid code point
-     * decodes; an out-of-range one — where Character.toChars
-     * would throw and abort the whole export — becomes U+FFFD
-     * instead (the HTML5 error-handling rule).
+     * Entity decoding for the raw strings this exporter still
+     * handles itself (opaque markup, attribute values read off
+     * raw tags): the full HTML5 set, via the shared decoder —
+     * "&copy;" becomes the character, "&amp;copy;" stays the
+     * literal text, unknown names stay literal, and numeric
+     * references outside the Unicode range become U+FFFD.
      */
-    private fun decodeCodePoint(codePoint: Int): String =
-        if (codePoint in 0..Character.MAX_CODE_POINT) {
-            String(Character.toChars(codePoint))
-        } else {
-            "\uFFFD"
-        }
+    private fun unescapeEntities(text: String): String = HtmlEntities.decode(text)
 
     /**
      * Active elements that never survive HTML export, dropped
@@ -1382,7 +1362,7 @@ object NoteExport {
      * scrub lives here and covers every one of them at once.
      */
     private val FRAGMENT_DROP_ELEMENTS = setOf(
-        "script", "iframe", "object", "embed", "form", "link", "meta", "base",
+        "script", "iframe", "object", "embed", "form", "link", "meta", "base", "style",
         // SMIL animation can rewrite an anchor's href into a
         // scriptable URL after attribute checks have passed.
         "animatetransform", "animatemotion", "animate", "set",
@@ -1393,17 +1373,23 @@ object NoteExport {
      * attributes are dropped, scriptable targets of URL
      * attributes — matched by local name, so namespaced
      * spellings like xlink:href are checked too — are pointed
-     * at "#", everything else passes through untouched.
+     * at "#", background attributes are dropped (their only
+     * modern effect is fetching the URL), and style attributes
+     * are rebuilt from their colour declarations only, so a
+     * CSS url() can never make the exported file phone home.
      * Attribute values arrive entity-decoded from the parser,
-     * exactly the shape isScriptableUrl expects. When nothing in
-     * the map needs scrubbing the SAME map is returned, so benign
-     * fragments serialise byte-identically to before.
+     * exactly the shape isScriptableUrl expects. When nothing
+     * in the map needs scrubbing the SAME map is returned, so
+     * benign fragments serialise byte-identically to before —
+     * a clean colour style included.
      */
     private fun scrubFragmentAttrs(attrs: Map<String, String>): Map<String, String> {
         fun dirty(name: String, value: String): Boolean {
             val lower = name.lowercase()
             return (lower.startsWith("on") && name.length > 2) ||
-                (isUrlAttr(lower) && isScriptableUrl(value))
+                (isUrlAttr(lower) && isScriptableUrl(value)) ||
+                lower == "background" ||
+                (lower == "style" && styleNeedsRewrite(value))
         }
         if (attrs.none { (name, value) -> dirty(name, value) }) return attrs
         val out = LinkedHashMap<String, String>(attrs.size)
@@ -1411,6 +1397,9 @@ object NoteExport {
             val lower = name.lowercase()
             when {
                 lower.startsWith("on") && name.length > 2 -> Unit
+                lower == "background" -> Unit
+                lower == "style" ->
+                    sanitizeStyleAttr(value)?.let { out[name] = it }
                 isUrlAttr(lower) && isScriptableUrl(value) ->
                     out[name] = "#"
                 else -> out[name] = value
@@ -1418,6 +1407,60 @@ object NoteExport {
         }
         return out
     }
+
+    /**
+     * The declarations of a style attribute that may survive
+     * export: text colours only — the two properties the
+     * editor's colour spans use — with values from a safe
+     * grammar (hex, a colour keyword, or a numeric rgb/hsl
+     * function). Anything else (url(), expression(), position,
+     * behaviour, …) is dropped, because in a standalone file a
+     * CSS fetch or rule is a tracking and injection surface
+     * the note never needed.
+     */
+    private fun keptStyleDeclarations(value: String): List<Pair<String, String>> =
+        value.split(';').mapNotNull { raw ->
+            val decl = raw.trim()
+            if (decl.isEmpty()) return@mapNotNull null
+            val colon = decl.indexOf(':')
+            if (colon < 0) return@mapNotNull null
+            val prop = decl.substring(0, colon).trim().lowercase()
+            val v = decl.substring(colon + 1).trim()
+            if (prop != "color" && prop != "background-color") {
+                return@mapNotNull null
+            }
+            if (!isSafeStyleValue(v)) return@mapNotNull null
+            prop to v
+        }
+
+    /** True when scrubbing would change this style attribute. */
+    private fun styleNeedsRewrite(value: String): Boolean {
+        val total = value.split(';').count { it.isNotBlank() }
+        return keptStyleDeclarations(value).size != total
+    }
+
+    /**
+     * The style attribute rebuilt from its colour declarations,
+     * or null when none survive (the attribute then goes away).
+     */
+    private fun sanitizeStyleAttr(value: String): String? {
+        val kept = keptStyleDeclarations(value)
+        return if (kept.isEmpty()) {
+            null
+        } else {
+            kept.joinToString("; ") { (prop, v) -> "$prop: $v" }
+        }
+    }
+
+    private fun isSafeStyleValue(v: String): Boolean =
+        v.matches(Regex("#[0-9a-fA-F]{3,8}")) ||
+            v.matches(Regex("[a-zA-Z]{1,24}")) ||
+            v.matches(
+                Regex(
+                    "(rgb|rgba|hsl|hsla)\\([0-9.,%\\s]+\\)",
+                    RegexOption.IGNORE_CASE,
+                ),
+            )
 
     /**
      * The HTML-export transform over a parsed fragment (1.x's
