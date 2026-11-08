@@ -139,4 +139,17 @@ class NoteExportTextTest {
         assertTrue(out.contains("- before\n  - child\n  after"))
     }
 
+    @Test
+    fun semicolonlessLegacyReferencesDecodeInText() {
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                TextSegment(
+                    html = "<p>Fish &copy chips, &notit; today</p>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("Fish \u00A9 chips, \u00ACit; today"))
+    }
+
 }
