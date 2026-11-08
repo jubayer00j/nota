@@ -546,4 +546,18 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains("[y]("))
     }
 
+    @Test
+    fun opaqueBlockImagesExportThroughTheImagePath() {
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<picture><img src=\"nota-attachment://img1\" alt=\"Cat\"></picture>",
+                ),
+            ),
+            exportResolver,
+        )
+        assertTrue(out.contains("![Cat]($EXPORT_DATA_URL)"))
+    }
+
 }
