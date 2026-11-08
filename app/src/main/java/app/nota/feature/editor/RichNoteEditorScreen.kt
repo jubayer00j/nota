@@ -1346,20 +1346,25 @@ fun RichNoteEditorScreen(
             try {
                 val artifact = withContext(Dispatchers.IO) {
                     val resolved = HashMap<String, String>()
-                    for (id in NoteExport.collectAttachmentIds(liveSegments)) {
-                        val entity = liveAttachments.firstOrNull { it.id == id }
-                            ?: continue
-                        val dataUrl = runCatching {
-                            val file = viewModel.attachmentFile(entity)
-                            if (!file.exists()) {
-                                null
-                            } else {
-                                "data:${entity.mimeType};base64," +
-                                    Base64.getEncoder()
-                                        .encodeToString(file.readBytes())
-                            }
-                        }.getOrNull()
-                        if (dataUrl != null) resolved[id] = dataUrl
+                    // Plain text never embeds images (named placeholders
+                    // only, and the text converter never consults the
+                    // resolver), so skip the attachment reads entirely.
+                    if (format != ExportFormat.TEXT) {
+                        for (id in NoteExport.collectAttachmentIds(liveSegments)) {
+                            val entity = liveAttachments.firstOrNull { it.id == id }
+                                ?: continue
+                            val dataUrl = runCatching {
+                                val file = viewModel.attachmentFile(entity)
+                                if (!file.exists()) {
+                                    null
+                                } else {
+                                    "data:${entity.mimeType};base64," +
+                                        Base64.getEncoder()
+                                            .encodeToString(file.readBytes())
+                                }
+                            }.getOrNull()
+                            if (dataUrl != null) resolved[id] = dataUrl
+                        }
                     }
                     NoteExport.build(liveTitle, liveSegments, format) { id ->
                         resolved[id]

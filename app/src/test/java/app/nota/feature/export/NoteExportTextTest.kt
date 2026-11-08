@@ -90,4 +90,19 @@ class NoteExportTextTest {
     fun emptyDocumentIsJustTheTitle() {
         assertEquals("Solo\n", NoteExport.noteToPlainText("Solo", emptyList()))
     }
+
+    @Test
+    fun textBuildNeverConsultsTheResolver() {
+        // The editor skips attachment resolution entirely for TEXT
+        // exports; that gate is only safe while the text converter
+        // never calls the resolver. A resolver that throws on any
+        // call must still produce the full, identical output.
+        val throwing: AttachmentResolver = { id ->
+            throw AssertionError("TEXT export consulted the resolver for $id")
+        }
+        val artifact = NoteExport.build(
+            EXPORT_FIXTURE_TITLE, exportFixture(), ExportFormat.TEXT, throwing,
+        )
+        assertEquals(text(), artifact.content)
+    }
 }
