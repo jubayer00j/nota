@@ -485,4 +485,32 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains("![Dot](data:image/png;base64,WA==)"))
     }
 
+    @Test
+    fun singleOversizedImageDegradesToPlaceholder() {
+        // ~33.7 MB decoded — past the single-image cap.
+        val big = "data:image/png;base64," + "A".repeat(45_000_000)
+        val artifact = NoteExport.build(
+            "T",
+            listOf(ImageSegment(src = "nota-attachment://big", alt = "Big")),
+            ExportFormat.MARKDOWN,
+        ) { big }
+        assertEquals(0, artifact.content.split("data:image/png").size - 1)
+    }
+
+    @Test
+    fun embeddingBudgetIsCumulativeAcrossImages() {
+        // ~17.25 MB decoded each: the first embeds, the second
+        // would take the total past the 32 MB budget.
+        val mid = "data:image/png;base64," + "A".repeat(23_000_000)
+        val artifact = NoteExport.build(
+            "T",
+            listOf(
+                ImageSegment(src = "nota-attachment://one", alt = "One"),
+                ImageSegment(src = "nota-attachment://two", alt = "Two"),
+            ),
+            ExportFormat.MARKDOWN,
+        ) { mid }
+        assertEquals(1, artifact.content.split("data:image/png").size - 1)
+    }
+
 }
