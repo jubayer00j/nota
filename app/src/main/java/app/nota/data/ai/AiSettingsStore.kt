@@ -45,7 +45,9 @@ class AiSettingsStore(
     /** The saved slot for one provider; the key comes back
      *  DECRYPTED (empty when none was saved or the sealed copy is
      *  unreadable — a dead Keystore copy degrades to "no key",
-     *  never a crash and never a wrong key). */
+     *  never a crash and never a wrong key). The embedding model
+     *  passes through a one-off legacy migration on the way out —
+     *  see migrateLegacyEmbeddingModel. */
     suspend fun slot(accountId: String, provider: AiProviderId): AiProviderSlot {
         val sealed = preferences.getAiField(accountId, keyField(provider))
         val key = sealed?.let { cipher.decrypt(it) }?.let { String(it, Charsets.UTF_8) } ?: ""
@@ -53,9 +55,35 @@ class AiSettingsStore(
             apiKey = key,
             model = preferences.getAiField(accountId, modelField(provider)) ?: "",
             baseUrl = preferences.getAiField(accountId, baseUrlField(provider)) ?: "",
-            embeddingModel = preferences.getAiField(accountId, embeddingModelField(provider)) ?: "",
+            embeddingModel = migrateLegacyEmbeddingModel(
+                provider,
+                preferences.getAiField(accountId, embeddingModelField(provider)) ?: "",
+            ),
         )
     }
+
+    /** One-off read migration (Beginner AI Setup #1, fix round 5):
+     *  OpenRouter slots saved on 0.14.0 or earlier can carry
+     *  LEGACY_OPENROUTER_EMBEDDING_MODEL verbatim — it was that
+     *  era's shipped OpenRouter default, and Save persisted the
+     *  resolved default into the slot, so it sits there as if the
+     *  user had typed it. The id is not a real OpenRouter model
+     *  (their catalogue namespaces it: openai/text-embedding-3-
+     *  large), so reads resolve it to the current default here —
+     *  the single slot funnel every consumer goes through — and
+     *  the next Save persists the fix. The scope is deliberately
+     *  exact: OpenRouter only (the identical string is OpenAI's
+     *  CORRECT default and must survive there untouched), and
+     *  only that one string — any other stored value is the
+     *  user's own choice and is returned as-is. */
+    private fun migrateLegacyEmbeddingModel(provider: AiProviderId, stored: String): String =
+        if (provider == AiProviderId.OPENROUTER &&
+            stored.trim() == LEGACY_OPENROUTER_EMBEDDING_MODEL
+        ) {
+            AiProviderId.OPENROUTER.defaultEmbeddingModel
+        } else {
+            stored
+        }
 
     /** Saves one provider's slot. The key is sealed before it
      *  touches storage; an empty key clears the slot's key (the
@@ -135,6 +163,13 @@ class AiSettingsStore(
 
     companion object {
         const val FIELD_ACTIVE = "active_provider"
+
+        /** The OpenRouter embedding default 0.14.0 and earlier
+         *  shipped — unprefixed, and not a real OpenRouter model
+         *  id. Slots saved back then can still carry it; slot()
+         *  migrates exactly that value on read (see
+         *  migrateLegacyEmbeddingModel). */
+        const val LEGACY_OPENROUTER_EMBEDDING_MODEL = "text-embedding-3-large"
 
         fun keyField(provider: AiProviderId) = "${provider.storageId}_key"
         fun modelField(provider: AiProviderId) = "${provider.storageId}_model"

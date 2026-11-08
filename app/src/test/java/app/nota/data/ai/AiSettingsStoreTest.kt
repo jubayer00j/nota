@@ -207,4 +207,75 @@ class AiSettingsStoreTest {
             ),
         )
     }
+
+    // ---- Legacy OpenRouter embedding default (fix round 5) -------
+    //
+    // 0.14.0 and earlier shipped "text-embedding-3-large" as the
+    // OpenRouter embedding default, and Save persisted that
+    // resolved default into slots. The id is not a real OpenRouter
+    // model (the catalogue namespaces it), so slot() migrates
+    // exactly that value on read — OpenRouter only.
+
+    @Test
+    fun legacyOpenRouterEmbeddingDefaultMigratesOnRead() = runBlocking {
+        store.saveSlot(
+            "acct-ormig", AiProviderId.OPENROUTER,
+            AiProviderSlot(apiKey = "or-key", embeddingModel = "text-embedding-3-large"),
+        )
+        // The slot read resolves the legacy id to the prefixed one…
+        assertEquals(
+            "openai/text-embedding-3-large",
+            store.slot("acct-ormig", AiProviderId.OPENROUTER).embeddingModel,
+        )
+        // …and so does the embedding config built from the slot.
+        store.setActiveProvider("acct-ormig", AiProviderId.OPENROUTER)
+        assertEquals(
+            "openai/text-embedding-3-large",
+            store.activeEmbeddingConfig("acct-ormig")!!.resolvedEmbeddingModel(),
+        )
+    }
+
+    @Test
+    fun openAiEmbeddingDefaultIsNotMigrated() = runBlocking {
+        // The identical string is OpenAI's CORRECT default — the
+        // migration is scoped to OpenRouter and must not touch it.
+        store.saveSlot(
+            "acct-oainomig", AiProviderId.OPENAI,
+            AiProviderSlot(apiKey = "o-key", embeddingModel = "text-embedding-3-large"),
+        )
+        assertEquals(
+            "text-embedding-3-large",
+            store.slot("acct-oainomig", AiProviderId.OPENAI).embeddingModel,
+        )
+        store.setActiveProvider("acct-oainomig", AiProviderId.OPENAI)
+        assertEquals(
+            "text-embedding-3-large",
+            store.activeEmbeddingConfig("acct-oainomig")!!.resolvedEmbeddingModel(),
+        )
+    }
+
+    @Test
+    fun userChosenOpenRouterEmbeddingModelIsNotMigrated() = runBlocking {
+        store.saveSlot(
+            "acct-orcustom", AiProviderId.OPENROUTER,
+            AiProviderSlot(apiKey = "or-key", embeddingModel = "my-own-embedder"),
+        )
+        assertEquals(
+            "my-own-embedder",
+            store.slot("acct-orcustom", AiProviderId.OPENROUTER).embeddingModel,
+        )
+    }
+
+    @Test
+    fun blankOpenRouterEmbeddingResolvesTheCurrentDefault() = runBlocking {
+        store.saveSlot(
+            "acct-orblank", AiProviderId.OPENROUTER,
+            AiProviderSlot(apiKey = "or-key"),
+        )
+        store.setActiveProvider("acct-orblank", AiProviderId.OPENROUTER)
+        assertEquals(
+            "openai/text-embedding-3-large",
+            store.activeEmbeddingConfig("acct-orblank")!!.resolvedEmbeddingModel(),
+        )
+    }
 }

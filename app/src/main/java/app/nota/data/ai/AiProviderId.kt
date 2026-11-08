@@ -91,8 +91,10 @@ enum class AiProviderId(
         // this model instructs ("Use `openai/text-embedding-3-large`
         // with the OpenRouter API" — openrouter.ai/openai/
         // text-embedding-3-large, checked 2026-11-08). 1.x's table
-        // already carried the prefixed form. Fresh slots only —
-        // a saved slot is never rewritten.
+        // already carried the prefixed form. Slots saved by
+        // 0.14.0 or earlier hold the unprefixed string instead;
+        // AiSettingsStore migrates exactly that value on read
+        // (LEGACY_OPENROUTER_EMBEDDING_MODEL, fix round 5).
         defaultEmbeddingModel = "openai/text-embedding-3-large",
         openAiCompatible = true,
         description = "One key that can reach models from many providers.",
