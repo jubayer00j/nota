@@ -816,6 +816,13 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
     val uLo = lo / unit
     val uHi = hi / unit
     val step0 = (uHi - uLo) / targetTicks
+    if (!(step0 > 0.0) || !step0.isFinite()) {
+        // The clamped endpoints are adjacent doubles at a huge
+        // magnitude, so their unit-domain difference underflowed
+        // to zero — no grid finer than the domain itself exists.
+        val w = max(1.0, abs(lo) * 0.01)
+        return ChartScale(lo - w, hi + w, w, listOf(lo - w, hi + w))
+    }
     val mag = 10.0.pow(floor(log10(step0)))
     val norm = step0 / mag
     val uStep = when {
