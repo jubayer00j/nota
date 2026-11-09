@@ -78,6 +78,11 @@ jobs:
   # B3 −1: TapBelowContentTest is deleted with the tap-anywhere
   # growth it covered; the conversion cases extend the existing
   # NoteDocument / CaretSplit / read-mode suites, so no new class.)
+  # (Charts PR-A: the partition grows to 101 classes — fast-a +2
+  # pure-JVM chart classes (parser/normaliser; colour conversion);
+  # the chart round-trip cases extend NoteDocumentTest and the
+  # read-mode chart cases extend EditorReadModeUiTest, so the B
+  # and UI shards gain no new class.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -123,7 +128,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 57 of 100 non-UI classes)
+      - name: Run fast unit tests (shard A, 59 of 101 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -133,6 +138,8 @@ jobs:
             --tests "app.nota.data.ai.NoteChunkerTest" \
             --tests "app.nota.data.ai.SemanticMathTest" \
             --tests "app.nota.data.ai.TagListParserTest" \
+            --tests "app.nota.data.chart.ChartDataParserTest" \
+            --tests "app.nota.data.chart.ChartColorsTest" \
             --tests "app.nota.feature.settings.AiSettingsFormTest" \
             --tests "app.nota.feature.settings.AiSetupCopyTest" \
             --tests "app.nota.feature.ask.AskThreadTest" \

@@ -350,4 +350,210 @@ class EditorReadModeUiTest {
         composeRule.onNodeWithContentDescription("Edit note").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Done editing").assertDoesNotExist()
     }
+
+    @Test
+    fun chartNote_rendersChartTitleInReadMode() {
+        // Charts PR-A: a stored v2 chart div renders as a chart in
+        // read mode — its title is real text on the chart — instead
+        // of the old "preserved as-is" placeholder card.
+        val chartDiv = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Quarterly Sales\" data-subtitle=\"\" " +
+            "data-categories='[\"Q1\",\"Q2\",\"Q3\"]' " +
+            "data-series='[{\"name\":\"Revenue\",\"values\":[10,25,15]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Charts",
+                contentHtml = "<p>Intro</p>$chartDiv",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("chart title rendered in read mode") {
+            exists("chart title") {
+                composeRule.onNodeWithText("Quarterly Sales").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Chart — preserved as-is.").assertDoesNotExist()
+    }
+
+    @Test
+    fun pieChart_composesInReadMode() {
+        val pie = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"pie\" data-title=\"Share\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[60,40]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Pie", contentHtml = pie)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("pie chart rendered") {
+            exists("pie title") {
+                composeRule.onNodeWithText("Share").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun stackedHugeBarChart_composesInReadMode() {
+        // Two stacked 1e308 values: their sum overflows a double.
+        // Stack accumulation saturates so the chart stays finite.
+        val bar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Stacked Huge\" data-subtitle=\"\" " +
+            "data-categories='[\"A\"]' " +
+            "data-series='[{\"name\":\"S1\",\"values\":[1e308]},{\"name\":\"S2\",\"values\":[1e308]}]' " +
+            "data-options='{\"stacked\":true}'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Stacked Huge note", contentHtml = bar)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("stacked huge chart rendered") {
+            exists("stacked huge title") {
+                composeRule.onNodeWithText("Stacked Huge").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun singleSeriesChart_showsLegendWithSeriesName() {
+        // showLegend is honoured as persisted (1.x parity): even
+        // a single-series chart lists its series name.
+        val bar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Solo\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"Revenue\",\"values\":[3,4]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Solo note", contentHtml = bar)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("single-series legend rendered") {
+            exists("series name in legend") {
+                composeRule.onNodeWithText("Revenue").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun tinyValuesLineChart_composesInReadMode() {
+        // [1e-12, 2e-12]: the axis must scale to the data's own
+        // magnitude, not an absolute unit-wide fallback.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Tiny Values\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[1e-12,2e-12]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Tiny Values note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("tiny values chart rendered") {
+            exists("tiny values title") {
+                composeRule.onNodeWithText("Tiny Values").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun oppositeExtremesLineChart_composesInReadMode() {
+        // [-1e308, 1e308]: the axis span itself overflows a
+        // double if computed unclamped, and nice-rounding the
+        // endpoints overflows again — the scale is computed on a
+        // unit domain so neither can happen.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Opposite Extremes\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[-1e308,1e308]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Opposite Extremes note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("opposite extremes chart rendered") {
+            exists("opposite extremes title") {
+                composeRule.onNodeWithText("Opposite Extremes").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun constantHugeLineChart_composesInReadMode() {
+        // Every value the same 1e308: the axis domain starts
+        // zero-width, and a flat +1 widening cannot move a double
+        // at that magnitude — the span must widen relatively.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Flat Huge\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[1e308,1e308]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Flat Huge note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("flat huge chart rendered") {
+            exists("flat huge title") {
+                composeRule.onNodeWithText("Flat Huge").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun hugePieChart_composesInReadMode() {
+        // Two 1e308 slices: the naive sum overflows to Infinity
+        // and would blank the chart; the render scales first.
+        val pie = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"pie\" data-title=\"Big Pie\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[1e308,1e308]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Big Pie note", contentHtml = pie)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("huge pie rendered") {
+            exists("huge pie title") {
+                composeRule.onNodeWithText("Big Pie").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun radarChart_composesInReadMode() {
+        val radar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"radar\" data-title=\"Skills\" data-subtitle=\"\" " +
+            "data-categories='[\"Speed\",\"Power\",\"Range\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[3,5,4]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Radar", contentHtml = radar)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("radar chart rendered") {
+            exists("radar title") {
+                composeRule.onNodeWithText("Skills").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun extremeValuesChart_composesInReadMode() {
+        // ±1e308 are legal finite chart values; the axis maths
+        // must survive them (the span overflows a Double if it is
+        // computed unclamped) instead of crashing the note open.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Extremes\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\",\"C\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[-1e308,1e308,0]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Extreme note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("extreme chart rendered") {
+            exists("extreme title") {
+                composeRule.onNodeWithText("Extremes").assertIsDisplayed()
+            }
+        }
+    }
 }

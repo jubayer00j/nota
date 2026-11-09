@@ -138,6 +138,7 @@ import app.nota.data.ai.AiService
 import app.nota.data.ai.AiSummaryHtml
 import app.nota.data.ai.AiSummaryOutcome
 import app.nota.data.ai.AiTagOutcome
+import app.nota.data.chart.ChartParser
 import app.nota.data.attachments.PendingInsertKind
 import app.nota.data.attachments.PendingInsertMode
 import app.nota.data.attachments.PendingInsertRecord
@@ -145,6 +146,7 @@ import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.feature.capture.NotePinShortcut
+import app.nota.feature.chart.ChartView
 import app.nota.feature.export.ExportFormat
 import app.nota.feature.export.NoteExport
 import app.nota.feature.export.NoteExportDelivery
@@ -2823,11 +2825,25 @@ private fun SegmentEditor(
                         )
                         is FileSegment -> FileBlock(segment, attachments, onRemove)
                         is ChartSegment -> BlockShell(onRemove) {
-                            Text(
-                                "Chart — preserved as-is. Chart editing arrives in a later phase.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            // Charts PR-A: the chart RENDERS from a
+                            // read-only parse of its preserved
+                            // rawHtml; the stored bytes are never
+                            // touched (editing arrives in PR-B). A
+                            // block with no recognisable chart
+                            // payload keeps the honest static label
+                            // instead of an invented chart.
+                            val chartData = remember(segment.rawHtml) {
+                                ChartParser.parse(segment.rawHtml)
+                            }
+                            if (chartData != null) {
+                                ChartView(chartData)
+                            } else {
+                                Text(
+                                    "Chart — preserved as-is.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                         // Phase 6 (Editor Refinement #1 fix): the
                         // code field previously rendered BARE — its
@@ -3109,9 +3125,36 @@ private fun SegmentReadView(
                 HorizontalDivider(Modifier.fillMaxWidth())
             }
         }
+        is ChartSegment -> {
+            // Charts PR-A (read mode): render the chart from a
+            // read-only parse of the preserved rawHtml. The stored
+            // bytes stay untouched; a block with no recognisable
+            // chart payload keeps the honest placeholder card.
+            val chartData = remember(segment.rawHtml) {
+                ChartParser.parse(segment.rawHtml)
+            }
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (chartData != null) {
+                    ChartView(chartData, Modifier.padding(NotaSpacing.sm))
+                } else {
+                    Text(
+                        "Chart — preserved as-is.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(NotaSpacing.sm),
+                    )
+                }
+            }
+        }
         else -> {
-            // Chart / opaque segments: the same honest placeholder
-            // the edit mode shows — preserved exactly as stored.
+            // Opaque segments: the same honest placeholder the edit
+            // mode shows — preserved exactly as stored.
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -3120,11 +3163,7 @@ private fun SegmentReadView(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    if (segment is ChartSegment) {
-                        "Chart — preserved as-is."
-                    } else {
-                        "Preserved block — kept exactly as stored."
-                    },
+                    "Preserved block — kept exactly as stored.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(NotaSpacing.sm),
