@@ -756,4 +756,19 @@ class NoteExportHtmlTest {
         assertTrue(out.contains("data:image/png;base64,iVBORw0KGgo="))
         assertFalse(out.contains("nota-attachment"))
     }
+
+    @Test
+    fun quotedAngleBracketInAltDoesNotHideTheSource() {
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                OpaqueSegment(
+                    "<img alt=\"2 > 1\" src=\"nota-attachment://img1\">",
+                ),
+            ),
+            pngDataResolver,
+        )
+        assertTrue(out.contains("data:image/png;base64,iVBORw0KGgo="))
+        assertFalse(out.contains("nota-attachment"))
+    }
 }
