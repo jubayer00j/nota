@@ -395,6 +395,27 @@ class EditorReadModeUiTest {
     }
 
     @Test
+    fun constantHugeLineChart_composesInReadMode() {
+        // Every value the same 1e308: the axis domain starts
+        // zero-width, and a flat +1 widening cannot move a double
+        // at that magnitude — the span must widen relatively.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Flat Huge\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[1e308,1e308]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Flat Huge note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("flat huge chart rendered") {
+            exists("flat huge title") {
+                composeRule.onNodeWithText("Flat Huge").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
     fun hugePieChart_composesInReadMode() {
         // Two 1e308 slices: the naive sum overflows to Infinity
         // and would blank the chart; the render scales first.

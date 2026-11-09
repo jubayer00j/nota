@@ -42,6 +42,7 @@ import app.nota.data.chart.ChartData
 import app.nota.data.chart.ChartType
 import app.nota.data.chart.LegendPosition
 import app.nota.data.chart.SeriesKind
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
@@ -806,7 +807,14 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
         lo = hi
         hi = t
     }
-    if (hi - lo < 1e-9) hi = lo + 1.0
+    if (hi - lo < 1e-9) {
+        // Widen RELATIVELY: at a magnitude like 1e308 a flat +1
+        // changes nothing (the step between representable doubles
+        // there is ~1e292), which would leave a zero span and NaN
+        // tick maths. 1% of the magnitude always moves the needle
+        // and keeps hi inside the clamped domain.
+        hi = lo + max(1.0, abs(lo) * 0.01)
+    }
     val step0 = (hi - lo) / targetTicks
     val mag = 10.0.pow(floor(log10(step0)))
     val norm = step0 / mag
