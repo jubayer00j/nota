@@ -204,7 +204,12 @@ object ChartParser {
             // a non-object entry reads as undefined in this port
             // (1.x would throw on a null entry; degrading to 0 is
             // the safe superset).
-            ((el as? JsonObject)?.get("value") as? JsonNumber)?.value ?: 0.0
+            // A non-finite legacy number (1e999 parses to
+            // +Infinity) degrades to 0, exactly as the v2 value
+            // coercion treats non-finite numbers — an infinite
+            // series value would poison the chart geometry.
+            ((el as? JsonObject)?.get("value") as? JsonNumber)?.value
+                ?.takeIf { it.isFinite() } ?: 0.0
         }
         val titleString = jsString(input?.get("title"))
         return ChartData(

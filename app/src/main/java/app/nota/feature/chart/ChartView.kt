@@ -817,42 +817,41 @@ private data class ChartScale(
 
 /** Classic 1/2/5/10 nice-number axis scale over [lo0, hi0]. */
 private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScale {
-    // Extreme stored values (±1e308 is a legal finite chart value)
-    // must not overflow anywhere in this arithmetic: an infinite
-    // span turns the tick maths into NaN or saturates a tick count
-    // into billions. The domain is therefore clamped to ±MAX/2,
-    // widened RELATIVELY when zero-width (a flat +1 cannot move a
-    // double at 1e308 magnitude), and the nice-number rounding —
-    // which EXPANDS the endpoints — runs on the unit domain, where
-    // the span is at most 2 and no product can overflow; results
-    // scale back at the end.
-    val bound = Double.MAX_VALUE / 2
-    var lo = if (lo0.isNaN()) 0.0 else lo0.coerceIn(-bound, bound)
-    var hi = if (hi0.isNaN()) 0.0 else hi0.coerceIn(-bound, bound)
+    // All arithmetic runs on the UNIT domain (the inputs divided
+    // by their own magnitude): raw-space maths on extreme stored
+    // values overflows at every step — the span (±1e308), the
+    // nice-rounding expansion, the tick back-scaling, even the
+    // projection subtraction. On the unit domain the bounds sit
+    // in [-1, 1] and nothing can overflow; raw tick values are
+    // coerced back inside Double range for labelling only, while
+    // projection uses the exact unit bounds.
+    var lo = if (lo0.isNaN()) 0.0 else lo0
+    var hi = if (hi0.isNaN()) 0.0 else hi0
+    if (lo == Double.NEGATIVE_INFINITY) lo = -Double.MAX_VALUE
+    if (hi == Double.POSITIVE_INFINITY) hi = Double.MAX_VALUE
     if (hi < lo) {
         val t = lo
         lo = hi
         hi = t
     }
-    // Widen a zero (or relatively zero) span by the domain's own
-    // magnitude: an absolute epsilon swamps tiny data (1e-12 vs
-    // 2e-12 would get a unit-wide axis) and cannot move huge
-    // data at all.
-    val magnitude0 = max(abs(lo), abs(hi))
-    if (hi - lo <= magnitude0 * 1e-12) {
-        hi = lo + if (magnitude0 > 0.0) magnitude0 * 0.01 else 1.0
-    }
     val magnitude = max(abs(lo), abs(hi))
     val unit = if (magnitude > 0.0) magnitude else 1.0
-    val uLo = lo / unit
-    val uHi = hi / unit
+    var uLo = lo / unit
+    var uHi = hi / unit
+    if (uHi - uLo <= 1e-12) {
+        // Zero (or relatively zero) span: widen symmetrically in
+        // unit space so constant data sits mid-plot.
+        val mid = (uLo + uHi) / 2
+        val half = max((uHi - uLo) / 2, 0.005 * max(1.0, abs(mid)))
+        uLo = mid - half
+        uHi = mid + half
+    }
     val step0 = (uHi - uLo) / targetTicks
     if (!(step0 > 0.0) || !step0.isFinite()) {
-        // The clamped endpoints are adjacent doubles at a huge
-        // magnitude, so their unit-domain difference underflowed
-        // to zero — no grid finer than the domain itself exists.
-        val w = max(1.0, abs(lo) * 0.01)
-        return ChartScale(lo - w, hi + w, w, listOf(lo - w, hi + w), lo - w, hi + w, 1.0)
+        // Defensive: no finer grid exists — fall back to the
+        // widened unit bounds themselves.
+        val ticks = listOf(uLo * unit, uHi * unit)
+        return ChartScale(ticks.first(), ticks.last(), (uHi - uLo) * unit, ticks, uLo, uHi, unit)
     }
     val mag = 10.0.pow(floor(log10(step0)))
     val norm = step0 / mag
@@ -864,12 +863,13 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
     } * mag
     val uNiceLo = floor(uLo / uStep) * uStep
     val uCount = ceil((uHi - uNiceLo) / uStep).toInt().coerceIn(1, 12)
-    val ticks = (0..uCount).map { (uNiceLo + it * uStep) * unit }
+    val uTicks = (0..uCount).map { uNiceLo + it * uStep }
+    val ticks = uTicks.map { (it * unit).coerceIn(-Double.MAX_VALUE, Double.MAX_VALUE) }
     return ChartScale(
-        ticks.first(),
-        ticks.last(),
-        uStep * unit,
-        ticks,
+        lo = ticks.first(),
+        hi = ticks.last(),
+        step = (uStep * unit).coerceIn(1e-300, Double.MAX_VALUE),
+        ticks = ticks,
         loUnit = uNiceLo,
         hiUnit = uNiceLo + uCount * uStep,
         unit = unit,

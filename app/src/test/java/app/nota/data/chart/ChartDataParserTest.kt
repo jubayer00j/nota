@@ -364,6 +364,14 @@ class ChartDataParserTest {
     }
 
     @Test
+    fun v1Migration_nonFiniteValuesBecomeZero() {
+        val data = ChartParser.parse(
+            v1Div(dataChart = "[{\"name\":\"A\",\"value\":1e999},{\"name\":\"B\",\"value\":5}]"),
+        )!!
+        assertEquals(listOf(0.0, 5.0), data.series[0].values)
+    }
+
+    @Test
     fun v1Migration_capsAtFiftyEntries() {
         val entries = (1..60).joinToString(",") { "{\"name\":\"C$it\",\"value\":$it}" }
         val data = ChartParser.parse(v1Div(dataChart = "[$entries]"))!!
