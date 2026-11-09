@@ -321,6 +321,9 @@ class NoteRepository(
     }
 
     // --- Daily notes -------------------------------------------------------------
+    /** True when a daily note for [date] already exists (never creates one). */
+    suspend fun hasDailyNote(date: String): Boolean = noteDao.getDaily(date) != null
+
     /**
      * Returns the daily note for [date] ("yyyy-MM-dd"), creating it if needed.
      *

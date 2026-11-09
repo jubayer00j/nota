@@ -136,7 +136,7 @@ class EditorReadModeUiTest {
         insertStore = PendingInsertStore(tempFolder.newFolder("files"))
     }
 
-    private fun composeEditor(noteId: String) {
+    private fun composeEditor(noteId: String, startInEdit: Boolean = false) {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val vm = RichNoteEditorViewModel(
             repository,
@@ -153,6 +153,7 @@ class EditorReadModeUiTest {
             app.nota.ui.theme.NotaTheme {
                 RichNoteEditorScreen(
                     noteId = noteId,
+                    startInEdit = startInEdit,
                     onBack = {},
                     viewModel = vm,
                     pendingInsertStore = insertStore,
@@ -269,6 +270,27 @@ class EditorReadModeUiTest {
             }
         }
         composeRule.onNodeWithText("Reading body text").assertIsDisplayed()
+    }
+
+    @Test
+    fun brandNewNote_startsInEditMode() {
+        // Editor Refinement #2 (fix round): a note created this
+        // moment opens IN the editor — the navigation layer passes
+        // startInEdit for creation flows only; an existing note
+        // (the flow test above) opens for reading.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Fresh Note",
+                contentHtml = "<p></p>",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+        awaitTrue("edit mode from the start") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").assertDoesNotExist()
     }
 
     @Test

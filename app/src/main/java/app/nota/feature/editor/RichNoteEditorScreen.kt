@@ -258,6 +258,12 @@ fun RichNoteEditorScreen(
     // Beginner AI Setup #1 (F6): where the no-key notice's
     // "Open AI settings" action goes (Settings → AI features).
     onOpenAiSettings: () -> Unit = {},
+    // Editor Refinement #2 (fix round): a note created this very
+    // moment (New note, quick capture, voice) opens IN the editor —
+    // there is nothing to read yet, the user came to write. Only an
+    // existing note opens for reading. Set by the navigation layer
+    // for creation flows only.
+    startInEdit: Boolean = false,
     viewModel: RichNoteEditorViewModel = koinViewModel(),
     // Phase 3.6 (G2): the durable picker-insert record + the account
     // seam, injected so UI tests can substitute a temp-dir store.
@@ -408,12 +414,14 @@ fun RichNoteEditorScreen(
     // parity); ✓/back in edit mode returns here, not out of the
     // note. The mode is ephemeral UI state, never persisted.
     // Phase 6 (Editor Refinement #2): entering edit mode is
-    // deliberate — the pencil is the ONLY door. Read mode used to
-    // treat every tap (body, title, blocks, the empty area below)
-    // as a door into edit mode, which also made its text
-    // unselectable: the press that starts a copy was consumed as a
-    // tap. Read content is now genuinely read-only and selectable.
-    var editing by remember { mutableStateOf(false) }
+    // deliberate — the pencil is the ONLY door in an existing note.
+    // Read mode used to treat every tap (body, title, blocks, the
+    // empty area below) as a door into edit mode, which also made
+    // its text unselectable: the press that starts a copy was
+    // consumed as a tap. Read content is now genuinely read-only
+    // and selectable. The one exception is a brand-new note
+    // ([startInEdit]): it opens in the editor directly.
+    var editing by remember { mutableStateOf(startInEdit) }
     val density = LocalDensity.current
     val view = LocalView.current
 
