@@ -681,4 +681,40 @@ class NoteDocumentTest {
             NoteDocument.replaceTaskItemText("<p><strong>Buy</strong> milk</p>", "Buy oat milk"),
         )
     }
+    @Test
+    fun entitiesDecodeInAttributesAndCodeText() {
+        // Attribute values and code text are decoded where raw
+        // markup becomes data: the full HTML5 set, exactly once.
+        val image = NoteDocument.parse(
+            "<p><img src=\"nota-attachment://abc\" alt=\"&copy; cat &eacute;\"></p>",
+        ).filterIsInstance<ImageSegment>().single()
+        assertEquals("\u00A9 cat \u00E9", image.alt)
+        val code = NoteDocument.parse(
+            "<pre><code>&copy; &lt;tag&gt; &#169;</code></pre>",
+        ).filterIsInstance<CodeSegment>().single()
+        assertEquals("\u00A9 <tag> \u00A9", code.text)
+    }
+
+    @Test
+    fun escapedEntitiesStayLiteralText() {
+        // "&amp;copy;" is the seven literal characters "&copy;"
+        // the author typed \u2014 decoding never runs twice.
+        val image = NoteDocument.parse(
+            "<p><img src=\"nota-attachment://abc\" alt=\"&amp;copy;\"></p>",
+        ).filterIsInstance<ImageSegment>().single()
+        assertEquals("&copy;", image.alt)
+    }
+
+    @Test
+    fun ampersandHeavyTextDecodesLiterallyAndLinearly() {
+        // Thousands of '&' with no reference in sight must
+        // pass through untouched (and the bounded lookahead
+        // keeps the scan linear — this input is the shape
+        // that used to go quadratic), while a real reference
+        // at the very end still decodes.
+        val amps = "&".repeat(5000)
+        assertEquals(amps + "\u00A9", HtmlEntities.decode(amps + "&copy;"))
+        assertEquals("a & b &nope c", HtmlEntities.decode("a & b &nope c"))
+    }
+
 }

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Per-note Export #1: the only directory FileProvider exposes is
+     the cache exports dir, where built export files are staged for
+     the share sheet. Nothing else on the device is reachable
+     through this provider. -->
+<paths>
+    <cache-path name="exports" path="exports/" />
+</paths>

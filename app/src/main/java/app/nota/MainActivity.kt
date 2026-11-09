@@ -3,7 +3,10 @@ package app.nota
 import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
@@ -41,13 +44,18 @@ import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AppLockManager
 import app.nota.data.security.AppLockMethod
 import app.nota.feature.lock.CredentialSetupForm
+import app.nota.feature.export.ExportSaveStore
+import app.nota.feature.export.NoteExportDelivery
 import app.nota.feature.lock.LegacyFingerprintPromptHost
 import app.nota.feature.lock.LockScreen
 import app.nota.notes.R
 import app.nota.ui.navigation.NotaNavShell
 import app.nota.ui.theme.NotaSpacing
 import app.nota.ui.theme.NotaTheme
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.koin.android.ext.android.inject
 
 /**
@@ -65,6 +73,50 @@ class MainActivity : FragmentActivity() {
     private val appLockManager: AppLockManager by inject()
     private val databaseProvider: DatabaseProvider by inject()
     private val pendingNoteOpenStore: app.nota.data.reminders.PendingNoteOpenStore by inject()
+
+    /**
+     * Per-note Export #1: the export Save flow's file-picker
+     * launcher, registered once here at activity level (see
+     * ExportSaveStore) so its result survives an App Lock
+     * relock that disposes the whole nav shell mid-picker.
+     */
+    private val exportSaveLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result -> onExportSaveResult(result) }
+
+    private fun onExportSaveResult(result: ActivityResult) {
+        val uri = result.data?.data
+        val artifact = ExportSaveStore.take()
+        if (result.resultCode != RESULT_OK || uri == null) return
+        if (artifact == null) {
+            Toast.makeText(
+                this,
+                "Export was interrupted — nothing was written.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        lifecycleScope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                runCatching {
+                    NoteExportDelivery.writeTo(
+                        this@MainActivity,
+                        uri,
+                        artifact,
+                    )
+                }.exceptionOrNull()
+            }
+            Toast.makeText(
+                this@MainActivity,
+                if (failure == null) {
+                    "Saved ${artifact.fileName}"
+                } else {
+                    "Couldn't save the export."
+                },
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
     private val captureIntake: app.nota.data.capture.CaptureIntake by inject()
 
     /**
@@ -111,6 +163,11 @@ class MainActivity : FragmentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        ExportSaveStore.launcher = null
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -145,6 +202,9 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         captureSystemIntent(intent)
+        ExportSaveStore.launcher = { intent ->
+            exportSaveLauncher.launch(intent)
+        }
         enableEdgeToEdge()
         setContent {
             // Phase 1a: theme choices are persisted in DataStore and

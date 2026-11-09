@@ -21,6 +21,7 @@ import app.nota.data.repository.NoteUnlockResult
 import app.nota.data.security.AppLockMethod
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.templates.TemplateRepository
+import app.nota.feature.export.NoteExportArtifact
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -674,6 +675,9 @@ class RichNoteEditorViewModel(
         } else {
             attachmentStore.fileFor(attachment)
         }
+
+    // --- Per-note export (Phase 6, Export #1) --------------------------------
+
 
     // --- Templates -------------------------------------------------------------
 
