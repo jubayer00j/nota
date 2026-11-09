@@ -100,6 +100,9 @@ private fun emptyText(filter: NotesFilter): String = when (filter) {
 @Composable
 fun NotesScreen(
     onOpenNote: (String) -> Unit = {},
+    // Editor Refinement #2 (fix round): the FAB's just-created note
+    // opens in the editor; existing notes open for reading.
+    onOpenNewNote: (String) -> Unit = onOpenNote,
     onOpenSearch: () -> Unit = {},
     onOpenGraph: () -> Unit = {},
     viewModel: NotesViewModel = koinViewModel(),
@@ -322,7 +325,7 @@ fun NotesScreen(
         },
         floatingActionButton = {
             if (state.selection.isEmpty()) {
-                FloatingActionButton(onClick = { viewModel.createNote(onCreated = onOpenNote) }) {
+                FloatingActionButton(onClick = { viewModel.createNote(onCreated = onOpenNewNote) }) {
                     Icon(Icons.Filled.Add, contentDescription = "New note")
                 }
             }

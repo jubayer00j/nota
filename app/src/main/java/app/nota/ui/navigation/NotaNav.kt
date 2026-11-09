@@ -27,6 +27,8 @@ import app.nota.data.auth.AuthManager
 import app.nota.feature.settings.SignInScreen
 import kotlinx.coroutines.launch
 import androidx.navigation.NavController
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -75,8 +77,9 @@ object NotaRoutes {
     const val SEARCH = "search"
     const val LINK_GRAPH = "link-graph"
     const val SIGN_IN = "sign-in"
-    const val NOTE_EDITOR = "note/{noteId}"
-    fun noteEditor(noteId: String): String = "note/$noteId"
+    const val NOTE_EDITOR = "note/{noteId}?fresh={fresh}"
+    fun noteEditor(noteId: String, fresh: Boolean = false): String =
+        "note/$noteId?fresh=$fresh"
 
     // Phase 6 presentation redesign: one sub-route per Settings
     // category. The Settings tab destination itself is the ROOT
@@ -116,13 +119,13 @@ private fun settingsRouteFor(category: SettingsCategory): String =
  * through B, then A; launchSingleTop covers re-opening the note
  * already on top.
  */
-private fun NavController.openNoteEditor(noteId: String) {
+private fun NavController.openNoteEditor(noteId: String, fresh: Boolean = false) {
     val existing = currentBackStack.value.lastOrNull { entry ->
         entry.destination.route == NotaRoutes.NOTE_EDITOR &&
             entry.arguments?.getString("noteId") == noteId
     }
     if (existing == null) {
-        navigate(NotaRoutes.noteEditor(noteId)) { launchSingleTop = true }
+        navigate(NotaRoutes.noteEditor(noteId, fresh)) { launchSingleTop = true }
     } else {
         while (currentBackStackEntry != null && currentBackStackEntry !== existing) {
             if (!popBackStack()) break
@@ -279,7 +282,9 @@ fun NotaNavShell(
                                     captureDeliverer.deliver(taken)
                                 }.getOrNull()
                                 if (noteId != null) {
-                                    navController.openNoteEditor(noteId)
+                                    // A capture just created this
+                                    // note — it opens in the editor.
+                                    navController.openNoteEditor(noteId, fresh = true)
                                 }
                             } finally {
                                 captureDeliveryInFlight = false
@@ -307,7 +312,7 @@ fun NotaNavShell(
                         )
                     }.getOrNull()
                     if (note != null) {
-                        navController.openNoteEditor(note.id)
+                        navController.openNoteEditor(note.id, fresh = true)
                     }
                 }
             },
@@ -319,7 +324,7 @@ fun NotaNavShell(
                         noteRepository.createNote()
                     }.getOrNull()
                     if (note != null) {
-                        navController.openNoteEditor(note.id)
+                        navController.openNoteEditor(note.id, fresh = true)
                     }
                 }
             },
@@ -363,6 +368,7 @@ fun NotaNavShell(
             composable(NotaDestination.Notes.route) {
                 NotesScreen(
                     onOpenNote = { id -> navController.openNoteEditor(id) },
+                    onOpenNewNote = { id -> navController.openNoteEditor(id, fresh = true) },
                     onOpenSearch = { navController.navigate(NotaRoutes.SEARCH) },
                     onOpenGraph = { navController.navigate(NotaRoutes.LINK_GRAPH) },
                 )
@@ -370,6 +376,7 @@ fun NotaNavShell(
             composable(NotaRoutes.TODAY) {
                 TodayScreen(
                     onOpenNote = { id -> navController.openNoteEditor(id) },
+                    onOpenNewNote = { id -> navController.openNoteEditor(id, fresh = true) },
                 )
             }
             composable(NotaRoutes.SEARCH) {
@@ -385,10 +392,19 @@ fun NotaNavShell(
                     onOpenNote = { id -> navController.openNoteEditor(id) },
                 )
             }
-            composable(NotaRoutes.NOTE_EDITOR) { entry ->
+            composable(
+                NotaRoutes.NOTE_EDITOR,
+                arguments = listOf(
+                    navArgument("fresh") {
+                        type = NavType.BoolType
+                        defaultValue = false
+                    },
+                ),
+            ) { entry ->
                 val noteId = entry.arguments?.getString("noteId").orEmpty()
                 RichNoteEditorScreen(
                     noteId = noteId,
+                    startInEdit = entry.arguments?.getBoolean("fresh") ?: false,
                     onBack = { navController.popBackStack() },
                     onOpenNote = { id -> navController.openNoteEditor(id) },
                     onOpenAiSettings = { navController.navigate(NotaRoutes.SETTINGS_AI) },

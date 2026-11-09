@@ -31,6 +31,10 @@ import org.koin.androidx.compose.koinViewModel
 @Composable
 fun TodayScreen(
     onOpenNote: (String) -> Unit = {},
+    // Editor Refinement #2 (fix round): a daily note created by the
+    // "Open today's note" tap opens in the editor; an existing one
+    // opens for reading.
+    onOpenNewNote: (String) -> Unit = onOpenNote,
     viewModel: TodayViewModel = koinViewModel(),
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -63,7 +67,7 @@ fun TodayScreen(
                 Spacer(Modifier.height(NotaSpacing.md))
                 NotaPrimaryButton(
                     text = "Open today's note",
-                    onClick = { viewModel.openTodaysNote(onOpenNote) },
+                    onClick = { viewModel.openTodaysNote(onOpenNote, onOpenNewNote) },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

@@ -48,10 +48,15 @@ import org.robolectric.shadows.ShadowLooper
  * Phase 3.6 (G3) — read mode, UI-level. Drives the REAL
  * [RichNoteEditorScreen] over real (in-memory) Room, the
  * NotesSwipeGhostUiTest pattern: a note must OPEN for reading (no
- * toolbar, no caret — Noma parity), a tap on the body must enter
- * edit mode, ✓ must return to reading the same note, task
- * checkboxes must toggle while reading, and a locked note must show
- * its gate — never the content, never an edit door.
+ * toolbar, no caret — Noma parity), ✓ must return to reading the
+ * same note, task checkboxes must toggle while reading, and a
+ * locked note must show its gate — never the content, never an
+ * edit door.
+ *
+ * Phase 6 (Editor Refinement #2): read mode is READ-ONLY — a tap
+ * on the body must NOT enter edit mode any more (the pencil is the
+ * only door), and a completed task wears the Tinted Card DONE pill
+ * while reading.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -131,7 +136,7 @@ class EditorReadModeUiTest {
         insertStore = PendingInsertStore(tempFolder.newFolder("files"))
     }
 
-    private fun composeEditor(noteId: String) {
+    private fun composeEditor(noteId: String, startInEdit: Boolean = false) {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val vm = RichNoteEditorViewModel(
             repository,
@@ -148,6 +153,7 @@ class EditorReadModeUiTest {
             app.nota.ui.theme.NotaTheme {
                 RichNoteEditorScreen(
                     noteId = noteId,
+                    startInEdit = startInEdit,
                     onBack = {},
                     viewModel = vm,
                     pendingInsertStore = insertStore,
@@ -194,7 +200,7 @@ class EditorReadModeUiTest {
     }
 
     @Test
-    fun noteOpensInReadMode_tapBodyEdits_checkReturnsToRead() {
+    fun noteOpensInReadMode_tapBodyStaysReading_pencilEdits_checkReturnsToRead() {
         val note = runBlocking {
             repository.createRichNote(
                 title = "Reading Note",
@@ -216,8 +222,11 @@ class EditorReadModeUiTest {
         }
         composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Done editing").assertDoesNotExist()
+        // The one task is unchecked: no DONE pill anywhere.
+        composeRule.onNodeWithText("DONE").assertDoesNotExist()
 
-        // Task checkboxes toggle while reading (Noma parity).
+        // Task checkboxes toggle while reading (Noma parity) — and
+        // the toggled-on task immediately wears the DONE pill.
         val toggle = composeRule.onNode(isToggleable())
         val before = toggle.fetchSemanticsNode().config
             .getOrNull(SemanticsProperties.ToggleableState)
@@ -227,15 +236,31 @@ class EditorReadModeUiTest {
             composeRule.onNode(isToggleable()).fetchSemanticsNode().config
                 .getOrNull(SemanticsProperties.ToggleableState) == ToggleableState.On
         }
+        composeRule.onNodeWithText("DONE").assertIsDisplayed()
 
-        // Tap the body → edit mode.
+        // Tap the body → STILL read mode (Editor Refinement #2:
+        // read mode has no tap doors; the pencil is the only one).
         composeRule.onNodeWithText("Reading body text").performClick()
-        awaitTrue("edit mode after body tap") {
+        composeRule.waitForIdle()
+        composeRule.onNodeWithContentDescription("Done editing").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+
+        // Tap the title → still read mode too.
+        composeRule.onNodeWithText("Reading Note").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithContentDescription("Done editing").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+
+        // The pencil → edit mode.
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode after pencil tap") {
             exists("done") {
                 composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
             }
         }
         composeRule.onNodeWithContentDescription("Edit note").assertDoesNotExist()
+        // The checked task keeps its DONE pill while editing.
+        composeRule.onNodeWithText("DONE").assertIsDisplayed()
 
         // ✓ → back to READ mode on the same note.
         composeRule.onNodeWithContentDescription("Done editing").performClick()
@@ -245,6 +270,60 @@ class EditorReadModeUiTest {
             }
         }
         composeRule.onNodeWithText("Reading body text").assertIsDisplayed()
+    }
+
+    @Test
+    fun brandNewNote_startsInEditMode() {
+        // Editor Refinement #2 (fix round): a note created this
+        // moment opens IN the editor — the navigation layer passes
+        // startInEdit for creation flows only; an existing note
+        // (the flow test above) opens for reading.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Fresh Note",
+                contentHtml = "<p></p>",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+        awaitTrue("edit mode from the start") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").assertDoesNotExist()
+    }
+
+    @Test
+    fun checkedTaskInReadMode_wearsTheDonePill_uncheckedDoesNot() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Chores",
+                contentHtml = "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"true\">" +
+                    "<p>Finished chore</p></li>" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Open chore</p></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("read mode with both tasks") {
+            exists("finished") {
+                composeRule.onNodeWithText("Finished chore").assertIsDisplayed()
+            } && exists("open") {
+                composeRule.onNodeWithText("Open chore").assertIsDisplayed()
+            }
+        }
+        // Exactly one DONE pill — the checked item's.
+        composeRule.onNodeWithText("DONE").assertIsDisplayed()
+        val states = composeRule.onAllNodes(isToggleable())
+            .fetchSemanticsNodes().map {
+                it.config.getOrNull(SemanticsProperties.ToggleableState)
+            }
+        org.junit.Assert.assertEquals(
+            listOf(ToggleableState.On, ToggleableState.Off),
+            states,
+        )
     }
 
     @Test

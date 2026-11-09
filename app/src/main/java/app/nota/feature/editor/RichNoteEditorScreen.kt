@@ -35,6 +35,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -69,6 +70,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -130,7 +132,6 @@ import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextLayoutResult
 import app.nota.data.ai.AiErrorKind
 import app.nota.data.ai.AiException
 import app.nota.data.ai.AiService
@@ -257,6 +258,12 @@ fun RichNoteEditorScreen(
     // Beginner AI Setup #1 (F6): where the no-key notice's
     // "Open AI settings" action goes (Settings → AI features).
     onOpenAiSettings: () -> Unit = {},
+    // Editor Refinement #2 (fix round): a note created this very
+    // moment (New note, quick capture, voice) opens IN the editor —
+    // there is nothing to read yet, the user came to write. Only an
+    // existing note opens for reading. Set by the navigation layer
+    // for creation flows only.
+    startInEdit: Boolean = false,
     viewModel: RichNoteEditorViewModel = koinViewModel(),
     // Phase 3.6 (G2): the durable picker-insert record + the account
     // seam, injected so UI tests can substitute a temp-dir store.
@@ -339,6 +346,13 @@ fun RichNoteEditorScreen(
     // Phase 3.5 (D4): after a caret split-insert, the segment after
     // the block takes the caret at its start (applied once composed).
     var pendingCaretFocusId by remember { mutableStateOf<String?>(null) }
+    // Phase 6 (Editor Refinement #2): after a "Make text" conversion,
+    // the caret goes to the start of the converted paragraph INSIDE
+    // a (possibly merged) text segment — (segment id, paragraph
+    // ordinal), resolved through the state's paragraph ranges once
+    // the editor has composed, the pendingCaretFocusId pattern one
+    // level down.
+    var pendingFocusParagraph by remember { mutableStateOf<Pair<String, Int>?>(null) }
     val segmentFocusRequesters = remember { mutableMapOf<String, FocusRequester>() }
     // Phase 3.8: the drag SESSION state (see BlockDragGesture.kt).
     // While a session is live the document NEVER reorders and
@@ -397,13 +411,17 @@ fun RichNoteEditorScreen(
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
     // Phase 3.6 (G3): read mode. A note opens for READING (Noma
-    // parity); editing is entered deliberately — tap on the body or
-    // the pencil — and ✓/back returns here, not out of the note. The
-    // mode is ephemeral UI state, never persisted. [editEntryTarget]
-    // is the (segmentId, caretOffset) a read-mode tap asked the edit
-    // mode to open with, applied once the editors compose.
-    var editing by remember { mutableStateOf(false) }
-    var editEntryTarget by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // parity); ✓/back in edit mode returns here, not out of the
+    // note. The mode is ephemeral UI state, never persisted.
+    // Phase 6 (Editor Refinement #2): entering edit mode is
+    // deliberate — the pencil is the ONLY door in an existing note.
+    // Read mode used to treat every tap (body, title, blocks, the
+    // empty area below) as a door into edit mode, which also made
+    // its text unselectable: the press that starts a copy was
+    // consumed as a tap. Read content is now genuinely read-only
+    // and selectable. The one exception is a brand-new note
+    // ([startInEdit]): it opens in the editor directly.
+    var editing by remember { mutableStateOf(startInEdit) }
     val density = LocalDensity.current
     val view = LocalView.current
 
@@ -413,11 +431,12 @@ fun RichNoteEditorScreen(
     val bringIntoView = remember { BringIntoViewRequester() }
     // Phase 1.5 fix 2: focus target for "tap below the last block".
     val trailingFocusRequester = remember { FocusRequester() }
-    // Phase 2.8 (E1): when a below-content tap grows a separate
-    // padding segment (document ends in a list), the new segment's
-    // editor only exists after recomposition — focus + caret are
-    // applied by the effect below once it has composed.
-    var pendingPaddingFocusId by remember { mutableStateOf<String?>(null) }
+    // Phase 6 (Editor Refinement #2): the task-list item whose field
+    // currently holds focus, as (segment id, item index) — the
+    // target of the toolbar's "Make text" action. Set when a task
+    // item field gains focus (the TableBlock selected-cell pattern),
+    // cleared when a text/quote editor takes focus instead.
+    var focusedTaskItem by remember { mutableStateOf<Pair<String, Int>?>(null) }
 
     val current = note
     // Phase 2b: a locked note initialises from the SESSION's decrypted
@@ -636,6 +655,131 @@ fun RichNoteEditorScreen(
             activeSegmentId = focusId
             pendingCaretFocusId = focusId
         }
+    }
+
+    /**
+     * Phase 6 (Editor Refinement #2): re-wrap conversion output as
+     * working segments. The pure conversions report, per output
+     * segment, which INPUT segment it derives from
+     * ([NoteDocument.ParagraphConversion.sourceIndices]); the FIRST
+     * output deriving from an input keeps that input's id — its
+     * live state and field keys stay attached — and every other
+     * output is minted fresh.
+     */
+    fun rewrapConversion(conversion: NoteDocument.ParagraphConversion): List<UiSegment> {
+        val inputIds = segments.map { it.id }
+        val used = mutableSetOf<String>()
+        return conversion.segments.mapIndexed { index, segment ->
+            val sourceId = conversion.sourceIndices.getOrNull(index)
+                ?.let { inputIds.getOrNull(it) }
+            if (sourceId != null && used.add(sourceId)) {
+                UiSegment(sourceId, segment)
+            } else {
+                UiSegment(newUiId(), segment)
+            }
+        }
+    }
+
+    /** Drops the live text state of every working segment whose id
+     *  did not survive a rebuild — a state keyed to a dead segment
+     *  would otherwise linger (and its focus requester with it). */
+    fun dropDeadTextStates(rebuilt: List<UiSegment>) {
+        val alive = rebuilt.map { it.id }.toSet()
+        textStates.keys.removeAll { it !in alive }
+        segmentFocusRequesters.keys.removeAll { it !in alive }
+    }
+
+    /**
+     * Phase 6 (Editor Refinement #2): "Make task" — the caret's
+     * paragraph of the active text segment becomes a task item.
+     * The split parts come from the editor state's own range
+     * serialisation ([paragraphPartsAtCaret]); the segment surgery
+     * is [NoteDocument.paragraphToTask]'s. Afterwards the caret
+     * lands at the start of the first text segment AFTER the task
+     * list (the insertBlockAtCaret focus discipline).
+     */
+    fun makeTaskAtCaret() {
+        val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
+        val active = segments.getOrNull(activeIndex) ?: return
+        if (active.segment !is TextSegment) return
+        val state = textStates[active.id] ?: return
+        val parts = paragraphPartsAtCaret(state) ?: return
+        // The conversion consumes the LIVE document (the active
+        // segment's state is its source of truth, via syncSegments)
+        // — the same HTML the parts were cut from.
+        val conversion = NoteDocument.paragraphToTask(
+            syncSegments(), activeIndex,
+            parts.beforeHtml, parts.paragraphHtml, parts.afterHtml,
+        ) ?: return
+        val rebuilt = rewrapConversion(conversion)
+        val taskUi = rebuilt[conversion.convertedIndex]
+        // The task list at the conversion point was created or
+        // extended: its item indices shifted, so its field states
+        // are evicted (the TaskListBlock discipline) and re-seed
+        // from the segments.
+        evictCellTextStates(cellTextStates, taskUi.id)
+        // A text half that kept the active id needs its live state
+        // re-seeded to exactly that half's HTML: before the task
+        // list it is the before-half, after it the after-half.
+        val survivor = rebuilt.firstOrNull { it.id == active.id && it.segment is TextSegment }
+        if (survivor != null) {
+            val survivorIndex = rebuilt.indexOf(survivor)
+            state.setHtml(
+                if (survivorIndex < conversion.convertedIndex) {
+                    parts.beforeHtml
+                } else {
+                    parts.afterHtml
+                },
+            )
+        }
+        dropDeadTextStates(rebuilt)
+        segments = ensureTrailing(rebuilt)
+        val taskIndex = segments.indexOfFirst { it.id == taskUi.id }
+        val follower = segments.subList(taskIndex + 1, segments.size)
+            .firstOrNull { it.segment is TextSegment || it.segment is QuoteSegment }
+        if (follower != null) {
+            activeSegmentId = follower.id
+            pendingCaretFocusId = follower.id
+        }
+        persistNow()
+    }
+
+    /**
+     * Phase 6 (Editor Refinement #2): "Make text" — the focused task
+     * item becomes plain paragraph(s) again, through
+     * [NoteDocument.taskItemToText]. The text segment the paragraph
+     * lands in is re-seeded from the merged HTML (when it already
+     * had a live state) and takes the caret at the converted
+     * paragraph's start.
+     */
+    fun makeTextFromFocusedTaskItem() {
+        val (blockId, itemIndex) = focusedTaskItem ?: return
+        val blockIndex = segments.indexOfFirst { it.id == blockId }
+        val block = segments.getOrNull(blockIndex) ?: return
+        if (block.segment !is TaskListSegment) return
+        val conversion = NoteDocument.taskItemToText(
+            syncSegments(), blockIndex, itemIndex,
+        ) ?: return
+        val rebuilt = rewrapConversion(conversion)
+        val textUi = rebuilt[conversion.convertedIndex]
+        // Every task list in the output had its items shifted by
+        // the split: evict their field states (and the source
+        // block's, when its id did not survive at all).
+        rebuilt.forEach { ui ->
+            if (ui.segment is TaskListSegment) {
+                evictCellTextStates(cellTextStates, ui.id)
+            }
+        }
+        if (rebuilt.none { it.id == blockId }) {
+            evictCellTextStates(cellTextStates, blockId)
+        }
+        dropDeadTextStates(rebuilt)
+        textStates[textUi.id]?.setHtml((textUi.segment as TextSegment).html)
+        segments = ensureTrailing(rebuilt)
+        focusedTaskItem = null
+        activeSegmentId = textUi.id
+        pendingFocusParagraph = textUi.id to conversion.convertedOrdinal
+        persistNow()
     }
 
     /** Phase 3.6 (G1): a small tick when a dragged block locks into
@@ -858,15 +1002,11 @@ fun RichNoteEditorScreen(
 
     // --- Phase 3.6 (G3): read ⇄ edit mode transitions ----------------
 
-    /** Enters edit mode; when [segmentId] names a text/quote segment,
-     *  the caret is placed at [caretOffset] inside it once the
-     *  editors compose (the read-mode tap's position, mapped through
-     *  the read renderer's own text layout). */
-    fun enterEdit(segmentId: String?, caretOffset: Int?) {
+    /** Enters edit mode. Phase 6 (Editor Refinement #2): the pencil
+     *  in the app bar is the ONLY caller — read mode has no tap
+     *  doors left, so no caret target is carried across the flip. */
+    fun enterEdit() {
         editing = true
-        if (segmentId != null) {
-            editEntryTarget = segmentId to (caretOffset ?: 0)
-        }
     }
 
     /** ✓ / back in edit mode: flush and return to reading the SAME
@@ -874,27 +1014,6 @@ fun RichNoteEditorScreen(
     fun exitToRead() {
         persistNow()
         editing = false
-    }
-
-    /** Where the caret should go when a read-mode BLOCK is tapped:
-     *  the start of the next text/quote segment, else the end of the
-     *  previous one — the block itself holds no caret. */
-    fun entryTargetForBlock(blockId: String): Pair<String, Int>? {
-        val idx = segments.indexOfFirst { it.id == blockId }
-        if (idx < 0) return null
-        for (i in idx + 1 until segments.size) {
-            val s = segments[i].segment
-            if (s is TextSegment || s is QuoteSegment) return segments[i].id to 0
-        }
-        for (i in idx - 1 downTo 0) {
-            val s = segments[i].segment
-            if (s is TextSegment || s is QuoteSegment) {
-                val length = textStates[segments[i].id]
-                    ?.annotatedString?.text?.length ?: 0
-                return segments[i].id to length
-            }
-        }
-        return null
     }
 
     /** Retires a still-staged picker record for this note (Phase 3.6,
@@ -912,27 +1031,6 @@ fun RichNoteEditorScreen(
     fun leaveNote() {
         retirePendingInsert()
         persistNow(onBack)
-    }
-
-    /**
-     * Phase 2.8 (E1): after a below-content tap grows the document,
-     * settle the list so the tapped region — the caret sits at its top
-     * edge, in the last segment — rests mid-viewport instead of below
-     * the fold or behind the keyboard.
-     */
-    fun scrollTailIntoView() {
-        // Item indices: title, meta, the segments, then below-blocks.
-        val tailIndex = segments.size + 2
-        val viewportPx = listState.layoutInfo.viewportSize.height
-        if (viewportPx <= 0) return
-        scope.launch {
-            runCatching {
-                listState.animateScrollToItem(
-                    tailIndex,
-                    (viewportPx * 0.45f).roundToInt(),
-                )
-            }
-        }
     }
 
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
@@ -1036,19 +1134,6 @@ fun RichNoteEditorScreen(
         }
     }
 
-    // Phase 2.8 (E1): focus the padding segment a below-content tap
-    // just appended, with the caret in its last paragraph.
-    LaunchedEffect(pendingPaddingFocusId) {
-        val id = pendingPaddingFocusId ?: return@LaunchedEffect
-        val ui = segments.firstOrNull { it.id == id }
-        if (ui != null) {
-            val st = richStateFor(ui)
-            st.selection = TextRange(st.annotatedString.text.length)
-            runCatching { trailingFocusRequester.requestFocus() }
-        }
-        pendingPaddingFocusId = null
-    }
-
     // Phase 3.5 (D4): after a caret split-insert, the caret goes to
     // the start of the segment following the inserted block.
     LaunchedEffect(pendingCaretFocusId) {
@@ -1062,20 +1147,27 @@ fun RichNoteEditorScreen(
         pendingCaretFocusId = null
     }
 
-    // Phase 3.6 (G3): a read-mode tap asked for edit mode at a
-    // specific caret — apply it once the editors have composed.
-    LaunchedEffect(editing, editEntryTarget) {
-        if (!editing) return@LaunchedEffect
-        val (segmentId, offset) = editEntryTarget ?: return@LaunchedEffect
-        val ui = segments.firstOrNull { it.id == segmentId }
+    // Phase 6 (Editor Refinement #2): the "Make text" caret — the
+    // start of the converted paragraph inside its (possibly merged)
+    // text segment, resolved through the segment state's own
+    // paragraph ranges. An ordinal past the end (the range model
+    // and the HTML leaf count disagreeing on an exotic shape)
+    // clamps to the last paragraph rather than losing the focus.
+    LaunchedEffect(pendingFocusParagraph) {
+        val (id, ordinal) = pendingFocusParagraph ?: return@LaunchedEffect
+        val ui = segments.firstOrNull { it.id == id }
         if (ui != null) {
             val st = richStateFor(ui)
-            st.selection = TextRange(
-                offset.coerceIn(0, st.annotatedString.text.length),
-            )
-            runCatching { segmentFocusRequesters[segmentId]?.requestFocus() }
+            val ranges = st.annotatedString.paragraphStyles
+            val start = when {
+                ranges.isEmpty() -> 0
+                ordinal in ranges.indices -> ranges[ordinal].start
+                else -> ranges.last().start
+            }
+            st.selection = TextRange(start)
+            runCatching { segmentFocusRequesters[id]?.requestFocus() }
         }
-        editEntryTarget = null
+        pendingFocusParagraph = null
     }
 
     // Phase 3.6 (G1) origin, Phase 3.8 form: auto-scroll while a
@@ -1443,7 +1535,7 @@ fun RichNoteEditorScreen(
                                 Icon(Icons.Filled.Check, contentDescription = "Done editing")
                             }
                         } else {
-                            IconButton(onClick = { enterEdit(null, null) }) {
+                            IconButton(onClick = { enterEdit() }) {
                                 Icon(Icons.Filled.Edit, contentDescription = "Edit note")
                             }
                         }
@@ -1679,7 +1771,15 @@ fun RichNoteEditorScreen(
                     .getOrPut(ui.id) { FocusRequester() },
                 stateFor = { richStateFor(ui) },
                 cellTextStates = cellTextStates,
-                onFocus = { activeSegmentId = ui.id },
+                onFocus = {
+                    activeSegmentId = ui.id
+                    // Phase 6 (Editor Refinement #2): a text/quote
+                    // editor taking focus ends any task-item focus —
+                    // the toolbar's conversion action follows the
+                    // caret, and the caret just moved.
+                    focusedTaskItem = null
+                },
+                onTaskItemFocus = { index -> focusedTaskItem = ui.id to index },
                 onChange = { updateBlock(ui.id, it) },
                 onRemove = { removeBlock(ui.id) },
                 attachments = attachments,
@@ -1740,15 +1840,18 @@ fun RichNoteEditorScreen(
                             )
                         } else {
                             // Phase 3.6 (G3): the read-mode title is
-                            // text, not a field — tapping it is one of
-                            // the doors into edit mode.
-                            Text(
-                                title.ifBlank { "Untitled note" },
-                                style = MaterialTheme.typography.titleLarge,
-                                modifier = Modifier.fillMaxWidth()
-                                    .clickable { enterEdit(null, null) }
-                                    .padding(vertical = NotaSpacing.xs),
-                            )
+                            // text, not a field. Phase 6 (Editor
+                            // Refinement #2): selectable like the
+                            // body, and no longer a door into edit
+                            // mode — the pencil is the only door.
+                            SelectionContainer {
+                                Text(
+                                    title.ifBlank { "Untitled note" },
+                                    style = MaterialTheme.typography.titleLarge,
+                                    modifier = Modifier.fillMaxWidth()
+                                        .padding(vertical = NotaSpacing.xs),
+                                )
+                            }
                         }
                         if (docStats.isNotEmpty()) {
                             Text(
@@ -1776,15 +1879,17 @@ fun RichNoteEditorScreen(
                         val folderName = folders.firstOrNull { it.id == folderId }?.name
                         val tagList = parseTagsCsv(tagsCsv)
                         if (folderName != null || tagList.isNotEmpty()) {
-                            Text(
-                                listOfNotNull(
-                                    folderName,
-                                    tagList.takeIf { it.isNotEmpty() }
-                                        ?.joinToString(" · ") { "#$it" },
-                                ).joinToString("  "),
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            SelectionContainer {
+                                Text(
+                                    listOfNotNull(
+                                        folderName,
+                                        tagList.takeIf { it.isNotEmpty() }
+                                            ?.joinToString(" · ") { "#$it" },
+                                    ).joinToString("  "),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }
@@ -1792,22 +1897,20 @@ fun RichNoteEditorScreen(
                     if (!editing) {
                         // Phase 3.6 (G3): the read rendering of the
                         // same segment — static rich text / blocks,
-                        // toggleable task checkboxes, tappable links;
-                        // a tap anywhere else is a door into edit mode.
-                        SegmentReadView(
-                            ui = ui,
-                            stateFor = { richStateFor(ui) },
-                            onTapText = { caret ->
-                                enterEdit(ui.id, caret)
-                            },
-                            onTapBlock = {
-                                val target = entryTargetForBlock(ui.id)
-                                enterEdit(target?.first, target?.second)
-                            },
-                            onChange = { updateBlock(ui.id, it) },
-                            attachments = attachments,
-                            fileFor = { viewModel.attachmentFile(it) },
-                        )
+                        // toggleable task checkboxes, tappable links.
+                        // Phase 6 (Editor Refinement #2): wrapped in
+                        // a SelectionContainer so the text selects
+                        // and copies natively, and NO tap here enters
+                        // edit mode — the pencil is the only door.
+                        SelectionContainer {
+                            SegmentReadView(
+                                ui = ui,
+                                stateFor = { richStateFor(ui) },
+                                onChange = { updateBlock(ui.id, it) },
+                                attachments = attachments,
+                                fileFor = { viewModel.attachmentFile(it) },
+                            )
+                        }
                         return@itemsIndexed
                     }
                     // Phase 3.6 (G1): EVERY block type drags — and so
@@ -1834,37 +1937,19 @@ fun RichNoteEditorScreen(
                     segmentEditor(ui, index)
                 }
                 if (segments.lastOrNull()?.segment is TextSegment) {
-                    // Phase 1.5 fix 2 + Phase 2.8 (E1): the empty area
-                    // below the last block is the tap-anywhere surface.
-                    // It fills the rest of the viewport, and a tap
-                    // places the caret at the tapped visual row: the
-                    // document grows with empty paragraphs up to that
-                    // row (see TapBelowContent.kt). A tap in the first
-                    // row band keeps the Phase 1.5 behaviour — caret at
-                    // the very end of the document.
+                    // Phase 1.5 fix 2: the empty area below the last
+                    // block fills the rest of the viewport, and a tap
+                    // in EDIT mode drops the caret at the very end of
+                    // the document. Phase 6 (Editor Refinement #2)
+                    // retires the Phase 2.8 (E1) tap-anywhere growth
+                    // for good: the tap NEVER appends empty
+                    // paragraphs, wherever in the area it lands — the
+                    // caret goes to the end of the last text segment,
+                    // exactly the Phase 1.5 behaviour. In read mode
+                    // the area is inert space (no tap doors remain).
                     item(key = "below-blocks") {
                         if (!editing) {
-                            // Phase 3.6 (G3): in read mode the empty
-                            // area below the content is a door into
-                            // edit mode, caret at the document's end.
-                            Box(
-                                Modifier.fillMaxWidth().height(96.dp)
-                                    .pointerInput(segments) {
-                                        detectTapGestures {
-                                            val lastText = segments.lastOrNull {
-                                                it.segment is TextSegment ||
-                                                    it.segment is QuoteSegment
-                                            }
-                                            if (lastText != null) {
-                                                val length = textStates[lastText.id]
-                                                    ?.annotatedString?.text?.length ?: 0
-                                                enterEdit(lastText.id, length)
-                                            } else {
-                                                enterEdit(null, null)
-                                            }
-                                        }
-                                    },
-                            )
+                            Box(Modifier.fillMaxWidth().height(96.dp))
                             return@item
                         }
                         val density = LocalDensity.current
@@ -1893,42 +1978,16 @@ fun RichNoteEditorScreen(
                         Box(
                             Modifier.fillMaxWidth().height(tailHeight)
                                 .pointerInput(segments) {
-                                    detectTapGestures { offset ->
+                                    detectTapGestures {
                                         val ui = segments.lastOrNull()
                                             ?: return@detectTapGestures
                                         val state = richStateFor(ui)
                                         activeSegmentId = ui.id
+                                        state.selection = TextRange(
+                                            state.annotatedString.text.length,
+                                        )
                                         runCatching {
                                             trailingFocusRequester.requestFocus()
-                                        }
-                                        val rows = tapRowsBelowContent(
-                                            tapYInTailPx = offset.y,
-                                            gapAboveTailPx = with(density) {
-                                                NotaSpacing.sm.toPx()
-                                            },
-                                            lineHeightPx = with(density) {
-                                                NotaEditorBody.lineHeight.toPx()
-                                            },
-                                        )
-                                        if (rows <= 0) {
-                                            state.placeCaretBelowContent(0)
-                                            return@detectTapGestures
-                                        }
-                                        if (state.placeCaretBelowContent(rows)) {
-                                            scrollTailIntoView()
-                                        } else {
-                                            // The document ends inside a
-                                            // list: the padding must be
-                                            // its own text segment below
-                                            // the list, not list items.
-                                            val padding = UiSegment(
-                                                newUiId(),
-                                                TextSegment(paddingSegmentHtml(rows)),
-                                            )
-                                            segments = segments + padding
-                                            activeSegmentId = padding.id
-                                            pendingPaddingFocusId = padding.id
-                                            scrollTailIntoView()
                                         }
                                     }
                                 },
@@ -2175,8 +2234,53 @@ fun RichNoteEditorScreen(
                 }
             }
             if (editing) {
+                // Phase 6 (Editor Refinement #2): the paragraph ⇄
+                // task conversion action for this frame. A focused
+                // task item wins — the caret is in its field, not in
+                // a text state. Otherwise the caret's paragraph in
+                // the active TEXT segment decides, and only a plain
+                // top-level paragraph offers "Make task" (a heading
+                // or list item offers nothing).
+                val focusedTask = focusedTaskItem
+                val activeUi = segments.firstOrNull { it.id == activeSegmentId }
+                val taskActionLabel = when {
+                    focusedTask != null && segments.any {
+                        it.id == focusedTask.first && it.segment is TaskListSegment
+                    } -> "Make text"
+                    activeUi?.segment is TextSegment && activeState != null &&
+                        activeState!!.annotatedString.text.isNotEmpty() -> {
+                        // Eligibility from the format state only —
+                        // the same live reads the toolbar itself
+                        // uses. Serialising the caret's paragraph
+                        // here (toHtml during composition) keeps
+                        // the editor state perpetually busy and the
+                        // composition never idles; the click path
+                        // re-validates against the real HTML via
+                        // NoteDocument.paragraphToTask, so an exotic
+                        // paragraph can at worst no-op, never
+                        // convert wrongly. A plain paragraph is
+                        // exactly: no heading style, no list.
+                        val format = activeState!!.toolbarFormatState()
+                        if (format.heading == HeadingStyle.Normal &&
+                            !format.unorderedList && !format.orderedList
+                        ) {
+                            "Make task"
+                        } else {
+                            null
+                        }
+                    }
+                    else -> null
+                }
                 EditorToolbar(
                     state = activeState,
+                    taskActionLabel = taskActionLabel,
+                    onTaskAction = {
+                        if (taskActionLabel == "Make text") {
+                            makeTextFromFocusedTaskItem()
+                        } else if (taskActionLabel == "Make task") {
+                            makeTaskAtCaret()
+                        }
+                    },
                     modifier = Modifier.alpha(chromeAlpha),
                     micVisible = speechAvailable,
                     micListening = speechSnapshot.state ==
@@ -2600,6 +2704,9 @@ private fun SegmentEditor(
     // the drag ghost share them (see the screen's declaration).
     cellTextStates: MutableMap<String, MutableState<String>>,
     onFocus: () -> Unit,
+    // Phase 6 (Editor Refinement #2): a task item field gained
+    // focus — the screen records it as the "Make text" target.
+    onTaskItemFocus: (Int) -> Unit = {},
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
     attachments: List<AttachmentEntity>,
@@ -2708,7 +2815,9 @@ private fun SegmentEditor(
                 Box(Modifier.weight(1f)) {
                     when (segment) {
                         is TableSegment -> TableBlock(ui.id, segment, cellTextStates, onChange, onRemove)
-                        is TaskListSegment -> TaskListBlock(ui.id, segment, cellTextStates, onChange, onRemove)
+                        is TaskListSegment -> TaskListBlock(
+                            ui.id, segment, cellTextStates, onChange, onRemove, onTaskItemFocus,
+                        )
                         is ImageSegment -> ImageBlock(
                             segment, attachments, fileFor, onChange, onRemove, onPinchingChange,
                         )
@@ -2767,22 +2876,23 @@ private fun SegmentEditor(
  * render through the library's read-only [BasicRichText] over the
  * SAME [RichTextState] the editor uses, so flipping modes is
  * seamless and warm; its link taps stay live (the renderer consumes
- * link taps itself — they never reach the tap-to-edit handler
- * below). Task checkboxes stay toggleable (a toggle is a state
- * change, not an edit session — Noma parity). Everything else is a
- * static rendering.
+ * them itself). Task checkboxes stay toggleable (a toggle is a
+ * state change, not an edit session — Noma parity). Everything
+ * else is a static rendering.
  *
- * Taps: a text tap maps through the renderer's own [TextLayoutResult]
- * to the exact caret offset edit mode should open with; a block tap
- * asks the caller for the nearest caret ([onTapBlock]).
+ * Phase 6 (Editor Refinement #2): there are NO tap handlers here
+ * any more. Read mode used to route every tap into edit mode,
+ * which also made the text impossible to select or copy (the
+ * selection press was consumed as a tap). The caller wraps this
+ * view in a [SelectionContainer], so text and quotes select and
+ * copy natively; the pencil in the app bar is the only door into
+ * edit mode.
  */
 @OptIn(ExperimentalRichTextApi::class)
 @Composable
 private fun SegmentReadView(
     ui: UiSegment,
     stateFor: () -> RichTextState,
-    onTapText: (caretOffset: Int) -> Unit,
-    onTapBlock: () -> Unit,
     onChange: (DocSegment) -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
@@ -2790,23 +2900,13 @@ private fun SegmentReadView(
     val readTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
     when (val segment = ui.segment) {
         is TextSegment -> {
-            var layout by remember(ui.id) { mutableStateOf<TextLayoutResult?>(null) }
             BasicRichText(
                 state = stateFor(),
                 style = readTextStyle,
-                onTextLayout = { layout = it },
-                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { offset ->
-                        onTapText(
-                            layout?.getOffsetForPosition(offset)
-                                ?: stateFor().annotatedString.text.length,
-                        )
-                    }
-                },
+                modifier = Modifier.fillMaxWidth(),
             )
         }
         is QuoteSegment -> {
-            var layout by remember(ui.id) { mutableStateOf<TextLayoutResult?>(null) }
             Row(Modifier.fillMaxWidth()) {
                 Box(
                     Modifier.width(3.dp).heightIn(min = 48.dp)
@@ -2816,15 +2916,7 @@ private fun SegmentReadView(
                 BasicRichText(
                     state = stateFor(),
                     style = readTextStyle,
-                    onTextLayout = { layout = it },
-                    modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
-                        detectTapGestures { offset ->
-                            onTapText(
-                                layout?.getOffsetForPosition(offset)
-                                    ?: stateFor().annotatedString.text.length,
-                            )
-                        }
-                    },
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }
@@ -2834,13 +2926,21 @@ private fun SegmentReadView(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 ),
                 shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { onTapBlock() }
-                },
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(Modifier.padding(NotaSpacing.sm)) {
                     segment.items.forEachIndexed { index, item ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = if (item.checked) {
+                                Modifier.fillMaxWidth().background(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
+                                    RoundedCornerShape(8.dp),
+                                )
+                            } else {
+                                Modifier.fillMaxWidth()
+                            },
+                        ) {
                             Checkbox(
                                 checked = item.checked,
                                 onCheckedChange = { checked ->
@@ -2856,15 +2956,30 @@ private fun SegmentReadView(
                                         ),
                                     )
                                 },
+                                colors = if (item.checked) {
+                                    doneCheckboxColors()
+                                } else {
+                                    CheckboxDefaults.colors()
+                                },
                             )
                             val itemState = remember(ui.id, index, item.contentHtml) {
                                 RichTextState().apply { setHtml(item.contentHtml) }
                             }
                             BasicRichText(
                                 state = itemState,
-                                style = readTextStyle,
-                                modifier = Modifier.fillMaxWidth(),
+                                style = if (item.checked) {
+                                    readTextStyle.copy(
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                } else {
+                                    readTextStyle
+                                },
+                                modifier = Modifier.weight(1f),
                             )
+                            if (item.checked) {
+                                DonePill()
+                                Spacer(Modifier.width(NotaSpacing.xs))
+                            }
                         }
                     }
                 }
@@ -2876,9 +2991,7 @@ private fun SegmentReadView(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 ),
                 shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { onTapBlock() }
-                },
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(Modifier.padding(NotaSpacing.sm)) {
                     segment.rows.forEachIndexed { r, row ->
@@ -2917,9 +3030,7 @@ private fun SegmentReadView(
                 else -> null
             }
             Box(
-                Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { onTapBlock() }
-                },
+                Modifier.fillMaxWidth(),
                 contentAlignment = Alignment.Center,
             ) {
                 if (model != null) {
@@ -2946,9 +3057,7 @@ private fun SegmentReadView(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 ),
                 shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { onTapBlock() }
-                },
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Row(
                     Modifier.padding(NotaSpacing.sm),
@@ -2983,7 +3092,6 @@ private fun SegmentReadView(
                         MaterialTheme.colorScheme.surfaceVariant,
                         RoundedCornerShape(8.dp),
                     )
-                    .pointerInput(ui.id) { detectTapGestures { onTapBlock() } }
                     .padding(NotaSpacing.sm),
             ) {
                 Text(
@@ -2996,9 +3104,7 @@ private fun SegmentReadView(
         }
         DividerSegment -> {
             Box(
-                Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { onTapBlock() }
-                }.padding(vertical = NotaSpacing.xs),
+                Modifier.fillMaxWidth().padding(vertical = NotaSpacing.xs),
             ) {
                 HorizontalDivider(Modifier.fillMaxWidth())
             }
@@ -3011,9 +3117,7 @@ private fun SegmentReadView(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 ),
                 shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.fillMaxWidth().pointerInput(ui.id) {
-                    detectTapGestures { onTapBlock() }
-                },
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
                     if (segment is ChartSegment) {
@@ -3152,6 +3256,9 @@ private fun EditableCellText(
     // operations) from it. Fires on gain only; losing focus to an
     // operation button must not clear the selection first.
     onFocus: () -> Unit = {},
+    // Phase 6 (Editor Refinement #2): softened ink — a completed
+    // task item's label (the Tinted Card look).
+    dimmed: Boolean = false,
     onEdit: (String) -> Unit,
 ) {
     val textState = cellTextStates.getOrPut(key) { mutableStateOf(initial) }
@@ -3162,11 +3269,17 @@ private fun EditableCellText(
             onEdit(it)
         },
         singleLine = true,
-        textStyle = if (bodyStyle) {
+        textStyle = (if (bodyStyle) {
             MaterialTheme.typography.bodyMedium
         } else {
             MaterialTheme.typography.bodySmall
-        },
+        }).copy(
+            color = if (dimmed) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                Color.Unspecified
+            },
+        ),
         modifier = modifier.onFocusChanged { if (it.isFocused) onFocus() },
     )
 }
@@ -3344,6 +3457,39 @@ private fun TableBlock(
     }
 }
 
+/**
+ * Phase 6 (Editor Refinement #2): the completed-task treatment (the
+ * "Tinted Card" look, picked from the design mock-up): a checked
+ * row sits on a soft pine tint, its checkbox is filled pine, its
+ * text softens to the variant colour, and a small DONE pill rides
+ * at the row's end. Shared by the read view and the edit-mode task
+ * list so a finished task reads identically in both. All colours
+ * are theme tokens — primary IS the pine of the pine & paper
+ * system — so the look follows light/dark/OLED schemes.
+ */
+@Composable
+private fun DonePill() {
+    Text(
+        "DONE",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier
+            .background(
+                MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                RoundedCornerShape(50),
+            )
+            .padding(horizontal = NotaSpacing.sm, vertical = 2.dp),
+    )
+}
+
+/** The filled-pine checkbox colours a completed task wears. */
+@Composable
+private fun doneCheckboxColors() = CheckboxDefaults.colors(
+    checkedColor = MaterialTheme.colorScheme.primary,
+    uncheckedColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    checkmarkColor = MaterialTheme.colorScheme.onPrimary,
+)
+
 @Composable
 private fun TaskListBlock(
     blockId: String,
@@ -3351,6 +3497,9 @@ private fun TaskListBlock(
     cellTextStates: MutableMap<String, MutableState<String>>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
+    // Phase 6 (Editor Refinement #2): an item field gained focus —
+    // reported so the toolbar can offer "Make text" for that item.
+    onItemFocus: (Int) -> Unit = {},
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -3359,7 +3508,17 @@ private fun TaskListBlock(
     ) {
         Column(Modifier.padding(NotaSpacing.sm)) {
             list.items.forEachIndexed { index, item ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = if (item.checked) {
+                        Modifier.fillMaxWidth().background(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
+                            RoundedCornerShape(8.dp),
+                        )
+                    } else {
+                        Modifier.fillMaxWidth()
+                    },
+                ) {
                     Checkbox(
                         checked = item.checked,
                         onCheckedChange = { checked ->
@@ -3371,13 +3530,20 @@ private fun TaskListBlock(
                                 ),
                             )
                         },
+                        colors = if (item.checked) {
+                            doneCheckboxColors()
+                        } else {
+                            CheckboxDefaults.colors()
+                        },
                     )
                     EditableCellText(
                         key = "$blockId-item-$index",
                         initial = PlainTextCodec.htmlToCellText(item.contentHtml),
                         bodyStyle = true,
+                        dimmed = item.checked,
                         cellTextStates = cellTextStates,
                         modifier = Modifier.weight(1f),
+                        onFocus = { onItemFocus(index) },
                         onEdit = { newText ->
                             onChange(
                                 TaskListSegment(
@@ -3400,6 +3566,10 @@ private fun TaskListBlock(
                             )
                         },
                     )
+                    if (item.checked) {
+                        DonePill()
+                        Spacer(Modifier.width(NotaSpacing.xs))
+                    }
                     IconButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
                         onChange(TaskListSegment(list.items.filterIndexed { i, _ -> i != index }))
@@ -3871,6 +4041,11 @@ private fun EditorToolbar(
     onMicClick: () -> Unit = {},
     insertMenuExpanded: Boolean,
     onInsertMenuChange: (Boolean) -> Unit,
+    // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
+    // conversion action's label ("Make task" / "Make text"), or
+    // null when the caret's context offers neither.
+    taskActionLabel: String? = null,
+    onTaskAction: () -> Unit = {},
     onLinkRequest: () -> Unit,
     onInsertImage: () -> Unit,
     onInsertImageUrl: () -> Unit,
@@ -3957,6 +4132,15 @@ private fun EditorToolbar(
             colors = toolbarIconColors(format?.orderedList == true),
         ) {
             Icon(Icons.Filled.FormatListNumbered, contentDescription = "Numbered list")
+        }
+        // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
+        // conversion — a text button in the toolbar's own idiom,
+        // present only when the caret's context offers it (a plain
+        // paragraph for "Make task", a focused task item for
+        // "Make text"). It is not gated on [enabled]: a focused task
+        // item has no RichTextState, so [state] is null there.
+        if (taskActionLabel != null) {
+            ToolbarButton(taskActionLabel, enabled = true) { onTaskAction() }
         }
         IconButton(
             onClick = onLinkRequest,

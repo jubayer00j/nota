@@ -74,6 +74,10 @@ jobs:
   # (Per-note Export #1 fix round: the partition grows to 100
   # classes — fast-a +1 export delivery Robolectric suite (unique
   # share cache paths + stale-export pruning).)
+  # (Editor Refinement #2: the partition shrinks to 99 classes —
+  # B3 −1: TapBelowContentTest is deleted with the tap-anywhere
+  # growth it covered; the conversion cases extend the existing
+  # NoteDocument / CaretSplit / read-mode suites, so no new class.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -368,7 +372,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B3, 21 of 43 shard-B classes)
+      - name: Run fast unit tests (shard B3, 20 of 42 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiSummaryHtmlTest" \
@@ -381,7 +385,6 @@ jobs:
             --tests "app.nota.feature.search.SearchSemanticHintRobolectricTest" \
             --tests "app.nota.feature.graph.LinkGraphRobolectricTest" \
             --tests "app.nota.feature.editor.NoteLockUnlockStateRobolectricTest" \
-            --tests "app.nota.feature.editor.TapBelowContentTest" \
             --tests "app.nota.feature.editor.ToolbarStateTest" \
             --tests "app.nota.feature.editor.EditorRefinementTest" \
             --tests "app.nota.feature.editor.TableOpsTest" \

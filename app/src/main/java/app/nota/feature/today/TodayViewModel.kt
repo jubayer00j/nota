@@ -47,10 +47,18 @@ class TodayViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TodayUiState())
 
-    fun openTodaysNote(onOpen: (String) -> Unit) {
+    fun openTodaysNote(
+        onOpen: (String) -> Unit,
+        onOpenNew: (String) -> Unit = onOpen,
+    ) {
         viewModelScope.launch {
-            val note = repository.ensureDailyNote(LocalDate.now().toString())
-            onOpen(note.id)
+            val date = LocalDate.now().toString()
+            // Editor Refinement #2 (fix round): a daily note this
+            // tap creates is brand new and opens in the editor; an
+            // existing one opens for reading.
+            val existed = repository.hasDailyNote(date)
+            val note = repository.ensureDailyNote(date)
+            if (existed) onOpen(note.id) else onOpenNew(note.id)
         }
     }
 }
