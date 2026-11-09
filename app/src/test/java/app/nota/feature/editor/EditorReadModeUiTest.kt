@@ -350,4 +350,65 @@ class EditorReadModeUiTest {
         composeRule.onNodeWithContentDescription("Edit note").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Done editing").assertDoesNotExist()
     }
+
+    @Test
+    fun chartNote_rendersChartTitleInReadMode() {
+        // Charts PR-A: a stored v2 chart div renders as a chart in
+        // read mode — its title is real text on the chart — instead
+        // of the old "preserved as-is" placeholder card.
+        val chartDiv = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Quarterly Sales\" data-subtitle=\"\" " +
+            "data-categories='[\"Q1\",\"Q2\",\"Q3\"]' " +
+            "data-series='[{\"name\":\"Revenue\",\"values\":[10,25,15]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Charts",
+                contentHtml = "<p>Intro</p>$chartDiv",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("chart title rendered in read mode") {
+            exists("chart title") {
+                composeRule.onNodeWithText("Quarterly Sales").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Chart — preserved as-is.").assertDoesNotExist()
+    }
+
+    @Test
+    fun pieChart_composesInReadMode() {
+        val pie = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"pie\" data-title=\"Share\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[60,40]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Pie", contentHtml = pie)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("pie chart rendered") {
+            exists("pie title") {
+                composeRule.onNodeWithText("Share").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun radarChart_composesInReadMode() {
+        val radar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"radar\" data-title=\"Skills\" data-subtitle=\"\" " +
+            "data-categories='[\"Speed\",\"Power\",\"Range\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[3,5,4]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Radar", contentHtml = radar)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("radar chart rendered") {
+            exists("radar title") {
+                composeRule.onNodeWithText("Skills").assertIsDisplayed()
+            }
+        }
+    }
 }

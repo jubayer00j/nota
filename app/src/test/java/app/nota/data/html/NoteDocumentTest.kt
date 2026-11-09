@@ -1075,6 +1075,35 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun chartDivV2_survivesParseSerializeByteIdentically() {
+        // Charts PR-A's hard invariant: rendering must never cost
+        // stored bytes. A v2 chart div (single-quoted JSON attrs,
+        // exactly what Noma 1.x writes) round-trips byte-for-byte.
+        val div = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Sales\" data-subtitle=\"\" " +
+            "data-categories='[\"Jan\",\"Feb\",\"Mar\"]' " +
+            "data-series='[{\"id\":\"s1\",\"name\":\"Revenue\",\"values\":[10,20,30]," +
+            "\"color\":\"oklch(0.578 0.192 260)\"}]' " +
+            "data-options='{\"showLegend\":true,\"legendPosition\":\"bottom\"}'></div>"
+        val body = "<p>Before</p>$div<p>After</p>"
+        val segments = NoteDocument.parse(body)
+        assertTrue(segments.any { it is ChartSegment })
+        assertEquals(body, NoteDocument.serialize(segments))
+        // And the parse of the serialisation is stable too.
+        assertEquals(body, NoteDocument.serialize(NoteDocument.parse(body)))
+    }
+
+    @Test
+    fun chartDivV1_survivesParseSerializeByteIdentically() {
+        val div = "<div data-type=\"noma-chart\" data-chart-type=\"pie\" " +
+            "data-title=\"Share\" data-chart='[{\"name\":\"A\",\"value\":3}]'></div>"
+        val body = "<p>x</p>$div"
+        val segments = NoteDocument.parse(body)
+        assertTrue(segments.any { it is ChartSegment })
+        assertEquals(body, NoteDocument.serialize(segments))
+    }
+
+    @Test
     fun leafParagraphCount_countsBlocksAndListItems() {
         assertEquals(0, NoteDocument.leafParagraphCount(""))
         assertEquals(1, NoteDocument.leafParagraphCount("<p>One</p>"))
