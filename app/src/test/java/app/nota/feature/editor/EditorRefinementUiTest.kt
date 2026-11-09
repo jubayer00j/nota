@@ -5,16 +5,11 @@ import androidx.activity.ComponentActivity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.hasAnyDescendant
-import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.isScrollable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onNode
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollToNode
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import app.nota.data.attachments.AttachmentStore
@@ -65,9 +60,13 @@ import org.robolectric.shadows.ShadowLooper
  * instead (EditorRefinementTest's parseRemoteImageUrl cases),
  * and its insert runs through the photo picker's own pre-existing
  * caret-insert funnel.
+ *
+ * The window is extra wide so the whole formatting toolbar —
+ * including the conversion actions, which sit far along its
+ * horizontally scrolling row — is on screen for real clicks.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], qualifiers = "w1080dp-h900dp")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class EditorRefinementUiTest {
 
@@ -205,18 +204,6 @@ class EditorRefinementUiTest {
         false
     }
 
-    /**
-     * The formatting toolbar is a horizontally scrolling row and
-     * the conversion actions sit far along it — scroll the toolbar
-     * (the scrollable node that has the action as a descendant)
-     * until the action is on screen so the click lands for real.
-     */
-    private fun scrollToolbarTo(text: String) {
-        composeRule
-            .onNode(isScrollable() and hasAnyDescendant(hasText(text)))
-            .performScrollToNode(hasText(text))
-    }
-
     private fun storedHtml(noteId: String): String =
         runBlocking { repository.getById(noteId)?.contentHtml ?: "" }
 
@@ -291,17 +278,12 @@ class EditorRefinementUiTest {
         }
 
         // Caret into the paragraph → the toolbar offers Make task.
-        // The action sits well along the horizontally scrolling
-        // toolbar, off the test display's right edge: existence is
-        // the honest "offered" signal, and the toolbar is scrolled
-        // to it before the click.
         composeRule.onNodeWithText("Make me a task").performClick()
         awaitTrue("Make task offered") {
             exists("make task") {
-                composeRule.onNodeWithText("Make task").assertExists()
+                composeRule.onNodeWithText("Make task").assertIsDisplayed()
             }
         }
-        scrollToolbarTo("Make task")
         composeRule.onNodeWithText("Make task").performClick()
 
         // The stored body is now a task list holding the paragraph.
@@ -315,10 +297,9 @@ class EditorRefinementUiTest {
         composeRule.onNodeWithText("Make me a task").performClick()
         awaitTrue("Make text offered") {
             exists("make text") {
-                composeRule.onNodeWithText("Make text").assertExists()
+                composeRule.onNodeWithText("Make text").assertIsDisplayed()
             }
         }
-        scrollToolbarTo("Make text")
         composeRule.onNodeWithText("Make text").performClick()
         awaitTrue("stored as a plain paragraph again") {
             val html = storedHtml(note.id)
