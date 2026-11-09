@@ -411,4 +411,25 @@ class EditorReadModeUiTest {
             }
         }
     }
+
+    @Test
+    fun extremeValuesChart_composesInReadMode() {
+        // ±1e308 are legal finite chart values; the axis maths
+        // must survive them (the span overflows a Double if it is
+        // computed unclamped) instead of crashing the note open.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Extremes\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\",\"C\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[-1e308,1e308,0]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Extremes", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("extreme chart rendered") {
+            exists("extreme title") {
+                composeRule.onNodeWithText("Extremes").assertIsDisplayed()
+            }
+        }
+    }
 }

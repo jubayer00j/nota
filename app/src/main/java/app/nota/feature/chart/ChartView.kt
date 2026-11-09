@@ -786,8 +786,15 @@ private data class ChartScale(val lo: Double, val hi: Double, val step: Double, 
 
 /** Classic 1/2/5/10 nice-number axis scale over [lo0, hi0]. */
 private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScale {
-    var lo = lo0
-    var hi = hi0
+    // Extreme stored values (±1e308 is a legal finite chart value)
+    // must not overflow the span arithmetic below: hi - lo would
+    // become Infinity, the tick maths NaN, and roundToInt() would
+    // throw mid-draw — a crash while merely opening the note.
+    // Clamp the domain to ±MAX/2, where the span stays finite;
+    // NaN bounds degrade to zero.
+    val bound = Double.MAX_VALUE / 2
+    var lo = if (lo0.isNaN()) 0.0 else lo0.coerceIn(-bound, bound)
+    var hi = if (hi0.isNaN()) 0.0 else hi0.coerceIn(-bound, bound)
     if (hi < lo) {
         val t = lo
         lo = hi
