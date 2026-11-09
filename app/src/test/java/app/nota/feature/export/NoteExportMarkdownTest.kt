@@ -521,6 +521,29 @@ class NoteExportMarkdownTest {
     }
 
     @Test
+    fun droppedElementsInsideTextSegmentsStayOutOfEveryFormat() {
+        val segments = listOf(
+            TextSegment(
+                html = "<p>Keep <script>hidden()" +
+                    "<img src=\"nota-attachment://s1\"></script>" +
+                    "<img src=\"nota-attachment://r1\"></p>",
+            ),
+        )
+        assertEquals(
+            listOf("r1"),
+            NoteExport.collectAttachmentIds(segments),
+        )
+        val md = NoteExport.noteToMarkdown("T", segments) { id ->
+            if (id == "r1") "data:image/png;base64,WA==" else null
+        }
+        assertTrue(md.contains("Keep"))
+        assertFalse(md.contains("hidden"))
+        val text = NoteExport.noteToPlainText("T", segments) { null }
+        assertTrue(text.contains("Keep"))
+        assertFalse(text.contains("hidden"))
+    }
+
+    @Test
     fun singleOversizedImageDegradesToPlaceholder() {
         // ~33.7 MB decoded — past the single-image cap.
         val big = "data:image/png;base64," + "A".repeat(45_000_000)
