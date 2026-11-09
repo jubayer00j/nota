@@ -395,6 +395,47 @@ class EditorReadModeUiTest {
     }
 
     @Test
+    fun stackedHugeBarChart_composesInReadMode() {
+        // Two stacked 1e308 values: their sum overflows a double.
+        // Stack accumulation saturates so the chart stays finite.
+        val bar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Stacked Huge\" data-subtitle=\"\" " +
+            "data-categories='[\"A\"]' " +
+            "data-series='[{\"name\":\"S1\",\"values\":[1e308]},{\"name\":\"S2\",\"values\":[1e308]}]' " +
+            "data-options='{\"stacked\":true}'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Stacked Huge note", contentHtml = bar)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("stacked huge chart rendered") {
+            exists("stacked huge title") {
+                composeRule.onNodeWithText("Stacked Huge").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun singleSeriesChart_showsLegendWithSeriesName() {
+        // showLegend is honoured as persisted (1.x parity): even
+        // a single-series chart lists its series name.
+        val bar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Solo\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"Revenue\",\"values\":[3,4]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Solo note", contentHtml = bar)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("single-series legend rendered") {
+            exists("series name in legend") {
+                composeRule.onNodeWithText("Revenue").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
     fun tinyValuesLineChart_composesInReadMode() {
         // [1e-12, 2e-12]: the axis must scale to the data's own
         // magnitude, not an absolute unit-wide fallback.

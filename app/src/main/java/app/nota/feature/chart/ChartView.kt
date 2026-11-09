@@ -96,7 +96,9 @@ fun ChartView(data: ChartData, modifier: Modifier = Modifier) {
             )
         }
         val pieLike = data.type == ChartType.PIE || data.type == ChartType.DONUT
-        val showLegend = data.options.showLegend && (data.series.size > 1 || pieLike)
+        // 1.x honours showLegend as persisted — including for a
+        // single-series chart, whose one legend entry names it.
+        val showLegend = data.options.showLegend
         val entries = legendEntries(data)
         if (showLegend && data.options.legendPosition == LegendPosition.TOP) {
             ChartLegend(entries)
@@ -248,7 +250,7 @@ private fun DrawScope.drawCartesianChart(
             data.series.forEachIndexed { si, s ->
                 if (kinds[si] == SeriesKind.LINE) return@forEachIndexed
                 val v = s.values.getOrNull(ci) ?: 0.0
-                if (v >= 0) pos += v else neg += v
+                if (v >= 0) pos = satAdd(pos, v) else neg = satAdd(neg, v)
             }
             consider(pos)
             consider(neg)
@@ -406,11 +408,11 @@ private fun DrawScope.drawCartesianChart(
                     val to: Double
                     if (v >= 0) {
                         from = posAcc[ci]
-                        to = posAcc[ci] + v
+                        to = satAdd(posAcc[ci], v)
                         posAcc[ci] = to
                     } else {
                         from = negAcc[ci]
-                        to = negAcc[ci] + v
+                        to = satAdd(negAcc[ci], v)
                         negAcc[ci] = to
                     }
                     val yTop = yOf(max(from, to))
@@ -433,9 +435,9 @@ private fun DrawScope.drawCartesianChart(
                 for (ci in 0 until n) {
                     val v = s.values.getOrNull(ci) ?: continue
                     val base = if (v >= 0) posAcc[ci] else negAcc[ci]
-                    tops[ci] = Offset(centerX(ci), yOf(base + v))
+                    tops[ci] = Offset(centerX(ci), yOf(satAdd(base, v)))
                     bottoms[ci] = Offset(centerX(ci), yOf(base))
-                    if (v >= 0) posAcc[ci] += v else negAcc[ci] += v
+                    if (v >= 0) posAcc[ci] = satAdd(posAcc[ci], v) else negAcc[ci] = satAdd(negAcc[ci], v)
                 }
                 var ci = 0
                 while (ci < n) {
@@ -791,6 +793,16 @@ private fun DrawScope.drawRadarChart(
 
 // ---------------------------------------------------------------------
 // Axis scaling
+
+/**
+ * Saturating add for stack accumulation: two finite 1e308 values
+ * sum to Infinity, which would poison the axis domain and every
+ * projected coordinate. Saturating at ±MAX/2 keeps the chart
+ * finite and usable; proportions at that magnitude are beyond
+ * meaning anyway.
+ */
+private fun satAdd(a: Double, b: Double): Double =
+    (a + b).coerceIn(-Double.MAX_VALUE / 2, Double.MAX_VALUE / 2)
 
 private data class ChartScale(
     val lo: Double,
