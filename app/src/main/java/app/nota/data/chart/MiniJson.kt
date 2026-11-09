@@ -34,11 +34,19 @@ data object JsonNull : JsonValue
 
 object MiniJson {
 
+    /**
+     * Nesting bound: real chart JSON nests about five levels.
+     * Beyond this the document is treated as a parse failure (the
+     * caller substitutes its fallback) instead of recursing until
+     * the stack gives out on a crafted payload.
+     */
+    private const val MAX_DEPTH = 64
+
     /** Parses [raw] as one complete JSON document; null on any syntax error. */
     fun parse(raw: String): JsonValue? {
         val parser = Parser(raw)
         parser.skipWhitespace()
-        val value = parser.readValue() ?: return null
+        val value = parser.readValue(0) ?: return null
         parser.skipWhitespace()
         return if (parser.atEnd()) value else null
     }
@@ -52,11 +60,12 @@ object MiniJson {
             while (i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
         }
 
-        fun readValue(): JsonValue? {
+        fun readValue(depth: Int): JsonValue? {
+            if (depth > MAX_DEPTH) return null
             if (i >= s.length) return null
             return when (s[i]) {
-                '{' -> readObject()
-                '[' -> readArray()
+                '{' -> readObject(depth)
+                '[' -> readArray(depth)
                 '"' -> readString()?.let { JsonString(it) }
                 't' -> readLiteral("true", JsonBool(true))
                 'f' -> readLiteral("false", JsonBool(false))
@@ -72,7 +81,7 @@ object MiniJson {
             return value
         }
 
-        private fun readObject(): JsonObject? {
+        private fun readObject(depth: Int): JsonObject? {
             i++ // consume '{'
             val entries = LinkedHashMap<String, JsonValue>()
             skipWhitespace()
@@ -88,7 +97,7 @@ object MiniJson {
                 if (i >= s.length || s[i] != ':') return null
                 i++
                 skipWhitespace()
-                val value = readValue() ?: return null
+                val value = readValue(depth + 1) ?: return null
                 entries[key] = value // duplicate keys: last wins, as JSON.parse
                 skipWhitespace()
                 if (i >= s.length) return null
@@ -103,7 +112,7 @@ object MiniJson {
             }
         }
 
-        private fun readArray(): JsonArray? {
+        private fun readArray(depth: Int): JsonArray? {
             i++ // consume '['
             val items = mutableListOf<JsonValue>()
             skipWhitespace()
@@ -113,7 +122,7 @@ object MiniJson {
             }
             while (true) {
                 skipWhitespace()
-                val value = readValue() ?: return null
+                val value = readValue(depth + 1) ?: return null
                 items += value
                 skipWhitespace()
                 if (i >= s.length) return null

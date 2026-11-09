@@ -57,7 +57,11 @@ object ChartParser {
         val attrs = extractAttrs(rawHtml) ?: return null
         val categoriesRaw = attrs["data-categories"]
         val seriesRaw = attrs["data-series"]
-        val hasV2Pair = !categoriesRaw.isNullOrEmpty() && !seriesRaw.isNullOrEmpty()
+        // 1.x's gate is attribute PRESENCE (`!== null`), not
+        // non-emptiness: an empty-string payload still takes the v2
+        // path, where its failed JSON parse substitutes the empty
+        // fallback the normaliser then minimalises.
+        val hasV2Pair = categoriesRaw != null && seriesRaw != null
         val recognised = attrs["data-type"] == "noma-chart" ||
             attrs.containsKey("data-chart") ||
             hasV2Pair

@@ -346,4 +346,34 @@ class ChartDataParserTest {
         assertEquals(listOf("A"), data.categories)
         assertEquals(listOf(9.0), data.series[0].values)
     }
+
+    @Test
+    fun emptyStringV2Payload_normalisesToMinimalChart() {
+        // 1.x's v2 gate is attribute PRESENCE: an empty-string
+        // payload still takes the v2 path, its failed JSON parse
+        // substitutes the empty fallback, and the normaliser
+        // minimalises to one category and a zero series — NOT the
+        // v1 migration sample chart.
+        val raw = "<div data-type=\"noma-chart\" data-version=\"2\" data-chart-type=\"bar\" " +
+            "data-title=\"Empty\" data-categories=\"\" data-series=\"\"></div>"
+        val data = ChartParser.parse(raw)!!
+        assertEquals("Empty", data.title)
+        assertEquals(listOf("Item 1"), data.categories)
+        assertEquals(1, data.series.size)
+        assertEquals(listOf(0.0), data.series[0].values)
+    }
+
+    @Test
+    fun deeplyNestedJson_degradesInsteadOfCrashing() {
+        // A crafted payload nested thousands deep must hit the
+        // JSON depth bound and degrade to the fallback series,
+        // never a stack overflow that makes the note unopenable.
+        val deep = "[".repeat(5_000) + "]".repeat(5_000)
+        val raw = "<div data-type=\"noma-chart\" data-version=\"2\" data-chart-type=\"bar\" " +
+            "data-categories='[\"A\"]' data-series='$deep'></div>"
+        val data = ChartParser.parse(raw)!!
+        assertEquals(listOf("A"), data.categories)
+        assertEquals("Series 1", data.series[0].name)
+        assertEquals(listOf(0.0), data.series[0].values)
+    }
 }
