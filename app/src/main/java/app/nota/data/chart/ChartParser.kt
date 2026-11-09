@@ -368,13 +368,13 @@ object ChartParser {
             return if (s[start] == '-') Double.NEGATIVE_INFINITY else Double.POSITIVE_INFINITY
         }
         var digits = 0
-        while (i < s.length && s[i].isDigit()) {
+        while (i < s.length && s[i] in '0'..'9') {
             i++
             digits++
         }
         if (i < s.length && s[i] == '.') {
             i++
-            while (i < s.length && s[i].isDigit()) {
+            while (i < s.length && s[i] in '0'..'9') {
                 i++
                 digits++
             }
@@ -384,7 +384,7 @@ object ChartParser {
             var j = i + 1
             if (j < s.length && (s[j] == '+' || s[j] == '-')) j++
             var expDigits = 0
-            while (j < s.length && s[j].isDigit()) {
+            while (j < s.length && s[j] in '0'..'9') {
                 j++
                 expDigits++
             }
@@ -400,7 +400,7 @@ object ChartParser {
         val start = i
         if (i < s.length && (s[i] == '+' || s[i] == '-')) i++
         var digits = 0
-        while (i < s.length && s[i].isDigit()) {
+        while (i < s.length && s[i] in '0'..'9') {
             i++
             digits++
         }

@@ -183,25 +183,29 @@ object MiniJson {
             return null
         }
 
+        // JSON digits are ASCII only. (Char.isDigit() also accepts
+        // e.g. Arabic-Indic digits, which String.toDouble then
+        // rejects by THROWING — a crafted payload must degrade to a
+        // parse failure here, never crash the caller.)
         private fun readNumber(): JsonNumber? {
             val start = i
             if (i < s.length && s[i] == '-') i++
             if (i >= s.length) return null
             when {
                 s[i] == '0' -> i++
-                s[i] in '1'..'9' -> while (i < s.length && s[i].isDigit()) i++
+                s[i] in '1'..'9' -> while (i < s.length && s[i] in '0'..'9') i++
                 else -> return null
             }
             if (i < s.length && s[i] == '.') {
                 i++
-                if (i >= s.length || !s[i].isDigit()) return null
-                while (i < s.length && s[i].isDigit()) i++
+                if (i >= s.length || s[i] !in '0'..'9') return null
+                while (i < s.length && s[i] in '0'..'9') i++
             }
             if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
                 i++
                 if (i < s.length && (s[i] == '+' || s[i] == '-')) i++
-                if (i >= s.length || !s[i].isDigit()) return null
-                while (i < s.length && s[i].isDigit()) i++
+                if (i >= s.length || s[i] !in '0'..'9') return null
+                while (i < s.length && s[i] in '0'..'9') i++
             }
             val text = s.substring(start, i)
             // Grammar above guarantees a valid literal; toDouble

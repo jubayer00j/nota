@@ -364,6 +364,21 @@ class ChartDataParserTest {
     }
 
     @Test
+    fun nonAsciiDigitNumber_degradesInsteadOfCrashing() {
+        // JSON numbers are ASCII-only: a value like [1\u0662]
+        // (Arabic-Indic digit) is a syntax error, so the payload
+        // degrades to the fallback series — the parse must never
+        // throw (it runs while a note is being opened).
+        val raw = v2Div(
+            categories = "[\"A\"]",
+            series = "[{\"name\":\"S\",\"values\":[1\u0662]}]",
+        )
+        val data = ChartParser.parse(raw)!!
+        assertEquals("Series 1", data.series[0].name)
+        assertEquals(listOf(0.0), data.series[0].values)
+    }
+
+    @Test
     fun deeplyNestedJson_degradesInsteadOfCrashing() {
         // A crafted payload nested thousands deep must hit the
         // JSON depth bound and degrade to the fallback series,

@@ -419,29 +419,59 @@ private fun DrawScope.drawCartesianChart(
                 }
             }
             kinds[si] == SeriesKind.AREA && stackActive -> {
-                val tops = ArrayList<Offset>(n)
-                val bottoms = ArrayList<Offset>(n)
+                // Null stays a GAP, as in the unstacked area path
+                // (and 1.x, where Recharts does not connect nulls):
+                // the series contributes nothing at that category —
+                // later series stack on the base without it — and
+                // its fill breaks into contiguous runs.
+                val tops = arrayOfNulls<Offset>(n)
+                val bottoms = arrayOfNulls<Offset>(n)
                 for (ci in 0 until n) {
-                    val v = s.values.getOrNull(ci) ?: 0.0
+                    val v = s.values.getOrNull(ci) ?: continue
                     val base = if (v >= 0) posAcc[ci] else negAcc[ci]
-                    tops += Offset(centerX(ci), yOf(base + v))
-                    bottoms += Offset(centerX(ci), yOf(base))
+                    tops[ci] = Offset(centerX(ci), yOf(base + v))
+                    bottoms[ci] = Offset(centerX(ci), yOf(base))
                     if (v >= 0) posAcc[ci] += v else negAcc[ci] += v
                 }
-                val fill = Path().apply {
-                    tops.forEachIndexed { i, p -> if (i == 0) moveTo(p.x, p.y) else lineTo(p.x, p.y) }
-                    for (i in bottoms.indices.reversed()) lineTo(bottoms[i].x, bottoms[i].y)
-                    close()
+                var ci = 0
+                while (ci < n) {
+                    if (tops[ci] == null) {
+                        ci++
+                        continue
+                    }
+                    var end = ci
+                    while (end + 1 < n && tops[end + 1] != null) end++
+                    if (end > ci) {
+                        val fill = Path().apply {
+                            for (k in ci..end) {
+                                val p = tops[k]!!
+                                if (k == ci) moveTo(p.x, p.y) else lineTo(p.x, p.y)
+                            }
+                            for (k in end downTo ci) {
+                                val p = bottoms[k]!!
+                                lineTo(p.x, p.y)
+                            }
+                            close()
+                        }
+                        drawPath(fill, color.copy(alpha = 0.4f))
+                        val strokePath = Path().apply {
+                            for (k in ci..end) {
+                                val p = tops[k]!!
+                                if (k == ci) moveTo(p.x, p.y) else lineTo(p.x, p.y)
+                            }
+                        }
+                        drawPath(
+                            strokePath,
+                            color,
+                            style = Stroke(
+                                width = 2.5.dp.toPx(),
+                                cap = StrokeCap.Round,
+                                join = StrokeJoin.Round,
+                            ),
+                        )
+                    }
+                    ci = end + 1
                 }
-                drawPath(fill, color.copy(alpha = 0.4f))
-                val strokePath = Path().apply {
-                    tops.forEachIndexed { i, p -> if (i == 0) moveTo(p.x, p.y) else lineTo(p.x, p.y) }
-                }
-                drawPath(
-                    strokePath,
-                    color,
-                    style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
-                )
             }
             kinds[si] == SeriesKind.AREA -> {
                 val pts = (0 until n).map { ci ->
