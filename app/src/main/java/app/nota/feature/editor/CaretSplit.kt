@@ -46,11 +46,14 @@ fun splitHtmlAtCaret(state: RichTextState): CaretSplit {
  * serialisation of exactly that span (a plain paragraph serialises
  * as one `<p>`, a list item as a `<ul>` around its `<li>`, a
  * heading as its `<hN>` — which is how the caller tells them
- * apart). The caret at a paragraph's very end still belongs to
- * THAT paragraph: ranges are matched end-inclusively, and the
- * separator between paragraphs is a single character, so a caret
- * one past a paragraph's end is the next paragraph's start and
- * matches it instead.
+ * apart). Range ownership: a paragraph's range INCLUDES its
+ * trailing separator, so a caret at a paragraph's text end is
+ * still inside that paragraph's range, and the caret at the next
+ * paragraph's first character is one past it. The match is
+ * therefore the first range whose end is strictly past the caret
+ * (with the caret at the very end of the text falling to the last
+ * range) — probe-verified against the shipped library build by
+ * CaretSplitRobolectricTest.
  */
 data class CaretParagraph(val range: TextRange, val html: String)
 
@@ -66,7 +69,7 @@ fun caretParagraph(state: RichTextState): CaretParagraph? {
         // one paragraph there is.
         return CaretParagraph(TextRange(0, text.length), state.toHtml())
     }
-    val match = ranges.firstOrNull { caret <= it.end } ?: ranges.last()
+    val match = ranges.firstOrNull { caret < it.end } ?: ranges.last()
     val range = TextRange(match.start, match.end)
     return CaretParagraph(range, state.toHtml(range))
 }
@@ -85,9 +88,16 @@ data class ParagraphParts(val beforeHtml: String, val paragraphHtml: String, val
 fun paragraphPartsAtCaret(state: RichTextState): ParagraphParts? {
     val paragraph = caretParagraph(state) ?: return null
     val length = state.annotatedString.text.length
+    // An empty range serialises as an empty PARAGRAPH ("<p></p>"),
+    // not as nothing — the library emits the paragraph shell for
+    // any range it is handed. The before/after parts of a caret in
+    // the first/last paragraph are genuinely empty, so empty
+    // ranges are answered directly instead of serialised.
+    fun htmlOf(range: TextRange): String =
+        if (range.start >= range.end) "" else state.toHtml(range)
     return ParagraphParts(
-        beforeHtml = state.toHtml(TextRange(0, paragraph.range.start)),
+        beforeHtml = htmlOf(TextRange(0, paragraph.range.start)),
         paragraphHtml = paragraph.html,
-        afterHtml = state.toHtml(TextRange(paragraph.range.end, length)),
+        afterHtml = htmlOf(TextRange(paragraph.range.end, length)),
     )
 }

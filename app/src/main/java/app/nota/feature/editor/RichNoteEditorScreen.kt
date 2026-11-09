@@ -2239,10 +2239,22 @@ fun RichNoteEditorScreen(
                     focusedTask != null && segments.any {
                         it.id == focusedTask.first && it.segment is TaskListSegment
                     } -> "Make text"
-                    activeUi?.segment is TextSegment && activeState != null -> {
-                        val paragraph = caretParagraph(activeState!!)
-                        if (paragraph != null &&
-                            NoteDocument.isPlainParagraphHtml(paragraph.html)
+                    activeUi?.segment is TextSegment && activeState != null &&
+                        activeState!!.annotatedString.text.isNotEmpty() -> {
+                        // Eligibility from the format state only —
+                        // the same live reads the toolbar itself
+                        // uses. Serialising the caret's paragraph
+                        // here (toHtml during composition) keeps
+                        // the editor state perpetually busy and the
+                        // composition never idles; the click path
+                        // re-validates against the real HTML via
+                        // NoteDocument.paragraphToTask, so an exotic
+                        // paragraph can at worst no-op, never
+                        // convert wrongly. A plain paragraph is
+                        // exactly: no heading style, no list.
+                        val format = activeState!!.toolbarFormatState()
+                        if (format.heading == HeadingStyle.Normal &&
+                            !format.unorderedList && !format.orderedList
                         ) {
                             "Make task"
                         } else {
