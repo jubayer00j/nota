@@ -422,7 +422,7 @@ class EditorReadModeUiTest {
             "data-categories='[\"A\",\"B\",\"C\"]' " +
             "data-series='[{\"name\":\"S\",\"values\":[-1e308,1e308,0]}]'></div>"
         val note = runBlocking {
-            repository.createRichNote(title = "Extremes", contentHtml = line)
+            repository.createRichNote(title = "Extreme note", contentHtml = line)
         }
         composeEditor(note.id)
 
