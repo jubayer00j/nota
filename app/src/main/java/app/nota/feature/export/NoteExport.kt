@@ -220,6 +220,7 @@ object NoteExport {
         fun collectFrom(nodes: List<HtmlNode>) {
             for (node in nodes) {
                 if (node is HtmlElement) {
+                    if (node.name in FRAGMENT_DROP_ELEMENTS) continue
                     if (node.name == "img") {
                         val src = node.attrs["src"]
                         if (src != null && src.startsWith(prefix)) {
@@ -587,6 +588,10 @@ object NoteExport {
             when (node) {
                 is HtmlText -> out.append(escapeMdText(plainTextLinks(node.text)))
                 is HtmlElement -> {
+                    // Dropped whole in every format, as in the
+                    // HTML transform: a script's source is not
+                    // note text, and its images never resolve.
+                    if (node.name in FRAGMENT_DROP_ELEMENTS) continue
                     val inner = mdInline(node.children, resolve)
                     when (node.name) {
                         "strong", "b" ->
@@ -998,7 +1003,10 @@ object NoteExport {
         for (node in nodes) {
             when (node) {
                 is HtmlText -> out.append(plainTextLinks(node.text))
-                is HtmlElement -> when (node.name) {
+                is HtmlElement ->
+                    if (node.name in FRAGMENT_DROP_ELEMENTS) {
+                        Unit
+                    } else when (node.name) {
                     "br" -> out.append("\n")
                     "a" -> {
                         val inner = textInline(node.children)
@@ -1416,33 +1424,75 @@ object NoteExport {
      * otherwise emitted as preserved.
      */
     private fun resolveOpaqueImages(rawHtml: String, resolve: AttachmentResolver): String {
-        val imgRe = Regex("""(?is)<img\b[^>]*>""")
-        return imgRe.replace(rawHtml) { match ->
-            val tag = match.value
-            // The name must be exactly "src": a plain word
-            // boundary also fires inside hyphenated names
-            // ("data-src", "ng-src"), and rewriting that match
-            // corrupts the lazy-load attribute while the real
-            // source keeps its unresolved attachment URI.
-            val srcMatch = Regex("""(?i)(?<![\w-])src\s*=\s*"([^"]*)"""").find(tag)
-                ?: Regex("""(?i)(?<![\w-])src\s*=\s*'([^']*)'""").find(tag)
-                ?: Regex("""(?i)(?<![\w-])src\s*=\s*([^\s>]+)""").find(tag)
-            val rawSrc = srcMatch?.groupValues?.get(1) ?: return@replace tag
-            // The captured value is raw markup text: an
-            // entity-escaped URI (&#58; for the colon) is the
-            // same attachment address once decoded — the
-            // collector works on decoded attributes, so the
-            // resolver must too, or an image the collector
-            // preloaded stays an app-specific URI in the export.
-            val src = unescapeAttrValue(rawSrc)
-            val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
-            if (!src.startsWith(prefix)) return@replace tag
-            val data = resolve(src.removePrefix(prefix))
-            if (data != null) {
-                tag.replaceRange(srcMatch.range, "src=\"${escapeHtmlAttr(data)}\"")
-            } else {
-                "<span>[Image]</span>"
+        // The tag scan is quote-aware: a ">" inside a quoted
+        // attribute value (alt="2 > 1") does not end the tag.
+        // A plain "<img[^>]*>" pattern stops there, never sees
+        // the src that follows, and leaves the attachment URI
+        // unresolved in the exported file.
+        val result = StringBuilder(rawHtml.length)
+        var i = 0
+        while (i < rawHtml.length) {
+            val lt = rawHtml.indexOf("<img", i, ignoreCase = true)
+            if (lt < 0) {
+                result.append(rawHtml, i, rawHtml.length)
+                break
             }
+            val after = rawHtml.getOrNull(lt + 4)
+            if (after != null && (after.isLetterOrDigit() || after == '-')) {
+                // "<image", "<img-x": not an image tag.
+                result.append(rawHtml, i, lt + 4)
+                i = lt + 4
+                continue
+            }
+            var j = lt + 4
+            var quote: Char? = null
+            while (j < rawHtml.length) {
+                val ch = rawHtml[j]
+                if (quote != null) {
+                    if (ch == quote) quote = null
+                } else if (ch == '"' || ch == '\'') {
+                    quote = ch
+                } else if (ch == '>') {
+                    break
+                }
+                j++
+            }
+            if (j >= rawHtml.length) {
+                result.append(rawHtml, i, rawHtml.length)
+                break
+            }
+            result.append(rawHtml, i, lt)
+            result.append(resolveOpaqueImageTag(rawHtml.substring(lt, j + 1), resolve))
+            i = j + 1
+        }
+        return result.toString()
+    }
+
+    /** One opaque <img> tag: resolve its src, or keep it as-is. */
+    private fun resolveOpaqueImageTag(tag: String, resolve: AttachmentResolver): String {
+        // The name must be exactly "src": a plain word
+        // boundary also fires inside hyphenated names
+        // ("data-src", "ng-src"), and rewriting that match
+        // corrupts the lazy-load attribute while the real
+        // source keeps its unresolved attachment URI.
+        val srcMatch = Regex("""(?i)(?<![\w-])src\s*=\s*"([^"]*)"""").find(tag)
+            ?: Regex("""(?i)(?<![\w-])src\s*=\s*'([^']*)'""").find(tag)
+            ?: Regex("""(?i)(?<![\w-])src\s*=\s*([^\s>]+)""").find(tag)
+        val rawSrc = srcMatch?.groupValues?.get(1) ?: return tag
+        // The captured value is raw markup text: an
+        // entity-escaped URI (&#58; for the colon) is the
+        // same attachment address once decoded — the
+        // collector works on decoded attributes, so the
+        // resolver must too, or an image the collector
+        // preloaded stays an app-specific URI in the export.
+        val src = unescapeAttrValue(rawSrc)
+        val prefix = NoteDocument.ATTACHMENT_SRC_PREFIX
+        if (!src.startsWith(prefix)) return tag
+        val data = resolve(src.removePrefix(prefix))
+        return if (data != null) {
+            tag.replaceRange(srcMatch.range, "src=\"${escapeHtmlAttr(data)}\"")
+        } else {
+            "<span>[Image]</span>"
         }
     }
 
