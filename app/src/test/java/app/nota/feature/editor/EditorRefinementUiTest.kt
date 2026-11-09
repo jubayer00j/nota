@@ -245,4 +245,62 @@ class EditorRefinementUiTest {
         )
     }
 
+    @Test
+    fun makeTaskThenMakeText_roundTripsThroughTheToolbar() {
+        // Editor Refinement #2: the paragraph ⇄ task conversion,
+        // driven end-to-end through the real toolbar. The note is
+        // one plain paragraph; the caret lands in it, "Make task"
+        // converts it, and focusing the new item offers "Make
+        // text", which converts it straight back.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Convertible",
+                contentHtml = "<p>Make me a task</p>",
+            )
+        }
+        composeEditor(note.id)
+
+        // Into edit mode via the pencil (the only door).
+        awaitTrue("edit door") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+
+        // Caret into the paragraph → the toolbar offers Make task.
+        composeRule.onNodeWithText("Make me a task").performClick()
+        awaitTrue("Make task offered") {
+            exists("make task") {
+                composeRule.onNodeWithText("Make task").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Make task").performClick()
+
+        // The stored body is now a task list holding the paragraph.
+        awaitTrue("stored as a task list") {
+            val html = storedHtml(note.id)
+            html.contains("taskList") && html.contains("Make me a task")
+        }
+
+        // Focus the task item's field → the toolbar offers Make
+        // text; taking it restores the plain paragraph.
+        composeRule.onNodeWithText("Make me a task").performClick()
+        awaitTrue("Make text offered") {
+            exists("make text") {
+                composeRule.onNodeWithText("Make text").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Make text").performClick()
+        awaitTrue("stored as a plain paragraph again") {
+            val html = storedHtml(note.id)
+            html.contains("<p>Make me a task</p>") && !html.contains("taskList")
+        }
+    }
+
 }

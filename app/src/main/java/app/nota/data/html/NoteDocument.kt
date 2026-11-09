@@ -947,6 +947,248 @@ object NoteDocument {
         return out.toString()
     }
 
+    // ------------------------------------- paragraph ⇄ task conversion
+
+    /**
+     * Phase 6 (Editor Refinement #2): true when [html] is exactly one
+     * plain top-level paragraph — the only shape "Make task" converts.
+     * Headings, lists (the editor's range serialisation wraps a caret
+     * paragraph that lives in one), multi-block fragments and bare
+     * text runs are all refused: the caret's paragraph must BE a <p>,
+     * not live inside some other structure.
+     */
+    fun isPlainParagraphHtml(html: String): Boolean {
+        val trimmed = html.trim()
+        if (trimmed.isEmpty()) return false
+        val chunks = topLevelChunks(trimmed)
+        if (chunks.size != 1) return false
+        val tag = readTag(trimmed, 0) ?: return false
+        if (tag.closing || tag.name != "p") return false
+        val close = findClose(trimmed, tag.end, "p") ?: return false
+        return close.second == trimmed.length
+    }
+
+    /**
+     * The number of leaf paragraphs in a text segment's HTML — the
+     * ordinal space the editor's paragraph ranges live in. A
+     * paragraph or heading chunk is one leaf; a list chunk
+     * contributes one leaf per item; anything else counts once.
+     * Used to aim the caret after a conversion merges text segments.
+     */
+    fun leafParagraphCount(html: String): Int {
+        var count = 0
+        for (range in topLevelChunks(html)) {
+            val chunk = html.substring(range)
+            val tag = if (chunk.startsWith("<")) readTag(chunk, 0) else null
+            count += when {
+                tag == null || tag.closing -> 1
+                tag.name == "ul" || tag.name == "ol" ->
+                    Regex("(?i)<li[\\s>]").findAll(chunk).count().coerceAtLeast(1)
+                else -> 1
+            }
+        }
+        return count
+    }
+
+    /**
+     * The outcome of a paragraph ⇄ task conversion (Phase 6, Editor
+     * Refinement #2): the rebuilt segment list, plus where the
+     * converted content landed so the editor can restore focus —
+     * [convertedIndex] is the segment holding it, and
+     * [convertedOrdinal] is the item's index inside that task list
+     * (paragraph → task) or the first converted paragraph's ordinal
+     * inside that text segment (task → text). [sourceIndices] runs
+     * parallel to [segments]: for each output segment, the index of
+     * the INPUT segment it derives from (a split text segment's
+     * halves both name the original; a task list that absorbed an
+     * item names itself), or -1 for a segment minted by the
+     * conversion. The editor uses it to keep live segment ids (and
+     * their states) attached to the pieces that survived.
+     */
+    data class ParagraphConversion(
+        val segments: List<DocSegment>,
+        val convertedIndex: Int,
+        val convertedOrdinal: Int,
+        val sourceIndices: List<Int>,
+    )
+
+    /**
+     * "Make task": converts ONE paragraph of the text segment at
+     * [segmentIndex] into a task item. The caller supplies the
+     * segment's HTML in three parts — [beforeHtml] and [afterHtml]
+     * are everything before/after the caret's paragraph and
+     * [paragraphHtml] is the paragraph itself (the editor's own
+     * range serialisation supplies all three, so inline marks
+     * survive exactly). The paragraph must be a plain top-level <p>
+     * ([isPlainParagraphHtml]); anything else returns null.
+     *
+     * The before/after halves stay as text segments (an empty half
+     * is dropped). When a half is empty and the segment on that side
+     * is a task list, the item joins THAT list instead of minting a
+     * one-item block between the halves; when both sides qualify,
+     * the two lists and the item fuse into a single list. The new
+     * item starts unchecked.
+     */
+    fun paragraphToTask(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+        beforeHtml: String,
+        paragraphHtml: String,
+        afterHtml: String,
+    ): ParagraphConversion? {
+        if (segments.getOrNull(segmentIndex) !is TextSegment) return null
+        if (!isPlainParagraphHtml(paragraphHtml)) return null
+        val item = TaskItem(paragraphHtml.trim(), checked = false)
+        val before = beforeHtml.trim()
+        val after = afterHtml.trim()
+        val prefix = segments.subList(0, segmentIndex)
+            .mapIndexed { i, s -> s to i }.toMutableList()
+        val suffix = segments.subList(segmentIndex + 1, segments.size)
+            .mapIndexed { i, s -> s to (segmentIndex + 1 + i) }.toMutableList()
+        val aboveList = prefix.lastOrNull()?.first as? TaskListSegment
+        val belowList = suffix.firstOrNull()?.first as? TaskListSegment
+        val joinAbove = aboveList != null && before.isEmpty()
+        val joinBelow = belowList != null && after.isEmpty()
+        val middle = mutableListOf<Pair<DocSegment, Int>>()
+        var convertedIndex = -1
+        var convertedOrdinal = 0
+        when {
+            joinAbove && joinBelow -> {
+                prefix.removeAt(prefix.lastIndex)
+                suffix.removeAt(0)
+                convertedOrdinal = aboveList!!.items.size
+                middle += (
+                    TaskListSegment(aboveList.items + item + belowList!!.items) to
+                        (segmentIndex - 1)
+                    )
+                convertedIndex = prefix.size
+            }
+            joinAbove -> {
+                prefix.removeAt(prefix.lastIndex)
+                convertedOrdinal = aboveList!!.items.size
+                middle += (TaskListSegment(aboveList.items + item) to (segmentIndex - 1))
+                if (after.isNotEmpty()) middle += (TextSegment(after) to segmentIndex)
+                convertedIndex = prefix.size
+            }
+            joinBelow -> {
+                suffix.removeAt(0)
+                if (before.isNotEmpty()) middle += (TextSegment(before) to segmentIndex)
+                convertedIndex = prefix.size + middle.size
+                middle += (
+                    TaskListSegment(listOf(item) + belowList!!.items) to
+                        (segmentIndex + 1)
+                    )
+                convertedOrdinal = 0
+            }
+            else -> {
+                if (before.isNotEmpty()) middle += (TextSegment(before) to segmentIndex)
+                convertedIndex = prefix.size + middle.size
+                middle += (TaskListSegment(listOf(item)) to -1)
+                if (after.isNotEmpty()) middle += (TextSegment(after) to segmentIndex)
+            }
+        }
+        val out = prefix + middle + suffix
+        return ParagraphConversion(
+            segments = out.map { it.first },
+            convertedIndex = convertedIndex,
+            convertedOrdinal = convertedOrdinal,
+            sourceIndices = out.map { it.second },
+        )
+    }
+
+    /**
+     * "Make text": converts the task item at ([segmentIndex],
+     * [itemIndex]) back into plain paragraph(s) — the exact inverse
+     * of [paragraphToTask]. The item's content keeps its block
+     * structure (a multi-paragraph item becomes multiple
+     * paragraphs); bare inline content gains its <p>.
+     *
+     * The list splits around the item; each non-empty half stays a
+     * task list. The paragraph merges into a directly adjacent text
+     * segment when one truly touches it — above only when the item
+     * is the list's FIRST (nothing of the list stands between), below
+     * only when it is the LAST — so document order is never changed
+     * by a merge; otherwise it stands as its own text segment.
+     */
+    fun taskItemToText(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+        itemIndex: Int,
+    ): ParagraphConversion? {
+        val list = segments.getOrNull(segmentIndex) as? TaskListSegment ?: return null
+        val item = list.items.getOrNull(itemIndex) ?: return null
+        val paragraphHtml = asTextHtml(item.contentHtml)
+        val itemsBefore = list.items.subList(0, itemIndex)
+        val itemsAfter = list.items.subList(itemIndex + 1, list.items.size)
+        val prefix = segments.subList(0, segmentIndex)
+            .mapIndexed { i, s -> s to i }.toMutableList()
+        val suffix = segments.subList(segmentIndex + 1, segments.size)
+            .mapIndexed { i, s -> s to (segmentIndex + 1 + i) }.toMutableList()
+        val aboveText = prefix.lastOrNull()?.first as? TextSegment
+        val belowText = suffix.firstOrNull()?.first as? TextSegment
+        val mergeAbove = aboveText != null && itemsBefore.isEmpty()
+        val mergeBelow = belowText != null && itemsAfter.isEmpty()
+        val middle = mutableListOf<Pair<DocSegment, Int>>()
+        var convertedOrdinal = 0
+        if (itemsBefore.isNotEmpty()) {
+            middle += (TaskListSegment(itemsBefore) to segmentIndex)
+        }
+        when {
+            mergeAbove && mergeBelow -> {
+                prefix.removeAt(prefix.lastIndex)
+                suffix.removeAt(0)
+                convertedOrdinal = leafParagraphCount(aboveText!!.html)
+                middle += (
+                    TextSegment(aboveText.html + paragraphHtml + belowText!!.html) to
+                        (segmentIndex - 1)
+                    )
+            }
+            mergeAbove -> {
+                prefix.removeAt(prefix.lastIndex)
+                convertedOrdinal = leafParagraphCount(aboveText!!.html)
+                middle += (TextSegment(aboveText.html + paragraphHtml) to (segmentIndex - 1))
+            }
+            mergeBelow -> {
+                suffix.removeAt(0)
+                middle += (TextSegment(paragraphHtml + belowText!!.html) to (segmentIndex + 1))
+            }
+            else -> {
+                middle += (TextSegment(paragraphHtml) to -1)
+            }
+        }
+        val convertedIndex = prefix.size + middle.size - 1
+        if (itemsAfter.isNotEmpty()) {
+            middle += (TaskListSegment(itemsAfter) to segmentIndex)
+        }
+        val out = prefix + middle + suffix
+        return ParagraphConversion(
+            segments = out.map { it.first },
+            convertedIndex = convertedIndex,
+            convertedOrdinal = convertedOrdinal,
+            sourceIndices = out.map { it.second },
+        )
+    }
+
+    /**
+     * Task item content as text-segment HTML: existing block
+     * structure is kept whole; bare inline content gains its <p>;
+     * an empty item becomes one empty paragraph.
+     */
+    private fun asTextHtml(contentHtml: String): String {
+        val content = contentHtml.trim()
+        if (content.isEmpty()) return "<p></p>"
+        val tag = readTag(content, 0)
+        val blockTags = setOf(
+            "p", "h1", "h2", "h3", "h4", "h5", "h6",
+            "ul", "ol", "div", "blockquote", "pre", "table",
+        )
+        return if (tag != null && !tag.closing && tag.name in blockTags) {
+            content
+        } else {
+            "<p>$content</p>"
+        }
+    }
+
     // ---------------------------------------------------------- projections
 
     /** Plain-text projection of the whole document (snippets + FTS + word count). */

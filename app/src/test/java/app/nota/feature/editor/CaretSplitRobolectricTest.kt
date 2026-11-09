@@ -113,4 +113,85 @@ class CaretSplitRobolectricTest {
         assertEquals("Alpha", text(split.leftHtml))
         assertEquals("", text(split.rightHtml))
     }
+
+    // ---------------- Editor Refinement #2: the caret's paragraph ----
+
+    @Test
+    fun caretParagraph_middleParagraphOfThree() {
+        val state = RichTextState()
+        state.setHtml("<p>First</p><p>Second</p><p>Third</p>")
+        // Paragraphs are separated by a single character in the raw
+        // text: "Second" starts at 6, so 8 is inside it.
+        state.selection = TextRange(8)
+        val paragraph = caretParagraph(state)
+        assertEquals("<p>Second</p>", paragraph?.html)
+        val parts = paragraphPartsAtCaret(state)
+        assertEquals("<p>First</p>", parts?.beforeHtml)
+        assertEquals("<p>Second</p>", parts?.paragraphHtml)
+        assertEquals("<p>Third</p>", parts?.afterHtml)
+    }
+
+    @Test
+    fun caretParagraph_atParagraphEnd_staysInThatParagraph() {
+        val state = RichTextState()
+        state.setHtml("<p>First</p><p>Second</p>")
+        state.selection = TextRange(5) // the very end of "First"
+        assertEquals("<p>First</p>", caretParagraph(state)?.html)
+        // One further — the start of "Second" — belongs to Second.
+        state.selection = TextRange(6)
+        assertEquals("<p>Second</p>", caretParagraph(state)?.html)
+    }
+
+    @Test
+    fun caretParagraph_firstAndLast() {
+        val state = RichTextState()
+        state.setHtml("<p>First</p><p>Second</p>")
+        state.selection = TextRange(0)
+        var parts = paragraphPartsAtCaret(state)
+        assertEquals("", parts?.beforeHtml)
+        assertEquals("<p>First</p>", parts?.paragraphHtml)
+        assertEquals("<p>Second</p>", parts?.afterHtml)
+        state.selection = TextRange(state.annotatedString.text.length)
+        parts = paragraphPartsAtCaret(state)
+        assertEquals("<p>First</p>", parts?.beforeHtml)
+        assertEquals("<p>Second</p>", parts?.paragraphHtml)
+        assertEquals("", parts?.afterHtml)
+    }
+
+    @Test
+    fun caretParagraph_headingAndListItem_areNotPlainParagraphs() {
+        val state = RichTextState()
+        state.setHtml("<h1>Title</h1><ul><li>One</li><li>Two</li></ul><p>Body</p>")
+        state.selection = TextRange(2)
+        val heading = caretParagraph(state)?.html ?: ""
+        assertTrue(
+            "heading paragraph serialised unexpectedly: $heading",
+            heading.startsWith("<h1"),
+        )
+        assertFalse(app.nota.data.html.NoteDocument.isPlainParagraphHtml(heading))
+        // Inside the second list item (located from the text, like
+        // the list split test — items carry marker characters).
+        val caret = state.annotatedString.text.indexOf("Two")
+        assertTrue(caret > 0)
+        state.selection = TextRange(caret + 1)
+        val item = caretParagraph(state)?.html ?: ""
+        assertTrue(
+            "list item paragraph serialised unexpectedly: $item",
+            item.contains("<li"),
+        )
+        assertFalse(app.nota.data.html.NoteDocument.isPlainParagraphHtml(item))
+        // And the plain trailing paragraph still qualifies.
+        val bodyCaret = state.annotatedString.text.indexOf("Body")
+        state.selection = TextRange(bodyCaret + 1)
+        val body = caretParagraph(state)?.html ?: ""
+        assertEquals("<p>Body</p>", body)
+        assertTrue(app.nota.data.html.NoteDocument.isPlainParagraphHtml(body))
+    }
+
+    @Test
+    fun caretParagraph_emptyState_hasNone() {
+        val state = RichTextState()
+        assertEquals(null, caretParagraph(state))
+        assertEquals(null, paragraphPartsAtCaret(state))
+    }
 }

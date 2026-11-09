@@ -717,4 +717,379 @@ class NoteDocumentTest {
         assertEquals("a & b &nope c", HtmlEntities.decode("a & b &nope c"))
     }
 
+    // -------------------------------- Editor Refinement #2: conversions
+
+    @Test
+    fun plainParagraphClassification() {
+        assertTrue(NoteDocument.isPlainParagraphHtml("<p>Hello</p>"))
+        assertTrue(NoteDocument.isPlainParagraphHtml("<p class=\"x\">Hello</p>"))
+        assertTrue(NoteDocument.isPlainParagraphHtml("  <p><strong>Bold</strong></p>  "))
+        assertFalse(NoteDocument.isPlainParagraphHtml(""))
+        assertFalse(NoteDocument.isPlainParagraphHtml("<h1>Title</h1>"))
+        assertFalse(NoteDocument.isPlainParagraphHtml("<ul><li>Item</li></ul>"))
+        assertFalse(NoteDocument.isPlainParagraphHtml("<p>One</p><p>Two</p>"))
+        assertFalse(NoteDocument.isPlainParagraphHtml("Bare text"))
+    }
+
+    @Test
+    fun makeTask_middleParagraph_splitsTextAroundANewList() {
+        val segments = listOf(
+            TextSegment("<p>One</p><p>Two</p><p>Three</p>"),
+        )
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "<p>Three</p>",
+        )!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>One</p>"),
+                TaskListSegment(listOf(TaskItem("<p>Two</p>", checked = false))),
+                TextSegment("<p>Three</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+        assertEquals(0, conversion.convertedOrdinal)
+        // The halves both derive from the split segment; the list
+        // is minted by the conversion.
+        assertEquals(listOf(0, -1, 0), conversion.sourceIndices)
+    }
+
+    @Test
+    fun makeTask_firstParagraph_dropsTheEmptyBeforeHalf() {
+        val segments = listOf(TextSegment("<p>One</p><p>Two</p>"))
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 0, "", "<p>One</p>", "<p>Two</p>",
+        )!!
+        assertEquals(
+            listOf(
+                TaskListSegment(listOf(TaskItem("<p>One</p>", checked = false))),
+                TextSegment("<p>Two</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+    }
+
+    @Test
+    fun makeTask_lastParagraph_dropsTheEmptyAfterHalf() {
+        val segments = listOf(TextSegment("<p>One</p><p>Two</p>"))
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "",
+        )!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>One</p>"),
+                TaskListSegment(listOf(TaskItem("<p>Two</p>", checked = false))),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+    }
+
+    @Test
+    fun makeTask_onlyParagraph_becomesAOneItemList() {
+        val segments = listOf(TextSegment("<p>Solo</p>"))
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 0, "", "<p>Solo</p>", "",
+        )!!
+        assertEquals(
+            listOf(TaskListSegment(listOf(TaskItem("<p>Solo</p>", checked = false)))),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+    }
+
+    @Test
+    fun makeTask_appendsIntoTheTaskListAbove() {
+        val above = TaskListSegment(listOf(TaskItem("<p>Existing</p>", checked = true)))
+        val segments = listOf(above, TextSegment("<p>One</p><p>Two</p>"))
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 1, "", "<p>One</p>", "<p>Two</p>",
+        )!!
+        assertEquals(
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem("<p>Existing</p>", checked = true),
+                        TaskItem("<p>One</p>", checked = false),
+                    ),
+                ),
+                TextSegment("<p>Two</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+        assertEquals(1, conversion.convertedOrdinal)
+        // The joined list derives from the list above.
+        assertEquals(0, conversion.sourceIndices[0])
+    }
+
+    @Test
+    fun makeTask_prependsIntoTheTaskListBelow() {
+        val below = TaskListSegment(listOf(TaskItem("<p>Existing</p>", checked = false)))
+        val segments = listOf(TextSegment("<p>One</p><p>Two</p>"), below)
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "",
+        )!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>One</p>"),
+                TaskListSegment(
+                    listOf(
+                        TaskItem("<p>Two</p>", checked = false),
+                        TaskItem("<p>Existing</p>", checked = false),
+                    ),
+                ),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+        assertEquals(0, conversion.convertedOrdinal)
+        assertEquals(1, conversion.sourceIndices[1])
+    }
+
+    @Test
+    fun makeTask_betweenTwoLists_fusesAllThree() {
+        val above = TaskListSegment(listOf(TaskItem("<p>A</p>", checked = false)))
+        val below = TaskListSegment(listOf(TaskItem("<p>B</p>", checked = true)))
+        val segments = listOf(above, TextSegment("<p>Middle</p>"), below)
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 1, "", "<p>Middle</p>", "",
+        )!!
+        assertEquals(
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem("<p>A</p>", checked = false),
+                        TaskItem("<p>Middle</p>", checked = false),
+                        TaskItem("<p>B</p>", checked = true),
+                    ),
+                ),
+            ),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+        assertEquals(1, conversion.convertedOrdinal)
+    }
+
+    @Test
+    fun makeTask_refusesNonParagraphsAndNonTextSegments() {
+        val segments = listOf(TextSegment("<h1>Title</h1><p>Body</p>"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToTask(segments, 0, "", "<h1>Title</h1>", "<p>Body</p>"),
+        )
+        assertEquals(
+            null,
+            NoteDocument.paragraphToTask(
+                segments, 0, "", "<ul><li>Item</li></ul>", "<p>Body</p>",
+            ),
+        )
+        val withBlock = listOf(DividerSegment, TextSegment("<p>Body</p>"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToTask(withBlock, 0, "", "<p>Body</p>", ""),
+        )
+    }
+
+    @Test
+    fun makeTask_serialisesThroughTheExistingWireFormat() {
+        val segments = listOf(TextSegment("<p>One</p><p>Two</p>"))
+        val conversion = NoteDocument.paragraphToTask(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "",
+        )!!
+        // The conversion produces ordinary segments: the stored
+        // form is the canonical task-list HTML, unchanged.
+        assertEquals(
+            "<p>One</p><ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                "<div><p>Two</p></div></li></ul>",
+            NoteDocument.serialize(conversion.segments),
+        )
+        // And it parses straight back to the same segments.
+        assertEquals(
+            conversion.segments,
+            NoteDocument.parse(NoteDocument.serialize(conversion.segments)),
+        )
+    }
+
+    @Test
+    fun makeText_soleItem_becomesAStandaloneParagraph() {
+        val segments = listOf(
+            TaskListSegment(listOf(TaskItem("<p>Only</p>", checked = true))),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 0, 0)!!
+        assertEquals(listOf(TextSegment("<p>Only</p>")), conversion.segments)
+        assertEquals(0, conversion.convertedIndex)
+        assertEquals(0, conversion.convertedOrdinal)
+    }
+
+    @Test
+    fun makeText_middleItem_splitsTheListAroundTheParagraph() {
+        val segments = listOf(
+            TaskListSegment(
+                listOf(
+                    TaskItem("<p>A</p>", checked = false),
+                    TaskItem("<p>B</p>", checked = true),
+                    TaskItem("<p>C</p>", checked = false),
+                ),
+            ),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 0, 1)!!
+        assertEquals(
+            listOf(
+                TaskListSegment(listOf(TaskItem("<p>A</p>", checked = false))),
+                TextSegment("<p>B</p>"),
+                TaskListSegment(listOf(TaskItem("<p>C</p>", checked = false))),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+        // Both list halves derive from the source list.
+        assertEquals(listOf(0, -1, 0), conversion.sourceIndices)
+    }
+
+    @Test
+    fun makeText_firstItem_mergesIntoTheTextAbove() {
+        val segments = listOf(
+            TextSegment("<p>Intro</p>"),
+            TaskListSegment(
+                listOf(
+                    TaskItem("<p>First</p>", checked = false),
+                    TaskItem("<p>Rest</p>", checked = false),
+                ),
+            ),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 1, 0)!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>Intro</p><p>First</p>"),
+                TaskListSegment(listOf(TaskItem("<p>Rest</p>", checked = false))),
+            ),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+        // The caret ordinal: the converted paragraph follows the
+        // one paragraph the text above already held.
+        assertEquals(1, conversion.convertedOrdinal)
+        assertEquals(0, conversion.sourceIndices[0])
+    }
+
+    @Test
+    fun makeText_lastItem_mergesIntoTheTextBelow() {
+        val segments = listOf(
+            TaskListSegment(
+                listOf(
+                    TaskItem("<p>Rest</p>", checked = false),
+                    TaskItem("<p>Last</p>", checked = false),
+                ),
+            ),
+            TextSegment("<p>Outro</p>"),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 0, 1)!!
+        assertEquals(
+            listOf(
+                TaskListSegment(listOf(TaskItem("<p>Rest</p>", checked = false))),
+                TextSegment("<p>Last</p><p>Outro</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+        assertEquals(0, conversion.convertedOrdinal)
+    }
+
+    @Test
+    fun makeText_soleItemBetweenTexts_mergesAllThree() {
+        val segments = listOf(
+            TextSegment("<p>Above</p>"),
+            TaskListSegment(listOf(TaskItem("<p>Mid</p>", checked = false))),
+            TextSegment("<p>Below</p>"),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 1, 0)!!
+        assertEquals(
+            listOf(TextSegment("<p>Above</p><p>Mid</p><p>Below</p>")),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+        assertEquals(1, conversion.convertedOrdinal)
+    }
+
+    @Test
+    fun makeText_nonFirstItem_doesNotMergeAcrossTheListAbove() {
+        // The item is NOT the list's first: the list's own first
+        // item stands between it and the text above, so merging
+        // would reorder the document. It stands alone instead.
+        val segments = listOf(
+            TextSegment("<p>Intro</p>"),
+            TaskListSegment(
+                listOf(
+                    TaskItem("<p>First</p>", checked = false),
+                    TaskItem("<p>Second</p>", checked = false),
+                ),
+            ),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 1, 1)!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>Intro</p>"),
+                TaskListSegment(listOf(TaskItem("<p>First</p>", checked = false))),
+                TextSegment("<p>Second</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(2, conversion.convertedIndex)
+    }
+
+    @Test
+    fun makeText_multiParagraphItem_keepsEveryParagraph() {
+        val segments = listOf(
+            TaskListSegment(
+                listOf(TaskItem("<p>Line one</p><p>Line two</p>", checked = false)),
+            ),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 0, 0)!!
+        assertEquals(
+            listOf(TextSegment("<p>Line one</p><p>Line two</p>")),
+            conversion.segments,
+        )
+    }
+
+    @Test
+    fun makeText_bareItemContent_gainsItsParagraph() {
+        val segments = listOf(
+            TaskListSegment(listOf(TaskItem("Just text", checked = false))),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 0, 0)!!
+        assertEquals(listOf(TextSegment("<p>Just text</p>")), conversion.segments)
+    }
+
+    @Test
+    fun makeText_refusesBadCoordinates() {
+        val segments = listOf(TextSegment("<p>Body</p>"))
+        assertEquals(null, NoteDocument.taskItemToText(segments, 0, 0))
+        val withList = listOf(
+            TaskListSegment(listOf(TaskItem("<p>A</p>", checked = false))),
+        )
+        assertEquals(null, NoteDocument.taskItemToText(withList, 0, 5))
+        assertEquals(null, NoteDocument.taskItemToText(withList, 3, 0))
+    }
+
+    @Test
+    fun leafParagraphCount_countsBlocksAndListItems() {
+        assertEquals(0, NoteDocument.leafParagraphCount(""))
+        assertEquals(1, NoteDocument.leafParagraphCount("<p>One</p>"))
+        assertEquals(
+            3,
+            NoteDocument.leafParagraphCount("<p>One</p><h1>Two</h1><p>Three</p>"),
+        )
+        assertEquals(
+            3,
+            NoteDocument.leafParagraphCount("<ul><li>A</li><li>B</li><li>C</li></ul>"),
+        )
+        assertEquals(
+            3,
+            NoteDocument.leafParagraphCount("<p>Intro</p><ul><li>A</li><li>B</li></ul>"),
+        )
+    }
+
 }
