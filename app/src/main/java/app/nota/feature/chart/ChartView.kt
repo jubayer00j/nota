@@ -794,11 +794,14 @@ private data class ChartScale(val lo: Double, val hi: Double, val step: Double, 
 /** Classic 1/2/5/10 nice-number axis scale over [lo0, hi0]. */
 private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScale {
     // Extreme stored values (±1e308 is a legal finite chart value)
-    // must not overflow the span arithmetic below: hi - lo would
-    // become Infinity, the tick maths NaN, and roundToInt() would
-    // throw mid-draw — a crash while merely opening the note.
-    // Clamp the domain to ±MAX/2, where the span stays finite;
-    // NaN bounds degrade to zero.
+    // must not overflow anywhere in this arithmetic: an infinite
+    // span turns the tick maths into NaN or saturates a tick count
+    // into billions. The domain is therefore clamped to ±MAX/2,
+    // widened RELATIVELY when zero-width (a flat +1 cannot move a
+    // double at 1e308 magnitude), and the nice-number rounding —
+    // which EXPANDS the endpoints — runs on the unit domain, where
+    // the span is at most 2 and no product can overflow; results
+    // scale back at the end.
     val bound = Double.MAX_VALUE / 2
     var lo = if (lo0.isNaN()) 0.0 else lo0.coerceIn(-bound, bound)
     var hi = if (hi0.isNaN()) 0.0 else hi0.coerceIn(-bound, bound)
@@ -807,28 +810,24 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
         lo = hi
         hi = t
     }
-    if (hi - lo < 1e-9) {
-        // Widen RELATIVELY: at a magnitude like 1e308 a flat +1
-        // changes nothing (the step between representable doubles
-        // there is ~1e292), which would leave a zero span and NaN
-        // tick maths. 1% of the magnitude always moves the needle
-        // and keeps hi inside the clamped domain.
-        hi = lo + max(1.0, abs(lo) * 0.01)
-    }
-    val step0 = (hi - lo) / targetTicks
+    if (hi - lo < 1e-9) hi = lo + max(1.0, abs(lo) * 0.01)
+    val magnitude = max(abs(lo), abs(hi))
+    val unit = if (magnitude > 0.0) magnitude else 1.0
+    val uLo = lo / unit
+    val uHi = hi / unit
+    val step0 = (uHi - uLo) / targetTicks
     val mag = 10.0.pow(floor(log10(step0)))
     val norm = step0 / mag
-    val step = when {
+    val uStep = when {
         norm < 1.5 -> 1.0
         norm < 3.0 -> 2.0
         norm < 7.0 -> 5.0
         else -> 10.0
     } * mag
-    val niceLo = floor(lo / step) * step
-    val niceHi = ceil(hi / step) * step
-    val count = ((niceHi - niceLo) / step).roundToInt().coerceAtLeast(1)
-    val ticks = (0..count).map { niceLo + it * step }
-    return ChartScale(niceLo, niceHi, step, ticks)
+    val uNiceLo = floor(uLo / uStep) * uStep
+    val uCount = ceil((uHi - uNiceLo) / uStep).toInt().coerceIn(1, 12)
+    val ticks = (0..uCount).map { (uNiceLo + it * uStep) * unit }
+    return ChartScale(ticks.first(), ticks.last(), uStep * unit, ticks)
 }
 
 private fun formatTick(value: Double, step: Double): String {

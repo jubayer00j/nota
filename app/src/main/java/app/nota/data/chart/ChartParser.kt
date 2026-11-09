@@ -191,7 +191,13 @@ object ChartParser {
                 return normalize(input)
             }
         }
-        val legacyData = (input?.get("data") as? JsonArray)?.items ?: emptyList()
+        // The v2 path caps categories at 50 and ChartData's
+        // contract promises it; the legacy path honours the same
+        // bound (a deliberate safety cap over 1.x, whose DOM
+        // renderer tolerates thousands of points — Nota composes
+        // every legend entry and slice, so an oversized imported
+        // payload must not become thousands of composables).
+        val legacyData = ((input?.get("data") as? JsonArray)?.items ?: emptyList()).take(50)
         val categories = legacyData.map { legacyCategoryName(it) }
         val values = legacyData.map { el ->
             // JS: typeof d["value"] === "number" ? d["value"] : 0 —

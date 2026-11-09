@@ -395,6 +395,28 @@ class EditorReadModeUiTest {
     }
 
     @Test
+    fun oppositeExtremesLineChart_composesInReadMode() {
+        // [-1e308, 1e308]: the axis span itself overflows a
+        // double if computed unclamped, and nice-rounding the
+        // endpoints overflows again — the scale is computed on a
+        // unit domain so neither can happen.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Opposite Extremes\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[-1e308,1e308]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Opposite Extremes note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("opposite extremes chart rendered") {
+            exists("opposite extremes title") {
+                composeRule.onNodeWithText("Opposite Extremes").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
     fun constantHugeLineChart_composesInReadMode() {
         // Every value the same 1e308: the axis domain starts
         // zero-width, and a flat +1 widening cannot move a double

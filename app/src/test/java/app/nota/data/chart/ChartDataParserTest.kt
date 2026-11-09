@@ -364,6 +364,16 @@ class ChartDataParserTest {
     }
 
     @Test
+    fun v1Migration_capsAtFiftyEntries() {
+        val entries = (1..60).joinToString(",") { "{\"name\":\"C$it\",\"value\":$it}" }
+        val data = ChartParser.parse(v1Div(dataChart = "[$entries]"))!!
+        assertEquals(50, data.categories.size)
+        assertEquals(50, data.series[0].values.size)
+        assertEquals("C50", data.categories.last())
+        assertEquals(50.0, data.series[0].values.last())
+    }
+
+    @Test
     fun nonAsciiDigitNumber_degradesInsteadOfCrashing() {
         // JSON numbers are ASCII-only: a value like [1\u0662]
         // (Arabic-Indic digit) is a syntax error, so the payload
