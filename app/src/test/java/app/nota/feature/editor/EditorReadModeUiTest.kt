@@ -395,6 +395,26 @@ class EditorReadModeUiTest {
     }
 
     @Test
+    fun hugePieChart_composesInReadMode() {
+        // Two 1e308 slices: the naive sum overflows to Infinity
+        // and would blank the chart; the render scales first.
+        val pie = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"pie\" data-title=\"Big Pie\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[1e308,1e308]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Big Pie note", contentHtml = pie)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("huge pie rendered") {
+            exists("huge pie title") {
+                composeRule.onNodeWithText("Big Pie").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
     fun radarChart_composesInReadMode() {
         val radar = "<div data-type=\"noma-chart\" data-version=\"2\" " +
             "data-chart-type=\"radar\" data-title=\"Skills\" data-subtitle=\"\" " +

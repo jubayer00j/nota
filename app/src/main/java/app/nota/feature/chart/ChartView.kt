@@ -633,7 +633,13 @@ private fun DrawScope.drawPieChart(
     val values = data.categories.indices.map { ci ->
         (series.values.getOrNull(ci) ?: 0.0).coerceAtLeast(0.0)
     }
-    val total = values.sum()
+    // Scale by the peak before summing: [1e308, 1e308] sums to
+    // Infinity unscaled, which would zero every slice's share and
+    // render real data as an empty chart. Proportions are
+    // identical either way.
+    val peak = values.maxOrNull() ?: 0.0
+    val scaled = if (peak > 0.0) values.map { it / peak } else values
+    val total = scaled.sum()
     val cx = size.width / 2f
     val cy = size.height / 2f
     val radius = min(size.width, size.height) / 2f - 6.dp.toPx()
@@ -657,7 +663,7 @@ private fun DrawScope.drawPieChart(
         0f
     }
     var start = -90f
-    values.forEachIndexed { i, v ->
+    scaled.forEachIndexed { i, v ->
         val sweep = (v / total * 360.0).toFloat()
         if (sweep > 0f) {
             val color = ChartColors.pieSliceColor(i)
