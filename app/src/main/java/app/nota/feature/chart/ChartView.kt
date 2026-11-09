@@ -270,8 +270,11 @@ private fun DrawScope.drawCartesianChart(
         }
     }
     val scale = niceScale(lo, hi)
+    // Project in the scale's UNIT domain: subtracting a raw 1e308
+    // value from the clamped bound overflows to Infinity in raw
+    // space, which would throw the point off the chart entirely.
     fun yOf(v: Double): Float =
-        (plotB - ((v - scale.lo) / (scale.hi - scale.lo)) * plotH).toFloat()
+        (plotB - ((v / scale.unit - scale.loUnit) / (scale.hiUnit - scale.loUnit)) * plotH).toFloat()
 
     // Gridlines + value labels.
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
@@ -789,7 +792,16 @@ private fun DrawScope.drawRadarChart(
 // ---------------------------------------------------------------------
 // Axis scaling
 
-private data class ChartScale(val lo: Double, val hi: Double, val step: Double, val ticks: List<Double>)
+private data class ChartScale(
+    val lo: Double,
+    val hi: Double,
+    val step: Double,
+    val ticks: List<Double>,
+    /** Unit-domain bounds + the unit itself, for overflow-free projection. */
+    val loUnit: Double,
+    val hiUnit: Double,
+    val unit: Double,
+)
 
 /** Classic 1/2/5/10 nice-number axis scale over [lo0, hi0]. */
 private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScale {
@@ -810,7 +822,14 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
         lo = hi
         hi = t
     }
-    if (hi - lo < 1e-9) hi = lo + max(1.0, abs(lo) * 0.01)
+    // Widen a zero (or relatively zero) span by the domain's own
+    // magnitude: an absolute epsilon swamps tiny data (1e-12 vs
+    // 2e-12 would get a unit-wide axis) and cannot move huge
+    // data at all.
+    val magnitude0 = max(abs(lo), abs(hi))
+    if (hi - lo <= magnitude0 * 1e-12) {
+        hi = lo + if (magnitude0 > 0.0) magnitude0 * 0.01 else 1.0
+    }
     val magnitude = max(abs(lo), abs(hi))
     val unit = if (magnitude > 0.0) magnitude else 1.0
     val uLo = lo / unit
@@ -821,7 +840,7 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
         // magnitude, so their unit-domain difference underflowed
         // to zero — no grid finer than the domain itself exists.
         val w = max(1.0, abs(lo) * 0.01)
-        return ChartScale(lo - w, hi + w, w, listOf(lo - w, hi + w))
+        return ChartScale(lo - w, hi + w, w, listOf(lo - w, hi + w), lo - w, hi + w, 1.0)
     }
     val mag = 10.0.pow(floor(log10(step0)))
     val norm = step0 / mag
@@ -834,7 +853,15 @@ private fun niceScale(lo0: Double, hi0: Double, targetTicks: Int = 4): ChartScal
     val uNiceLo = floor(uLo / uStep) * uStep
     val uCount = ceil((uHi - uNiceLo) / uStep).toInt().coerceIn(1, 12)
     val ticks = (0..uCount).map { (uNiceLo + it * uStep) * unit }
-    return ChartScale(ticks.first(), ticks.last(), uStep * unit, ticks)
+    return ChartScale(
+        ticks.first(),
+        ticks.last(),
+        uStep * unit,
+        ticks,
+        loUnit = uNiceLo,
+        hiUnit = uNiceLo + uCount * uStep,
+        unit = unit,
+    )
 }
 
 private fun formatTick(value: Double, step: Double): String {

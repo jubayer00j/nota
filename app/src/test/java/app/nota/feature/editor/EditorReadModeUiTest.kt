@@ -395,6 +395,26 @@ class EditorReadModeUiTest {
     }
 
     @Test
+    fun tinyValuesLineChart_composesInReadMode() {
+        // [1e-12, 2e-12]: the axis must scale to the data's own
+        // magnitude, not an absolute unit-wide fallback.
+        val line = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"line\" data-title=\"Tiny Values\" data-subtitle=\"\" " +
+            "data-categories='[\"A\",\"B\"]' " +
+            "data-series='[{\"name\":\"S\",\"values\":[1e-12,2e-12]}]'></div>"
+        val note = runBlocking {
+            repository.createRichNote(title = "Tiny Values note", contentHtml = line)
+        }
+        composeEditor(note.id)
+
+        awaitTrue("tiny values chart rendered") {
+            exists("tiny values title") {
+                composeRule.onNodeWithText("Tiny Values").assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
     fun oppositeExtremesLineChart_composesInReadMode() {
         // [-1e308, 1e308]: the axis span itself overflows a
         // double if computed unclamped, and nice-rounding the
