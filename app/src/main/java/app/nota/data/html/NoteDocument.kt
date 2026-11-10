@@ -934,12 +934,34 @@ object NoteDocument {
         }
         val nested = serializeTaskList(TaskListSegment(item.children))
         val after = item.contentAfterHtml.trim()
-        return if (before.startsWith("<p", ignoreCase = true) ||
-            (before.isEmpty() && after.startsWith("<p", ignoreCase = true))
-        ) {
-            before + nested + after
-        } else {
-            "<p>" + before + nested + after + "</p>"
+        // Codex P2 (PR #41): the nested list must stay a TOP-LEVEL
+        // sibling of the item's content paragraphs — wrapping bare
+        // before/after content AROUND it ("<p>Parent<ul>…</ul></p>")
+        // buries the list inside a paragraph, and the parser only
+        // extracts top-level lists, so the children would fold
+        // back into the parent's content on reopen. Each part is
+        // wrapped separately instead; paragraph-shaped parts pass
+        // through verbatim (the canonical byte identity).
+        return buildString {
+            if (before.isNotEmpty()) {
+                append(
+                    if (before.startsWith("<p", ignoreCase = true)) {
+                        before
+                    } else {
+                        "<p>$before</p>"
+                    },
+                )
+            }
+            append(nested)
+            if (after.isNotEmpty()) {
+                append(
+                    if (after.startsWith("<p", ignoreCase = true)) {
+                        after
+                    } else {
+                        "<p>$after</p>"
+                    },
+                )
+            }
         }
     }
 

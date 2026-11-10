@@ -123,6 +123,31 @@ class NoteDocumentNestedTest {
     }
 
     @Test
+    fun bareContentItem_gainsChild_listStaysTopLevel() {
+        // Codex P2 (PR #41): an item whose content is BARE inline
+        // markup (no wrapping <p>) that gains a child must not
+        // serialise as "<p>Parent<ul>…</ul></p>" — the parser only
+        // extracts top-level lists, so the child would fold back
+        // into the parent's content on reopen. Each part wraps
+        // separately and the result round-trips.
+        val items = listOf(
+            TaskItem(
+                "Parent",
+                checked = false,
+                children = listOf(TaskItem("<p>Kid</p>", checked = false)),
+                contentAfterHtml = "Tail",
+            ),
+        )
+        val html = NoteDocument.serialize(listOf(TaskListSegment(items)))
+        assertTrue(html.contains("<p>Parent</p><ul data-type=\"taskList\">"))
+        assertTrue(html.contains("</ul><p>Tail</p>"))
+        val back = (NoteDocument.parse(html).single() as TaskListSegment).items.single()
+        assertEquals("<p>Parent</p>", back.contentHtml)
+        assertEquals(1, back.children.size)
+        assertEquals("<p>Tail</p>", back.contentAfterHtml)
+    }
+
+    @Test
     fun removingLastChild_keepsTrailingContent() {
         // Codex P1 (PR #41): once the only child is removed, the
         // item is childless but still carries its trailing content
