@@ -12,7 +12,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Phase 6 extras (PR #44): the Clock hand-off carries the reminder's
+ * Phase 6 extras (PR #45): the Clock hand-off carries the reminder's
  * stored tone choices — EXTRA_VIBRATE from the stored flag (5.1
  * hardcoded it on) and EXTRA_RINGTONE only when a tone URI is
  * stored. The pre-existing extras (hour, minutes, message, skip-UI)

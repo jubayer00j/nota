@@ -16,7 +16,7 @@ import java.time.ZoneId
  * belong to the Clock app; Nota arms nothing and posts nothing for
  * these reminders.
  *
- * Phase 6 extras (PR #44): the hand-off now carries the reminder's
+ * Phase 6 extras (PR #45): the hand-off now carries the reminder's
  * stored tone choices — EXTRA_VIBRATE from the stored flag (5.1
  * hardcoded it on, which stays the default) and EXTRA_RINGTONE only
  * when a tone URI is stored, exactly as 1.x forwards them.

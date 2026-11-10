@@ -216,8 +216,8 @@ class MainActivity : FragmentActivity() {
                 .collectAsState(initial = false)
             val oledBlack by preferencesRepository.oledBlack
                 .collectAsState(initial = false)
-            // Phase 6 extras (PR #44): the theme choice — "system"
-            // (the default; behaviour identical to before PR #44),
+            // Phase 6 extras (PR #45): the theme choice — "system"
+            // (the default; behaviour identical to before PR #45),
             // "light" or "dark" — resolves against the live system
             // state through the pure mapping in the theme layer.
             // selectScheme keeps deciding OLED / dynamic colour

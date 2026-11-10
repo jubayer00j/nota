@@ -257,8 +257,8 @@ class PreferencesRepository internal constructor(
 
     suspend fun writingLineHeightNow(): Float = writingLineHeight.first()
 
-    // ---- Theme choice (Phase 6 extras, PR #44) ---------------------
-    // Until PR #44 the app always followed the system dark setting;
+    // ---- Theme choice (Phase 6 extras, PR #45) ---------------------
+    // Until PR #45 the app always followed the system dark setting;
     // the user can now pin Light or Dark. Unknown stored values
     // degrade to "system", the same posture as the swipe-action
     // mapping below. Device-local, like every preference in this
@@ -284,7 +284,7 @@ class PreferencesRepository internal constructor(
 
     suspend fun themeModeNow(): String = themeMode.first()
 
-    // ---- Dictation language (Phase 6 extras, PR #44) ---------------
+    // ---- Dictation language (Phase 6 extras, PR #45) ---------------
     // 1.x's speechLanguage: which language the speech recogniser is
     // asked to listen in, for the editor mic and voice notes alike.
     // "system" (the default) adds no override — the engine keeps
@@ -720,14 +720,14 @@ class PreferencesRepository internal constructor(
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         val KEY_SPEECH_LANGUAGE = stringPreferencesKey("speech_language")
 
-        // Theme choice (Phase 6 extras, PR #44): "system" (follow
+        // Theme choice (Phase 6 extras, PR #45): "system" (follow
         // the device), "light" or "dark". System is the default —
-        // until PR #44 the app always followed the system.
+        // until PR #45 the app always followed the system.
         const val THEME_MODE_SYSTEM = "system"
         const val THEME_MODE_LIGHT = "light"
         const val THEME_MODE_DARK = "dark"
 
-        // Dictation language (Phase 6 extras, PR #44 — Noma 1.x's
+        // Dictation language (Phase 6 extras, PR #45 — Noma 1.x's
         // speechLanguage): "system" (the device default), "en" or
         // "bn". The pure resolver mapping a stored value to the
         // recognition language tag lives with the voice feature

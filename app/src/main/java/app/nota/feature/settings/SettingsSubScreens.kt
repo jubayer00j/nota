@@ -111,7 +111,7 @@ fun SettingsAppearanceScreen(
 ) {
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
     val oledBlack by preferencesRepository.oledBlack.collectAsState(initial = false)
-    // Phase 6 extras (PR #44): the theme choice — System stays the
+    // Phase 6 extras (PR #45): the theme choice — System stays the
     // default; Light / Dark pin the app regardless of the device.
     val themeMode by preferencesRepository.themeMode
         .collectAsState(initial = PreferencesRepository.THEME_MODE_SYSTEM)
@@ -173,7 +173,7 @@ fun SettingsNotesScreen(
         .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
     val writingLineHeight by preferencesRepository.writingLineHeight
         .collectAsState(initial = PreferencesRepository.WRITING_LINE_HEIGHT_DEFAULT)
-    // Phase 6 extras (PR #44): 1.x's dictation language choice.
+    // Phase 6 extras (PR #45): 1.x's dictation language choice.
     val speechLanguage by preferencesRepository.speechLanguage
         .collectAsState(initial = PreferencesRepository.SPEECH_LANGUAGE_SYSTEM)
     val scope = rememberCoroutineScope()

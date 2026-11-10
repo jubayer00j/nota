@@ -5,7 +5,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Phase 6 extras (PR #44): the dictation-language resolver — 1.x's
+ * Phase 6 extras (PR #45): the dictation-language resolver — 1.x's
  * speech.ts mapping. "system" means NO override (null), so the
  * recogniser keeps the device default; the two pinned languages
  * resolve to their BCP-47 tags; anything unknown degrades to

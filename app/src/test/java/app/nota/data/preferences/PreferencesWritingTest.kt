@@ -57,7 +57,7 @@ class PreferencesWritingTest {
         assertEquals(2.0f, fresh.writingLineHeightNow(), 0.0001f)
     }
 
-    // ---- PR #44: theme choice + dictation language -----------------
+    // ---- PR #45: theme choice + dictation language -----------------
 
     @Test
     fun themeMode_defaultsToSystem_andRoundTrips() = runBlocking {

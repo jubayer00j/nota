@@ -15,7 +15,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
- * Phase 6 extras (PR #44): MIGRATION_6_7 adds the four device-local
+ * Phase 6 extras (PR #45): MIGRATION_6_7 adds the four device-local
  * tone columns to reminders. The v6-shaped table is recreated by
  * hand (its exact DDL is the v6 exported schema's createSql) inside
  * a live database, seeded with a phone-alarm row, and the REAL

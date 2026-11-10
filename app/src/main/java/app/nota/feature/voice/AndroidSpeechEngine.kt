@@ -64,7 +64,7 @@ class AndroidSpeechEngine(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * Phase 6 extras (PR #44): used only to read the dictation-
+     * Phase 6 extras (PR #45): used only to read the dictation-
      * language preference at START time (see [start]) — reads are
      * one-shot (`first()`), never a standing collection, so an
      * engine instance holds no subscription open.
@@ -154,7 +154,7 @@ class AndroidSpeechEngine(
     /* ---------------- Recognition ---------------- */
 
     override fun start(languageTag: String, handlers: SpeechEngineHandlers) {
-        // PR #44: the dictation-language preference is read NOW, at
+        // PR #45: the dictation-language preference is read NOW, at
         // start time — not snapshotted when the engine was built —
         // so changing it in Settings steers the very next dictation
         // on both voice surfaces. "system" resolves to null (no

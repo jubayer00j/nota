@@ -79,7 +79,7 @@ class ReminderBackupConsistencyRobolectricTest {
     }
 
     /**
-     * PR #44: the tone fields are device-local like alertType — the
+     * PR #45: the tone fields are device-local like alertType — the
      * full backup round-trip must bring the reminder back with the
      * system default tone and vibrate on (and, per the 2c contract,
      * as a notification reminder), never the tone picked here.

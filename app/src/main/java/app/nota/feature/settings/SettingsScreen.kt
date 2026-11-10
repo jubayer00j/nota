@@ -158,7 +158,7 @@ fun SettingsScreen(
     LaunchedEffect(signedIn?.uid) { driveRepository.refreshEncryptionRecord() }
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
     val oledBlack by preferencesRepository.oledBlack.collectAsState(initial = false)
-    // Phase 6 extras (PR #44): the theme choice leads the Appearance
+    // Phase 6 extras (PR #45): the theme choice leads the Appearance
     // summary ("System · Pine & paper · OLED off").
     val themeMode by preferencesRepository.themeMode
         .collectAsState(initial = PreferencesRepository.THEME_MODE_SYSTEM)
@@ -204,7 +204,7 @@ fun SettingsScreen(
             // even when the preference is stored on.
             val materialYou = dynamicColour &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-            // PR #44: the theme choice leads; the scheme and OLED
+            // PR #45: the theme choice leads; the scheme and OLED
             // facts keep their existing wording after it.
             app.nota.ui.theme.themeModeLabel(themeMode) + " · " +
                 (if (materialYou) "Material You" else "Pine & paper") +
@@ -470,7 +470,7 @@ internal fun SwipeActionRow(
 }
 
 /**
- * Phase 6 extras (PR #44): a single-choice row in the SwipeActionRow
+ * Phase 6 extras (PR #45): a single-choice row in the SwipeActionRow
  * shape — tappable row showing the current choice as its subtitle,
  * dropdown menu with a ✓ on the current value. Used for the Theme
  * choice (Appearance) and the Dictation language (Notes & writing).

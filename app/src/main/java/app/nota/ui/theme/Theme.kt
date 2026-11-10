@@ -156,7 +156,7 @@ private val OledColors = darkColorScheme(
 enum class NotaScheme { Light, Dark, Oled, DynamicLight, DynamicDark }
 
 /**
- * Phase 6 extras (PR #44): the stored theme choice
+ * Phase 6 extras (PR #45): the stored theme choice
  * (PreferencesRepository THEME_MODE_* — "system" / "light" /
  * "dark") mapped to the `darkTheme` flag [NotaTheme] consumes. A
  * pinned Light or Dark wins over the system state; "system" (and

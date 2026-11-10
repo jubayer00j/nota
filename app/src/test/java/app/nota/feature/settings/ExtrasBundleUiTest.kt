@@ -6,7 +6,6 @@ import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onNode
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import app.nota.data.db.ReminderEntity
@@ -29,7 +28,7 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
 
 /**
- * Phase 6 extras (PR #44): the three new settings/dialog surfaces at
+ * Phase 6 extras (PR #45): the three new settings/dialog surfaces at
  * the composition level, over the app's own Koin graph (the
  * SettingsScreenPolishUiTest pattern):
  *
@@ -60,7 +59,7 @@ class ExtrasBundleUiTest {
 
     @Before
     fun setUp() {
-        // Normalise the two PR #44 preferences on the app's real
+        // Normalise the two PR #45 preferences on the app's real
         // store so test order inside this class cannot leak state.
         runBlocking {
             preferences.setThemeMode(PreferencesRepository.THEME_MODE_SYSTEM)

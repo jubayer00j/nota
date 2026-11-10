@@ -90,7 +90,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         require(alertType == ReminderAlertType.NOTIFICATION || alertType == ReminderAlertType.PHONE_ALARM) {
             "Unknown reminder alertType: $alertType"
         }
-        // The tone fields are device-local extras (PR #44): they are
+        // The tone fields are device-local extras (PR #45): they are
         // stored on the row like alertType but never cross into a
         // backup or sync payload (the BxReminder crossover has no
         // tone fields, so a restored reminder comes back with the

@@ -6,7 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 
 /**
- * Phase 6 extras (PR #44): the platform half of 1.x's phone-alarm
+ * Phase 6 extras (PR #45): the platform half of 1.x's phone-alarm
  * tone handling (src/lib/noma/phone-alarm.ts) — accessibility
  * validation and display-name resolution for a stored tone URI.
  *

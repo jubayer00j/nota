@@ -66,7 +66,7 @@ class ThemeSelectionTest {
         )
     }
 
-    // ---- PR #44: the theme choice → darkTheme mapping -------------
+    // ---- PR #45: the theme choice → darkTheme mapping -------------
 
     @Test
     fun themeMode_pinnedLightWinsOverSystemDark() {

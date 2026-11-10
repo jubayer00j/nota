@@ -78,7 +78,7 @@ private fun defaultTriggerAt(nowMillis: Long): Long {
  * app the reminder is kept as a notification reminder and the user is
  * told), and the exact-alarm settings route.
  *
- * Phase 6 extras (PR #44): for Clock-alarm reminders the dialog also
+ * Phase 6 extras (PR #45): for Clock-alarm reminders the dialog also
  * carries 1.x's tone controls — the system ringtone picker, a custom
  * audio file (persistable read permission), a system-default reset,
  * a preview play/stop, and the vibrate switch. The tone fields are
@@ -133,7 +133,7 @@ fun ReminderDialog(
         is24Hour = android.text.format.DateFormat.is24HourFormat(context),
     )
 
-    // --- Tone preview + pickers (PR #44) --------------------------------
+    // --- Tone preview + pickers (PR #45) --------------------------------
     val previewRingtone = remember { mutableStateOf<Ringtone?>(null) }
     var previewPlaying by remember { mutableStateOf(false) }
 

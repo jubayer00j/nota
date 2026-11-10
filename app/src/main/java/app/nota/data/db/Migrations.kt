@@ -65,7 +65,7 @@ val MIGRATION_5_6: Migration = object : Migration(5, 6) {
 }
 
 /**
- * Phase 6 extras (PR #44) adds the phone-alarm tone fields to
+ * Phase 6 extras (PR #45) adds the phone-alarm tone fields to
  * reminders — per-reminder, device-local, exactly like alertType:
  * the backup wire format carries none of them, so restored
  * reminders come back with these same defaults. Plain ADD COLUMNs

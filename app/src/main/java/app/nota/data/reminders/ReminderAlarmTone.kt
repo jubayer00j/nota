@@ -3,7 +3,7 @@ package app.nota.data.reminders
 import app.nota.data.db.ReminderEntity
 
 /**
- * Phase 6 extras (PR #44): the phone-alarm tone choices on a
+ * Phase 6 extras (PR #45): the phone-alarm tone choices on a
  * reminder, mirroring 1.x's phone-alarm.ts alarmToneMode. The mode
  * says WHERE the tone came from; the URI + display name are set
  * only for the two picked modes.
