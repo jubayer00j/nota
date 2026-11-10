@@ -65,7 +65,7 @@ import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Sell
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.AssistChip
+
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -111,12 +111,14 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
@@ -126,7 +128,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyListItemInfo
@@ -161,6 +167,7 @@ import app.nota.feature.reminders.ReminderDialog
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
 import app.nota.data.db.AttachmentEntity
+import app.nota.data.db.NoteEntity
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.DividerSegment
@@ -187,6 +194,7 @@ import app.nota.ui.theme.NotaSpacing
 import coil3.compose.AsyncImage
 import com.mohamedrejeb.richeditor.annotation.ExperimentalRichTextApi
 import com.mohamedrejeb.richeditor.model.HeadingStyle
+import com.mohamedrejeb.richeditor.model.RichSpanStyle
 import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
 import java.text.SimpleDateFormat
@@ -1083,6 +1091,12 @@ fun RichNoteEditorScreen(
         cellRichStates["$blockId-$r-$c"]
     }
     val toolbarState: RichTextState? = focusedCellState ?: activeState
+    // Phase 6 (Editor Refinement #3): caret geometry per rich
+    // field — the entry key is the segment id for text/quote
+    // editors, the cell key for table cells — captured from the
+    // editors' own layout callbacks (see EditorFieldGeometry).
+    // The [[ suggestion popup anchors to the edited field's entry.
+    val fieldGeometries = remember { mutableMapOf<String, EditorFieldGeometry>() }
 
     // Dictation seam (Phase 5): the active editor's insert-at-caret.
     LaunchedEffect(activeSegmentId) {
@@ -1518,16 +1532,25 @@ fun RichNoteEditorScreen(
         }
     }
 
-    // [[ backlink autocomplete state, derived from the active editor.
+    // Phase 6 (Editor Refinement #3): [[ backlink autocomplete,
+    // derived from the rich state actually being edited — the
+    // focused table cell's state while a cell holds focus,
+    // otherwise the active text segment's state. The chip-strip
+    // version only ever saw the text segment; the caret popup
+    // serves both. [linkFieldKey] names the same field in
+    // [fieldGeometries].
+    val linkEditState: RichTextState? = focusedCellState ?: activeState
+    val linkFieldKey: String? = focusedTableCell?.let { (blockId, r, c) ->
+        "$blockId-$r-$c"
+    } ?: activeSegmentId
     val linkTrigger: Pair<Int, String>? = run {
-        val st = activeState
+        val st = linkEditState
         if (st == null || !st.selection.collapsed) {
             null
         } else {
             val text = st.annotatedString.text
             val caret = st.selection.end.coerceIn(0, text.length)
-            val match = Regex("""\[\[([^\[\]\n]*)$""").find(text.substring(0, caret))
-            if (match != null) match.range.first to match.groupValues[1] else null
+            LinkSuggestions.triggerAt(text, caret)?.let { it.start to it.query }
         }
     }
     val linkSuggestions = if (linkTrigger != null) {
@@ -1537,6 +1560,12 @@ fun RichNoteEditorScreen(
     } else {
         emptyList()
     }
+    // The suggestion popup never competes with a modal: any
+    // dialog or sheet this screen can raise hides it.
+    val modalOpen = showLinkDialog || showTableDialog || showChartInsertDialog ||
+        showImageUrlDialog || showOutline || showTemplateDialog ||
+        showExportDialog || showReminderDialog || showLockDialog ||
+        showManageLock || aiSummary != null || aiTags != null || aiBusyLabel != null
 
     val chromeAlpha = if (focusMode && activeSegmentId != null) 0.35f else 1f
     val saveLabel = when (val s = saveState) {
@@ -1821,6 +1850,7 @@ fun RichNoteEditorScreen(
                 stateFor = { richStateFor(ui) },
                 cellTextStates = cellTextStates,
                 cellRichStates = cellRichStates,
+                fieldGeometries = fieldGeometries,
                 onFocus = {
                     activeSegmentId = ui.id
                     // Phase 6 (Editor Refinement #2): a text/quote
@@ -2217,25 +2247,31 @@ fun RichNoteEditorScreen(
                 }
             }
             }
-            if (editing && linkSuggestions.isNotEmpty() && linkTrigger != null) {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                        .padding(horizontal = NotaSpacing.sm),
-                    horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
-                ) {
-                    linkSuggestions.forEach { candidate ->
-                        AssistChip(
-                            onClick = {
-                                val st = activeState ?: return@AssistChip
-                                val caret = st.selection.end.coerceIn(0, st.annotatedString.text.length)
-                                st.replaceTextRange(
-                                    TextRange(linkTrigger.first, caret),
-                                    "[[${candidate.title}]] ",
-                                )
-                            },
-                            label = { Text(candidate.title.ifBlank { "Untitled note" }) },
-                        )
-                    }
+            // Phase 6 (Editor Refinement #3): the [[ suggestions
+            // live in a caret-anchored popup now (the above-toolbar
+            // chip strip is gone) — it floats over the editor at
+            // the caret of the field being edited, text segment or
+            // table cell, and follows it as typing continues. It
+            // never shows during a block drag or over a modal.
+            if (editing && linkTrigger != null && linkSuggestions.isNotEmpty() &&
+                dragSession == null && !modalOpen
+            ) {
+                val st = linkEditState
+                val geometry = linkFieldKey?.let { fieldGeometries[it] }
+                if (st != null && geometry != null) {
+                    LinkSuggestionPopup(
+                        geometry = geometry,
+                        caret = st.selection.end,
+                        candidates = linkSuggestions,
+                        onPick = { candidate ->
+                            val caretNow = st.selection.end
+                                .coerceIn(0, st.annotatedString.text.length)
+                            st.replaceTextRange(
+                                TextRange(linkTrigger.first, caretNow),
+                                "[[${candidate.title}]] ",
+                            )
+                        },
+                    )
                 }
             }
             // Phase 5.4: the dictation status strip, directly above
@@ -2811,6 +2847,9 @@ private fun SegmentEditor(
     // states (the same hoist) + the cell-focus hook the toolbar
     // routing keys on.
     cellRichStates: MutableMap<String, RichTextState>,
+    // Phase 6 (Editor Refinement #3): the screen-owned caret
+    // geometry map (the [[ popup's anchor source).
+    fieldGeometries: MutableMap<String, EditorFieldGeometry>,
     onTableCellFocus: (Int, Int) -> Unit = { _, _ -> },
     onTableCellFocusCleared: () -> Unit = {},
     onFocus: () -> Unit,
@@ -2841,6 +2880,7 @@ private fun SegmentEditor(
     when (val segment = ui.segment) {
         is TextSegment -> {
             val state = stateFor()
+            AutolinkEffect(state)
             var editorModifier = Modifier.fillMaxWidth().then(focusModifier).then(activeModifier)
             if (focusRequester != null) {
                 editorModifier = editorModifier.focusRequester(focusRequester)
@@ -2858,7 +2898,14 @@ private fun SegmentEditor(
                 BasicRichTextEditor(
                     state = state,
                     textStyle = editorTextStyle,
-                    modifier = editorModifier,
+                    modifier = editorModifier.onGloballyPositioned { coordinates ->
+                        val geometry = fieldGeometries.geometryFor(ui.id)
+                        geometry.windowPosition = coordinates.positionInWindow()
+                        geometry.size = coordinates.size
+                    },
+                    onTextLayout = { result ->
+                        fieldGeometries.geometryFor(ui.id).layout = result
+                    },
                 )
                 if (showBodyPlaceholder && state.annotatedString.text.isEmpty()) {
                     Text(
@@ -2871,6 +2918,7 @@ private fun SegmentEditor(
         }
         is QuoteSegment -> {
             val state = stateFor()
+            AutolinkEffect(state)
             Row(Modifier.fillMaxWidth().then(focusModifier)) {
                 Box(
                     Modifier.width(3.dp).heightIn(min = 48.dp)
@@ -2886,7 +2934,14 @@ private fun SegmentEditor(
                         } else {
                             Modifier
                         },
-                    ),
+                    ).onGloballyPositioned { coordinates ->
+                        val geometry = fieldGeometries.geometryFor(ui.id)
+                        geometry.windowPosition = coordinates.positionInWindow()
+                        geometry.size = coordinates.size
+                    },
+                    onTextLayout = { result ->
+                        fieldGeometries.geometryFor(ui.id).layout = result
+                    },
                 )
                 // Phase 6 (Editor Refinement #1 fix): every block
                 // must be deletable — a quote previously had NO
@@ -2926,6 +2981,7 @@ private fun SegmentEditor(
                     when (segment) {
                         is TableSegment -> TableBlock(
                             ui.id, segment, cellTextStates, cellRichStates,
+                            fieldGeometries,
                             onChange, onRemove, onTableCellFocus,
                             onTableCellFocusCleared,
                         )
@@ -3516,6 +3572,146 @@ private fun evictCellRichStates(
 }
 
 /**
+ * Phase 6 (Editor Refinement #3): watches one rich state's TEXT
+ * for the autolink triggers (see [AutoLink]) and linkifies the
+ * token through the library's own range link application, so the
+ * stored bytes are exactly the shape the link dialog writes.
+ *
+ * The flow is keyed on the plain text only: applying a link
+ * changes spans, not text, so the linkify can never re-trigger
+ * itself. Both editor hosts (the list slot and the drag ghost)
+ * may collect the same state during a drag; the collectors run
+ * sequentially on the main thread and the already-linked guard
+ * in [applyAutolink] reads live state, so a second collector
+ * always sees the first one's link and stands down.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun AutolinkEffect(state: RichTextState) {
+    LaunchedEffect(state) {
+        var previous = state.annotatedString.text
+        snapshotFlow { state.annotatedString.text }.collect { current ->
+            if (current != previous) {
+                val before = previous
+                previous = current
+                applyAutolink(state, before, current)
+            }
+        }
+    }
+}
+
+/**
+ * Applies one detected autolink trigger to [state]. Guards, per
+ * the chapter audit: never inside an in-progress [[...]] trigger
+ * (the user is writing a link query, and a URL-shaped query is
+ * not prose), and never over a range that already carries a link
+ * span. The link application itself neither moves the caret nor
+ * alters text.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+private fun applyAutolink(state: RichTextState, previous: String, current: String) {
+    val token = AutoLink.triggeredToken(previous, current) ?: return
+    val caret = state.selection.end.coerceIn(0, current.length)
+    // The [[ guard defers to the trigger derivation itself,
+    // bounded to the caret's own paragraph (Codex P2, PR #42).
+    // The library's text model joins paragraphs with a SPACE, so
+    // a text-wide scan would let one stray "[[" in an earlier
+    // paragraph silently disable autolinking everywhere after
+    // it; the paragraph styles on the annotated string carry the
+    // real boundaries.
+    val paragraph = state.annotatedString.paragraphStyles
+        .lastOrNull { caret >= it.start }
+    val guardActive = if (paragraph != null) {
+        LinkSuggestions.triggerAt(
+            current.substring(
+                paragraph.start,
+                minOf(paragraph.end, current.length),
+            ),
+            caret - paragraph.start,
+        ) != null
+    } else {
+        LinkSuggestions.triggerAt(current, caret) != null
+    }
+    if (guardActive) return
+    for (i in token.range) {
+        if (state.getRichSpanStyle(TextRange(i, i + 1)) is RichSpanStyle.Link) return
+    }
+    state.addLinkToTextRange(
+        url = token.href,
+        textRange = TextRange(token.range.first, token.range.last + 1),
+    )
+}
+
+/**
+ * Phase 6 (Editor Refinement #3): the caret-anchored [[
+ * suggestion popup — a floating card listing the candidate
+ * notes (title only, one line each), positioned by
+ * [LinkPopupPositionProvider] from the edited field's live caret
+ * rect: below the caret line when it fits, above otherwise, x
+ * clamped to 16dp screen margins.
+ *
+ * The popup is deliberately NON-focusable: the editor keeps
+ * focus and its caret while the popup is up, row taps still
+ * land, and picking a candidate is a plain click — no dismiss
+ * plumbing competes with the editor. Closing is driven by the
+ * trigger state itself (type "]", delete back past "[[", move
+ * the caret away) rather than by dismissal.
+ */
+@Composable
+private fun LinkSuggestionPopup(
+    geometry: EditorFieldGeometry,
+    caret: Int,
+    candidates: List<NoteEntity>,
+    onPick: (NoteEntity) -> Unit,
+) {
+    val density = LocalDensity.current
+    val marginPx = with(density) { 16.dp.roundToPx() }
+    val gapPx = with(density) { 4.dp.roundToPx() }
+    val caretState = rememberUpdatedState(caret)
+    val provider = remember(geometry, marginPx, gapPx) {
+        LinkPopupPositionProvider(
+            anchorProvider = {
+                geometry.caretRectInWindow(caretState.value)
+                    ?: IntRect(0, 0, 0, 0)
+            },
+            marginPx = marginPx,
+            gapPx = gapPx,
+        )
+    }
+    Popup(
+        popupPositionProvider = provider,
+        onDismissRequest = {},
+        properties = PopupProperties(focusable = false),
+    ) {
+        Card(
+            Modifier.width(280.dp),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface,
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+        ) {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                candidates.forEach { candidate ->
+                    Text(
+                        text = candidate.title.ifBlank { "Untitled note" },
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth()
+                            .clickable { onPick(candidate) }
+                            .padding(
+                                horizontal = NotaSpacing.md,
+                                vertical = 10.dp,
+                            ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
  * Phase 6 (rich table cells): one table cell's rich editor. The
  * cell's [RichTextState] is hoisted into the screen-owned
  * [cellRichStates] map (the EditableCellText hoist, one level up):
@@ -3541,6 +3737,10 @@ private fun RichCellText(
     initialHtml: String,
     header: Boolean,
     cellRichStates: MutableMap<String, RichTextState>,
+    // Phase 6 (Editor Refinement #3): this cell's caret geometry
+    // entry (same hoisted-map pattern as the state) — the [[
+    // popup anchors to it while the cell is being edited.
+    fieldGeometries: MutableMap<String, EditorFieldGeometry>,
     modifier: Modifier = Modifier,
     onFocus: () -> Unit = {},
     onEdit: (String) -> Unit,
@@ -3563,12 +3763,15 @@ private fun RichCellText(
             }
         }
     }
+    AutolinkEffect(state)
+    val geometry = fieldGeometries.geometryFor(key)
     BasicRichTextEditor(
         state = state,
         textStyle = MaterialTheme.typography.bodySmall.copy(
             color = MaterialTheme.colorScheme.onSurface,
             fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
         ),
+        onTextLayout = { geometry.layout = it },
         modifier = modifier
             .border(
                 1.dp,
@@ -3576,6 +3779,12 @@ private fun RichCellText(
                 RoundedCornerShape(4.dp),
             )
             .padding(horizontal = 6.dp, vertical = 6.dp)
+            // After the padding, so the captured origin is the
+            // TEXT's origin (the layout result's coordinate space).
+            .onGloballyPositioned { coordinates ->
+                geometry.windowPosition = coordinates.positionInWindow()
+                geometry.size = coordinates.size
+            }
             .onFocusChanged { if (it.isFocused) onFocus() },
     )
 }
@@ -3625,6 +3834,9 @@ private fun TableBlock(
     table: TableSegment,
     cellTextStates: MutableMap<String, MutableState<String>>,
     cellRichStates: MutableMap<String, RichTextState>,
+    // Phase 6 (Editor Refinement #3): the caret geometry map the
+    // [[ popup anchors to (a cell's entry is keyed by its cell key).
+    fieldGeometries: MutableMap<String, EditorFieldGeometry>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
     // Phase 6 (rich table cells): a cell field gained focus —
@@ -3675,6 +3887,7 @@ private fun TableBlock(
                             initialHtml = cell,
                             header = table.headerRow && r == 0,
                             cellRichStates = cellRichStates,
+                            fieldGeometries = fieldGeometries,
                             modifier = Modifier.weight(1f),
                             onFocus = {
                                 selectedCell = r to c
