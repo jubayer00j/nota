@@ -1,16 +1,26 @@
 package app.nota.feature.settings
 
 import android.os.Build
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.preferences.SwipeAction
+import app.nota.ui.theme.NotaSpacing
+import app.nota.ui.theme.notaEditorBody
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import org.koin.compose.koinInject
 
@@ -43,8 +53,10 @@ private const val INTRO_APPEARANCE =
     "How Nota looks on this device. These choices only change the " +
         "display — never your notes."
 private const val INTRO_NOTES =
-    "How the notes list behaves: where Nota starts, what a swipe " +
-        "does, and the templates you can start a note from."
+    "How your notes read, and how the list behaves: the text size " +
+        "and line spacing for reading and writing, where Nota " +
+        "starts, what a swipe does, and the templates you can " +
+        "start a note from."
 private const val INTRO_AI =
     // Beginner AI Setup #1: the key is explained BEFORE the word
     // is leaned on — a personal pass from the provider, created
@@ -140,9 +152,71 @@ fun SettingsNotesScreen(
         .collectAsState(initial = SwipeAction.ARCHIVE)
     val swipeLeft by preferencesRepository.swipeLeftAction
         .collectAsState(initial = SwipeAction.TRASH)
+    // Phase 6 (PR #43): the Writing pair (1.x parity).
+    val writingFontSize by preferencesRepository.writingFontSize
+        .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
+    val writingLineHeight by preferencesRepository.writingLineHeight
+        .collectAsState(initial = PreferencesRepository.WRITING_LINE_HEIGHT_DEFAULT)
     val scope = rememberCoroutineScope()
 
     SettingsSubScreen(SettingsCategory.NOTES, INTRO_NOTES, onBack) {
+        // Writing (1.x's Writing settings, phone-adapted): two
+        // sliders + a live sample in the chosen type. 1.x's third
+        // slider (editor width) is a desktop column concept with
+        // no phone meaning and is deliberately not ported.
+        SettingsCard(title = "Writing") {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Font size", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "${writingFontSize}px",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Slider(
+                value = writingFontSize.toFloat(),
+                onValueChange = { value ->
+                    scope.launch {
+                        preferencesRepository.setWritingFontSize(value.roundToInt())
+                    }
+                },
+                valueRange = PreferencesRepository.WRITING_FONT_SIZE_MIN.toFloat()..
+                    PreferencesRepository.WRITING_FONT_SIZE_MAX.toFloat(),
+                steps = PreferencesRepository.WRITING_FONT_SIZE_MAX -
+                    PreferencesRepository.WRITING_FONT_SIZE_MIN - 1,
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Line height", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    formatLineHeight(writingLineHeight),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Slider(
+                value = writingLineHeight,
+                onValueChange = { value ->
+                    scope.launch { preferencesRepository.setWritingLineHeight(value) }
+                },
+                valueRange = PreferencesRepository.WRITING_LINE_HEIGHT_MIN..
+                    PreferencesRepository.WRITING_LINE_HEIGHT_MAX,
+                steps = 7,
+            )
+            Spacer(Modifier.height(NotaSpacing.sm))
+            Text(
+                "Reading should feel calm — pick the size and " +
+                    "spacing that suit your eyes, and every note " +
+                    "follows.",
+                style = notaEditorBody(writingFontSize, writingLineHeight)
+                    .copy(color = MaterialTheme.colorScheme.onSurface),
+            )
+        }
         SettingsCard {
             SettingsSwitchRow(
                 title = "Start on Today",

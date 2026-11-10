@@ -472,4 +472,31 @@ override fun sealCipherResult(): StepResult<Cipher> =
             assertTrue(e.message!!.contains("already locked"))
         }
     }
+
+    @Test
+    fun lockNote_purgesVersionHistory() = runBlocking {
+        // PR #43 (1.x versions.ts hard rule): a version row holds
+        // plaintext title + content, so the moment a note gains a
+        // lock its history must go — otherwise the seal would
+        // leave a readable copy of the note behind.
+        val note = notes.createRichNote(title = "Diary", contentHtml = "<p>secret body</p>")
+        val now = System.currentTimeMillis()
+        db.noteVersionDao().insert(
+            app.nota.data.db.NoteVersionEntity(
+                id = "vh-1", noteId = note.id, title = "Diary",
+                contentHtml = "<p>earlier secret</p>", createdAt = now - 120_000,
+            ),
+        )
+        db.noteVersionDao().insert(
+            app.nota.data.db.NoteVersionEntity(
+                id = "vh-2", noteId = note.id, title = "Diary",
+                contentHtml = "<p>secret body</p>", createdAt = now - 60_000,
+            ),
+        )
+        assertEquals(2, db.noteVersionDao().getForNote(note.id).size)
+
+        lockRepo.lockNote(note.id, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("1234"))
+
+        assertTrue(db.noteVersionDao().getForNote(note.id).isEmpty())
+    }
 }

@@ -224,8 +224,25 @@ interface NoteVersionDao {
     @Query("SELECT * FROM note_versions")
     suspend fun getAll(): List<NoteVersionEntity>
 
+    /** Phase 6 (PR #43): one version by id, for restore. */
+    @Query("SELECT * FROM note_versions WHERE id = :id")
+    suspend fun getById(id: String): NoteVersionEntity?
+
+    /** Phase 6 (PR #43): a note's versions, newest first — the
+     *  prune's input (1.x reads the rows and prunes in code too). */
+    @Query("SELECT * FROM note_versions WHERE noteId = :noteId ORDER BY createdAt DESC")
+    suspend fun getForNote(noteId: String): List<NoteVersionEntity>
+
     @Insert
     suspend fun insert(version: NoteVersionEntity)
+
+    @Delete
+    suspend fun delete(version: NoteVersionEntity)
+
+    /** Phase 6 (PR #43): clearVersions — permanent deletion and
+     *  locking wipe a note's history outright (1.x versions.ts). */
+    @Query("DELETE FROM note_versions WHERE noteId = :noteId")
+    suspend fun deleteForNote(noteId: String)
 }
 
 /** Keeps [NoteFtsEntity] in sync with note writes; called by the repository in the

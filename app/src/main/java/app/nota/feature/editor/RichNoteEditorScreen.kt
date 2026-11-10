@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Lock
@@ -124,6 +125,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -153,6 +155,7 @@ import app.nota.data.attachments.PendingInsertMode
 import app.nota.data.attachments.PendingInsertRecord
 import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.feature.capture.NotePinShortcut
 import app.nota.feature.chart.CHART_BLOCK_EDIT_TAG
@@ -189,7 +192,7 @@ import app.nota.data.text.PlainTextCodec
 import app.nota.feature.lock.LockNoteDialog
 import app.nota.feature.lock.ManageLockDialog
 import app.nota.feature.lock.NoteLockGate
-import app.nota.ui.theme.NotaEditorBody
+import app.nota.ui.theme.notaEditorBody
 import app.nota.ui.theme.NotaSpacing
 import coil3.compose.AsyncImage
 import com.mohamedrejeb.richeditor.annotation.ExperimentalRichTextApi
@@ -211,8 +214,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.koin.androidx.compose.koinViewModel
 
-/** One row of the editor's working document (stable id across recompositions). */
-private data class UiSegment(val id: String, val segment: DocSegment)
+/**
+ * One row of the editor's working document (stable id across recompositions).
+ * Internal (not private) since Phase 6 (PR #43): the version-history
+ * preview renders stored HTML through the same read pipeline.
+ */
+internal data class UiSegment(val id: String, val segment: DocSegment)
 
 /**
  * Phase 3.8: one live block-drag session. [fromIndex] is the
@@ -230,7 +237,7 @@ private data class BlockDragSession(
     val blockHeightPx: Int,
 )
 
-private fun newUiId(): String = UUID.randomUUID().toString()
+internal fun newUiId(): String = UUID.randomUUID().toString()
 
 /** A copy of the list with the element at [from] moved to [to] (Phase 3.5, D4 drag reorder). */
 private fun <T> List<T>.moved(from: Int, to: Int): List<T> =
@@ -284,8 +291,18 @@ fun RichNoteEditorScreen(
     databaseProvider: DatabaseProvider = koinInject(),
     // Phase 4.1: the BYOK AI orchestration (Summarize / Suggest tags).
     aiService: AiService = koinInject(),
+    // Phase 6 (PR #43): the Writing typography preferences — the
+    // body style below is derived from them live, so a slider move
+    // in Settings re-types every open note surface (editor, read
+    // view, version previews) with no restart.
+    preferencesRepository: PreferencesRepository = koinInject(),
 ) {
     LaunchedEffect(noteId) { viewModel.load(noteId) }
+    val writingFontSize by preferencesRepository.writingFontSize
+        .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
+    val writingLineHeight by preferencesRepository.writingLineHeight
+        .collectAsState(initial = PreferencesRepository.WRITING_LINE_HEIGHT_DEFAULT)
+    val editorBodyStyle = notaEditorBody(writingFontSize, writingLineHeight)
     val note by viewModel.note.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val existingTags by viewModel.tagNames.collectAsState()
@@ -357,6 +374,8 @@ fun RichNoteEditorScreen(
     var showTemplateDialog by remember { mutableStateOf(false) }
     // Per-note Export #1: the export dialog + its in-flight build flag.
     var showExportDialog by remember { mutableStateOf(false) }
+    // Phase 6 (PR #43): the version-history dialog.
+    var showVersionHistory by remember { mutableStateOf(false) }
     var exportBusy by remember { mutableStateOf(false) }
     var showReminderDialog by remember { mutableStateOf(false) }
     var templateName by remember { mutableStateOf("") }
@@ -510,6 +529,28 @@ fun RichNoteEditorScreen(
 
     fun persistNow(then: () -> Unit = {}) {
         viewModel.persist(title, syncSegments(), folderId, tagsCsv, then)
+    }
+
+    /**
+     * Phase 6 (PR #43): re-seeds the working document from a row
+     * the VM just restored — the editor's buffer must show the
+     * restored title + content, not the pre-restore text. Every
+     * hoisted editor state goes with the old segments (they are
+     * keyed by segment/cell identity), and focus routes reset:
+     * the caret lands wherever the fresh composition puts it.
+     */
+    fun reloadAfterRestore(restored: app.nota.data.db.NoteEntity) {
+        textStates.clear()
+        cellRichStates.clear()
+        cellTextStates.clear()
+        activeSegmentId = null
+        focusedTableCell = null
+        focusedTaskItem = null
+        title = restored.title
+        folderId = restored.folderId
+        segments = NoteDocument.ensureTrailingTextSegment(
+            NoteDocument.parse(restored.contentHtml),
+        ).map { UiSegment(newUiId(), it) }
     }
 
     fun updateBlock(id: String, segment: DocSegment) {
@@ -1564,7 +1605,7 @@ fun RichNoteEditorScreen(
     // dialog or sheet this screen can raise hides it.
     val modalOpen = showLinkDialog || showTableDialog || showChartInsertDialog ||
         showImageUrlDialog || showOutline || showTemplateDialog ||
-        showExportDialog || showReminderDialog || showLockDialog ||
+        showExportDialog || showVersionHistory || showReminderDialog || showLockDialog ||
         showManageLock || aiSummary != null || aiTags != null || aiBusyLabel != null
 
     val chromeAlpha = if (focusMode && activeSegmentId != null) 0.35f else 1f
@@ -1687,6 +1728,31 @@ fun RichNoteEditorScreen(
                                 onClick = {
                                     menuExpanded = false
                                     showExportDialog = true
+                                },
+                            )
+                        }
+                        // Phase 6 (PR #43): the version-history
+                        // entry — beside Export, in view and edit
+                        // modes, for an unlocked note with content
+                        // on screen. Locked notes have no history
+                        // (locking purges it and locked notes never
+                        // snapshot), so a locked note gets no entry.
+                        // Opening while editing flushes the pending
+                        // save first (1.x host rule), so a restore's
+                        // force-snapshot keeps the text just typed.
+                        if (!gated && current?.locked != true) {
+                            DropdownMenuItem(
+                                text = { Text("Version history") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.History, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    if (editing) {
+                                        persistNow { showVersionHistory = true }
+                                    } else {
+                                        showVersionHistory = true
+                                    }
                                 },
                             )
                         }
@@ -1883,6 +1949,7 @@ fun RichNoteEditorScreen(
                 fileFor = { viewModel.attachmentFile(it) },
                 bringIntoView = bringIntoView,
                 onPinchingChange = { imagePinchActive = it },
+                bodyStyle = editorBodyStyle,
                 dragHandleModifier = if (isBlock) Modifier else null,
             )
         }
@@ -2006,6 +2073,7 @@ fun RichNoteEditorScreen(
                                 onChange = { updateBlock(ui.id, it) },
                                 attachments = attachments,
                                 fileFor = { viewModel.attachmentFile(it) },
+                                bodyStyle = editorBodyStyle,
                             )
                         }
                         return@itemsIndexed
@@ -2740,6 +2808,26 @@ fun RichNoteEditorScreen(
         )
     }
 
+    // Phase 6 (PR #43): version history. The restore hands the
+    // restored row back so the working buffer re-seeds from it
+    // (reloadAfterRestore), in whichever mode the dialog was
+    // opened from.
+    if (showVersionHistory) {
+        val noteForHistory = current
+        if (noteForHistory != null) {
+            VersionHistoryDialog(
+                viewModel = viewModel,
+                noteId = noteForHistory.id,
+                noteTitle = noteForHistory.title,
+                bodyStyle = editorBodyStyle,
+                attachments = attachments,
+                fileFor = { viewModel.attachmentFile(it) },
+                onRestored = { restored -> reloadAfterRestore(restored) },
+                onDismiss = { showVersionHistory = false },
+            )
+        }
+    }
+
     if (showReminderDialog) {
         val noteForReminder = current
         if (noteForReminder != null) {
@@ -2864,6 +2952,9 @@ private fun SegmentEditor(
     // Phase 3.6 (G4): lets the screen suspend list scrolling while an
     // image pinch is live.
     onPinchingChange: (Boolean) -> Unit = {},
+    // Phase 6 (PR #43): the Writing-preference body style — the
+    // base every segment editor derives its ink from.
+    bodyStyle: TextStyle,
 ) {
     val focusModifier = Modifier.onFocusChanged { if (it.isFocused) onFocus() }
     val activeModifier = if (isActive) Modifier.bringIntoViewRequester(bringIntoView) else Modifier
@@ -2876,7 +2967,7 @@ private fun SegmentEditor(
     // colour to onSurface: unstyled body/headings/lists/quotes inherit it
     // (heading styles derive from this base style), while spans with an
     // explicit colour from the document HTML still win over the base.
-    val editorTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
+    val editorTextStyle = bodyStyle.copy(color = MaterialTheme.colorScheme.onSurface)
     when (val segment = ui.segment) {
         is TextSegment -> {
             val state = stateFor()
@@ -3118,14 +3209,17 @@ private fun SegmentEditor(
  */
 @OptIn(ExperimentalRichTextApi::class)
 @Composable
-private fun SegmentReadView(
+internal fun SegmentReadView(
     ui: UiSegment,
     stateFor: () -> RichTextState,
     onChange: (DocSegment) -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
+    // Phase 6 (PR #43): the Writing-preference body style, threaded
+    // from the screen (the read-mode title of truth for body size).
+    bodyStyle: TextStyle,
 ) {
-    val readTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
+    val readTextStyle = bodyStyle.copy(color = MaterialTheme.colorScheme.onSurface)
     when (val segment = ui.segment) {
         is TextSegment -> {
             BasicRichText(
@@ -3165,6 +3259,7 @@ private fun SegmentReadView(
                         items = segment.items,
                         path = emptyList(),
                         depth = 0,
+                        bodyStyle = bodyStyle,
                         onToggle = { itemPath, checked ->
                             onChange(
                                 TaskListSegment(
@@ -3373,9 +3468,11 @@ private fun ReadTaskRows(
     items: List<TaskItem>,
     path: List<Int>,
     depth: Int,
+    // Phase 6 (PR #43): the Writing-preference body style.
+    bodyStyle: TextStyle,
     onToggle: (List<Int>, Boolean) -> Unit,
 ) {
-    val readTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
+    val readTextStyle = bodyStyle.copy(color = MaterialTheme.colorScheme.onSurface)
     items.forEachIndexed { index, item ->
         val itemPath = path + index
         Row(
@@ -3419,7 +3516,7 @@ private fun ReadTaskRows(
                 Spacer(Modifier.width(NotaSpacing.xs))
             }
         }
-        ReadTaskRows(blockId, item.children, itemPath, depth + 1, onToggle)
+        ReadTaskRows(blockId, item.children, itemPath, depth + 1, bodyStyle, onToggle)
         // Codex P2 (PR #41): the item's trailing content renders
         // AFTER its child rows — the stored order (own -> children
         // -> trailing), as a continuation row under the item's text.

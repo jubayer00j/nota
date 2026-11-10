@@ -6,6 +6,7 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.NoteDocument
+import androidx.room.withTransaction
 import app.nota.data.security.BiometricStep
 import app.nota.data.security.LockPerf
 import app.nota.data.security.StepResult
@@ -54,10 +55,10 @@ data class DecryptedNoteData(
  * - Attempt bookkeeping mirrors 1.x exactly: lockout is checked BEFORE
  *   the slot, failed attempts persist through the record JSON, and the
  *   lockout deadline is only overwritten when the new duration is > 0.
- * - Version history: nothing writes `note_versions` rows anywhere in
- *   Nota today (the DAO insert has no callers), so there is no plaintext
- *   history to purge on lock — 1.x's clearVersions has no counterpart
- *   yet; when versions land, lockNote must purge them.
+ * - Version history: locking PURGES the note's version rows
+ *   (Phase 6, PR #43 — 1.x's clearVersions on lock). A version
+ *   stores the note's plaintext storage form, so any row left
+ *   behind would defeat the seal the moment it lands.
  * - Locking also evicts the note's semantic-search vectors in the
  *   same call (Phase 4.2, Jules PR #23 P1): the vectors are derived
  *   from the note's plaintext and must not linger in the local
@@ -163,7 +164,20 @@ class NoteLockRepository(
                     lockRecordJson = record.toJson(),
                     updatedAt = System.currentTimeMillis(),
                 )
-                noteRepository.upsert(locked)
+                // Phase 6 (PR #43): the seal and the version-history
+                // purge commit ATOMICALLY (Codex P1, PR #43). The
+                // version rows hold plaintext; if the process died
+                // between a committed seal and a separate purge, a
+                // locked note would retain plaintext history across
+                // restart, defeating the seal. One transaction: the
+                // note locks and its history vanishes together, or
+                // neither happens. (runExclusive above is only a
+                // mutex — it orders callers, it does not make the
+                // two writes atomic.)
+                provider.current.withTransaction {
+                    noteRepository.upsert(locked)
+                    provider.current.noteVersionDao().deleteForNote(noteId)
+                }
             }
             // The lock has landed: evict the note's semantic
             // vectors NOW (see the class doc). Best-effort by

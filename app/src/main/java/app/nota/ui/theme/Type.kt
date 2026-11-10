@@ -76,3 +76,18 @@ val NotaEditorBody = TextStyle(
     fontSize = 17.sp,
     lineHeight = 28.sp,
 )
+
+/**
+ * The editor body style built from the Writing preferences
+ * (Phase 6, PR #43 — Noma 1.x parity): the user's font size with
+ * the line height as a MULTIPLIER of it, exactly how 1.x applies
+ * its two Writing sliders to the note body. At the defaults
+ * (17 / 1.7) this is the [NotaEditorBody] shape modulo the
+ * multiplier's rounding (28.9sp vs the hand-set 28sp).
+ */
+fun notaEditorBody(fontSizeSp: Int, lineHeightMultiplier: Float): TextStyle = TextStyle(
+    fontFamily = NotaSerifFamily,
+    fontWeight = FontWeight.Normal,
+    fontSize = fontSizeSp.sp,
+    lineHeight = (fontSizeSp * lineHeightMultiplier).sp,
+)

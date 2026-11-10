@@ -8,6 +8,7 @@ import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteFtsEntity
 import app.nota.data.db.NoteLinkEntity
 import app.nota.data.db.NoteTagCrossRef
+import app.nota.data.db.NoteVersionEntity
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.db.TagEntity
@@ -170,6 +171,10 @@ class NoteRepository(
                     app.nota.data.sync.EntityHash.ENTITY_REMINDER, reminder.id, now,
                 )
             }
+            // Phase 6 (PR #43): permanent deletion clears the note's
+            // version history (1.x clearVersions) — stated explicitly
+            // rather than left to the FK cascade alone.
+            db.noteVersionDao().deleteForNote(note.id)
             noteDao.delete(note)
             ftsDao.deleteForNote(note.id)
         }
@@ -199,15 +204,77 @@ class NoteRepository(
         return note
     }
 
+    // --- Version history (Phase 6, PR #43) ---------------------------
+
+    /**
+     * The version-history hook (1.x snapshots inside `updateNote`;
+     * Nota's counterparts are the three edit entry points below).
+     * The STORED row is what gets snapshotted — the caller's copy
+     * can be stale — and only when the title or the content
+     * actually differs from it, so a no-change save produces
+     * nothing. [newContentHtml] is null for a title-only save
+     * (content untouched by definition). Deliberately NOT in
+     * [upsert]: sync applies, backup restores, lock-session sealed
+     * saves and the guest transfer all flow through upsert and
+     * must never snapshot (see [VersionHistory]).
+     */
+    private suspend fun snapshotStoredIfChanged(
+        noteId: String,
+        newTitle: String,
+        newContentHtml: String?,
+    ) {
+        val stored = noteDao.getById(noteId) ?: return
+        val contentChanged = newContentHtml != null && stored.contentHtml != newContentHtml
+        if (stored.title == newTitle && !contentChanged) return
+        VersionHistory.snapshotIfSettled(db, stored)
+    }
+
+    /** A note's earlier states, newest first (see [VersionHistory]). */
+    fun observeVersions(noteId: String): Flow<List<NoteVersionEntity>> =
+        VersionHistory.observeVersions(db, noteId)
+
+    /** Deletes every version of a note (the history dialog's Clear). */
+    suspend fun clearVersions(noteId: String) = VersionHistory.clearVersions(db, noteId)
+
+    /**
+     * Restores a version: the current state is force-snapshotted
+     * first (so the restore can itself be undone), then the
+     * version's title + content are written back through [upsert] —
+     * the same plain-text / FTS / backlink derivation every edit
+     * gets. The note-row change is also what the semantic index's
+     * maintenance observer keys on, so restored content becomes
+     * what search matches (1.x refreshes the note's vector
+     * explicitly after its direct write, for the same reason).
+     * Returns false when the version or its note is gone — or the
+     * note is locked, in which case nothing is written at all:
+     * plaintext must never land on a sealed record.
+     */
+    suspend fun restoreVersion(versionId: String): Boolean {
+        val version = db.noteVersionDao().getById(versionId) ?: return false
+        val note = noteDao.getById(version.noteId) ?: return false
+        if (note.locked) return false
+        VersionHistory.forceSnapshot(db, note)
+        val restored = note.copy(
+            title = version.title,
+            contentHtml = version.contentHtml,
+            plainText = NoteDocument.plainText(NoteDocument.parse(version.contentHtml)),
+            updatedAt = System.currentTimeMillis(),
+        )
+        upsert(restored)
+        return true
+    }
+
     suspend fun updateBody(note: NoteEntity, title: String, plainBody: String): NoteEntity {
         // Phase 2b defence-in-depth: a locked note's body may only be
         // written through NoteLockRepository.saveLockedContent (sealed).
         // Any other path landing here with plaintext would silently
         // break the seal, so it fails loudly instead.
         require(!note.locked) { "Note is locked; body writes must go through the lock session." }
+        val newContentHtml = PlainTextCodec.textToHtml(plainBody)
+        snapshotStoredIfChanged(note.id, title, newContentHtml)
         val updated = note.copy(
             title = title,
-            contentHtml = PlainTextCodec.textToHtml(plainBody),
+            contentHtml = newContentHtml,
             plainText = plainBody,
             updatedAt = System.currentTimeMillis(),
         )
@@ -221,6 +288,7 @@ class NoteRepository(
      * their HTML must not be rewritten by the plain codec.
      */
     suspend fun updateTitle(note: NoteEntity, title: String): NoteEntity {
+        snapshotStoredIfChanged(note.id, title, newContentHtml = null)
         val updated = note.copy(title = title, updatedAt = System.currentTimeMillis())
         upsert(updated)
         return updated
@@ -253,6 +321,7 @@ class NoteRepository(
     suspend fun updateRichBody(note: NoteEntity, title: String, contentHtml: String): NoteEntity {
         // Phase 2b: see updateBody — plaintext must never overwrite a seal.
         require(!note.locked) { "Note is locked; body writes must go through the lock session." }
+        snapshotStoredIfChanged(note.id, title, contentHtml)
         val updated = note.copy(
             title = title,
             contentHtml = contentHtml,
