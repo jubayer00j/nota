@@ -90,6 +90,7 @@ class ExtrasBundleUiTest {
         }
         composeRule.onNode(
             hasClickAction() and hasAnyDescendant(hasText("Theme")),
+            useUnmergedTree = true,
         ).performClick()
         awaitTrue("Theme menu open") { exists("✓ System") || exists("Dark") }
         composeRule.onNodeWithText("Dark").performClick()
@@ -110,6 +111,7 @@ class ExtrasBundleUiTest {
         awaitTrue("Dictation language row") { exists("Dictation language") }
         composeRule.onNode(
             hasClickAction() and hasAnyDescendant(hasText("Dictation language")),
+            useUnmergedTree = true,
         ).performClick()
         awaitTrue("Language menu open") { exists("Bangla") }
         composeRule.onNodeWithText("Bangla").performClick()
@@ -123,11 +125,13 @@ class ExtrasBundleUiTest {
         )
     }
 
+    private val futureTrigger: Long
+        get() = System.currentTimeMillis() + 86_400_000L
+
     @Test
-    fun reminderDialog_toneControlsOnlyForClockAlarm() {
-        val future = System.currentTimeMillis() + 86_400_000L
+    fun reminderDialog_clockAlarmShowsToneControls() {
         val phoneAlarm = ReminderEntity(
-            id = "r-alarm", noteId = "n1", triggerAt = future,
+            id = "r-alarm", noteId = "n1", triggerAt = futureTrigger,
             enabled = true, createdAt = 1_000L,
             alertType = ReminderAlertType.PHONE_ALARM,
         )
@@ -146,9 +150,14 @@ class ExtrasBundleUiTest {
             exists("Alarm sound") && exists("Choose tone…") && exists("Vibrate")
         }
         assertTrue(exists("System default"))
+    }
 
-        val notification = phoneAlarm.copy(
-            id = "r-note", alertType = ReminderAlertType.NOTIFICATION,
+    @Test
+    fun reminderDialog_notificationHidesToneControls() {
+        val notification = ReminderEntity(
+            id = "r-note", noteId = "n1", triggerAt = futureTrigger,
+            enabled = true, createdAt = 1_000L,
+            alertType = ReminderAlertType.NOTIFICATION,
         )
         composeRule.setContent {
             NotaTheme {
@@ -161,7 +170,7 @@ class ExtrasBundleUiTest {
                 )
             }
         }
-        awaitTrue("Dialog re-composed for a notification reminder") {
+        awaitTrue("Dialog composed for a notification reminder") {
             exists("Notification")
         }
         assertTrue(!exists("Alarm sound"))
