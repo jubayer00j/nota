@@ -700,4 +700,29 @@ class NoteExportMarkdownTest {
         )
         assertTrue(out.contains("- [ ] Parent\n  - [x] Child\n    - [ ] Grandchild\n- [ ] Sibling"))
     }
+
+    @Test
+    fun nestedTasksTrailingContentKeepsStoredOrder() {
+        // Codex P2 (PR #41): content that followed an item's
+        // nested list exports AFTER the children, as a
+        // continuation line — never folded into the item's line.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Before</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = false),
+                            ),
+                            contentAfterHtml = "<p>After</p>",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n      After"))
+    }
 }

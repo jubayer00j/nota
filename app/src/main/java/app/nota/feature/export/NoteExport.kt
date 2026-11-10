@@ -350,11 +350,22 @@ object NoteExport {
                     for (item in items) {
                         val marker = if (item.checked) "- [x] " else "- [ ] "
                         val body = mdInline(
-                            parseFragment(item.contentHtml + item.contentAfterHtml),
+                            parseFragment(item.contentHtml),
                             resolve,
                         ).trim()
                         lines += "  ".repeat(depth) + marker + body
                         walk(item.children, depth + 1)
+                        // Codex P2 (PR #41): trailing own content
+                        // exports AFTER the children (the stored
+                        // order), as a continuation line under the
+                        // item — never folded into the item's line.
+                        val after = mdInline(
+                            parseFragment(item.contentAfterHtml),
+                            resolve,
+                        ).trim()
+                        if (after.isNotEmpty()) {
+                            lines += "  ".repeat(depth) + "      " + after
+                        }
                     }
                 }
                 walk(segment.items, 0)
@@ -906,10 +917,18 @@ object NoteExport {
                 for (item in items) {
                     val marker = if (item.checked) "- [x] " else "- [ ] "
                     val body = textInline(
-                        parseFragment(item.contentHtml + item.contentAfterHtml),
+                        parseFragment(item.contentHtml),
                     ).replace(Regex("\\s+"), " ").trim()
                     lines += "  ".repeat(depth) + marker + body
                     walk(item.children, depth + 1)
+                    // Codex P2 (PR #41): trailing own content
+                    // after the children, as in the Markdown twin.
+                    val after = textInline(
+                        parseFragment(item.contentAfterHtml),
+                    ).replace(Regex("\\s+"), " ").trim()
+                    if (after.isNotEmpty()) {
+                        lines += "  ".repeat(depth) + "      " + after
+                    }
                 }
             }
             walk(segment.items, 0)

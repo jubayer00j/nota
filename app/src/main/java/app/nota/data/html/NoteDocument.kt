@@ -895,32 +895,42 @@ object NoteDocument {
      * paragraph and passes through untouched, and bare content is
      * wrapped in a single paragraph around list and all.
      */
+    /**
+     * A childless item's full own content: its leading content with
+     * any trailing content (content that followed its nested list,
+     * split into [TaskItem.contentAfterHtml] at parse) folded back
+     * in — the serialised shape. Codex P1 (PR #41): an item that
+     * lost its last child (removeAt, or a child outdenting away)
+     * still carries that trailing content, and no consumer —
+     * serialiser, "Make text" conversion — may drop it.
+     * Paragraph-shaped parts concatenate verbatim (the canonical
+     * shape); bare runs keep their separation as two paragraphs
+     * rather than merging into one word.
+     */
+    internal fun childlessItemContent(item: TaskItem): String {
+        val before = item.contentHtml.trim()
+        val after = item.contentAfterHtml.trim()
+        if (after.isEmpty()) {
+            return if (before.startsWith("<p", ignoreCase = true)) {
+                before
+            } else {
+                "<p>$before</p>"
+            }
+        }
+        return if (before.startsWith("<p", ignoreCase = true) ||
+            (before.isEmpty() && after.startsWith("<p", ignoreCase = true))
+        ) {
+            before + after
+        } else {
+            listOf(before, after).filter { it.isNotEmpty() }
+                .joinToString("") { "<p>$it</p>" }
+        }
+    }
+
     private fun serializeTaskItemContent(item: TaskItem): String {
         val before = item.contentHtml.trim()
         if (item.children.isEmpty()) {
-            val after = item.contentAfterHtml.trim()
-            if (after.isEmpty()) {
-                return if (before.startsWith("<p", ignoreCase = true)) {
-                    before
-                } else {
-                    "<p>$before</p>"
-                }
-            }
-            // Codex P1 (PR #41): an item that lost its last child
-            // (removeAt, or a child outdenting away) still carries
-            // trailing content the parser split into
-            // contentAfterHtml — the childless branch must not drop
-            // it. Paragraph-shaped parts concatenate verbatim (the
-            // canonical shape); bare runs keep their separation as
-            // two paragraphs rather than merging into one word.
-            return if (before.startsWith("<p", ignoreCase = true) ||
-                (before.isEmpty() && after.startsWith("<p", ignoreCase = true))
-            ) {
-                before + after
-            } else {
-                listOf(before, after).filter { it.isNotEmpty() }
-                    .joinToString("") { "<p>$it</p>" }
-            }
+            return childlessItemContent(item)
         }
         val nested = serializeTaskList(TaskListSegment(item.children))
         val after = item.contentAfterHtml.trim()
@@ -1179,7 +1189,11 @@ object NoteDocument {
     ): ParagraphConversion? {
         val list = segments.getOrNull(segmentIndex) as? TaskListSegment ?: return null
         val item = list.items.getOrNull(itemIndex) ?: return null
-        val paragraphHtml = asTextHtml(item.contentHtml)
+        // Codex P2 (PR #41): a childless item can still carry
+        // trailing content (it followed a nested list that has
+        // since been removed) — convert the item's FULL own
+        // content, never just the leading part.
+        val paragraphHtml = asTextHtml(childlessItemContent(item))
         val itemsBefore = list.items.subList(0, itemIndex)
         val itemsAfter = list.items.subList(itemIndex + 1, list.items.size)
         val prefix = segments.subList(0, segmentIndex)

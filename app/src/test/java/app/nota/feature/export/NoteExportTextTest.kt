@@ -227,4 +227,28 @@ class NoteExportTextTest {
         )
         assertTrue(out.contains("- [ ] Parent\n  - [x] Child"))
     }
+
+    @Test
+    fun nestedTasksTrailingContentKeepsStoredOrder() {
+        // Codex P2 (PR #41): the plain-text twin of the Markdown
+        // ordering rule — trailing content after the children.
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Before</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = false),
+                            ),
+                            contentAfterHtml = "<p>After</p>",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n      After"))
+    }
 }
