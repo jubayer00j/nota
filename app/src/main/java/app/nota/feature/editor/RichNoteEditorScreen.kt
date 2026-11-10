@@ -100,6 +100,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -239,9 +240,6 @@ private fun <T> List<T>.moved(from: Int, to: Int): List<T> =
  */
 private val BLOCK_SWAP_OVERSHOOT = 24.dp
 
-private fun escapeCellText(text: String): String = text
-    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
 /**
  * The Phase 1c rich editor — route `note/{noteId}` (unchanged from 1b).
  *
@@ -318,6 +316,12 @@ fun RichNoteEditorScreen(
     // state lives here, keyed by block position, so slot and ghost
     // share the very same field state and a remount is a non-event.
     val cellTextStates = remember { mutableMapOf<String, MutableState<String>>() }
+    // Phase 6 (rich table cells): the per-cell RICH states — the
+    // cellTextStates hoist one level up, because a table cell is a
+    // small rich document now, not a plain-text field. Same keys
+    // ("<blockId>-<row>-<col>"), same eviction discipline:
+    // structural table ops evict BOTH maps together.
+    val cellRichStates = remember { mutableMapOf<String, RichTextState>() }
     var activeSegmentId by remember { mutableStateOf<String?>(null) }
     var focusMode by remember { mutableStateOf(false) }
     var docStats by remember { mutableStateOf("") }
@@ -446,6 +450,14 @@ fun RichNoteEditorScreen(
     // item field gains focus (the TableBlock selected-cell pattern),
     // cleared when a text/quote editor takes focus instead.
     var focusedTaskItem by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    // Phase 6 (rich table cells): the table cell currently holding
+    // focus, as (segment id, row, column). While a cell is focused
+    // the formatting toolbar routes to the CELL's rich state (see
+    // toolbarState below) and its block-style row hides — a cell
+    // holds inline formatting and paragraphs, never headings or
+    // note-level lists. Set when a cell field gains focus, cleared
+    // when a text/quote editor or a task item takes focus instead.
+    var focusedTableCell by remember { mutableStateOf<Triple<String, Int, Int>?>(null) }
 
     val current = note
     // Phase 2b: a locked note initialises from the SESSION's decrypted
@@ -1043,6 +1055,15 @@ fun RichNoteEditorScreen(
     }
 
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
+
+    // Phase 6 (rich table cells): the state the formatting toolbar
+    // (and the link dialog) acts on — the focused CELL's rich state
+    // while a cell holds focus, otherwise the active text segment's
+    // state, exactly as before.
+    val focusedCellState: RichTextState? = focusedTableCell?.let { (blockId, r, c) ->
+        cellRichStates["$blockId-$r-$c"]
+    }
+    val toolbarState: RichTextState? = focusedCellState ?: activeState
 
     // Dictation seam (Phase 5): the active editor's insert-at-caret.
     LaunchedEffect(activeSegmentId) {
@@ -1780,15 +1801,26 @@ fun RichNoteEditorScreen(
                     .getOrPut(ui.id) { FocusRequester() },
                 stateFor = { richStateFor(ui) },
                 cellTextStates = cellTextStates,
+                cellRichStates = cellRichStates,
                 onFocus = {
                     activeSegmentId = ui.id
                     // Phase 6 (Editor Refinement #2): a text/quote
                     // editor taking focus ends any task-item focus —
                     // the toolbar's conversion action follows the
-                    // caret, and the caret just moved.
+                    // caret, and the caret just moved. It also ends
+                    // any table-cell focus (rich table cells): the
+                    // toolbar routes back to this editor's state.
+                    focusedTaskItem = null
+                    focusedTableCell = null
+                },
+                onTaskItemFocus = { index ->
+                    focusedTaskItem = ui.id to index
+                    focusedTableCell = null
+                },
+                onTableCellFocus = { r, c ->
+                    focusedTableCell = Triple(ui.id, r, c)
                     focusedTaskItem = null
                 },
-                onTaskItemFocus = { index -> focusedTaskItem = ui.id to index },
                 onChange = { updateBlock(ui.id, it) },
                 onRemove = { removeBlock(ui.id) },
                 attachments = attachments,
@@ -2253,6 +2285,7 @@ fun RichNoteEditorScreen(
                 val focusedTask = focusedTaskItem
                 val activeUi = segments.firstOrNull { it.id == activeSegmentId }
                 val taskActionLabel = when {
+                    focusedCellState != null -> null
                     focusedTask != null && segments.any {
                         it.id == focusedTask.first && it.segment is TaskListSegment
                     } -> "Make text"
@@ -2281,7 +2314,8 @@ fun RichNoteEditorScreen(
                     else -> null
                 }
                 EditorToolbar(
-                    state = activeState,
+                    state = toolbarState,
+                    blockStylesVisible = focusedCellState == null,
                     taskActionLabel = taskActionLabel,
                     onTaskAction = {
                         if (taskActionLabel == "Make text") {
@@ -2291,7 +2325,7 @@ fun RichNoteEditorScreen(
                         }
                     },
                     modifier = Modifier.alpha(chromeAlpha),
-                    micVisible = speechAvailable,
+                    micVisible = speechAvailable && focusedCellState == null,
                     micListening = speechSnapshot.state ==
                         app.nota.feature.voice.SpeechSessionState.LISTENING,
                     micBusy = speechSnapshot.state ==
@@ -2308,7 +2342,7 @@ fun RichNoteEditorScreen(
                         // in an existing link, and knows it is an
                         // edit (Remove link is offered) rather than a
                         // fresh insert.
-                        val existing = activeState?.toolbarFormatState()?.linkUrl
+                        val existing = toolbarState?.toolbarFormatState()?.linkUrl
                         linkUrl = existing ?: ""
                         linkDialogExisting = existing != null
                         showLinkDialog = true
@@ -2389,7 +2423,7 @@ fun RichNoteEditorScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val st = activeState
+                    val st = toolbarState
                     val url = linkUrl.trim()
                     if (st != null && url.isNotEmpty()) {
                         when {
@@ -2406,7 +2440,7 @@ fun RichNoteEditorScreen(
                 Row {
                     if (linkDialogExisting) {
                         TextButton(onClick = {
-                            activeState?.removeLink()
+                            toolbarState?.removeLink()
                             linkUrl = ""
                             showLinkDialog = false
                         }) { Text("Remove link") }
@@ -2736,6 +2770,11 @@ private fun SegmentEditor(
     // text states, hoisted above this editor so the list slot and
     // the drag ghost share them (see the screen's declaration).
     cellTextStates: MutableMap<String, MutableState<String>>,
+    // Phase 6 (rich table cells): the screen-owned per-cell rich
+    // states (the same hoist) + the cell-focus hook the toolbar
+    // routing keys on.
+    cellRichStates: MutableMap<String, RichTextState>,
+    onTableCellFocus: (Int, Int) -> Unit = { _, _ -> },
     onFocus: () -> Unit,
     // Phase 6 (Editor Refinement #2): a task item field gained
     // focus — the screen records it as the "Make text" target.
@@ -2847,7 +2886,10 @@ private fun SegmentEditor(
                 }
                 Box(Modifier.weight(1f)) {
                     when (segment) {
-                        is TableSegment -> TableBlock(ui.id, segment, cellTextStates, onChange, onRemove)
+                        is TableSegment -> TableBlock(
+                            ui.id, segment, cellTextStates, cellRichStates,
+                            onChange, onRemove, onTableCellFocus,
+                        )
                         is TaskListSegment -> TaskListBlock(
                             ui.id, segment, cellTextStates, onChange, onRemove, onTaskItemFocus,
                         )
@@ -3088,14 +3130,26 @@ private fun SegmentReadView(
                     segment.rows.forEachIndexed { r, row ->
                         Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
                             row.forEach { cell ->
-                                Text(
-                                    PlainTextCodec.htmlToText(cell),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = if (segment.headerRow && r == 0) {
-                                        FontWeight.Bold
-                                    } else {
-                                        FontWeight.Normal
-                                    },
+                                // Phase 6 (rich table cells): the
+                                // cell renders RICH — the task-item
+                                // pattern. Its stored HTML is a small
+                                // rich document (bold, links, colours,
+                                // paragraphs), not plain text to
+                                // flatten. Header-row cells keep their
+                                // bold base style.
+                                val cellState = remember(cell) {
+                                    RichTextState().apply { setHtml(cell) }
+                                }
+                                BasicRichText(
+                                    state = cellState,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = if (segment.headerRow && r == 0) {
+                                            FontWeight.Bold
+                                        } else {
+                                            FontWeight.Normal
+                                        },
+                                    ),
                                     modifier = Modifier.weight(1f),
                                 )
                             }
@@ -3358,6 +3412,74 @@ private fun evictCellTextStates(
     val prefix = "$blockId-"
     cellTextStates.keys.removeAll { it.startsWith(prefix) }
 }
+
+/** The rich-state twin of [evictCellTextStates] (rich table cells). */
+private fun evictCellRichStates(
+    cellRichStates: MutableMap<String, RichTextState>,
+    blockId: String,
+) {
+    val prefix = "$blockId-"
+    cellRichStates.keys.removeAll { it.startsWith(prefix) }
+}
+
+/**
+ * Phase 6 (rich table cells): one table cell's rich editor. The
+ * cell's [RichTextState] is hoisted into the screen-owned
+ * [cellRichStates] map (the EditableCellText hoist, one level up):
+ * seeded ONCE from the cell's stored HTML, shared by the list slot
+ * and the drag ghost, and evicted with the block's other cell
+ * states on any structural change.
+ *
+ * Write-back is change-only: a snapshot flow over the state's
+ * annotated string skips the seed emission and reports only real
+ * edits (typing, toolbar formatting, link changes), so a cell the
+ * user never touched keeps its stored HTML byte-for-byte — the
+ * rich library's setHtml -> toHtml round-trip is NOT byte-stable
+ * for arbitrary imported markup, and it must never be allowed to
+ * rewrite cells by itself. Enter inside a cell makes a paragraph
+ * break INSIDE the cell (the 1.x cell shape); the cell editor is
+ * not part of the note's segment list, so it can never split the
+ * table block or the note.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun RichCellText(
+    key: String,
+    initialHtml: String,
+    header: Boolean,
+    cellRichStates: MutableMap<String, RichTextState>,
+    modifier: Modifier = Modifier,
+    onFocus: () -> Unit = {},
+    onEdit: (String) -> Unit,
+) {
+    val state = cellRichStates.getOrPut(key) {
+        RichTextState().apply { setHtml(initialHtml) }
+    }
+    LaunchedEffect(state) {
+        var last = state.annotatedString
+        snapshotFlow { state.annotatedString }.collect { current ->
+            if (current != last) {
+                last = current
+                onEdit(state.toHtml())
+            }
+        }
+    }
+    BasicRichTextEditor(
+        state = state,
+        textStyle = MaterialTheme.typography.bodySmall.copy(
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
+        ),
+        modifier = modifier
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outline,
+                RoundedCornerShape(4.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 6.dp)
+            .onFocusChanged { if (it.isFocused) onFocus() },
+    )
+}
 @Composable
 private fun EditableCellText(
     key: String,
@@ -3403,8 +3525,13 @@ private fun TableBlock(
     blockId: String,
     table: TableSegment,
     cellTextStates: MutableMap<String, MutableState<String>>,
+    cellRichStates: MutableMap<String, RichTextState>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
+    // Phase 6 (rich table cells): a cell field gained focus —
+    // reported so the screen can route the formatting toolbar to
+    // that cell's rich state.
+    onCellFocus: (Int, Int) -> Unit = { _, _ -> },
 ) {
     // Phase 6 (Editor Refinement #1, A3): the cell the at-cell
     // row/column operations act on — set when a cell field gains
@@ -3412,6 +3539,12 @@ private fun TableBlock(
     // evicts the block's field states anyway, and a stale
     // coordinate would aim the next operation at shifted content).
     var selectedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // Structural ops evict BOTH hoisted cell maps together — the
+    // positional keys would otherwise name shifted cells.
+    fun evictCells() {
+        evictCellTextStates(cellTextStates, blockId)
+        evictCellRichStates(cellRichStates, blockId)
+    }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
@@ -3421,23 +3554,28 @@ private fun TableBlock(
             table.rows.forEachIndexed { r, row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                     row.forEachIndexed { c, cell ->
-                        EditableCellText(
-                            // Field state is hoisted (see
-                            // EditableCellText): projecting through
-                            // the codec on every frame — or reseeding
-                            // on a drag remount — would eat spaces.
-                            // The seed is the lossless projection.
+                        RichCellText(
+                            // Rich state is hoisted (see
+                            // RichCellText): seeded once from the
+                            // cell's stored HTML and shared between
+                            // the list slot and the drag ghost; only
+                            // an actual edit writes back, so an
+                            // untouched cell keeps its stored bytes
+                            // exactly.
                             key = "$blockId-$r-$c",
-                            initial = PlainTextCodec.htmlToCellText(cell),
-                            bodyStyle = false,
-                            cellTextStates = cellTextStates,
+                            initialHtml = cell,
+                            header = table.headerRow && r == 0,
+                            cellRichStates = cellRichStates,
                             modifier = Modifier.weight(1f),
-                            onFocus = { selectedCell = r to c },
-                            onEdit = { newText ->
+                            onFocus = {
+                                selectedCell = r to c
+                                onCellFocus(r, c)
+                            },
+                            onEdit = { newHtml ->
                                 val newRows = table.rows.mapIndexed { rr, rowCells ->
                                     if (rr == r) {
                                         rowCells.mapIndexed { cc, old ->
-                                            if (cc == c) escapeCellText(newText) else old
+                                            if (cc == c) newHtml else old
                                         }
                                     } else {
                                         rowCells
@@ -3466,22 +3604,22 @@ private fun TableBlock(
                     horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs),
                 ) {
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(TableOps.insertRow(table, sr))
                         selectedCell = null
                     }) { Text("Row above") }
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(TableOps.insertRow(table, sr + 1))
                         selectedCell = null
                     }) { Text("Row below") }
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(TableOps.insertColumn(table, TableOps.visualColumnOf(table, sr, sc)))
                         selectedCell = null
                     }) { Text("Col left") }
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(
                             TableOps.insertColumn(
                                 table,
@@ -3493,14 +3631,14 @@ private fun TableBlock(
                     }) { Text("Col right") }
                     if (table.rows.size > 1) {
                         TextButton(onClick = {
-                            evictCellTextStates(cellTextStates, blockId)
+                            evictCells()
                             onChange(TableOps.deleteRow(table, sr))
                             selectedCell = null
                         }) { Text("Delete row") }
                     }
                     if (TableOps.visualColumns(table) > 1) {
                         TextButton(onClick = {
-                            evictCellTextStates(cellTextStates, blockId)
+                            evictCells()
                             onChange(
                                 TableOps.deleteColumn(
                                     table,
@@ -3514,7 +3652,7 @@ private fun TableBlock(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
-                    evictCellTextStates(cellTextStates, blockId)
+                    evictCells()
                     selectedCell = null
                     val cols = table.rows.firstOrNull()?.size ?: 1
                     val newSpans = if (table.cellSpans.isEmpty()) {
@@ -3527,7 +3665,7 @@ private fun TableBlock(
                     )
                 }) { Text("+ Row") }
                 TextButton(onClick = {
-                    evictCellTextStates(cellTextStates, blockId)
+                    evictCells()
                     selectedCell = null
                     onChange(
                         TableSegment(
@@ -3539,7 +3677,7 @@ private fun TableBlock(
                 }) { Text("+ Col") }
                 if (table.rows.size > 1) {
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         selectedCell = null
                         // Through TableOps like "Delete row": a
                         // rowspan crossing the dropped row must
@@ -3549,7 +3687,7 @@ private fun TableBlock(
                 }
                 if (TableOps.visualColumns(table) > 1) {
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         selectedCell = null
                         // Through TableOps like "Delete col": a
                         // trailing MERGED cell must shrink, not be
@@ -4155,6 +4293,11 @@ private fun EditorToolbar(
     onMicClick: () -> Unit = {},
     insertMenuExpanded: Boolean,
     onInsertMenuChange: (Boolean) -> Unit,
+    // Phase 6 (rich table cells): false while a TABLE CELL holds
+    // focus — the block-style row (headings, note-level lists) has
+    // no meaning inside a cell, so it hides; the inline row keeps
+    // acting, on the cell's state.
+    blockStylesVisible: Boolean = true,
     // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
     // conversion action's label ("Make task" / "Make text"), or
     // null when the caret's context offers neither.
@@ -4222,6 +4365,7 @@ private fun EditorToolbar(
         ToolbarButton("code", enabled, selected = format?.code == true) {
             state?.toggleCodeSpan()
         }
+        if (blockStylesVisible) {
         ToolbarButton("H1", enabled, selected = format?.heading == HeadingStyle.H1) {
             state?.setHeadingStyle(HeadingStyle.H1)
         }
@@ -4247,6 +4391,7 @@ private fun EditorToolbar(
             colors = toolbarIconColors(format?.orderedList == true),
         ) {
             Icon(Icons.Filled.FormatListNumbered, contentDescription = "Numbered list")
+        }
         }
         // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
         // conversion — a text button in the toolbar's own idiom,
