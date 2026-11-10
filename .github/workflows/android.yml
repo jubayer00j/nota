@@ -117,6 +117,9 @@ jobs:
   # (Phase 6.1 revival: the partition grows to 118 classes —
   # fast-a +1 list-rows Robolectric suite, B3 +1 semantic-cache
   # Robolectric suite.)
+  # (Phase 6.1 fix round: the partition grows to 119 classes —
+  # fast-a +1 (the semantic cache slot's generation-discipline
+  # suite).)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -170,6 +173,7 @@ jobs:
             --tests "app.nota.data.ai.AiSettingsStoreTest" \
             --tests "app.nota.data.ai.AskNotaTest" \
             --tests "app.nota.data.ai.NoteChunkerTest" \
+            --tests "app.nota.data.ai.SemanticIndexCacheSlotTest" \
             --tests "app.nota.data.ai.SemanticMathTest" \
             --tests "app.nota.data.ai.TagListParserTest" \
             --tests "app.nota.data.chart.ChartDataParserTest" \

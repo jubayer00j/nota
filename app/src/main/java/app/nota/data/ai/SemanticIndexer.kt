@@ -74,24 +74,22 @@ class SemanticIndexer(
     // per debounced search keystroke, per Ask question, per status
     // check. Every write to the store in the app flows through this
     // class (rebuild, reconcile, persist, evict, clear — verified by
-    // grep over SemanticIndexStore call sites), so the cache can be
-    // kept exactly coherent: [storeIndex] is the ONLY way anything
-    // mutates the store from here, and it refreshes the cache with a
-    // snapshot copy in the same step. The file remains the persistence
-    // copy (survives process death); the cache is the read path.
-    private val cacheLock = Any()
-    @Volatile
-    private var cachedIndex: Pair<String, StoredSemanticIndex?>? = null
+    // grep over SemanticIndexStore call sites): [storeIndex] is the
+    // ONLY way anything mutates the store from here, and it refreshes
+    // the cache with a snapshot copy in the same step. The file
+    // remains the persistence copy (survives process death); the
+    // cache is the read path. Coherence across the one unlocked
+    // step — the cold disk read in [loadIndex] — is the slot's
+    // generation discipline (see SemanticIndexCacheSlot): a store
+    // landing mid-load is never overwritten by the stale load.
+    private val cacheSlot = SemanticIndexCacheSlot()
 
     /** The account's index: memory first, disk on a cold cache. */
     private fun loadIndex(accountId: String): StoredSemanticIndex? {
-        synchronized(cacheLock) {
-            val cached = cachedIndex
-            if (cached != null && cached.first == accountId) return cached.second
-        }
+        val lookup = cacheSlot.get(accountId)
+        if (lookup.hit) return lookup.index
         val loaded = store.load(accountId)
-        synchronized(cacheLock) { cachedIndex = accountId to loaded }
-        return loaded
+        return cacheSlot.fill(accountId, loaded, lookup.generation)
     }
 
     /** The single mutation path: write the file (or delete it when
@@ -107,7 +105,7 @@ class SemanticIndexer(
         val snapshot = index?.let {
             StoredSemanticIndex(it.signature, it.dims, LinkedHashMap(it.notes))
         }
-        synchronized(cacheLock) { cachedIndex = accountId to snapshot }
+        cacheSlot.store(accountId, snapshot)
     }
 
     private val _rebuildProgress = MutableStateFlow<SemanticRebuildProgress?>(null)
