@@ -61,7 +61,7 @@ class AutoLinkTest {
         assertEquals("https://example.co.uk", token("example.co.uk")?.href)
         // Unlisted endings are not domains Nota linkifies.
         assertNull(token("file.txt"))
-        assertNull(token("hello.world"))
+        assertNull(token("hello.qqq"))
         assertNull(token("notes.local"))
         // A lone label is never a domain.
         assertNull(token("example"))
