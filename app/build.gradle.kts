@@ -40,8 +40,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.19.0"
+        versionCode = 33
+        versionName = "0.20.0"
     }
 
     buildTypes {
@@ -106,6 +106,7 @@ val notaUiTestClasses = listOf(
     "app.nota.feature.editor.EditorBlockDragUiTest",
     "app.nota.feature.editor.EditorReadModeUiTest",
     "app.nota.feature.chart.ChartEditorUiTest",
+    "app.nota.feature.chart.ChartViewUiTest",
     "app.nota.feature.editor.EditorRefinementUiTest",
     "app.nota.feature.notes.NotesSwipeGhostUiTest",
     "app.nota.feature.settings.BeginnerAiSetupUiTest",
