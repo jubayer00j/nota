@@ -158,6 +158,26 @@ class TaskTreeTest {
     }
 
     @Test
+    fun indent_refusesWhenSubtreeWouldPassTheCap() {
+        // Bao review (PR #41): the cap applies to the item's deepest
+        // descendant, not just the item — a depth-2 parent whose
+        // child already sits at depth 3 cannot sink, while a depth-2
+        // leaf next to it still can.
+        val tree2 = listOf(
+            item("A", children = listOf(
+                item("A1", children = listOf(
+                    item("A1a"),
+                    item("A1b", children = listOf(item("B1"))),
+                    item("A1c"),
+                )),
+            )),
+        )
+        assertFalse(TaskTree.canIndent(tree2, listOf(0, 0, 1)))
+        assertEquals(tree2, TaskTree.indent(tree2, listOf(0, 0, 1)))
+        assertTrue(TaskTree.canIndent(tree2, listOf(0, 0, 2)))
+    }
+
+    @Test
     fun outdent_movesItemAfterItsParent_subtreeTravels() {
         val out = TaskTree.outdent(tree, listOf(0, 0))
         assertEquals(listOf("A", "A2", "A1", "B", "C", "C1"), texts(out))

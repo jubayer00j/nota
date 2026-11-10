@@ -123,6 +123,26 @@ class NoteDocumentNestedTest {
     }
 
     @Test
+    fun removingLastChild_keepsTrailingContent() {
+        // Codex P1 (PR #41): once the only child is removed, the
+        // item is childless but still carries its trailing content
+        // in contentAfterHtml — serialisation must not drop it.
+        val mid = "<ul data-type=\"taskList\">" +
+            "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Before</p>" +
+            "<ul data-type=\"taskList\">" +
+            "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Kid</p></div></li>" +
+            "</ul><p>After</p></div></li></ul>"
+        val list = NoteDocument.parse(mid).single() as TaskListSegment
+        val pruned = TaskTree.removeAt(list.items, listOf(0, 0))
+        assertEquals(
+            "<ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                "<div><p>Before</p><p>After</p></div></li></ul>",
+            NoteDocument.serialize(listOf(TaskListSegment(pruned))),
+        )
+    }
+
+    @Test
     fun bareDialectNestedList_splitsAndCanonicalises() {
         val bare = "<ul>" +
             "<li data-type=\"taskItem\" data-checked=\"false\"><p>Parent</p>" +

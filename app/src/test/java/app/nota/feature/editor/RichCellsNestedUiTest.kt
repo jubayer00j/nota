@@ -6,12 +6,15 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodes
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.text.font.FontWeight
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -331,6 +334,48 @@ class RichCellsNestedUiTest {
             "an untouched plain cell keeps its stored bytes: $html",
             html.contains("<td><p>Plain cell</p></td>"),
         )
+    }
+
+    /** Replaces the text of the editable field currently showing
+     *  [current] — the EditorBlockDragUiTest setFieldText pattern. */
+    private fun replaceFieldText(current: String, replacement: String) {
+        val nodes = composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = nodes.indexOfFirst {
+            it.config.getOrNull(SemanticsProperties.EditableText)?.text == current
+        }
+        if (index < 0) fail("no editable field showing '$current'")
+        composeRule.onAllNodes(hasSetTextAction())[index]
+            .performTextReplacement(replacement)
+    }
+
+    @Test
+    fun editMode_twoCellsEditedInSequence_bothPersist() {
+        // Codex P1 (PR #41): RichCellText's change collector must
+        // call the LATEST onEdit — with the first-composed callback,
+        // editing a second cell wrote from the stale table snapshot
+        // and silently reverted the first cell's edit.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Two cells",
+                contentHtml = "<table><tbody><tr><td><p>Cell one</p></td>" +
+                    "<td><p>Cell two</p></td></tr></tbody></table>",
+            )
+        }
+        composeEditor(note.id)
+        enterEditMode()
+
+        replaceFieldText("Cell one", "First edited")
+        replaceFieldText("Cell two", "Second edited")
+
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        val html = storedHtml(note.id)
+        assertTrue("first cell edit persists: $html", html.contains("First edited"))
+        assertTrue("second cell edit persists: $html", html.contains("Second edited"))
     }
 
     // ------------------------------------------------------ Part B

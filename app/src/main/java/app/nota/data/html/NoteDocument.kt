@@ -898,10 +898,28 @@ object NoteDocument {
     private fun serializeTaskItemContent(item: TaskItem): String {
         val before = item.contentHtml.trim()
         if (item.children.isEmpty()) {
-            return if (before.startsWith("<p", ignoreCase = true)) {
-                before
+            val after = item.contentAfterHtml.trim()
+            if (after.isEmpty()) {
+                return if (before.startsWith("<p", ignoreCase = true)) {
+                    before
+                } else {
+                    "<p>$before</p>"
+                }
+            }
+            // Codex P1 (PR #41): an item that lost its last child
+            // (removeAt, or a child outdenting away) still carries
+            // trailing content the parser split into
+            // contentAfterHtml — the childless branch must not drop
+            // it. Paragraph-shaped parts concatenate verbatim (the
+            // canonical shape); bare runs keep their separation as
+            // two paragraphs rather than merging into one word.
+            return if (before.startsWith("<p", ignoreCase = true) ||
+                (before.isEmpty() && after.startsWith("<p", ignoreCase = true))
+            ) {
+                before + after
             } else {
-                "<p>$before</p>"
+                listOf(before, after).filter { it.isNotEmpty() }
+                    .joinToString("") { "<p>$it</p>" }
             }
         }
         val nested = serializeTaskList(TaskListSegment(item.children))

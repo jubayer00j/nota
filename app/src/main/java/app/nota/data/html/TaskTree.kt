@@ -140,9 +140,18 @@ object TaskTree {
     }
 
     /** True when [indent] would do something for the item at [path]. */
-    fun canIndent(items: List<TaskItem>, path: List<Int>): Boolean =
-        path.isNotEmpty() && path.last() > 0 &&
-            path.size <= MAX_DEPTH_INDEX && itemAt(items, path) != null
+    fun canIndent(items: List<TaskItem>, path: List<Int>): Boolean {
+        if (path.isEmpty() || path.last() <= 0) return false
+        val item = itemAt(items, path) ?: return false
+        // The item's deepest descendant lands at (path.size - 1) +
+        // subtreeHeight after the move (the item itself drops one
+        // level); the whole subtree must stay within the cap.
+        return path.size - 1 + subtreeHeight(item) <= MAX_DEPTH_INDEX
+    }
+
+    /** Levels in [item]'s subtree including itself (1 = no children). */
+    private fun subtreeHeight(item: TaskItem): Int =
+        1 + (item.children.maxOfOrNull { subtreeHeight(it) } ?: 0)
 
     /**
      * Nests the item at [path] as the LAST child of its previous

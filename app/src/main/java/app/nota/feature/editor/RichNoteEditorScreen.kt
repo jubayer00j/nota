@@ -3503,12 +3503,18 @@ private fun RichCellText(
     val state = cellRichStates.getOrPut(key) {
         RichTextState().apply { setHtml(initialHtml) }
     }
+    // Codex P1 (PR #41): the collector must call the LATEST onEdit.
+    // TableBlock's lambda maps over its captured table snapshot, so
+    // the first-composed lambda would write a later cell edit from
+    // stale rows and silently revert an earlier cell's edit (the
+    // same hazard ImageBlock's rememberUpdatedState guards).
+    val latestOnEdit by rememberUpdatedState(onEdit)
     LaunchedEffect(state) {
         var last = state.annotatedString
         snapshotFlow { state.annotatedString }.collect { current ->
             if (current != last) {
                 last = current
-                onEdit(state.toHtml())
+                latestOnEdit(state.toHtml())
             }
         }
     }

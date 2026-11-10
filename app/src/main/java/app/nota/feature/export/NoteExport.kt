@@ -1180,9 +1180,15 @@ object NoteExport {
     private fun htmlTaskList(items: List<TaskItem>, resolve: AttachmentResolver): String {
         val inner = items.joinToString("") { item ->
             val checkedAttr = if (item.checked) " checked" else ""
-            val own = serializeFragment(
+            val before = serializeFragment(
                 transformFragment(
-                    parseFragment(item.contentHtml + item.contentAfterHtml),
+                    parseFragment(item.contentHtml),
+                    resolve,
+                ),
+            )
+            val after = serializeFragment(
+                transformFragment(
+                    parseFragment(item.contentAfterHtml),
                     resolve,
                 ),
             )
@@ -1191,9 +1197,13 @@ object NoteExport {
             } else {
                 htmlTaskList(item.children, resolve)
             }
+            // Codex P2 (PR #41): trailing own content belongs AFTER
+            // the nested list (the stored order is before -> child
+            // -> after); folding it into `own` exported it before
+            // the children.
             "<li data-checked=\"${item.checked}\">" +
                 "<label><input type=\"checkbox\"$checkedAttr disabled></label>" +
-                "<div>$own$nested</div></li>"
+                "<div>$before$nested$after</div></li>"
         }
         return "<ul data-type=\"taskList\">$inner</ul>"
     }
