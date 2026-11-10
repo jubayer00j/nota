@@ -83,6 +83,10 @@ jobs:
   # the chart round-trip cases extend NoteDocumentTest and the
   # read-mode chart cases extend EditorReadModeUiTest, so the B
   # and UI shards gain no new class.)
+  # (Charts PR-B: the partition grows to 102 classes — fast-a +1
+  # pure-JVM chart serialiser class; the chart editor dialog suite
+  # joins the UI shard's class list in app/build.gradle.kts, and
+  # the full-screen chart edit cases extend EditorReadModeUiTest.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -128,7 +132,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 59 of 101 non-UI classes)
+      - name: Run fast unit tests (shard A, 60 of 102 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -140,6 +144,7 @@ jobs:
             --tests "app.nota.data.ai.TagListParserTest" \
             --tests "app.nota.data.chart.ChartDataParserTest" \
             --tests "app.nota.data.chart.ChartColorsTest" \
+            --tests "app.nota.data.chart.ChartSerializerTest" \
             --tests "app.nota.feature.settings.AiSettingsFormTest" \
             --tests "app.nota.feature.settings.AiSetupCopyTest" \
             --tests "app.nota.feature.ask.AskThreadTest" \

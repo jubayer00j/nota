@@ -9,7 +9,9 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.room.Room
@@ -28,6 +30,11 @@ import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.BiometricStep
 import app.nota.data.security.StepResult
 import app.nota.data.templates.TemplateRepository
+import app.nota.feature.chart.CHART_BLOCK_EDIT_TAG
+import app.nota.feature.chart.CHART_CANCEL_TAG
+import app.nota.feature.chart.CHART_SAVE_TAG
+import app.nota.feature.chart.CHART_TAB_CHART_TAG
+import app.nota.feature.chart.CHART_TITLE_FIELD_TAG
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -555,5 +562,120 @@ class EditorReadModeUiTest {
                 composeRule.onNodeWithText("Extremes").assertIsDisplayed()
             }
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Charts PR-B: tap-to-edit in edit mode
+
+    private fun editableChartDiv(): String =
+        "<div data-type=\"noma-chart\" data-version=\"2\" " +
+            "data-chart-type=\"bar\" data-title=\"Quarterly Sales\" data-subtitle=\"\" " +
+            "data-categories='[\"Q1\",\"Q2\",\"Q3\"]' " +
+            "data-series='[{\"name\":\"Revenue\",\"values\":[10,25,15]}]'></div>"
+
+    private fun storedHtml(noteId: String): String =
+        runBlocking { repository.getById(noteId)?.contentHtml ?: "" }
+
+    @Test
+    fun chartInEditMode_tapOpensEditor_saveReplacesStoredBytes() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Editable Charts",
+                contentHtml = "<p>Intro</p>${editableChartDiv()}",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+
+        awaitTrue("chart edit target in edit mode") {
+            exists("chart block") {
+                composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).performClick()
+        awaitTrue("chart editor dialog open") {
+            exists("chart tab") {
+                composeRule.onNodeWithTag(CHART_TAB_CHART_TAG).assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithTag(CHART_TAB_CHART_TAG).performClick()
+        composeRule.onNodeWithTag(CHART_TITLE_FIELD_TAG)
+            .performTextReplacement("Annual Sales")
+        composeRule.onNodeWithTag(CHART_SAVE_TAG).performClick()
+
+        // ✓ is the persist point (the block-deletion suite's rule).
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("stored chart bytes replaced by the edit") {
+            val stored = storedHtml(note.id)
+            stored.contains("data-title=\"Annual Sales\"") &&
+                !stored.contains("Quarterly Sales")
+        }
+        // And the replacement is a valid v2 chart with the data intact.
+        val stored = storedHtml(note.id)
+        val chartHtml = stored.substring(stored.indexOf("<div data-type=\"noma-chart\""))
+        val parsed = app.nota.data.chart.ChartParser.parse(chartHtml)!!
+        org.junit.Assert.assertEquals("Annual Sales", parsed.title)
+        org.junit.Assert.assertEquals(listOf(10.0, 25.0, 15.0), parsed.series[0].values)
+    }
+
+    @Test
+    fun chartInEditMode_cancelLeavesStoredBytesUntouched() {
+        val chartDiv = editableChartDiv()
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Untouched Charts",
+                contentHtml = "<p>Intro</p>$chartDiv",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+
+        awaitTrue("chart edit target in edit mode") {
+            exists("chart block") {
+                composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).performClick()
+        awaitTrue("chart editor dialog open") {
+            exists("chart tab") {
+                composeRule.onNodeWithTag(CHART_TAB_CHART_TAG).assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithTag(CHART_TAB_CHART_TAG).performClick()
+        composeRule.onNodeWithTag(CHART_TITLE_FIELD_TAG)
+            .performTextReplacement("Changed But Cancelled")
+        composeRule.onNodeWithTag(CHART_CANCEL_TAG).performClick()
+
+        // Persist whatever the document holds now; the chart's
+        // stored bytes must still be the originals, verbatim.
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back in read mode") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        val stored = storedHtml(note.id)
+        org.junit.Assert.assertTrue(stored.contains(chartDiv))
+        org.junit.Assert.assertFalse(stored.contains("Changed But Cancelled"))
+    }
+
+    @Test
+    fun unparseableChartBlock_hasNoEditAffordance() {
+        // A div NoteDocument classifies as a chart block but the
+        // chart parser cannot recognise: never editable, never
+        // re-serialised — the honest placeholder only.
+        val stray = "<div data-nota-block=\"chart\" data-payload=\"x\"></div>"
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Stray Chart",
+                contentHtml = "<p>Body</p>$stray",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+
+        awaitTrue("preserved placeholder in edit mode") {
+            exists("placeholder") {
+                composeRule.onNodeWithText("Chart — preserved as-is.").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).assertDoesNotExist()
     }
 }

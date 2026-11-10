@@ -1,5 +1,6 @@
 package app.nota.feature.export
 
+import app.nota.data.chart.ChartParser
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.DividerSegment
@@ -265,14 +266,41 @@ object NoteExport {
         "composed" to "Composed",
     )
 
-    /** "[Bar chart]" for a known chart type, "[Chart]" otherwise (1.x). */
-    fun chartPlaceholder(segment: ChartSegment): String {
+    /**
+     * "[Bar chart]" for a known chart type, "[Chart]" otherwise
+     * (1.x). Charts PR-B: when the segment PARSES and carries a
+     * title, the title joins the placeholder — "[Bar chart:
+     * Quarterly Sales]" — so an exported note still says what the
+     * chart was about. The parsed title is the normalised one (a
+     * blank stored title normalises to "Chart", exactly what the
+     * app displays); an unparseable segment keeps the plain
+     * placeholder, as do the existing shape tests' fixtures.
+     *
+     * The title is user/imported data, so each rendered path
+     * passes its own escaper for it ([escapeTitle]): the HTML
+     * path passes escapeHtmlText (a markup-bearing title lands
+     * as text, never live HTML), the Markdown path passes
+     * escapeMdText (the same treatment as every other Markdown
+     * text: "<" becomes "\<" and "]" becomes "\]", so the title
+     * can neither inject raw HTML nor re-parse as a link — the
+     * FileSegment name discipline). Plain text passes nothing:
+     * a .txt has no markup to escape from. The placeholder's own
+     * characters are inert in both formats, so escaping the
+     * title alone is the whole job.
+     */
+    fun chartPlaceholder(
+        segment: ChartSegment,
+        escapeTitle: (String) -> String = { it },
+    ): String {
         val fromAttr = Regex("""data-chart-type\s*=\s*"([^"]+)"""")
             .find(segment.rawHtml)?.groupValues?.get(1)
         val fromPayload = Regex(""""type"\s*:\s*"([A-Za-z]+)"""")
             .find(segment.payload)?.groupValues?.get(1)
         val label = CHART_TYPE_LABELS[(fromAttr ?: fromPayload)?.lowercase()]
-        return if (label != null) "[$label chart]" else "[Chart]"
+        val base = if (label != null) "[$label chart]" else "[Chart]"
+        val title = ChartParser.parse(segment.rawHtml)?.title
+            ?.takeIf { it.isNotBlank() } ?: return base
+        return base.dropLast(1) + ": " + escapeTitle(title) + "]"
     }
 
     // ------------------------------------------------------------ Markdown
@@ -321,7 +349,11 @@ object NoteExport {
             // as a link and rewrite the placeholder.
             is FileSegment -> listOf("[File: ${escapeMdText(segment.fileName)}]")
             DividerSegment -> listOf("---")
-            is ChartSegment -> listOf(chartPlaceholder(segment))
+            // The title is escaped inside chartPlaceholder with
+            // escapeMdText (see its doc): neither raw HTML nor a
+            // "](…)" link survives; the plain-text path keeps the
+            // raw readable form.
+            is ChartSegment -> listOf(chartPlaceholder(segment, ::escapeMdText))
             is OpaqueSegment -> {
                 val nodes = parseFragment(segment.rawHtml)
                 val parts = opaqueParts(nodes)
@@ -1105,7 +1137,13 @@ object NoteExport {
             is FileSegment -> "<p>[File: ${escapeHtmlText(segment.fileName)}]</p>"
             DividerSegment -> "<hr>"
             is ChartSegment ->
-                "<p class=\"noma-chart-placeholder\">${chartPlaceholder(segment)}</p>"
+                // Charts PR-B + Codex P2: the placeholder carries
+                // the chart's TITLE (user/imported data); it is
+                // escaped inside chartPlaceholder with
+                // escapeHtmlText, like every other text branch —
+                // a title holding markup lands as text, never as
+                // live HTML.
+                "<p class=\"noma-chart-placeholder\">${chartPlaceholder(segment, ::escapeHtmlText)}</p>"
             is OpaqueSegment -> resolveOpaqueImages(sanitizeOpaqueHtml(segment.rawHtml), resolve)
         }
 

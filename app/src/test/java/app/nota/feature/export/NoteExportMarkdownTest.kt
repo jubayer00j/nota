@@ -213,6 +213,39 @@ class NoteExportMarkdownTest {
     }
 
     @Test
+    fun chartTitleIsEscapedInMarkdownExport() {
+        // Charts PR-B (Codex P2s): the Markdown placeholder
+        // carries the chart title through escapeMdText — the same
+        // treatment as every other Markdown text in this engine.
+        // A title holding raw HTML gets "\<" (inert text to a
+        // renderer that allows raw HTML, displayed as "<"), and a
+        // title holding "](…)" gets "\]", so it cannot re-parse
+        // as a link and rewrite the placeholder.
+        val chart = app.nota.data.html.ChartSegment(
+            payload = "",
+            rawHtml = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+                "data-chart-type=\"bar\" " +
+                "data-title=\"&lt;img src=x onerror=alert(1)&gt;\" data-subtitle=\"\" " +
+                "data-categories='[\"Q1\"]' " +
+                "data-series='[{\"name\":\"S\",\"values\":[1]}]'></div>",
+        )
+        val out = NoteExport.noteToMarkdown("T", listOf(chart))
+        assertTrue(out.contains("[Bar chart: \\<img src=x onerror=alert(1)>]"))
+        assertFalse(out.contains("[Bar chart: <img"))
+
+        val linky = app.nota.data.html.ChartSegment(
+            payload = "",
+            rawHtml = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+                "data-chart-type=\"bar\" " +
+                "data-title=\"](https://example.com)\" data-subtitle=\"\" " +
+                "data-categories='[\"Q1\"]' " +
+                "data-series='[{\"name\":\"S\",\"values\":[1]}]'></div>",
+        )
+        val out2 = NoteExport.noteToMarkdown("T", listOf(linky))
+        assertTrue(out2.contains("[Bar chart: \\](https://example.com)]"))
+    }
+
+    @Test
     fun standaloneImages() {
         val out = md()
         assertTrue(out.contains("![Cat]($EXPORT_DATA_URL)"))

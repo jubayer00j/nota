@@ -138,7 +138,9 @@ import app.nota.data.ai.AiService
 import app.nota.data.ai.AiSummaryHtml
 import app.nota.data.ai.AiSummaryOutcome
 import app.nota.data.ai.AiTagOutcome
+import app.nota.data.chart.ChartData
 import app.nota.data.chart.ChartParser
+import app.nota.data.chart.ChartSerializer
 import app.nota.data.attachments.PendingInsertKind
 import app.nota.data.attachments.PendingInsertMode
 import app.nota.data.attachments.PendingInsertRecord
@@ -146,6 +148,8 @@ import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.feature.capture.NotePinShortcut
+import app.nota.feature.chart.CHART_BLOCK_EDIT_TAG
+import app.nota.feature.chart.ChartEditorDialog
 import app.nota.feature.chart.ChartView
 import app.nota.feature.export.ExportFormat
 import app.nota.feature.export.NoteExport
@@ -329,6 +333,9 @@ fun RichNoteEditorScreen(
     // and image-from-URL (A6) with its inline-error flag.
     var linkDialogExisting by remember { mutableStateOf(false) }
     var showTableDialog by remember { mutableStateOf(false) }
+    // Charts PR-B: the insert-chart dialog (the chart editor,
+    // seeded with the default chart; edit opens from the block).
+    var showChartInsertDialog by remember { mutableStateOf(false) }
     var showImageUrlDialog by remember { mutableStateOf(false) }
     var imageUrl by remember { mutableStateOf("") }
     var imageUrlError by remember { mutableStateOf(false) }
@@ -2307,6 +2314,7 @@ fun RichNoteEditorScreen(
                         showLinkDialog = true
                     },
                     onInsertTableRequest = { showTableDialog = true },
+                    onInsertChartRequest = { showChartInsertDialog = true },
                     onInsertImageUrl = {
                         imageUrl = ""
                         imageUrlError = false
@@ -2418,6 +2426,29 @@ fun RichNoteEditorScreen(
                 // table lands after the active segment, exactly
                 // where the old fixed 2×2 insert put it.
                 insertBlock(TableOps.newTable(rows, cols, headerRow))
+            },
+        )
+    }
+
+    if (showChartInsertDialog) {
+        // Charts PR-B: insert a chart. The dialog is seeded with
+        // 1.x's default chart; on Insert the model is serialised
+        // (the serialiser normalises, so the stored div is valid
+        // v2 1.x can read) and lands at the caret through the same
+        // insertBlockAtCaret funnel as every other caret insert.
+        // Cancel inserts nothing.
+        ChartEditorDialog(
+            initial = ChartSerializer.defaultChart(),
+            editing = false,
+            onDismiss = { showChartInsertDialog = false },
+            onSave = { data ->
+                showChartInsertDialog = false
+                insertBlockAtCaret(
+                    ChartSegment(
+                        payload = "",
+                        rawHtml = ChartSerializer.serialize(data),
+                    ),
+                )
             },
         )
     }
@@ -2825,23 +2856,61 @@ private fun SegmentEditor(
                         )
                         is FileSegment -> FileBlock(segment, attachments, onRemove)
                         is ChartSegment -> BlockShell(onRemove) {
-                            // Charts PR-A: the chart RENDERS from a
-                            // read-only parse of its preserved
-                            // rawHtml; the stored bytes are never
-                            // touched (editing arrives in PR-B). A
-                            // block with no recognisable chart
-                            // payload keeps the honest static label
-                            // instead of an invented chart.
+                            // Charts PR-A/PR-B: the chart RENDERS
+                            // from a parse of its stored div. In
+                            // edit mode, tapping a PARSEABLE chart
+                            // opens the chart editor seeded from
+                            // that parse; Save replaces the
+                            // segment's stored HTML with the
+                            // serialised edit through onChange — a
+                            // normal block edit (dirty state and
+                            // autosave follow the existing paths) —
+                            // and Cancel leaves the bytes untouched.
+                            // A legacy v1 chart saves back as v2,
+                            // matching 1.x. A block with NO
+                            // recognisable chart payload is never
+                            // editable and never re-serialised: it
+                            // keeps the honest static label.
                             val chartData = remember(segment.rawHtml) {
                                 ChartParser.parse(segment.rawHtml)
                             }
+                            var chartEditing by remember {
+                                mutableStateOf<ChartData?>(null)
+                            }
                             if (chartData != null) {
-                                ChartView(chartData)
+                                Column(
+                                    Modifier.fillMaxWidth()
+                                        .clickable { chartEditing = chartData }
+                                        .testTag(CHART_BLOCK_EDIT_TAG),
+                                ) {
+                                    ChartView(chartData)
+                                    Text(
+                                        "Tap to edit chart",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             } else {
                                 Text(
                                     "Chart — preserved as-is.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            chartEditing?.let { seed ->
+                                ChartEditorDialog(
+                                    initial = seed,
+                                    editing = true,
+                                    onDismiss = { chartEditing = null },
+                                    onSave = { data ->
+                                        chartEditing = null
+                                        onChange(
+                                            ChartSegment(
+                                                payload = "",
+                                                rawHtml = ChartSerializer.serialize(data),
+                                            ),
+                                        )
+                                    },
                                 )
                             }
                         }
@@ -4090,6 +4159,7 @@ private fun EditorToolbar(
     onInsertImageUrl: () -> Unit,
     onInsertFile: () -> Unit,
     onInsertTableRequest: () -> Unit,
+    onInsertChartRequest: () -> Unit = {},
     onInsertBlock: (DocSegment) -> Unit,
 ) {
     val enabled = state != null
@@ -4333,6 +4403,10 @@ private fun EditorToolbar(
                 DropdownMenuItem(
                     text = { Text("Table…") },
                     onClick = { onInsertMenuChange(false); onInsertTableRequest() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Chart…") },
+                    onClick = { onInsertMenuChange(false); onInsertChartRequest() },
                 )
                 DropdownMenuItem(
                     text = { Text("Task list") },
