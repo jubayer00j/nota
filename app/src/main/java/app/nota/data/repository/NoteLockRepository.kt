@@ -6,6 +6,7 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NoteEntity
 import app.nota.data.html.NoteDocument
+import androidx.room.withTransaction
 import app.nota.data.security.BiometricStep
 import app.nota.data.security.LockPerf
 import app.nota.data.security.StepResult
@@ -163,12 +164,20 @@ class NoteLockRepository(
                     lockRecordJson = record.toJson(),
                     updatedAt = System.currentTimeMillis(),
                 )
-                noteRepository.upsert(locked)
-                // Phase 6 (PR #43): the seal has landed — purge the
-                // note's version history in the same exclusive
-                // section (1.x lockNote calls clearVersions). The
-                // rows hold plaintext; none may outlive the lock.
-                provider.current.noteVersionDao().deleteForNote(noteId)
+                // Phase 6 (PR #43): the seal and the version-history
+                // purge commit ATOMICALLY (Codex P1, PR #43). The
+                // version rows hold plaintext; if the process died
+                // between a committed seal and a separate purge, a
+                // locked note would retain plaintext history across
+                // restart, defeating the seal. One transaction: the
+                // note locks and its history vanishes together, or
+                // neither happens. (runExclusive above is only a
+                // mutex — it orders callers, it does not make the
+                // two writes atomic.)
+                provider.current.withTransaction {
+                    noteRepository.upsert(locked)
+                    provider.current.noteVersionDao().deleteForNote(noteId)
+                }
             }
             // The lock has landed: evict the note's semantic
             // vectors NOW (see the class doc). Best-effort by
