@@ -5,11 +5,13 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTouchInput
 import app.nota.data.chart.ChartSerializer
 import app.nota.ui.theme.NotaTheme
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,6 +35,26 @@ class ChartViewUiTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
 
+    /**
+     * The callout's visibility contract, checked geometrically:
+     * Robolectric's window-frame display check reports the
+     * dynamically-composed, offset-positioned chip as "not
+     * displayed" even while it sits on the chart, so the pin is
+     * existence (asserted at the call sites) plus a real,
+     * non-empty bounds overlap with the canvas.
+     */
+    private fun assertCalloutOnChart(
+        callout: SemanticsNodeInteraction,
+        canvas: SemanticsNodeInteraction,
+    ) {
+        val chip = callout.fetchSemanticsNode().boundsInRoot
+        val plot = canvas.fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "callout $chip should sit on the canvas $plot",
+            chip.width > 0f && chip.height > 0f && chip.overlaps(plot),
+        )
+    }
+
     @Test
     fun tapCentreBar_showsFebCallout_tapEmptySpaceDismisses() {
         composeRule.setContent {
@@ -44,8 +66,10 @@ class ChartViewUiTest {
         // The centre of the canvas is Feb's bar (the middle of
         // three bands, and 150 tall on a 0..200 domain).
         canvas.performTouchInput { click(center) }
-        composeRule.onNodeWithTag(CHART_CALLOUT_TAG).assertIsDisplayed()
-        composeRule.onNodeWithText("Feb · Series 1: 150").assertIsDisplayed()
+        val callout = composeRule.onNodeWithTag(CHART_CALLOUT_TAG)
+        callout.assertExists()
+        composeRule.onNodeWithText("Feb · Series 1: 150").assertExists()
+        assertCalloutOnChart(callout, canvas)
 
         // The top-left corner is axis-label margin: a miss clears.
         canvas.performTouchInput { click(Offset(2f, 2f)) }
@@ -60,7 +84,7 @@ class ChartViewUiTest {
         }
         val canvas = composeRule.onNodeWithTag(CHART_CANVAS_TAG)
         canvas.performTouchInput { click(center) }
-        composeRule.onNodeWithText("Feb · Series 1: 150").assertIsDisplayed()
+        composeRule.onNodeWithText("Feb · Series 1: 150").assertExists()
         canvas.performTouchInput { click(center) }
         composeRule.onNodeWithText("Feb · Series 1: 150").assertDoesNotExist()
     }
@@ -85,6 +109,7 @@ class ChartViewUiTest {
         canvas.performTouchInput {
             click(Offset(bounds.width / 2f, bounds.height * 0.3f))
         }
-        composeRule.onNodeWithText("Jan: 50 (50%)").assertIsDisplayed()
+        composeRule.onNodeWithText("Jan: 50 (50%)").assertExists()
+        assertCalloutOnChart(composeRule.onNodeWithTag(CHART_CALLOUT_TAG), canvas)
     }
 }
