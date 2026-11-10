@@ -23,7 +23,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import app.nota.data.preferences.PreferencesRepository
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Phase 5.4: the Android speech engine — a port of Noma 1.x's
@@ -50,10 +55,21 @@ import kotlinx.coroutines.CompletableDeferred
  *    its service is disabled, the engine refuses to bind to the
  *    dead service and reports SERVICE_DISABLED itself.
  */
-class AndroidSpeechEngine(context: Context) : SpeechEngine {
+class AndroidSpeechEngine(
+    context: Context,
+    private val preferencesRepository: PreferencesRepository? = null,
+) : SpeechEngine {
 
     private val appContext: Context = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Phase 6 extras (PR #44): used only to read the dictation-
+     * language preference at START time (see [start]) — reads are
+     * one-shot (`first()`), never a standing collection, so an
+     * engine instance holds no subscription open.
+     */
+    private val languageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var recognizer: SpeechRecognizer? = null
     private var generation = 0
@@ -138,7 +154,22 @@ class AndroidSpeechEngine(context: Context) : SpeechEngine {
     /* ---------------- Recognition ---------------- */
 
     override fun start(languageTag: String, handlers: SpeechEngineHandlers) {
-        mainHandler.post { startOnMain(languageTag, handlers) }
+        // PR #44: the dictation-language preference is read NOW, at
+        // start time — not snapshotted when the engine was built —
+        // so changing it in Settings steers the very next dictation
+        // on both voice surfaces. "system" resolves to null (no
+        // override): the caller-supplied device-default tag stands.
+        val repository = preferencesRepository
+        if (repository == null) {
+            mainHandler.post { startOnMain(languageTag, handlers) }
+        } else {
+            languageScope.launch {
+                val override = runCatching {
+                    SpeechLanguage.resolveTag(repository.speechLanguageNow())
+                }.getOrNull()
+                mainHandler.post { startOnMain(override ?: languageTag, handlers) }
+            }
+        }
     }
 
     private fun startOnMain(languageTag: String, handlers: SpeechEngineHandlers) {

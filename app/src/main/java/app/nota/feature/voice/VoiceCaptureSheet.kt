@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.unit.dp
 import app.nota.data.text.PlainTextCodec
+import org.koin.compose.koinInject
 import app.nota.ui.theme.NotaSpacing
 import java.util.Locale
 import kotlinx.coroutines.delay
@@ -68,9 +69,10 @@ fun VoiceCaptureSheet(
     onDismiss: () -> Unit,
     onSave: (title: String, contentHtml: String) -> Unit,
     onTypeInstead: () -> Unit,
+    preferencesRepository: app.nota.data.preferences.PreferencesRepository = koinInject(),
 ) {
     val context = LocalContext.current
-    val engine = remember { AndroidSpeechEngine(context) }
+    val engine = remember { AndroidSpeechEngine(context, preferencesRepository) }
     rememberSpeechPermissionRequester(engine)
     val scope = rememberCoroutineScope()
     val controller = remember(engine) { SpeechSessionController(engine, scope) }

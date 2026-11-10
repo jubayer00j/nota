@@ -257,6 +257,60 @@ class PreferencesRepository internal constructor(
 
     suspend fun writingLineHeightNow(): Float = writingLineHeight.first()
 
+    // ---- Theme choice (Phase 6 extras, PR #44) ---------------------
+    // Until PR #44 the app always followed the system dark setting;
+    // the user can now pin Light or Dark. Unknown stored values
+    // degrade to "system", the same posture as the swipe-action
+    // mapping below. Device-local, like every preference in this
+    // store: it never enters a backup.
+
+    val themeMode: Flow<String> = dataStore.safeData.map { prefs ->
+        when (prefs[KEY_THEME_MODE]) {
+            THEME_MODE_LIGHT -> THEME_MODE_LIGHT
+            THEME_MODE_DARK -> THEME_MODE_DARK
+            else -> THEME_MODE_SYSTEM
+        }
+    }
+
+    suspend fun setThemeMode(mode: String) {
+        safeEdit {
+            this[KEY_THEME_MODE] = when (mode) {
+                THEME_MODE_LIGHT -> THEME_MODE_LIGHT
+                THEME_MODE_DARK -> THEME_MODE_DARK
+                else -> THEME_MODE_SYSTEM
+            }
+        }
+    }
+
+    suspend fun themeModeNow(): String = themeMode.first()
+
+    // ---- Dictation language (Phase 6 extras, PR #44) ---------------
+    // 1.x's speechLanguage: which language the speech recogniser is
+    // asked to listen in, for the editor mic and voice notes alike.
+    // "system" (the default) adds no override — the engine keeps
+    // asking for the device default. Unknown values degrade to
+    // "system".
+
+    val speechLanguage: Flow<String> = dataStore.safeData.map { prefs ->
+        when (prefs[KEY_SPEECH_LANGUAGE]) {
+            SPEECH_LANGUAGE_ENGLISH -> SPEECH_LANGUAGE_ENGLISH
+            SPEECH_LANGUAGE_BANGLA -> SPEECH_LANGUAGE_BANGLA
+            else -> SPEECH_LANGUAGE_SYSTEM
+        }
+    }
+
+    suspend fun setSpeechLanguage(language: String) {
+        safeEdit {
+            this[KEY_SPEECH_LANGUAGE] = when (language) {
+                SPEECH_LANGUAGE_ENGLISH -> SPEECH_LANGUAGE_ENGLISH
+                SPEECH_LANGUAGE_BANGLA -> SPEECH_LANGUAGE_BANGLA
+                else -> SPEECH_LANGUAGE_SYSTEM
+            }
+        }
+    }
+
+    suspend fun speechLanguageNow(): String = speechLanguage.first()
+
     // ---- Swipe actions (Phase 3.5, D3) -------------------------------
     // Per-direction actions for the main notes list, chosen in
     // Settings. Defaults are the pre-3.5 behaviour: right (start-to-
@@ -663,6 +717,24 @@ class PreferencesRepository internal constructor(
         val KEY_SWIPE_LEFT_ACTION = stringPreferencesKey("swipe_left_action")
         val KEY_WRITING_FONT_SIZE = intPreferencesKey("writing_font_size")
         val KEY_WRITING_LINE_HEIGHT = floatPreferencesKey("writing_line_height")
+        val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        val KEY_SPEECH_LANGUAGE = stringPreferencesKey("speech_language")
+
+        // Theme choice (Phase 6 extras, PR #44): "system" (follow
+        // the device), "light" or "dark". System is the default —
+        // until PR #44 the app always followed the system.
+        const val THEME_MODE_SYSTEM = "system"
+        const val THEME_MODE_LIGHT = "light"
+        const val THEME_MODE_DARK = "dark"
+
+        // Dictation language (Phase 6 extras, PR #44 — Noma 1.x's
+        // speechLanguage): "system" (the device default), "en" or
+        // "bn". The pure resolver mapping a stored value to the
+        // recognition language tag lives with the voice feature
+        // (SpeechLanguage.resolveTag).
+        const val SPEECH_LANGUAGE_SYSTEM = "system"
+        const val SPEECH_LANGUAGE_ENGLISH = "en"
+        const val SPEECH_LANGUAGE_BANGLA = "bn"
 
         // Writing typography (Phase 6, PR #43 — Noma 1.x parity):
         // the reading/editor comfort pair from 1.x's Writing
