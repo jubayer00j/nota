@@ -251,7 +251,20 @@ class EditorAutolinkPopupUiTest {
         composeEditor(note.id, startInEdit = true)
         awaitEditMode()
 
-        replaceFieldText("[[abc\nexample.com", "[[abc\nexample.com ")
+        // Append ONE space to whichever field holds the URL —
+        // how paragraphs are separated inside a field's text is
+        // the library's own business, so match on content rather
+        // than an exact field text.
+        val nodes = composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = nodes.indexOfFirst {
+            it.config.getOrNull(SemanticsProperties.EditableText)
+                ?.text?.contains("example.com") == true
+        }
+        if (index < 0) fail("no editable field containing 'example.com'")
+        val fieldText = nodes[index].config
+            .getOrNull(SemanticsProperties.EditableText)?.text.orEmpty()
+        composeRule.onAllNodes(hasSetTextAction())[index]
+            .performTextReplacement(fieldText + " ")
 
         finishEditing()
         val html = storedHtml(note.id)
