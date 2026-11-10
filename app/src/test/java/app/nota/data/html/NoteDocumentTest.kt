@@ -925,6 +925,30 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun makeText_itemWithTrailingContent_convertsAllOfIt() {
+        // Codex P2 (PR #41): a childless item can still carry
+        // trailing content (it followed a nested list that was
+        // removed) — "Make text" must convert ALL of it, not just
+        // the leading part.
+        val segments = listOf(
+            TaskListSegment(
+                listOf(
+                    TaskItem(
+                        "<p>Before</p>",
+                        checked = false,
+                        contentAfterHtml = "<p>After</p>",
+                    ),
+                ),
+            ),
+        )
+        val conversion = NoteDocument.taskItemToText(segments, 0, 0)!!
+        assertEquals(
+            listOf(TextSegment("<p>Before</p><p>After</p>")),
+            conversion.segments,
+        )
+    }
+
+    @Test
     fun makeText_middleItem_splitsTheListAroundTheParagraph() {
         val segments = listOf(
             TaskListSegment(

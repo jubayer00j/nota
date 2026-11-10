@@ -799,4 +799,69 @@ class NoteExportHtmlTest {
         assertTrue(out.contains("data:image/png;base64,iVBORw0KGgo="))
         assertFalse(out.contains("nota-attachment"))
     }
+
+    @Test
+    fun nestedTasksEmitNestedListInsideParentItem() {
+        // Phase 6 (nested checklists): the HTML converter rebuilds
+        // the list from the model, so children must be re-emitted
+        // as a nested task list inside the parent item's <div> —
+        // not dropped, not flattened.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Parent</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = true),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            out.contains(
+                "<div><p>Parent</p><ul data-type=\"taskList\">" +
+                    "<li data-checked=\"true\"><label>" +
+                    "<input type=\"checkbox\" checked disabled></label>" +
+                    "<div><p>Child</p></div></li></ul></div>",
+            ),
+        )
+    }
+
+    @Test
+    fun nestedTasksTrailingContentExportsAfterTheNestedList() {
+        // Codex P2 (PR #41): an item's own content that followed
+        // its nested list (contentAfterHtml) exports AFTER the
+        // nested list, in the stored order — not folded in front
+        // of the children.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Before</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = false),
+                            ),
+                            contentAfterHtml = "<p>After</p>",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            out.contains(
+                "<div><p>Before</p><ul data-type=\"taskList\">" +
+                    "<li data-checked=\"false\"><label>" +
+                    "<input type=\"checkbox\" disabled></label>" +
+                    "<div><p>Child</p></div></li></ul><p>After</p></div>",
+            ),
+        )
+    }
 }

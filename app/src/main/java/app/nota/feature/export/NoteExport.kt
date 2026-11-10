@@ -12,6 +12,7 @@ import app.nota.data.html.NoteDocument
 import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.QuoteSegment
 import app.nota.data.html.TableSegment
+import app.nota.data.html.TaskItem
 import app.nota.data.html.TaskListSegment
 import app.nota.data.html.TextSegment
 
@@ -243,7 +244,16 @@ object NoteExport {
                 is TextSegment -> scan(segment.html)
                 is QuoteSegment -> scan(segment.innerHtml)
                 is TableSegment -> segment.rows.forEach { row -> row.forEach(::scan) }
-                is TaskListSegment -> segment.items.forEach { scan(it.contentHtml) }
+                is TaskListSegment -> {
+                    fun scanItems(items: List<TaskItem>) {
+                        items.forEach { item ->
+                            scan(item.contentHtml)
+                            scan(item.contentAfterHtml)
+                            scanItems(item.children)
+                        }
+                    }
+                    scanItems(segment.items)
+                }
                 // Opaque blocks are collected from the sanitised
                 // fragment, so sources inside dropped elements
                 // (scripts, comments) never queue.
@@ -332,10 +342,39 @@ object NoteExport {
                 }
             }
             is TaskListSegment -> {
-                val lines = segment.items.map { item ->
-                    val marker = if (item.checked) "- [x] " else "- [ ] "
-                    marker + mdInline(parseFragment(item.contentHtml), resolve).trim()
+                // Phase 6 (nested checklists): children indent two
+                // spaces per depth, the same checkbox markers at
+                // every level.
+                val lines = mutableListOf<String>()
+                fun walk(items: List<TaskItem>, depth: Int) {
+                    for (item in items) {
+                        val marker = if (item.checked) "- [x] " else "- [ ] "
+                        val body = mdInline(
+                            parseFragment(item.contentHtml),
+                            resolve,
+                        ).trim()
+                        lines += "  ".repeat(depth) + marker + body
+                        walk(item.children, depth + 1)
+                        // Codex P2 (PR #41): trailing own content
+                        // exports AFTER the children (the stored
+                        // order), as a continuation line under the
+                        // item. The indent is the parent item's
+                        // MARKDOWN continuation indent — the depth
+                        // indent plus the two-space "- " marker.
+                        // Anything deeper (e.g. aligned under the
+                        // "[ ]" text) would attach the line to the
+                        // last CHILD item in CommonMark, or render
+                        // as an indented code block (round 4).
+                        val after = mdInline(
+                            parseFragment(item.contentAfterHtml),
+                            resolve,
+                        ).trim()
+                        if (after.isNotEmpty()) {
+                            lines += "  ".repeat(depth) + "  " + after
+                        }
+                    }
                 }
+                walk(segment.items, 0)
                 if (lines.isEmpty()) emptyList() else listOf(lines.joinToString("\n"))
             }
             is TableSegment -> {
@@ -877,10 +916,28 @@ object NoteExport {
             }
         }
         is TaskListSegment -> {
-            val lines = segment.items.map { item ->
-                val marker = if (item.checked) "- [x] " else "- [ ] "
-                marker + textInline(parseFragment(item.contentHtml)).replace(Regex("\\s+"), " ").trim()
+            // Phase 6 (nested checklists): the Markdown branch's
+            // twin — children indent two spaces per depth.
+            val lines = mutableListOf<String>()
+            fun walk(items: List<TaskItem>, depth: Int) {
+                for (item in items) {
+                    val marker = if (item.checked) "- [x] " else "- [ ] "
+                    val body = textInline(
+                        parseFragment(item.contentHtml),
+                    ).replace(Regex("\\s+"), " ").trim()
+                    lines += "  ".repeat(depth) + marker + body
+                    walk(item.children, depth + 1)
+                    // Codex P2 (PR #41): trailing own content
+                    // after the children, as in the Markdown twin.
+                    val after = textInline(
+                        parseFragment(item.contentAfterHtml),
+                    ).replace(Regex("\\s+"), " ").trim()
+                    if (after.isNotEmpty()) {
+                        lines += "  ".repeat(depth) + "      " + after
+                    }
+                }
             }
+            walk(segment.items, 0)
             if (lines.isEmpty()) emptyList() else listOf(lines.joinToString("\n"))
         }
         is TableSegment -> {
@@ -1098,18 +1155,7 @@ object NoteExport {
                 "<blockquote>" +
                     serializeFragment(transformFragment(parseFragment(segment.innerHtml), resolve)) +
                     "</blockquote>"
-            is TaskListSegment -> {
-                val items = segment.items.joinToString("") { item ->
-                    val checkedAttr = if (item.checked) " checked" else ""
-                    val inner = serializeFragment(
-                        transformFragment(parseFragment(item.contentHtml), resolve),
-                    )
-                    "<li data-checked=\"${item.checked}\">" +
-                        "<label><input type=\"checkbox\"$checkedAttr disabled></label>" +
-                        "<div>$inner</div></li>"
-                }
-                "<ul data-type=\"taskList\">$items</ul>"
-            }
+            is TaskListSegment -> htmlTaskList(segment.items, resolve)
             is TableSegment -> htmlTable(segment, resolve)
             is CodeSegment -> "<pre><code>${escapeHtmlText(segment.text)}</code></pre>"
             is ImageSegment -> {
@@ -1146,6 +1192,46 @@ object NoteExport {
                 "<p class=\"noma-chart-placeholder\">${chartPlaceholder(segment, ::escapeHtmlText)}</p>"
             is OpaqueSegment -> resolveOpaqueImages(sanitizeOpaqueHtml(segment.rawHtml), resolve)
         }
+
+    /**
+     * Phase 6 (nested checklists): the HTML task list — children
+     * nest as a real <ul data-type="taskList"> inside the parent
+     * item's <div>, the stored shape. (This converter REBUILDS the
+     * list from the segment model rather than copying stored HTML,
+     * so once the model split children out of contentHtml the
+     * nesting had to be re-emitted here or it would vanish from
+     * HTML exports.)
+     */
+    private fun htmlTaskList(items: List<TaskItem>, resolve: AttachmentResolver): String {
+        val inner = items.joinToString("") { item ->
+            val checkedAttr = if (item.checked) " checked" else ""
+            val before = serializeFragment(
+                transformFragment(
+                    parseFragment(item.contentHtml),
+                    resolve,
+                ),
+            )
+            val after = serializeFragment(
+                transformFragment(
+                    parseFragment(item.contentAfterHtml),
+                    resolve,
+                ),
+            )
+            val nested = if (item.children.isEmpty()) {
+                ""
+            } else {
+                htmlTaskList(item.children, resolve)
+            }
+            // Codex P2 (PR #41): trailing own content belongs AFTER
+            // the nested list (the stored order is before -> child
+            // -> after); folding it into `own` exported it before
+            // the children.
+            "<li data-checked=\"${item.checked}\">" +
+                "<label><input type=\"checkbox\"$checkedAttr disabled></label>" +
+                "<div>$before$nested$after</div></li>"
+        }
+        return "<ul data-type=\"taskList\">$inner</ul>"
+    }
 
     private fun htmlTable(segment: TableSegment, resolve: AttachmentResolver): String {
         if (segment.rows.isEmpty()) return ""

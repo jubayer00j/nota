@@ -1,6 +1,8 @@
 package app.nota.feature.export
 
 import app.nota.data.html.TextSegment
+import app.nota.data.html.TaskItem
+import app.nota.data.html.TaskListSegment
 import app.nota.data.html.OpaqueSegment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -202,4 +204,51 @@ class NoteExportTextTest {
         assertTrue(out.contains("[Image: Cat]"))
     }
 
+
+    @Test
+    fun nestedTasksIndentTwoSpacesPerDepth() {
+        // Phase 6 (nested checklists): the plain-text twin of the
+        // Markdown indentation rule.
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Parent</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = true),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(out.contains("- [ ] Parent\n  - [x] Child"))
+    }
+
+    @Test
+    fun nestedTasksTrailingContentKeepsStoredOrder() {
+        // Codex P2 (PR #41): the plain-text twin of the Markdown
+        // ordering rule — trailing content after the children.
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Before</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = false),
+                            ),
+                            contentAfterHtml = "<p>After</p>",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n      After"))
+    }
 }

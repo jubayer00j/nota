@@ -100,6 +100,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -170,6 +171,7 @@ import app.nota.data.html.NoteDocument
 import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.OutlineEntry
 import app.nota.data.html.QuoteSegment
+import app.nota.data.html.TaskTree
 import app.nota.data.html.TableCellSpan
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TaskItem
@@ -238,9 +240,6 @@ private fun <T> List<T>.moved(from: Int, to: Int): List<T> =
  * the landing line back and forth across a boundary.
  */
 private val BLOCK_SWAP_OVERSHOOT = 24.dp
-
-private fun escapeCellText(text: String): String = text
-    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 /**
  * The Phase 1c rich editor — route `note/{noteId}` (unchanged from 1b).
@@ -318,6 +317,12 @@ fun RichNoteEditorScreen(
     // state lives here, keyed by block position, so slot and ghost
     // share the very same field state and a remount is a non-event.
     val cellTextStates = remember { mutableMapOf<String, MutableState<String>>() }
+    // Phase 6 (rich table cells): the per-cell RICH states — the
+    // cellTextStates hoist one level up, because a table cell is a
+    // small rich document now, not a plain-text field. Same keys
+    // ("<blockId>-<row>-<col>"), same eviction discipline:
+    // structural table ops evict BOTH maps together.
+    val cellRichStates = remember { mutableMapOf<String, RichTextState>() }
     var activeSegmentId by remember { mutableStateOf<String?>(null) }
     var focusMode by remember { mutableStateOf(false) }
     var docStats by remember { mutableStateOf("") }
@@ -441,11 +446,19 @@ fun RichNoteEditorScreen(
     // Phase 1.5 fix 2: focus target for "tap below the last block".
     val trailingFocusRequester = remember { FocusRequester() }
     // Phase 6 (Editor Refinement #2): the task-list item whose field
-    // currently holds focus, as (segment id, item index) — the
+    // currently holds focus, as (segment id, item path) — the
     // target of the toolbar's "Make text" action. Set when a task
     // item field gains focus (the TableBlock selected-cell pattern),
     // cleared when a text/quote editor takes focus instead.
-    var focusedTaskItem by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    var focusedTaskItem by remember { mutableStateOf<Pair<String, List<Int>>?>(null) }
+    // Phase 6 (rich table cells): the table cell currently holding
+    // focus, as (segment id, row, column). While a cell is focused
+    // the formatting toolbar routes to the CELL's rich state (see
+    // toolbarState below) and its block-style row hides — a cell
+    // holds inline formatting and paragraphs, never headings or
+    // note-level lists. Set when a cell field gains focus, cleared
+    // when a text/quote editor or a task item takes focus instead.
+    var focusedTableCell by remember { mutableStateOf<Triple<String, Int, Int>?>(null) }
 
     val current = note
     // Phase 2b: a locked note initialises from the SESSION's decrypted
@@ -565,6 +578,14 @@ fun RichNoteEditorScreen(
     }
 
     fun removeBlock(id: String) {
+        // Codex P2 (PR #41): a removed block takes its focus routes
+        // and hoisted cell states with it — a stale focused-cell
+        // route would keep the toolbar aiming at an orphan state
+        // whose edits go nowhere, and its map entry would linger.
+        if (focusedTableCell?.first == id) focusedTableCell = null
+        if (focusedTaskItem?.first == id) focusedTaskItem = null
+        evictCellTextStates(cellTextStates, id)
+        evictCellRichStates(cellRichStates, id)
         segments = ensureTrailing(segments.filterNot { it.id == id })
     }
 
@@ -762,10 +783,20 @@ fun RichNoteEditorScreen(
      * paragraph's start.
      */
     fun makeTextFromFocusedTaskItem() {
-        val (blockId, itemIndex) = focusedTaskItem ?: return
+        val (blockId, itemPath) = focusedTaskItem ?: return
+        // Phase 6 (nested checklists): "Make text" converts a
+        // TOP-LEVEL item only, and only one with no children —
+        // converting a parent would orphan its subtree, and the
+        // document-level conversion has no nested form (outdent
+        // first, then convert).
+        if (itemPath.size != 1) return
+        val itemIndex = itemPath.single()
         val blockIndex = segments.indexOfFirst { it.id == blockId }
         val block = segments.getOrNull(blockIndex) ?: return
         if (block.segment !is TaskListSegment) return
+        val focusedItem = (block.segment as TaskListSegment)
+            .items.getOrNull(itemIndex) ?: return
+        if (focusedItem.children.isNotEmpty()) return
         val conversion = NoteDocument.taskItemToText(
             syncSegments(), blockIndex, itemIndex,
         ) ?: return
@@ -1043,6 +1074,15 @@ fun RichNoteEditorScreen(
     }
 
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
+
+    // Phase 6 (rich table cells): the state the formatting toolbar
+    // (and the link dialog) acts on — the focused CELL's rich state
+    // while a cell holds focus, otherwise the active text segment's
+    // state, exactly as before.
+    val focusedCellState: RichTextState? = focusedTableCell?.let { (blockId, r, c) ->
+        cellRichStates["$blockId-$r-$c"]
+    }
+    val toolbarState: RichTextState? = focusedCellState ?: activeState
 
     // Dictation seam (Phase 5): the active editor's insert-at-caret.
     LaunchedEffect(activeSegmentId) {
@@ -1780,15 +1820,33 @@ fun RichNoteEditorScreen(
                     .getOrPut(ui.id) { FocusRequester() },
                 stateFor = { richStateFor(ui) },
                 cellTextStates = cellTextStates,
+                cellRichStates = cellRichStates,
                 onFocus = {
                     activeSegmentId = ui.id
                     // Phase 6 (Editor Refinement #2): a text/quote
                     // editor taking focus ends any task-item focus —
                     // the toolbar's conversion action follows the
-                    // caret, and the caret just moved.
+                    // caret, and the caret just moved. It also ends
+                    // any table-cell focus (rich table cells): the
+                    // toolbar routes back to this editor's state.
+                    focusedTaskItem = null
+                    focusedTableCell = null
+                },
+                onTaskItemFocus = { path ->
+                    // A null path clears the task focus (an item
+                    // was removed from under it — Codex P2, PR #41).
+                    focusedTaskItem = path?.let { ui.id to it }
+                    if (path != null) focusedTableCell = null
+                },
+                onTableCellFocus = { r, c ->
+                    focusedTableCell = Triple(ui.id, r, c)
                     focusedTaskItem = null
                 },
-                onTaskItemFocus = { index -> focusedTaskItem = ui.id to index },
+                onTableCellFocusCleared = {
+                    // Only this block's route clears (a structural
+                    // op in ANOTHER table must not drop it).
+                    if (focusedTableCell?.first == ui.id) focusedTableCell = null
+                },
                 onChange = { updateBlock(ui.id, it) },
                 onRemove = { removeBlock(ui.id) },
                 attachments = attachments,
@@ -2252,10 +2310,22 @@ fun RichNoteEditorScreen(
                 // or list item offers nothing).
                 val focusedTask = focusedTaskItem
                 val activeUi = segments.firstOrNull { it.id == activeSegmentId }
+                // Phase 6 (nested checklists): "Make text" is
+                // offered only for a TOP-LEVEL item with no
+                // children (see makeTextFromFocusedTaskItem).
+                val focusedTaskModel = focusedTask?.let { (blockId, path) ->
+                    segments.firstOrNull { it.id == blockId }
+                        ?.segment as? TaskListSegment
+                }?.let { list ->
+                    focusedTask?.second?.let { path -> TaskTree.itemAt(list.items, path) }
+                }
+                val makeTextAvailable = focusedTask != null &&
+                    focusedTask.second.size == 1 &&
+                    focusedTaskModel != null &&
+                    focusedTaskModel.children.isEmpty()
                 val taskActionLabel = when {
-                    focusedTask != null && segments.any {
-                        it.id == focusedTask.first && it.segment is TaskListSegment
-                    } -> "Make text"
+                    focusedCellState != null -> null
+                    makeTextAvailable -> "Make text"
                     activeUi?.segment is TextSegment && activeState != null &&
                         activeState!!.annotatedString.text.isNotEmpty() -> {
                         // Eligibility from the format state only —
@@ -2281,7 +2351,8 @@ fun RichNoteEditorScreen(
                     else -> null
                 }
                 EditorToolbar(
-                    state = activeState,
+                    state = toolbarState,
+                    blockStylesVisible = focusedCellState == null,
                     taskActionLabel = taskActionLabel,
                     onTaskAction = {
                         if (taskActionLabel == "Make text") {
@@ -2291,7 +2362,7 @@ fun RichNoteEditorScreen(
                         }
                     },
                     modifier = Modifier.alpha(chromeAlpha),
-                    micVisible = speechAvailable,
+                    micVisible = speechAvailable && focusedCellState == null,
                     micListening = speechSnapshot.state ==
                         app.nota.feature.voice.SpeechSessionState.LISTENING,
                     micBusy = speechSnapshot.state ==
@@ -2308,7 +2379,7 @@ fun RichNoteEditorScreen(
                         // in an existing link, and knows it is an
                         // edit (Remove link is offered) rather than a
                         // fresh insert.
-                        val existing = activeState?.toolbarFormatState()?.linkUrl
+                        val existing = toolbarState?.toolbarFormatState()?.linkUrl
                         linkUrl = existing ?: ""
                         linkDialogExisting = existing != null
                         showLinkDialog = true
@@ -2389,7 +2460,7 @@ fun RichNoteEditorScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val st = activeState
+                    val st = toolbarState
                     val url = linkUrl.trim()
                     if (st != null && url.isNotEmpty()) {
                         when {
@@ -2406,7 +2477,7 @@ fun RichNoteEditorScreen(
                 Row {
                     if (linkDialogExisting) {
                         TextButton(onClick = {
-                            activeState?.removeLink()
+                            toolbarState?.removeLink()
                             linkUrl = ""
                             showLinkDialog = false
                         }) { Text("Remove link") }
@@ -2736,10 +2807,16 @@ private fun SegmentEditor(
     // text states, hoisted above this editor so the list slot and
     // the drag ghost share them (see the screen's declaration).
     cellTextStates: MutableMap<String, MutableState<String>>,
+    // Phase 6 (rich table cells): the screen-owned per-cell rich
+    // states (the same hoist) + the cell-focus hook the toolbar
+    // routing keys on.
+    cellRichStates: MutableMap<String, RichTextState>,
+    onTableCellFocus: (Int, Int) -> Unit = { _, _ -> },
+    onTableCellFocusCleared: () -> Unit = {},
     onFocus: () -> Unit,
     // Phase 6 (Editor Refinement #2): a task item field gained
     // focus — the screen records it as the "Make text" target.
-    onTaskItemFocus: (Int) -> Unit = {},
+    onTaskItemFocus: (List<Int>?) -> Unit = {},
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
     attachments: List<AttachmentEntity>,
@@ -2847,7 +2924,11 @@ private fun SegmentEditor(
                 }
                 Box(Modifier.weight(1f)) {
                     when (segment) {
-                        is TableSegment -> TableBlock(ui.id, segment, cellTextStates, onChange, onRemove)
+                        is TableSegment -> TableBlock(
+                            ui.id, segment, cellTextStates, cellRichStates,
+                            onChange, onRemove, onTableCellFocus,
+                            onTableCellFocusCleared,
+                        )
                         is TaskListSegment -> TaskListBlock(
                             ui.id, segment, cellTextStates, onChange, onRemove, onTaskItemFocus,
                         )
@@ -3020,59 +3101,22 @@ private fun SegmentReadView(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(Modifier.padding(NotaSpacing.sm)) {
-                    segment.items.forEachIndexed { index, item ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = if (item.checked) {
-                                Modifier.fillMaxWidth().background(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
-                                    RoundedCornerShape(8.dp),
-                                )
-                            } else {
-                                Modifier.fillMaxWidth()
-                            },
-                        ) {
-                            Checkbox(
-                                checked = item.checked,
-                                onCheckedChange = { checked ->
-                                    onChange(
-                                        TaskListSegment(
-                                            segment.items.mapIndexed { i, old ->
-                                                if (i == index) {
-                                                    old.copy(checked = checked)
-                                                } else {
-                                                    old
-                                                }
-                                            },
-                                        ),
-                                    )
-                                },
-                                colors = if (item.checked) {
-                                    doneCheckboxColors()
-                                } else {
-                                    CheckboxDefaults.colors()
-                                },
+                    // Phase 6 (nested checklists): children render
+                    // in the same card, indented, with their own
+                    // toggleable checkboxes (ReadTaskRows).
+                    ReadTaskRows(
+                        blockId = ui.id,
+                        items = segment.items,
+                        path = emptyList(),
+                        depth = 0,
+                        onToggle = { itemPath, checked ->
+                            onChange(
+                                TaskListSegment(
+                                    TaskTree.toggle(segment.items, itemPath, checked),
+                                ),
                             )
-                            val itemState = remember(ui.id, index, item.contentHtml) {
-                                RichTextState().apply { setHtml(item.contentHtml) }
-                            }
-                            BasicRichText(
-                                state = itemState,
-                                style = if (item.checked) {
-                                    readTextStyle.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                } else {
-                                    readTextStyle
-                                },
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (item.checked) {
-                                DonePill()
-                                Spacer(Modifier.width(NotaSpacing.xs))
-                            }
-                        }
-                    }
+                        },
+                    )
                 }
             }
         }
@@ -3088,14 +3132,26 @@ private fun SegmentReadView(
                     segment.rows.forEachIndexed { r, row ->
                         Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
                             row.forEach { cell ->
-                                Text(
-                                    PlainTextCodec.htmlToText(cell),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = if (segment.headerRow && r == 0) {
-                                        FontWeight.Bold
-                                    } else {
-                                        FontWeight.Normal
-                                    },
+                                // Phase 6 (rich table cells): the
+                                // cell renders RICH — the task-item
+                                // pattern. Its stored HTML is a small
+                                // rich document (bold, links, colours,
+                                // paragraphs), not plain text to
+                                // flatten. Header-row cells keep their
+                                // bold base style.
+                                val cellState = remember(cell) {
+                                    RichTextState().apply { setHtml(cell) }
+                                }
+                                BasicRichText(
+                                    state = cellState,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = if (segment.headerRow && r == 0) {
+                                            FontWeight.Bold
+                                        } else {
+                                            FontWeight.Normal
+                                        },
+                                    ),
                                     modifier = Modifier.weight(1f),
                                 )
                             }
@@ -3249,6 +3305,97 @@ private fun SegmentReadView(
 }
 
 /**
+ * Phase 6 (nested checklists): the read view's task rows — one
+ * row per item at every depth, indented 24dp per level, each with
+ * its own toggleable checkbox and DONE styling, all inside the
+ * parent card. Toggles route by PATH through [TaskTree].
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun ReadTaskRows(
+    blockId: String,
+    items: List<TaskItem>,
+    path: List<Int>,
+    depth: Int,
+    onToggle: (List<Int>, Boolean) -> Unit,
+) {
+    val readTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
+    items.forEachIndexed { index, item ->
+        val itemPath = path + index
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = (if (item.checked) {
+                Modifier.fillMaxWidth().background(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
+                    RoundedCornerShape(8.dp),
+                )
+            } else {
+                Modifier.fillMaxWidth()
+            }).padding(start = (depth * 24).dp),
+        ) {
+            Checkbox(
+                checked = item.checked,
+                onCheckedChange = { checked -> onToggle(itemPath, checked) },
+                colors = if (item.checked) {
+                    doneCheckboxColors()
+                } else {
+                    CheckboxDefaults.colors()
+                },
+            )
+            val itemState = remember(blockId, itemPath.joinToString("."), item.contentHtml) {
+                RichTextState().apply {
+                    setHtml(item.contentHtml)
+                }
+            }
+            BasicRichText(
+                state = itemState,
+                style = if (item.checked) {
+                    readTextStyle.copy(
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    readTextStyle
+                },
+                modifier = Modifier.weight(1f),
+            )
+            if (item.checked) {
+                DonePill()
+                Spacer(Modifier.width(NotaSpacing.xs))
+            }
+        }
+        ReadTaskRows(blockId, item.children, itemPath, depth + 1, onToggle)
+        // Codex P2 (PR #41): the item's trailing content renders
+        // AFTER its child rows — the stored order (own -> children
+        // -> trailing), as a continuation row under the item's text.
+        if (item.contentAfterHtml.isNotBlank()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = (depth * 24).dp),
+            ) {
+                Spacer(Modifier.width(48.dp))
+                val afterState = remember(
+                    blockId, itemPath.joinToString("."), item.contentAfterHtml,
+                ) {
+                    RichTextState().apply { setHtml(item.contentAfterHtml) }
+                }
+                BasicRichText(
+                    state = afterState,
+                    style = if (item.checked) {
+                        readTextStyle.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        readTextStyle
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+/**
  * Phase 3.5 (D4): an in-document file block. Name/size resolve live
  * from the attachments table when the row exists (it is the source
  * of truth); the segment's insert-time snapshot is the fallback, and
@@ -3358,6 +3505,80 @@ private fun evictCellTextStates(
     val prefix = "$blockId-"
     cellTextStates.keys.removeAll { it.startsWith(prefix) }
 }
+
+/** The rich-state twin of [evictCellTextStates] (rich table cells). */
+private fun evictCellRichStates(
+    cellRichStates: MutableMap<String, RichTextState>,
+    blockId: String,
+) {
+    val prefix = "$blockId-"
+    cellRichStates.keys.removeAll { it.startsWith(prefix) }
+}
+
+/**
+ * Phase 6 (rich table cells): one table cell's rich editor. The
+ * cell's [RichTextState] is hoisted into the screen-owned
+ * [cellRichStates] map (the EditableCellText hoist, one level up):
+ * seeded ONCE from the cell's stored HTML, shared by the list slot
+ * and the drag ghost, and evicted with the block's other cell
+ * states on any structural change.
+ *
+ * Write-back is change-only: a snapshot flow over the state's
+ * annotated string skips the seed emission and reports only real
+ * edits (typing, toolbar formatting, link changes), so a cell the
+ * user never touched keeps its stored HTML byte-for-byte — the
+ * rich library's setHtml -> toHtml round-trip is NOT byte-stable
+ * for arbitrary imported markup, and it must never be allowed to
+ * rewrite cells by itself. Enter inside a cell makes a paragraph
+ * break INSIDE the cell (the 1.x cell shape); the cell editor is
+ * not part of the note's segment list, so it can never split the
+ * table block or the note.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun RichCellText(
+    key: String,
+    initialHtml: String,
+    header: Boolean,
+    cellRichStates: MutableMap<String, RichTextState>,
+    modifier: Modifier = Modifier,
+    onFocus: () -> Unit = {},
+    onEdit: (String) -> Unit,
+) {
+    val state = cellRichStates.getOrPut(key) {
+        RichTextState().apply { setHtml(initialHtml) }
+    }
+    // Codex P1 (PR #41): the collector must call the LATEST onEdit.
+    // TableBlock's lambda maps over its captured table snapshot, so
+    // the first-composed lambda would write a later cell edit from
+    // stale rows and silently revert an earlier cell's edit (the
+    // same hazard ImageBlock's rememberUpdatedState guards).
+    val latestOnEdit by rememberUpdatedState(onEdit)
+    LaunchedEffect(state) {
+        var last = state.annotatedString
+        snapshotFlow { state.annotatedString }.collect { current ->
+            if (current != last) {
+                last = current
+                latestOnEdit(state.toHtml())
+            }
+        }
+    }
+    BasicRichTextEditor(
+        state = state,
+        textStyle = MaterialTheme.typography.bodySmall.copy(
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
+        ),
+        modifier = modifier
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outline,
+                RoundedCornerShape(4.dp),
+            )
+            .padding(horizontal = 6.dp, vertical = 6.dp)
+            .onFocusChanged { if (it.isFocused) onFocus() },
+    )
+}
 @Composable
 private fun EditableCellText(
     key: String,
@@ -3403,8 +3624,18 @@ private fun TableBlock(
     blockId: String,
     table: TableSegment,
     cellTextStates: MutableMap<String, MutableState<String>>,
+    cellRichStates: MutableMap<String, RichTextState>,
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
+    // Phase 6 (rich table cells): a cell field gained focus —
+    // reported so the screen can route the formatting toolbar to
+    // that cell's rich state.
+    onCellFocus: (Int, Int) -> Unit = { _, _ -> },
+    // Codex P2 (PR #41): a structural change evicts the cell
+    // states — the screen's focused-cell route must clear with
+    // them, or the toolbar keeps aiming at coordinates whose
+    // state no longer exists.
+    onCellFocusCleared: () -> Unit = {},
 ) {
     // Phase 6 (Editor Refinement #1, A3): the cell the at-cell
     // row/column operations act on — set when a cell field gains
@@ -3412,6 +3643,17 @@ private fun TableBlock(
     // evicts the block's field states anyway, and a stale
     // coordinate would aim the next operation at shifted content).
     var selectedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // Structural ops evict BOTH hoisted cell maps together — the
+    // positional keys would otherwise name shifted cells. The
+    // screen's focused-cell toolbar route clears with them
+    // (Codex P2, PR #41): its coordinates named a now-evicted
+    // state, and tapping a cell again re-establishes the route
+    // through the normal focus-gain report.
+    fun evictCells() {
+        evictCellTextStates(cellTextStates, blockId)
+        evictCellRichStates(cellRichStates, blockId)
+        onCellFocusCleared()
+    }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
@@ -3421,23 +3663,28 @@ private fun TableBlock(
             table.rows.forEachIndexed { r, row ->
                 Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                     row.forEachIndexed { c, cell ->
-                        EditableCellText(
-                            // Field state is hoisted (see
-                            // EditableCellText): projecting through
-                            // the codec on every frame — or reseeding
-                            // on a drag remount — would eat spaces.
-                            // The seed is the lossless projection.
+                        RichCellText(
+                            // Rich state is hoisted (see
+                            // RichCellText): seeded once from the
+                            // cell's stored HTML and shared between
+                            // the list slot and the drag ghost; only
+                            // an actual edit writes back, so an
+                            // untouched cell keeps its stored bytes
+                            // exactly.
                             key = "$blockId-$r-$c",
-                            initial = PlainTextCodec.htmlToCellText(cell),
-                            bodyStyle = false,
-                            cellTextStates = cellTextStates,
+                            initialHtml = cell,
+                            header = table.headerRow && r == 0,
+                            cellRichStates = cellRichStates,
                             modifier = Modifier.weight(1f),
-                            onFocus = { selectedCell = r to c },
-                            onEdit = { newText ->
+                            onFocus = {
+                                selectedCell = r to c
+                                onCellFocus(r, c)
+                            },
+                            onEdit = { newHtml ->
                                 val newRows = table.rows.mapIndexed { rr, rowCells ->
                                     if (rr == r) {
                                         rowCells.mapIndexed { cc, old ->
-                                            if (cc == c) escapeCellText(newText) else old
+                                            if (cc == c) newHtml else old
                                         }
                                     } else {
                                         rowCells
@@ -3466,22 +3713,22 @@ private fun TableBlock(
                     horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs),
                 ) {
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(TableOps.insertRow(table, sr))
                         selectedCell = null
                     }) { Text("Row above") }
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(TableOps.insertRow(table, sr + 1))
                         selectedCell = null
                     }) { Text("Row below") }
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(TableOps.insertColumn(table, TableOps.visualColumnOf(table, sr, sc)))
                         selectedCell = null
                     }) { Text("Col left") }
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         onChange(
                             TableOps.insertColumn(
                                 table,
@@ -3493,14 +3740,14 @@ private fun TableBlock(
                     }) { Text("Col right") }
                     if (table.rows.size > 1) {
                         TextButton(onClick = {
-                            evictCellTextStates(cellTextStates, blockId)
+                            evictCells()
                             onChange(TableOps.deleteRow(table, sr))
                             selectedCell = null
                         }) { Text("Delete row") }
                     }
                     if (TableOps.visualColumns(table) > 1) {
                         TextButton(onClick = {
-                            evictCellTextStates(cellTextStates, blockId)
+                            evictCells()
                             onChange(
                                 TableOps.deleteColumn(
                                     table,
@@ -3514,7 +3761,7 @@ private fun TableBlock(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
                 TextButton(onClick = {
-                    evictCellTextStates(cellTextStates, blockId)
+                    evictCells()
                     selectedCell = null
                     val cols = table.rows.firstOrNull()?.size ?: 1
                     val newSpans = if (table.cellSpans.isEmpty()) {
@@ -3527,7 +3774,7 @@ private fun TableBlock(
                     )
                 }) { Text("+ Row") }
                 TextButton(onClick = {
-                    evictCellTextStates(cellTextStates, blockId)
+                    evictCells()
                     selectedCell = null
                     onChange(
                         TableSegment(
@@ -3539,7 +3786,7 @@ private fun TableBlock(
                 }) { Text("+ Col") }
                 if (table.rows.size > 1) {
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         selectedCell = null
                         // Through TableOps like "Delete row": a
                         // rowspan crossing the dropped row must
@@ -3549,7 +3796,7 @@ private fun TableBlock(
                 }
                 if (TableOps.visualColumns(table) > 1) {
                     TextButton(onClick = {
-                        evictCellTextStates(cellTextStates, blockId)
+                        evictCells()
                         selectedCell = null
                         // Through TableOps like "Delete col": a
                         // trailing MERGED cell must shrink, not be
@@ -3604,6 +3851,39 @@ private fun doneCheckboxColors() = CheckboxDefaults.colors(
     checkmarkColor = MaterialTheme.colorScheme.onPrimary,
 )
 
+/** One rendered row of the task block: an item row, or the
+ *  trailing-content row that follows an item's subtree. */
+private sealed interface TaskBlockRow {
+    data class Item(val flat: TaskTree.FlatItem) : TaskBlockRow
+    data class Trailing(
+        val path: List<Int>,
+        val depth: Int,
+        val item: TaskItem,
+    ) : TaskBlockRow
+}
+
+/**
+ * The task block's rows in reading order — an item, its children,
+ * then its trailing content. Codex P2 (PR #41): the trailing
+ * content is edited in its true position after the children,
+ * never folded into the item's label field.
+ */
+private fun taskBlockRows(items: List<TaskItem>): List<TaskBlockRow> {
+    val out = mutableListOf<TaskBlockRow>()
+    fun walk(list: List<TaskItem>, prefix: List<Int>, depth: Int) {
+        list.forEachIndexed { index, item ->
+            val path = prefix + index
+            out += TaskBlockRow.Item(TaskTree.FlatItem(path, depth, item))
+            walk(item.children, path, depth + 1)
+            if (item.contentAfterHtml.isNotBlank()) {
+                out += TaskBlockRow.Trailing(path, depth, item)
+            }
+        }
+    }
+    walk(items, emptyList(), 0)
+    return out
+}
+
 @Composable
 private fun TaskListBlock(
     blockId: String,
@@ -3613,35 +3893,83 @@ private fun TaskListBlock(
     onRemove: () -> Unit,
     // Phase 6 (Editor Refinement #2): an item field gained focus —
     // reported so the toolbar can offer "Make text" for that item.
-    onItemFocus: (Int) -> Unit = {},
+    // Phase 6 (nested checklists): the report is the item's PATH in
+    // the tree, not a flat index. A null report clears the focus
+    // (the focused item was removed, or its path was rebased by a
+    // removal — the block reports the new path then).
+    onItemFocus: (List<Int>?) -> Unit = {},
 ) {
+    // The focused item's path — the target of the footer's nesting
+    // actions. Local to the block (the footer renders here); the
+    // screen keeps its own copy for the toolbar's "Make text".
+    var focusedPath by remember { mutableStateOf<List<Int>?>(null) }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(NotaSpacing.sm)) {
-            list.items.forEachIndexed { index, item ->
+            // Phase 6 (nested checklists): the tree renders
+            // FLATTENED — one row per item at every depth, indented
+            // 24dp per level, each with its own checkbox, label
+            // field and remove; an item's trailing content gets
+            // its own field row after its children. All mutations
+            // go through TaskTree's path operations on the tree.
+            taskBlockRows(list.items).forEach { taskRow ->
+                if (taskRow is TaskBlockRow.Trailing) {
+                    val tItem = taskRow.item
+                    val tPath = taskRow.path
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(start = (taskRow.depth * 24).dp),
+                    ) {
+                        Spacer(Modifier.width(48.dp))
+                        EditableCellText(
+                            key = "$blockId-item-${tPath.joinToString(".")}-after",
+                            initial = PlainTextCodec.htmlToCellText(
+                                tItem.contentAfterHtml,
+                            ),
+                            bodyStyle = true,
+                            dimmed = tItem.checked,
+                            cellTextStates = cellTextStates,
+                            modifier = Modifier.weight(1f),
+                            onFocus = {
+                                focusedPath = tPath
+                                onItemFocus(tPath)
+                            },
+                            onEdit = { newText ->
+                                onChange(
+                                    TaskListSegment(
+                                        TaskTree.setAfterText(
+                                            list.items, tPath, newText,
+                                        ),
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                    return@forEach
+                }
+                val flat = (taskRow as TaskBlockRow.Item).flat
+                val item = flat.item
+                val path = flat.path
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = if (item.checked) {
+                    modifier = (if (item.checked) {
                         Modifier.fillMaxWidth().background(
                             MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
                             RoundedCornerShape(8.dp),
                         )
                     } else {
                         Modifier.fillMaxWidth()
-                    },
+                    }).padding(start = (flat.depth * 24).dp),
                 ) {
                     Checkbox(
                         checked = item.checked,
                         onCheckedChange = { checked ->
                             onChange(
-                                TaskListSegment(
-                                    list.items.mapIndexed { i, old ->
-                                        if (i == index) old.copy(checked = checked) else old
-                                    },
-                                ),
+                                TaskListSegment(TaskTree.toggle(list.items, path, checked)),
                             )
                         },
                         colors = if (item.checked) {
@@ -3651,32 +3979,25 @@ private fun TaskListBlock(
                         },
                     )
                     EditableCellText(
-                        key = "$blockId-item-$index",
-                        initial = PlainTextCodec.htmlToCellText(item.contentHtml),
+                        key = "$blockId-item-${path.joinToString(".")}",
+                        // The label field shows the item's OWN
+                        // leading content only — trailing content
+                        // after its nested list has its own field
+                        // row after the children (Codex P2, PR #41).
+                        initial = PlainTextCodec.htmlToCellText(
+                            item.contentHtml,
+                        ),
                         bodyStyle = true,
                         dimmed = item.checked,
                         cellTextStates = cellTextStates,
                         modifier = Modifier.weight(1f),
-                        onFocus = { onItemFocus(index) },
+                        onFocus = {
+                            focusedPath = path
+                            onItemFocus(path)
+                        },
                         onEdit = { newText ->
                             onChange(
-                                TaskListSegment(
-                                    list.items.mapIndexed { i, old ->
-                                        if (i == index) {
-                                            // Phase 6 polish (N5): the
-                                            // label edit must not flatten
-                                            // the item's inline formatting
-                                            // (the old path rebuilt the
-                                            // item as escaped plain text).
-                                            old.copy(
-                                                contentHtml = NoteDocument
-                                                    .replaceTaskItemText(old.contentHtml, newText),
-                                            )
-                                        } else {
-                                            old
-                                        }
-                                    },
-                                ),
+                                TaskListSegment(TaskTree.setText(list.items, path, newText)),
                             )
                         },
                     )
@@ -3686,9 +4007,68 @@ private fun TaskListBlock(
                     }
                     IconButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
-                        onChange(TaskListSegment(list.items.filterIndexed { i, _ -> i != index }))
+                        // Codex P2 (PR #41): removing an item can
+                        // stale the focused path — the focused item
+                        // itself, a descendant of the removed item,
+                        // or a later sibling whose index just
+                        // shifted. Rebase (or clear) BOTH focus
+                        // copies, or the footer actions and the
+                        // toolbar's "Make text" would act on the
+                        // wrong item.
+                        val fpNow = focusedPath
+                        if (fpNow != null) {
+                            val rebased =
+                                TaskTree.rebasePathAfterRemoval(fpNow, path)
+                            if (rebased != fpNow) {
+                                focusedPath = rebased
+                                onItemFocus(rebased)
+                            }
+                        }
+                        onChange(TaskListSegment(TaskTree.removeAt(list.items, path)))
                     }) {
                         Icon(Icons.Filled.Close, contentDescription = "Remove item")
+                    }
+                }
+            }
+            // Phase 6 (nested checklists): nesting actions for the
+            // FOCUSED item, in the block footer's idiom — each shown
+            // only when legal for that item (depth cap for growing,
+            // a previous sibling for indent, a parent for outdent).
+            val fp = focusedPath
+            val focusedItem = fp?.let { TaskTree.itemAt(list.items, it) }
+            if (fp != null && focusedItem != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
+                    if (fp.size <= TaskTree.MAX_DEPTH_INDEX) {
+                        TextButton(onClick = {
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TaskListSegment(TaskTree.addChild(list.items, fp)))
+                        }) { Text("Add sub-item") }
+                    }
+                    if (TaskTree.canIndent(list.items, fp)) {
+                        TextButton(onClick = {
+                            // The item lands as the previous
+                            // sibling's LAST child — compute its new
+                            // path before the tree changes.
+                            val prevPath = fp.dropLast(1) + (fp.last() - 1)
+                            val prevChildCount = TaskTree.itemAt(list.items, prevPath)
+                                ?.children?.size ?: 0
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TaskListSegment(TaskTree.indent(list.items, fp)))
+                            val newPath = prevPath + prevChildCount
+                            focusedPath = newPath
+                            onItemFocus(newPath)
+                        }) { Text("Indent") }
+                    }
+                    if (TaskTree.canOutdent(list.items, fp)) {
+                        TextButton(onClick = {
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TaskListSegment(TaskTree.outdent(list.items, fp)))
+                            // The item now sits directly after its
+                            // former parent.
+                            val newPath = fp.dropLast(2) + (fp[fp.size - 2] + 1)
+                            focusedPath = newPath
+                            onItemFocus(newPath)
+                        }) { Text("Outdent") }
                     }
                 }
             }
@@ -4155,6 +4535,11 @@ private fun EditorToolbar(
     onMicClick: () -> Unit = {},
     insertMenuExpanded: Boolean,
     onInsertMenuChange: (Boolean) -> Unit,
+    // Phase 6 (rich table cells): false while a TABLE CELL holds
+    // focus — the block-style row (headings, note-level lists) has
+    // no meaning inside a cell, so it hides; the inline row keeps
+    // acting, on the cell's state.
+    blockStylesVisible: Boolean = true,
     // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
     // conversion action's label ("Make task" / "Make text"), or
     // null when the caret's context offers neither.
@@ -4222,6 +4607,7 @@ private fun EditorToolbar(
         ToolbarButton("code", enabled, selected = format?.code == true) {
             state?.toggleCodeSpan()
         }
+        if (blockStylesVisible) {
         ToolbarButton("H1", enabled, selected = format?.heading == HeadingStyle.H1) {
             state?.setHeadingStyle(HeadingStyle.H1)
         }
@@ -4247,6 +4633,7 @@ private fun EditorToolbar(
             colors = toolbarIconColors(format?.orderedList == true),
         ) {
             Icon(Icons.Filled.FormatListNumbered, contentDescription = "Numbered list")
+        }
         }
         // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
         // conversion — a text button in the toolbar's own idiom,

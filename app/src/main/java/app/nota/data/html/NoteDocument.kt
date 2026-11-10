@@ -58,7 +58,21 @@ data class TableSegment(
     val cellSpans: List<List<TableCellSpan>> = emptyList(),
 ) : DocSegment
 
-data class TaskItem(val contentHtml: String, val checked: Boolean)
+/**
+ * One task item. [contentHtml] is the item's OWN content (a nested
+ * task list is NOT part of it — see [children]); [contentAfterHtml]
+ * is any own content that followed the nested list inside the
+ * item's <li> (the nested list is not always the last element —
+ * its position is preserved faithfully rather than relocated).
+ * Phase 6 (nested checklists): before this, a nested list survived
+ * only as opaque HTML inside [contentHtml]; it is now a real tree.
+ */
+data class TaskItem(
+    val contentHtml: String,
+    val checked: Boolean,
+    val children: List<TaskItem> = emptyList(),
+    val contentAfterHtml: String = "",
+)
 
 /** A Tiptap task list (<ul data-type="taskList">). */
 data class TaskListSegment(val items: List<TaskItem>) : DocSegment
@@ -862,13 +876,93 @@ object NoteDocument {
         for (item in list.items) {
             append("<li data-type=\"taskItem\" data-checked=\"")
                 .append(item.checked.toString()).append("\"><div>")
-            val content = item.contentHtml.trim()
-            if (content.startsWith("<p", ignoreCase = true)) append(content) else {
-                append("<p>").append(content).append("</p>")
-            }
+            append(serializeTaskItemContent(item))
             append("</div></li>")
         }
         append("</ul>")
+    }
+
+    /**
+     * One item's inner content: its own HTML, its children as a
+     * nested task list, then any trailing own content — the exact
+     * inverse of [splitNestedTaskList]. A childless item follows
+     * the long-standing rule verbatim (content as-is when it opens
+     * with a paragraph, wrapped in one otherwise), so flat lists
+     * serialise byte-identically to before. With children, the same
+     * rule is applied to the VIRTUAL concatenation (own + nested
+     * list + trailing), which is what keeps an unedited nested
+     * item byte-identical too: canonical content opens with a
+     * paragraph and passes through untouched, and bare content is
+     * wrapped in a single paragraph around list and all.
+     */
+    /**
+     * A childless item's full own content: its leading content with
+     * any trailing content (content that followed its nested list,
+     * split into [TaskItem.contentAfterHtml] at parse) folded back
+     * in — the serialised shape. Codex P1 (PR #41): an item that
+     * lost its last child (removeAt, or a child outdenting away)
+     * still carries that trailing content, and no consumer —
+     * serialiser, "Make text" conversion — may drop it.
+     * Paragraph-shaped parts concatenate verbatim (the canonical
+     * shape); bare runs keep their separation as two paragraphs
+     * rather than merging into one word.
+     */
+    internal fun childlessItemContent(item: TaskItem): String {
+        val before = item.contentHtml.trim()
+        val after = item.contentAfterHtml.trim()
+        if (after.isEmpty()) {
+            return if (before.startsWith("<p", ignoreCase = true)) {
+                before
+            } else {
+                "<p>$before</p>"
+            }
+        }
+        return if (before.startsWith("<p", ignoreCase = true) ||
+            (before.isEmpty() && after.startsWith("<p", ignoreCase = true))
+        ) {
+            before + after
+        } else {
+            listOf(before, after).filter { it.isNotEmpty() }
+                .joinToString("") { "<p>$it</p>" }
+        }
+    }
+
+    private fun serializeTaskItemContent(item: TaskItem): String {
+        val before = item.contentHtml.trim()
+        if (item.children.isEmpty()) {
+            return childlessItemContent(item)
+        }
+        val nested = serializeTaskList(TaskListSegment(item.children))
+        val after = item.contentAfterHtml.trim()
+        // Codex P2 (PR #41): the nested list must stay a TOP-LEVEL
+        // sibling of the item's content paragraphs — wrapping bare
+        // before/after content AROUND it ("<p>Parent<ul>…</ul></p>")
+        // buries the list inside a paragraph, and the parser only
+        // extracts top-level lists, so the children would fold
+        // back into the parent's content on reopen. Each part is
+        // wrapped separately instead; paragraph-shaped parts pass
+        // through verbatim (the canonical byte identity).
+        return buildString {
+            if (before.isNotEmpty()) {
+                append(
+                    if (before.startsWith("<p", ignoreCase = true)) {
+                        before
+                    } else {
+                        "<p>$before</p>"
+                    },
+                )
+            }
+            append(nested)
+            if (after.isNotEmpty()) {
+                append(
+                    if (after.startsWith("<p", ignoreCase = true)) {
+                        after
+                    } else {
+                        "<p>$after</p>"
+                    },
+                )
+            }
+        }
     }
 
     /**
@@ -1117,7 +1211,11 @@ object NoteDocument {
     ): ParagraphConversion? {
         val list = segments.getOrNull(segmentIndex) as? TaskListSegment ?: return null
         val item = list.items.getOrNull(itemIndex) ?: return null
-        val paragraphHtml = asTextHtml(item.contentHtml)
+        // Codex P2 (PR #41): a childless item can still carry
+        // trailing content (it followed a nested list that has
+        // since been removed) — convert the item's FULL own
+        // content, never just the leading part.
+        val paragraphHtml = asTextHtml(childlessItemContent(item))
         val itemsBefore = list.items.subList(0, itemIndex)
         val itemsAfter = list.items.subList(itemIndex + 1, list.items.size)
         val prefix = segments.subList(0, segmentIndex)
@@ -1199,9 +1297,8 @@ object NoteDocument {
                 is TableSegment -> segment.rows.joinToString("\n") { row ->
                     row.joinToString(" ") { PlainTextCodec.htmlToText(it) }.trim()
                 }
-                is TaskListSegment -> segment.items.joinToString("\n") {
-                    PlainTextCodec.htmlToText(it.contentHtml)
-                }
+                is TaskListSegment -> taskItemsPlainText(segment.items)
+                    .joinToString("\n")
                 is ImageSegment -> segment.alt
                 is FileSegment -> segment.fileName
                 is QuoteSegment -> PlainTextCodec.htmlToText(segment.innerHtml)
@@ -1214,6 +1311,21 @@ object NoteDocument {
         return parts.filter { it.isNotBlank() }.joinToString("\n\n")
             .replace(Regex("\n{3,}"), "\n\n").trim()
     }
+
+    /**
+     * One plain-text line per task item, children after their
+     * parent at every depth (the order a reader sees). An item's
+     * own trailing content (after its nested list) projects as
+     * its own line AFTER the children — the stored reading order
+     * (Codex P2, PR #41).
+     */
+    private fun taskItemsPlainText(items: List<TaskItem>): List<String> =
+        items.flatMap { item ->
+            listOf(PlainTextCodec.htmlToText(item.contentHtml)) +
+                taskItemsPlainText(item.children) +
+                listOf(PlainTextCodec.htmlToText(item.contentAfterHtml))
+                    .filter { it.isNotBlank() }
+        }
 
     /** Headings inside text segments, in document order (in-note outline, §12). */
     fun headings(segments: List<DocSegment>): List<OutlineEntry> {
@@ -1412,10 +1524,76 @@ object NoteDocument {
                     content = content.substring(divTag.end, divClose.first).trim()
                 }
             }
-            items += TaskItem(content, checked)
+            items += splitNestedTaskList(content, checked)
             idx = close.second
         }
         return items
+    }
+
+    /** Tags that never open a nesting level in the depth walk. */
+    private val voidTags = setOf("br", "hr", "img", "input", "meta", "link")
+
+    /**
+     * Phase 6 (nested checklists): splits the TOP-LEVEL nested task
+     * list(s) out of one item's own content into [TaskItem.children]
+     * (recursively, via [parseTaskItems]) — the exact inverse of
+     * [serializeTaskItemContent]. Content before the first nested
+     * list stays in [TaskItem.contentHtml]; content after the last
+     * one goes to [TaskItem.contentAfterHtml], so a nested list that
+     * is NOT the item's last element keeps its position instead of
+     * being relocated to the end. A nested list buried inside
+     * another element (a leftover <div>, a blockquote) is not
+     * top-level and stays in the item's own HTML untouched, exactly
+     * as before. Content stranded BETWEEN two nested lists — a
+     * shape the 1.x schema cannot produce (one nested list per
+     * item) — stays with the item's own leading content rather
+     * than being dropped.
+     */
+    private fun splitNestedTaskList(content: String, checked: Boolean): TaskItem {
+        val spans = mutableListOf<Pair<IntRange, List<TaskItem>>>()
+        var i = 0
+        var depth = 0
+        while (i < content.length) {
+            val lt = content.indexOf('<', i)
+            if (lt < 0) break
+            val tag = readTag(content, lt) ?: break
+            when {
+                tag.closing -> {
+                    if (depth > 0) depth--
+                    i = tag.end
+                }
+                tag.name == "ul" && depth == 0 -> {
+                    val close = findClose(content, tag.end, "ul")
+                    if (close == null) {
+                        i = tag.end
+                    } else {
+                        val ulInner = content.substring(tag.end, close.first)
+                        if (isTaskList(tag.attrs, ulInner)) {
+                            spans += (lt until close.second) to parseTaskItems(ulInner)
+                        }
+                        i = close.second
+                    }
+                }
+                else -> {
+                    if (!tag.attrs.trimEnd().endsWith("/") && tag.name !in voidTags) {
+                        depth++
+                    }
+                    i = tag.end
+                }
+            }
+        }
+        if (spans.isEmpty()) return TaskItem(content, checked)
+        val before = content.substring(0, spans.first().first.first).trim()
+        val after = content.substring(spans.last().first.last + 1).trim()
+        val between = spans.zipWithNext().joinToString("") { (a, b) ->
+            content.substring(a.first.last + 1, b.first.first)
+        }.trim()
+        return TaskItem(
+            contentHtml = (before + between).trim(),
+            checked = checked,
+            children = spans.flatMap { it.second },
+            contentAfterHtml = after,
+        )
     }
 
     private fun extractCodeText(inner: String): String {

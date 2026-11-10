@@ -1,6 +1,8 @@
 package app.nota.feature.export
 
 import app.nota.data.html.CodeSegment
+import app.nota.data.html.TaskItem
+import app.nota.data.html.TaskListSegment
 import app.nota.data.html.FileSegment
 import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.ImageSegment
@@ -668,4 +670,59 @@ class NoteExportMarkdownTest {
         assertTrue(out.contains("![Dot](data:image/png;base64,WA==)"))
     }
 
+
+    @Test
+    fun nestedTasksIndentTwoSpacesPerDepth() {
+        // Phase 6 (nested checklists): children keep the checkbox
+        // markers and indent two spaces per depth.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Parent</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem(
+                                    "<p>Child</p>",
+                                    checked = true,
+                                    children = listOf(
+                                        TaskItem("<p>Grandchild</p>", checked = false),
+                                    ),
+                                ),
+                            ),
+                        ),
+                        TaskItem("<p>Sibling</p>", checked = false),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(out.contains("- [ ] Parent\n  - [x] Child\n    - [ ] Grandchild\n- [ ] Sibling"))
+    }
+
+    @Test
+    fun nestedTasksTrailingContentKeepsStoredOrder() {
+        // Codex P2 (PR #41): content that followed an item's
+        // nested list exports AFTER the children, as a
+        // continuation line — never folded into the item's line.
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                TaskListSegment(
+                    listOf(
+                        TaskItem(
+                            "<p>Before</p>",
+                            checked = false,
+                            children = listOf(
+                                TaskItem("<p>Child</p>", checked = false),
+                            ),
+                            contentAfterHtml = "<p>After</p>",
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n  After"))
+    }
 }
