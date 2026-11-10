@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -311,5 +313,84 @@ class RichCellsNestedUiTest {
             "an untouched plain cell keeps its stored bytes: $html",
             html.contains("<td><p>Plain cell</p></td>"),
         )
+    }
+
+    // ------------------------------------------------------ Part B
+
+    @Test
+    fun readMode_nestedTasks_renderAndChildCheckboxToggles() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Nested",
+                contentHtml = "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Parent task</p>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Child task</p></div></li>" +
+                    "</ul></div></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("nested tasks rendered in read mode") {
+            exists("parent") {
+                composeRule.onNodeWithText("Parent task").assertIsDisplayed()
+            } && exists("child") {
+                composeRule.onNodeWithText("Child task").assertIsDisplayed()
+            }
+        }
+        // Two toggleable checkboxes: parent first, child second.
+        val toggles = composeRule.onAllNodes(isToggleable()).fetchSemanticsNodes()
+        org.junit.Assert.assertEquals(2, toggles.size)
+
+        // Toggle the CHILD's checkbox while reading.
+        composeRule.onAllNodes(isToggleable())[1].performClick()
+        awaitTrue("child toggled on, parent untouched") {
+            val html = storedHtml(note.id)
+            html.contains("data-checked=\"true\"><div><p>Child task</p>") &&
+                html.contains("data-checked=\"false\"><div><p>Parent task</p>") &&
+                composeRule.onAllNodes(isToggleable())[1].fetchSemanticsNode().config
+                    .getOrNull(SemanticsProperties.ToggleableState) == ToggleableState.On &&
+                composeRule.onAllNodes(isToggleable())[0].fetchSemanticsNode().config
+                    .getOrNull(SemanticsProperties.ToggleableState) == ToggleableState.Off
+        }
+    }
+
+    @Test
+    fun editMode_indentThenAddSubItem_persistsNestedShape() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Nesting",
+                contentHtml = "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Task A</p></div></li>" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Task B</p></div></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+        enterEditMode()
+
+        // Focus Task B's field: the footer offers Indent (it has a
+        // previous sibling) but not Outdent (it is top-level).
+        composeRule.onNodeWithText("Task B").performClick()
+        awaitTrue("Indent offered for Task B") {
+            exists("indent") { composeRule.onNodeWithText("Indent").assertExists() }
+        }
+        composeRule.onNodeWithText("Outdent").assertDoesNotExist()
+
+        composeRule.onNodeWithText("Indent").performClick()
+        awaitTrue("Task B nested under Task A in storage") {
+            val html = storedHtml(note.id)
+            html.contains("<p>Task A</p><ul data-type=\"taskList\">") &&
+                html.contains("<p>Task B</p>")
+        }
+
+        // The focus followed B to its nested path: Add sub-item is
+        // now offered for it, and using it nests a third level.
+        awaitTrue("Add sub-item offered for nested Task B") {
+            exists("add sub") { composeRule.onNodeWithText("Add sub-item").assertExists() }
+        }
+        composeRule.onNodeWithText("Add sub-item").performClick()
+        awaitTrue("sub-item persisted as a third list level") {
+            storedHtml(note.id).split("<ul data-type=\"taskList\">").size - 1 == 3
+        }
     }
 }

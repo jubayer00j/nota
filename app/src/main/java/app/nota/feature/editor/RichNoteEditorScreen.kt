@@ -171,6 +171,7 @@ import app.nota.data.html.NoteDocument
 import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.OutlineEntry
 import app.nota.data.html.QuoteSegment
+import app.nota.data.html.TaskTree
 import app.nota.data.html.TableCellSpan
 import app.nota.data.html.TableSegment
 import app.nota.data.html.TaskItem
@@ -445,11 +446,11 @@ fun RichNoteEditorScreen(
     // Phase 1.5 fix 2: focus target for "tap below the last block".
     val trailingFocusRequester = remember { FocusRequester() }
     // Phase 6 (Editor Refinement #2): the task-list item whose field
-    // currently holds focus, as (segment id, item index) — the
+    // currently holds focus, as (segment id, item path) — the
     // target of the toolbar's "Make text" action. Set when a task
     // item field gains focus (the TableBlock selected-cell pattern),
     // cleared when a text/quote editor takes focus instead.
-    var focusedTaskItem by remember { mutableStateOf<Pair<String, Int>?>(null) }
+    var focusedTaskItem by remember { mutableStateOf<Pair<String, List<Int>>?>(null) }
     // Phase 6 (rich table cells): the table cell currently holding
     // focus, as (segment id, row, column). While a cell is focused
     // the formatting toolbar routes to the CELL's rich state (see
@@ -774,10 +775,20 @@ fun RichNoteEditorScreen(
      * paragraph's start.
      */
     fun makeTextFromFocusedTaskItem() {
-        val (blockId, itemIndex) = focusedTaskItem ?: return
+        val (blockId, itemPath) = focusedTaskItem ?: return
+        // Phase 6 (nested checklists): "Make text" converts a
+        // TOP-LEVEL item only, and only one with no children —
+        // converting a parent would orphan its subtree, and the
+        // document-level conversion has no nested form (outdent
+        // first, then convert).
+        if (itemPath.size != 1) return
+        val itemIndex = itemPath.single()
         val blockIndex = segments.indexOfFirst { it.id == blockId }
         val block = segments.getOrNull(blockIndex) ?: return
         if (block.segment !is TaskListSegment) return
+        val focusedItem = (block.segment as TaskListSegment)
+            .items.getOrNull(itemIndex) ?: return
+        if (focusedItem.children.isNotEmpty()) return
         val conversion = NoteDocument.taskItemToText(
             syncSegments(), blockIndex, itemIndex,
         ) ?: return
@@ -1813,8 +1824,8 @@ fun RichNoteEditorScreen(
                     focusedTaskItem = null
                     focusedTableCell = null
                 },
-                onTaskItemFocus = { index ->
-                    focusedTaskItem = ui.id to index
+                onTaskItemFocus = { path ->
+                    focusedTaskItem = ui.id to path
                     focusedTableCell = null
                 },
                 onTableCellFocus = { r, c ->
@@ -2284,11 +2295,22 @@ fun RichNoteEditorScreen(
                 // or list item offers nothing).
                 val focusedTask = focusedTaskItem
                 val activeUi = segments.firstOrNull { it.id == activeSegmentId }
+                // Phase 6 (nested checklists): "Make text" is
+                // offered only for a TOP-LEVEL item with no
+                // children (see makeTextFromFocusedTaskItem).
+                val focusedTaskModel = focusedTask?.let { (blockId, path) ->
+                    segments.firstOrNull { it.id == blockId }
+                        ?.segment as? TaskListSegment
+                }?.let { list ->
+                    focusedTask?.second?.let { path -> TaskTree.itemAt(list.items, path) }
+                }
+                val makeTextAvailable = focusedTask != null &&
+                    focusedTask.second.size == 1 &&
+                    focusedTaskModel != null &&
+                    focusedTaskModel.children.isEmpty()
                 val taskActionLabel = when {
                     focusedCellState != null -> null
-                    focusedTask != null && segments.any {
-                        it.id == focusedTask.first && it.segment is TaskListSegment
-                    } -> "Make text"
+                    makeTextAvailable -> "Make text"
                     activeUi?.segment is TextSegment && activeState != null &&
                         activeState!!.annotatedString.text.isNotEmpty() -> {
                         // Eligibility from the format state only —
@@ -2778,7 +2800,7 @@ private fun SegmentEditor(
     onFocus: () -> Unit,
     // Phase 6 (Editor Refinement #2): a task item field gained
     // focus — the screen records it as the "Make text" target.
-    onTaskItemFocus: (Int) -> Unit = {},
+    onTaskItemFocus: (List<Int>) -> Unit = {},
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
     attachments: List<AttachmentEntity>,
@@ -3062,59 +3084,22 @@ private fun SegmentReadView(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(Modifier.padding(NotaSpacing.sm)) {
-                    segment.items.forEachIndexed { index, item ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = if (item.checked) {
-                                Modifier.fillMaxWidth().background(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
-                                    RoundedCornerShape(8.dp),
-                                )
-                            } else {
-                                Modifier.fillMaxWidth()
-                            },
-                        ) {
-                            Checkbox(
-                                checked = item.checked,
-                                onCheckedChange = { checked ->
-                                    onChange(
-                                        TaskListSegment(
-                                            segment.items.mapIndexed { i, old ->
-                                                if (i == index) {
-                                                    old.copy(checked = checked)
-                                                } else {
-                                                    old
-                                                }
-                                            },
-                                        ),
-                                    )
-                                },
-                                colors = if (item.checked) {
-                                    doneCheckboxColors()
-                                } else {
-                                    CheckboxDefaults.colors()
-                                },
+                    // Phase 6 (nested checklists): children render
+                    // in the same card, indented, with their own
+                    // toggleable checkboxes (ReadTaskRows).
+                    ReadTaskRows(
+                        blockId = ui.id,
+                        items = segment.items,
+                        path = emptyList(),
+                        depth = 0,
+                        onToggle = { itemPath, checked ->
+                            onChange(
+                                TaskListSegment(
+                                    TaskTree.toggle(segment.items, itemPath, checked),
+                                ),
                             )
-                            val itemState = remember(ui.id, index, item.contentHtml) {
-                                RichTextState().apply { setHtml(item.contentHtml) }
-                            }
-                            BasicRichText(
-                                state = itemState,
-                                style = if (item.checked) {
-                                    readTextStyle.copy(
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                } else {
-                                    readTextStyle
-                                },
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (item.checked) {
-                                DonePill()
-                                Spacer(Modifier.width(NotaSpacing.xs))
-                            }
-                        }
-                    }
+                        },
+                    )
                 }
             }
         }
@@ -3299,6 +3284,69 @@ private fun SegmentReadView(
                 )
             }
         }
+    }
+}
+
+/**
+ * Phase 6 (nested checklists): the read view's task rows — one
+ * row per item at every depth, indented 24dp per level, each with
+ * its own toggleable checkbox and DONE styling, all inside the
+ * parent card. Toggles route by PATH through [TaskTree].
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun ReadTaskRows(
+    blockId: String,
+    items: List<TaskItem>,
+    path: List<Int>,
+    depth: Int,
+    onToggle: (List<Int>, Boolean) -> Unit,
+) {
+    val readTextStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface)
+    items.forEachIndexed { index, item ->
+        val itemPath = path + index
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = (if (item.checked) {
+                Modifier.fillMaxWidth().background(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
+                    RoundedCornerShape(8.dp),
+                )
+            } else {
+                Modifier.fillMaxWidth()
+            }).padding(start = (depth * 24).dp),
+        ) {
+            Checkbox(
+                checked = item.checked,
+                onCheckedChange = { checked -> onToggle(itemPath, checked) },
+                colors = if (item.checked) {
+                    doneCheckboxColors()
+                } else {
+                    CheckboxDefaults.colors()
+                },
+            )
+            val itemState = remember(blockId, itemPath.joinToString("."), item.contentHtml) {
+                RichTextState().apply {
+                    setHtml(item.contentHtml + item.contentAfterHtml)
+                }
+            }
+            BasicRichText(
+                state = itemState,
+                style = if (item.checked) {
+                    readTextStyle.copy(
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    readTextStyle
+                },
+                modifier = Modifier.weight(1f),
+            )
+            if (item.checked) {
+                DonePill()
+                Spacer(Modifier.width(NotaSpacing.xs))
+            }
+        }
+        ReadTaskRows(blockId, item.children, itemPath, depth + 1, onToggle)
     }
 }
 
@@ -3751,35 +3799,44 @@ private fun TaskListBlock(
     onRemove: () -> Unit,
     // Phase 6 (Editor Refinement #2): an item field gained focus —
     // reported so the toolbar can offer "Make text" for that item.
-    onItemFocus: (Int) -> Unit = {},
+    // Phase 6 (nested checklists): the report is the item's PATH in
+    // the tree, not a flat index.
+    onItemFocus: (List<Int>) -> Unit = {},
 ) {
+    // The focused item's path — the target of the footer's nesting
+    // actions. Local to the block (the footer renders here); the
+    // screen keeps its own copy for the toolbar's "Make text".
+    var focusedPath by remember { mutableStateOf<List<Int>?>(null) }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(NotaSpacing.sm)) {
-            list.items.forEachIndexed { index, item ->
+            // Phase 6 (nested checklists): the tree renders
+            // FLATTENED — one row per item at every depth, indented
+            // 24dp per level, each with its own checkbox, label
+            // field and remove. All mutations go through TaskTree's
+            // path operations on the whole tree.
+            TaskTree.flatten(list.items).forEach { flat ->
+                val item = flat.item
+                val path = flat.path
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = if (item.checked) {
+                    modifier = (if (item.checked) {
                         Modifier.fillMaxWidth().background(
                             MaterialTheme.colorScheme.primary.copy(alpha = 0.09f),
                             RoundedCornerShape(8.dp),
                         )
                     } else {
                         Modifier.fillMaxWidth()
-                    },
+                    }).padding(start = (flat.depth * 24).dp),
                 ) {
                     Checkbox(
                         checked = item.checked,
                         onCheckedChange = { checked ->
                             onChange(
-                                TaskListSegment(
-                                    list.items.mapIndexed { i, old ->
-                                        if (i == index) old.copy(checked = checked) else old
-                                    },
-                                ),
+                                TaskListSegment(TaskTree.toggle(list.items, path, checked)),
                             )
                         },
                         colors = if (item.checked) {
@@ -3789,32 +3846,24 @@ private fun TaskListBlock(
                         },
                     )
                     EditableCellText(
-                        key = "$blockId-item-$index",
-                        initial = PlainTextCodec.htmlToCellText(item.contentHtml),
+                        key = "$blockId-item-${path.joinToString(".")}",
+                        // The label field shows the item's own
+                        // content whole — leading content plus any
+                        // trailing content after its nested list.
+                        initial = PlainTextCodec.htmlToCellText(
+                            item.contentHtml + item.contentAfterHtml,
+                        ),
                         bodyStyle = true,
                         dimmed = item.checked,
                         cellTextStates = cellTextStates,
                         modifier = Modifier.weight(1f),
-                        onFocus = { onItemFocus(index) },
+                        onFocus = {
+                            focusedPath = path
+                            onItemFocus(path)
+                        },
                         onEdit = { newText ->
                             onChange(
-                                TaskListSegment(
-                                    list.items.mapIndexed { i, old ->
-                                        if (i == index) {
-                                            // Phase 6 polish (N5): the
-                                            // label edit must not flatten
-                                            // the item's inline formatting
-                                            // (the old path rebuilt the
-                                            // item as escaped plain text).
-                                            old.copy(
-                                                contentHtml = NoteDocument
-                                                    .replaceTaskItemText(old.contentHtml, newText),
-                                            )
-                                        } else {
-                                            old
-                                        }
-                                    },
-                                ),
+                                TaskListSegment(TaskTree.setText(list.items, path, newText)),
                             )
                         },
                     )
@@ -3824,9 +3873,52 @@ private fun TaskListBlock(
                     }
                     IconButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
-                        onChange(TaskListSegment(list.items.filterIndexed { i, _ -> i != index }))
+                        if (focusedPath == path) focusedPath = null
+                        onChange(TaskListSegment(TaskTree.removeAt(list.items, path)))
                     }) {
                         Icon(Icons.Filled.Close, contentDescription = "Remove item")
+                    }
+                }
+            }
+            // Phase 6 (nested checklists): nesting actions for the
+            // FOCUSED item, in the block footer's idiom — each shown
+            // only when legal for that item (depth cap for growing,
+            // a previous sibling for indent, a parent for outdent).
+            val fp = focusedPath
+            val focusedItem = fp?.let { TaskTree.itemAt(list.items, it) }
+            if (fp != null && focusedItem != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.xs)) {
+                    if (fp.size <= TaskTree.MAX_DEPTH_INDEX) {
+                        TextButton(onClick = {
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TaskListSegment(TaskTree.addChild(list.items, fp)))
+                        }) { Text("Add sub-item") }
+                    }
+                    if (TaskTree.canIndent(list.items, fp)) {
+                        TextButton(onClick = {
+                            // The item lands as the previous
+                            // sibling's LAST child — compute its new
+                            // path before the tree changes.
+                            val prevPath = fp.dropLast(1) + (fp.last() - 1)
+                            val prevChildCount = TaskTree.itemAt(list.items, prevPath)
+                                ?.children?.size ?: 0
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TaskListSegment(TaskTree.indent(list.items, fp)))
+                            val newPath = prevPath + prevChildCount
+                            focusedPath = newPath
+                            onItemFocus(newPath)
+                        }) { Text("Indent") }
+                    }
+                    if (TaskTree.canOutdent(list.items, fp)) {
+                        TextButton(onClick = {
+                            evictCellTextStates(cellTextStates, blockId)
+                            onChange(TaskListSegment(TaskTree.outdent(list.items, fp)))
+                            // The item now sits directly after its
+                            // former parent.
+                            val newPath = fp.dropLast(2) + (fp[fp.size - 2] + 1)
+                            focusedPath = newPath
+                            onItemFocus(newPath)
+                        }) { Text("Outdent") }
                     }
                 }
             }
