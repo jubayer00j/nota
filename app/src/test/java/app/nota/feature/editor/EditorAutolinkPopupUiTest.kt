@@ -275,6 +275,30 @@ class EditorAutolinkPopupUiTest {
     }
 
     @Test
+    fun autolink_insideBracketQuery_staysPlain() {
+        // The other half of the guard: a URL typed INSIDE an
+        // active [[ query (same paragraph) is a search term, not
+        // prose — it must not linkify.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Query",
+                contentHtml = "<p>[[example.com</p>",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+        awaitEditMode()
+
+        replaceFieldText("[[example.com", "[[example.com ")
+
+        finishEditing()
+        val html = storedHtml(note.id)
+        assertTrue(
+            "no link was created inside the [[ query: $html",
+            !html.contains("href=\"https://example.com\""),
+        )
+    }
+
+    @Test
     fun autolink_typedSpaceAfterUrl_inTextSegment_linkifies() {
         val note = runBlocking {
             repository.createRichNote(

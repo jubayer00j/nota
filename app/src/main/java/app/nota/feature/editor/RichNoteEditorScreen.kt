@@ -3612,12 +3612,27 @@ private fun AutolinkEffect(state: RichTextState) {
 private fun applyAutolink(state: RichTextState, previous: String, current: String) {
     val token = AutoLink.triggeredToken(previous, current) ?: return
     val caret = state.selection.end.coerceIn(0, current.length)
-    // The [[ guard IS the trigger derivation itself (Codex P2,
-    // PR #42): an ad-hoc "unclosed [[ anywhere before the caret"
-    // scan was broader than the real trigger — which cannot cross
-    // a newline or a bracket — and silently disabled autolinking
-    // on every later line of a field containing a stray "[[".
-    if (LinkSuggestions.triggerAt(current, caret) != null) return
+    // The [[ guard defers to the trigger derivation itself,
+    // bounded to the caret's own paragraph (Codex P2, PR #42).
+    // The library's text model joins paragraphs with a SPACE, so
+    // a text-wide scan would let one stray "[[" in an earlier
+    // paragraph silently disable autolinking everywhere after
+    // it; the paragraph styles on the annotated string carry the
+    // real boundaries.
+    val paragraph = state.annotatedString.paragraphStyles
+        .lastOrNull { caret >= it.start }
+    val guardActive = if (paragraph != null) {
+        LinkSuggestions.triggerAt(
+            current.substring(
+                paragraph.start,
+                minOf(paragraph.end, current.length),
+            ),
+            caret - paragraph.start,
+        ) != null
+    } else {
+        LinkSuggestions.triggerAt(current, caret) != null
+    }
+    if (guardActive) return
     for (i in token.range) {
         if (state.getRichSpanStyle(TextRange(i, i + 1)) is RichSpanStyle.Link) return
     }
