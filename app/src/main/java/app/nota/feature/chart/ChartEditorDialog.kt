@@ -766,11 +766,16 @@ private fun parseFloatPrefix(s: String): Double? {
  * rule); kinds alternate bar/line as 1.x's do. The 50/20 caps are
  * applied here so the grid never holds more than the serialiser
  * would keep. Returns null when the text holds no usable rows.
+ *
+ * Deliberate improvement over 1.x (Codex P2, PR #39): 1.x splits
+ * every line on BOTH tabs and commas, so a TSV cell holding a
+ * comma ("New York, NY") is truncated and its row's values shift.
+ * Row splitting here detects the delimiter instead — see
+ * [splitPastedRows]. Pasted text is input convenience only, never
+ * part of the stored-format parity contract.
  */
-private fun applyPasteMatrix(current: ChartData, text: String): ChartData? {
-    val lines = text.trim().split("\n").map { line ->
-        line.split('\t', ',').map { it.trim() }
-    }
+internal fun applyPasteMatrix(current: ChartData, text: String): ChartData? {
+    val lines = splitPastedRows(text)
     if (lines.isEmpty()) return null
     val hasHeader = lines.size > 1
     val seriesNames = if (hasHeader) {
@@ -806,4 +811,56 @@ private fun applyPasteMatrix(current: ChartData, text: String): ChartData? {
         )
     }
     return current.copy(categories = cappedCategories, series = newSeries)
+}
+
+/**
+ * Splits pasted text into rows of trimmed cells. The delimiter is
+ * chosen for the whole paste, the way spreadsheet clipboards
+ * behave: if any line contains a tab the paste is TSV and only
+ * tabs split (commas inside cells survive verbatim); otherwise it
+ * is CSV and commas split, honouring double-quoted fields
+ * (`"New York, NY",12` — a quoted comma is data, and `""` inside
+ * quotes is an escaped quote).
+ */
+internal fun splitPastedRows(text: String): List<List<String>> {
+    val trimmed = text.trim()
+    if (trimmed.isEmpty()) return emptyList()
+    val rawLines = trimmed.split("\n")
+    return if (rawLines.any { it.contains('\t') }) {
+        rawLines.map { line -> line.split('\t').map { it.trim() } }
+    } else {
+        rawLines.map { splitCsvRow(it) }
+    }
+}
+
+/** One CSV line → cells: commas split outside double quotes. */
+private fun splitCsvRow(line: String): List<String> {
+    val cells = mutableListOf<String>()
+    val cell = StringBuilder()
+    var inQuotes = false
+    var i = 0
+    while (i < line.length) {
+        val c = line[i]
+        when {
+            inQuotes && c == '"' && i + 1 < line.length && line[i + 1] == '"' -> {
+                cell.append('"')
+                i += 2
+            }
+            c == '"' -> {
+                inQuotes = !inQuotes
+                i++
+            }
+            !inQuotes && c == ',' -> {
+                cells += cell.toString().trim()
+                cell.clear()
+                i++
+            }
+            else -> {
+                cell.append(c)
+                i++
+            }
+        }
+    }
+    cells += cell.toString().trim()
+    return cells
 }

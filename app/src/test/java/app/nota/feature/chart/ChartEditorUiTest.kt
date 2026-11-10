@@ -193,4 +193,34 @@ class ChartEditorUiTest {
         composeRule.onNodeWithTag(CHART_TAB_DATA_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(CHART_ADD_ROW_TAG).assertIsDisplayed()
     }
+
+    @Test
+    fun pasteTsv_keepsCommasInsideCells() {
+        // Codex P2 (PR #39): 1.x splits pasted lines on tabs AND
+        // commas, truncating a TSV category like "New York, NY"
+        // and shifting its values. Nota detects the delimiter:
+        // a paste containing tabs splits on tabs only.
+        val pasted = applyPasteMatrix(
+            ChartSerializer.defaultChart(),
+            "City\tSales\nNew York, NY\t12\nBoston\t9",
+        )
+        assertTrue(pasted != null)
+        assertEquals(listOf("New York, NY", "Boston"), pasted!!.categories)
+        assertEquals("Sales", pasted.series[0].name)
+        assertEquals(listOf(12.0, 9.0), pasted.series[0].values)
+    }
+
+    @Test
+    fun pasteCsv_honoursQuotedFields() {
+        // The other arm: a comma-only paste is CSV, and a quoted
+        // field keeps its comma; plain unquoted rows still split.
+        val pasted = applyPasteMatrix(
+            ChartSerializer.defaultChart(),
+            "\"City\",\"Sales\"\n\"New York, NY\",12\nBoston,9",
+        )
+        assertTrue(pasted != null)
+        assertEquals(listOf("New York, NY", "Boston"), pasted!!.categories)
+        assertEquals("Sales", pasted.series[0].name)
+        assertEquals(listOf(12.0, 9.0), pasted.series[0].values)
+    }
 }
