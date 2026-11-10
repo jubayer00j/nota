@@ -3603,18 +3603,21 @@ private fun AutolinkEffect(state: RichTextState) {
 /**
  * Applies one detected autolink trigger to [state]. Guards, per
  * the chapter audit: never inside an in-progress [[...]] trigger
- * (an unclosed "[[" before the caret — the user is writing a
- * link query, and a URL-shaped query is not prose), and never
- * over a range that already carries a link span. The link
- * application itself neither moves the caret nor alters text.
+ * (the user is writing a link query, and a URL-shaped query is
+ * not prose), and never over a range that already carries a link
+ * span. The link application itself neither moves the caret nor
+ * alters text.
  */
 @OptIn(ExperimentalRichTextApi::class)
 private fun applyAutolink(state: RichTextState, previous: String, current: String) {
     val token = AutoLink.triggeredToken(previous, current) ?: return
     val caret = state.selection.end.coerceIn(0, current.length)
-    val beforeCaret = current.substring(0, caret)
-    val open = beforeCaret.lastIndexOf("[[")
-    if (open >= 0 && beforeCaret.lastIndexOf("]]") < open) return
+    // The [[ guard IS the trigger derivation itself (Codex P2,
+    // PR #42): an ad-hoc "unclosed [[ anywhere before the caret"
+    // scan was broader than the real trigger — which cannot cross
+    // a newline or a bracket — and silently disabled autolinking
+    // on every later line of a field containing a stray "[[".
+    if (LinkSuggestions.triggerAt(current, caret) != null) return
     for (i in token.range) {
         if (state.getRichSpanStyle(TextRange(i, i + 1)) is RichSpanStyle.Link) return
     }

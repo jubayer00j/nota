@@ -237,6 +237,31 @@ class EditorAutolinkPopupUiTest {
     // ------------------------------------------------------ Part A
 
     @Test
+    fun autolink_strayBracketsOnEarlierLine_doNotBlockLaterLines() {
+        // Codex P2 (PR #42): an unmatched "[[" in an earlier
+        // paragraph must not disable autolinking for the rest of
+        // the field — the real [[ trigger cannot cross a newline,
+        // and the autolink guard now defers to it exactly.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Stray brackets",
+                contentHtml = "<p>[[abc</p><p>example.com</p>",
+            )
+        }
+        composeEditor(note.id, startInEdit = true)
+        awaitEditMode()
+
+        replaceFieldText("[[abc\nexample.com", "[[abc\nexample.com ")
+
+        finishEditing()
+        val html = storedHtml(note.id)
+        assertTrue(
+            "the URL on the later line still linkified: $html",
+            html.contains("href=\"https://example.com\""),
+        )
+    }
+
+    @Test
     fun autolink_typedSpaceAfterUrl_inTextSegment_linkifies() {
         val note = runBlocking {
             repository.createRichNote(
