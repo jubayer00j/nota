@@ -1,7 +1,9 @@
 package app.nota.feature.reminders
 
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.AlarmClock
 import app.nota.data.reminders.ReminderNotificationText
 import java.time.Instant
@@ -41,9 +43,15 @@ object PhoneAlarmIntents {
             )
             putExtra(AlarmClock.EXTRA_VIBRATE, vibrate)
             // Only when the user picked a tone: with no extra the
-            // Clock app uses its own default.
+            // Clock app uses its own default. A picked CUSTOM tone is
+            // a document URI the Clock app holds no grant for — it
+            // could not open the file and would silently fall back to
+            // its default — so the hand-off also carries a read grant
+            // for exactly that URI (Codex PR #45 round 1).
             if (ringtoneUri != null) {
                 putExtra(AlarmClock.EXTRA_RINGTONE, ringtoneUri)
+                clipData = ClipData.newRawUri("Alarm tone", Uri.parse(ringtoneUri))
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             putExtra(AlarmClock.EXTRA_SKIP_UI, false)
         }

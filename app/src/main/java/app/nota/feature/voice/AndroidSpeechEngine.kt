@@ -71,6 +71,12 @@ class AndroidSpeechEngine(
      */
     private val languageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** Pending-start gate: a cancel landing while the language read
+     *  below is in flight must stop the delayed start from creating
+     *  a recogniser after the capture surface has gone (Codex PR #45
+     *  round 1). See [StartGate]. */
+    private val startGate = StartGate()
+
     private var recognizer: SpeechRecognizer? = null
     private var generation = 0
 
@@ -160,14 +166,21 @@ class AndroidSpeechEngine(
         // on both voice surfaces. "system" resolves to null (no
         // override): the caller-supplied device-default tag stands.
         val repository = preferencesRepository
+        val ticket = startGate.issue()
         if (repository == null) {
-            mainHandler.post { startOnMain(languageTag, handlers) }
+            mainHandler.post {
+                if (startGate.isCurrent(ticket)) startOnMain(languageTag, handlers)
+            }
         } else {
             languageScope.launch {
                 val override = runCatching {
                     SpeechLanguage.resolveTag(repository.speechLanguageNow())
                 }.getOrNull()
-                mainHandler.post { startOnMain(override ?: languageTag, handlers) }
+                mainHandler.post {
+                    if (startGate.isCurrent(ticket)) {
+                        startOnMain(override ?: languageTag, handlers)
+                    }
+                }
             }
         }
     }
@@ -274,6 +287,10 @@ class AndroidSpeechEngine(
     }
 
     override fun cancel() {
+        // Invalidate any pending start FIRST (synchronously, before
+        // the destroy below is even posted): a delayed language read
+        // completing after this cancel must not start listening.
+        startGate.invalidate()
         mainHandler.post { destroyRecognizer() }
     }
 
