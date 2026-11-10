@@ -358,6 +358,37 @@ class BackupRestoreSemanticsTest {
         assertEquals(realLock, stored.lockRecordJson)
     }
 
+    @Test
+    fun versions_neverEnterBackupPayload_andRestoreCreatesNone() = runBlocking {
+        // PR #43 (1.x): history is local to the device — a version
+        // row must not appear in the export bytes, and restoring
+        // must not manufacture history on the other side.
+        val stack = newStack()
+        insertLocalNote(stack, "vh-note", "Has History", updatedAt = 5000)
+        val marker = "VERSION-ONLY-MARKER-7f3a"
+        stack.db.noteVersionDao().insert(
+            app.nota.data.db.NoteVersionEntity(
+                id = "vh-1", noteId = "vh-note", title = "Has History",
+                contentHtml = "<p>$marker</p>", createdAt = 4000,
+            ),
+        )
+
+        val exported = File.createTempFile("vh-export", ".zip")
+        stack.backup.exportToFile(exported, null)
+        val zipText = java.util.zip.ZipFile(exported).use { zip ->
+            zip.entries().asSequence()
+                .map { entry -> zip.getInputStream(entry).readBytes().toString(Charsets.UTF_8) }
+                .joinToString("\n")
+        }
+        assertTrue("version content leaked into the backup", !zipText.contains(marker))
+        assertTrue("a versions entry exists in the backup", !zipText.contains("note_versions"))
+
+        val stack2 = newStack()
+        stack2.backup.restore(exported, null, RestoreMode.REPLACE)
+        assertNotNull(stack2.db.noteDao().getById("vh-note"))
+        assertTrue(stack2.db.noteVersionDao().getAll().isEmpty())
+    }
+
     companion object {
         private const val PRECOMPUTED_NOMAENC1 =
         "Tk9NQUVOQzEAAACdeyJ2IjoxLCJzYWx0IjoiWW1GamEzVndMWE5oYkhRdE1USXpOQT09IiwiaXRl" +

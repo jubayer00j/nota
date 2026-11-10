@@ -156,7 +156,10 @@ class SettingsScreenPolishUiTest {
         composeRule.onNodeWithText("Sign in to use Drive backup").assertExists()
         composeRule.onNodeWithText("App lock Off · Encryption Off").assertExists()
         composeRule.onNodeWithText("Pine & paper · OLED off").assertExists()
-        composeRule.onNodeWithText("Starts on Notes").assertExists()
+        // PR #43: the Notes & writing summary leads with the
+        // Writing typography ("17px · 1.7" — the defaults), then
+        // the start destination, exactly as the sub-screen shows.
+        composeRule.onNodeWithText("17px · 1.7 · Starts on Notes").assertExists()
         composeRule.onNodeWithText("Not set up").assertExists()
         composeRule.onNodeWithText("Version 0.13.0").assertExists()
 

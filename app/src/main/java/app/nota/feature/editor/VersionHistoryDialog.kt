@@ -77,8 +77,8 @@ fun VersionHistoryDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    val versions by viewModel.observeVersions(noteId)
-        .collectAsState(initial = null)
+    val versionsFlow = remember(noteId) { viewModel.observeVersions(noteId) }
+    val versions by versionsFlow.collectAsState(initial = null)
     var selected by remember { mutableStateOf<NoteVersionEntity?>(null) }
     var confirmingRestore by remember { mutableStateOf(false) }
     var confirmingClear by remember { mutableStateOf(false) }
