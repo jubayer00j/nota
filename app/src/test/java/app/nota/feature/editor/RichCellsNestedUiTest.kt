@@ -248,7 +248,7 @@ class RichCellsNestedUiTest {
     }
 
     @Test
-    fun editMode_cellFocus_hidesBlockStyles_textFocusRestoresThem() {
+    fun editMode_cellFocus_hidesBlockStyles() {
         val note = runBlocking {
             repository.createRichNote(
                 title = "Routing",
@@ -260,26 +260,44 @@ class RichCellsNestedUiTest {
         composeEditor(note.id)
         enterEditMode()
 
-        // Caret in the body paragraph: the full toolbar, block
-        // styles included.
-        composeRule.onNodeWithText("Body para").performClick()
-        awaitTrue("block styles with text focus") {
-            exists("H1") { composeRule.onNodeWithText("H1").assertExists() }
-        }
-
-        // Focus into a table cell: the inline row stays (Bold is
-        // offered, acting on the cell), the block-style row hides.
+        // Focus goes straight into a table cell — the first (and
+        // only) rich editor focused in this test: the inline row
+        // stays (Bold is offered, acting on the cell), the
+        // block-style row hides.
+        // Split from editMode_textFocus_showsBlockStyles: moving
+        // focus BETWEEN two rich editors inside one Robolectric
+        // test hits a deterministic NPE in Magnifier.dismiss()
+        // (the platform magnifier's surface is null under NATIVE
+        // graphics), so each routing direction gets its own
+        // single-transition test.
         composeRule.onNodeWithText("Cell one").performClick()
         awaitTrue("block styles hidden with cell focus") {
             exists("no H1") { composeRule.onNodeWithText("H1").assertDoesNotExist() }
         }
         composeRule.onNodeWithText("B").assertExists()
+    }
 
-        // Caret back in the body: block styles return.
-        composeRule.onNodeWithText("Body para").performClick()
-        awaitTrue("block styles restored with text focus") {
-            exists("H1 again") { composeRule.onNodeWithText("H1").assertExists() }
+    @Test
+    fun editMode_textFocus_showsBlockStyles() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Routing",
+                contentHtml = "<p>Body para</p>" +
+                    "<table><tbody><tr><td><p>Cell one</p></td>" +
+                    "<td><p>Cell two</p></td></tr></tbody></table>",
+            )
         }
+        composeEditor(note.id)
+        enterEditMode()
+
+        // Caret in the body paragraph — again the only rich editor
+        // focused in this test (see the split note above): the
+        // full toolbar, block styles included.
+        composeRule.onNodeWithText("Body para").performClick()
+        awaitTrue("block styles with text focus") {
+            exists("H1") { composeRule.onNodeWithText("H1").assertExists() }
+        }
+        composeRule.onNodeWithText("B").assertExists()
     }
 
     @Test
@@ -345,14 +363,29 @@ class RichCellsNestedUiTest {
         // Toggle the CHILD's checkbox while reading.
         composeRule.onAllNodes(isToggleable())[1].performClick()
         awaitTrue("child toggled on, parent untouched") {
-            val html = storedHtml(note.id)
-            html.contains("data-checked=\"true\"><div><p>Child task</p>") &&
-                html.contains("data-checked=\"false\"><div><p>Parent task</p>") &&
-                composeRule.onAllNodes(isToggleable())[1].fetchSemanticsNode().config
-                    .getOrNull(SemanticsProperties.ToggleableState) == ToggleableState.On &&
+            composeRule.onAllNodes(isToggleable())[1].fetchSemanticsNode().config
+                .getOrNull(SemanticsProperties.ToggleableState) == ToggleableState.On &&
                 composeRule.onAllNodes(isToggleable())[0].fetchSemanticsNode().config
                     .getOrNull(SemanticsProperties.ToggleableState) == ToggleableState.Off
         }
+        // The toggle only schedules the 1.5 s autosave, which does
+        // not tick on Robolectric's virtual clock — drive the
+        // explicit persist point instead: round-trip through edit
+        // mode and press Done (the pattern
+        // editMode_untouchedRichCells_persistByteIdentical uses).
+        enterEditMode()
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        val html = storedHtml(note.id)
+        assertTrue(
+            "child persisted checked, parent untouched: $html",
+            html.contains("data-checked=\"true\"><div><p>Child task</p>") &&
+                html.contains("data-checked=\"false\"><div><p>Parent task</p>"),
+        )
     }
 
     @Test
@@ -377,20 +410,41 @@ class RichCellsNestedUiTest {
         composeRule.onNodeWithText("Outdent").assertDoesNotExist()
 
         composeRule.onNodeWithText("Indent").performClick()
-        awaitTrue("Task B nested under Task A in storage") {
-            val html = storedHtml(note.id)
-            html.contains("<p>Task A</p><ul data-type=\"taskList\">") &&
-                html.contains("<p>Task B</p>")
+        // Indent only schedules the 1.5 s autosave, which does not
+        // tick on Robolectric's virtual clock — persist explicitly
+        // via Done (the editMode_untouchedRichCells pattern) before
+        // asserting storage.
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
         }
+        val nestedHtml = storedHtml(note.id)
+        assertTrue(
+            "Task B nested under Task A in storage: $nestedHtml",
+            nestedHtml.contains("<p>Task A</p><ul data-type=\"taskList\">") &&
+                nestedHtml.contains("<p>Task B</p>"),
+        )
 
-        // The focus followed B to its nested path: Add sub-item is
-        // now offered for it, and using it nests a third level.
+        // Back into edit mode and focus Task B at its nested path:
+        // Add sub-item is now offered for it, and using it nests a
+        // third level.
+        enterEditMode()
+        composeRule.onNodeWithText("Task B").performClick()
         awaitTrue("Add sub-item offered for nested Task B") {
             exists("add sub") { composeRule.onNodeWithText("Add sub-item").assertExists() }
         }
         composeRule.onNodeWithText("Add sub-item").performClick()
-        awaitTrue("sub-item persisted as a third list level") {
-            storedHtml(note.id).split("<ul data-type=\"taskList\">").size - 1 == 3
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode again") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
         }
+        assertTrue(
+            "sub-item persisted as a third list level: ${storedHtml(note.id)}",
+            storedHtml(note.id).split("<ul data-type=\"taskList\">").size - 1 == 3,
+        )
     }
 }

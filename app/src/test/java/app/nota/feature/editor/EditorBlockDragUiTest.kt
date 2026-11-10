@@ -530,9 +530,15 @@ class EditorBlockDragUiTest {
         )
         // The drop's persist carries the cell verbatim...
         val html = runBlocking { repository.getById(note.id)?.contentHtml ?: "" }
+        // PR #41 (rich table cells): the byte form changed — an
+        // edited cell now stores the rich editor's canonical
+        // output, the <p>-wrapped shape 1.x Tiptap writes, with
+        // the leading space escaped as &#32;. The test's intent is
+        // unchanged: the cell's text, boundary spaces included,
+        // survives the ghost remount into the persisted document.
         assertTrue(
             "persisted cell keeps its boundary spaces: $html",
-            html.contains("<td> A </td>"),
+            html.contains("<td><p>&#32;A </p></td>"),
         )
         // ...and the cell field, recomposed in its new slot after
         // the ghost remount, still shows the exact typed text.
