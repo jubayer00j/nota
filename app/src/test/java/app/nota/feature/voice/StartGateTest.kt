@@ -39,4 +39,43 @@ class StartGateTest {
         val fresh = gate.issue()
         assertTrue(gate.isCurrent(fresh))
     }
+
+    @Test
+    fun stopInvalidationOwesASettle_cancelDoesNot() {
+        val stopped = StartGate()
+        stopped.issue()
+        stopped.invalidateForStop()
+        assertTrue(stopped.consumeSettleOwed())
+
+        val cancelled = StartGate()
+        cancelled.issue()
+        cancelled.invalidate()
+        assertFalse(cancelled.consumeSettleOwed())
+    }
+
+    @Test
+    fun anOwedSettleIsConsumedExactlyOnce() {
+        val gate = StartGate()
+        gate.issue()
+        gate.invalidateForStop()
+        assertTrue(gate.consumeSettleOwed())
+        assertFalse(gate.consumeSettleOwed())
+    }
+
+    @Test
+    fun aFreshStartClearsAStaleOwedSettle() {
+        val gate = StartGate()
+        gate.issue()
+        gate.invalidateForStop()
+        gate.issue()
+        assertFalse(gate.consumeSettleOwed())
+    }
+
+    @Test
+    fun aSupersededStartOwesNoSettle() {
+        val gate = StartGate()
+        gate.issue()
+        gate.issue()
+        assertFalse(gate.consumeSettleOwed())
+    }
 }

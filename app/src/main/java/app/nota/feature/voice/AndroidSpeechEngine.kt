@@ -169,7 +169,15 @@ class AndroidSpeechEngine(
         val ticket = startGate.issue()
         if (repository == null) {
             mainHandler.post {
-                if (startGate.isCurrent(ticket)) startOnMain(languageTag, handlers)
+                if (startGate.isCurrent(ticket)) {
+                    startOnMain(languageTag, handlers)
+                } else if (startGate.consumeSettleOwed()) {
+                    // Dropped because stop() landed first: the
+                    // session is sitting in STOPPING and only an
+                    // end report settles it, so report the end of
+                    // the utterance that never began.
+                    handlers.onEnd()
+                }
             }
         } else {
             languageScope.launch {
@@ -179,6 +187,11 @@ class AndroidSpeechEngine(
                 mainHandler.post {
                     if (startGate.isCurrent(ticket)) {
                         startOnMain(override ?: languageTag, handlers)
+                    } else if (startGate.consumeSettleOwed()) {
+                        // Same settle as the no-repository path
+                        // above: stop() dropped this start, and the
+                        // STOPPING session is waiting for an end.
+                        handlers.onEnd()
                     }
                 }
             }
@@ -278,11 +291,15 @@ class AndroidSpeechEngine(
 
     override fun stop() {
         // Invalidate any pending start FIRST (synchronously, before
-        // the stop below is even posted) — the mirror of cancel(): if
-        // the user stops while the start-time language read is still
-        // in flight, the delayed start must not begin listening after
-        // they stopped. A later start() issues a fresh ticket.
-        startGate.invalidate()
+        // the stop below is even posted): if the user stops while
+        // the start-time language read is still in flight, the
+        // delayed start must not begin listening after they
+        // stopped. Unlike cancel, a stop OWES the session a settle
+        // — the session sits in STOPPING until the engine reports
+        // an end — so the drop is recorded as settle-owed and the
+        // dropped start reports its end when it lands. A later
+        // start() issues a fresh ticket and clears the debt.
+        startGate.invalidateForStop()
         mainHandler.post {
             try {
                 recognizer?.stopListening()
