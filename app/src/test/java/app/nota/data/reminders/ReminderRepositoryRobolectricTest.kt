@@ -161,6 +161,76 @@ class ReminderRepositoryRobolectricTest {
     }
 
     @Test
+    fun setReminderPersistsToneFieldsAndUpdateKeepsTheSameId() = runBlocking {
+        val note = notes.createNote(title = "Wake up", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
+            tone = AlarmToneSettings(
+                mode = AlarmToneMode.SYSTEM_PICKER,
+                uri = "content://media/internal/audio/42",
+                name = "Morning",
+                vibrate = false,
+            ),
+        )
+        assertEquals(AlarmToneMode.SYSTEM_PICKER, saved.alarmToneMode)
+        assertEquals("content://media/internal/audio/42", saved.alarmToneUri)
+        assertEquals("Morning", saved.alarmToneName)
+        assertFalse(saved.alarmVibrate)
+        assertEquals(saved, db.reminderDao().getById(saved.id))
+
+        // In-place update (the 5.1 contract): same id, tone replaced.
+        val updated = reminders.setReminder(
+            note.id, triggerAt = 1_900_003_600_000L,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 2_000L,
+            tone = AlarmToneSettings(
+                mode = AlarmToneMode.CUSTOM,
+                uri = "content://docs/song.mp3",
+                name = "song.mp3",
+                vibrate = true,
+            ),
+        )
+        assertEquals(saved.id, updated.id)
+        assertEquals(AlarmToneMode.CUSTOM, updated.alarmToneMode)
+        assertEquals("content://docs/song.mp3", updated.alarmToneUri)
+        assertEquals("song.mp3", updated.alarmToneName)
+        assertTrue(updated.alarmVibrate)
+        assertEquals(1, db.reminderDao().getForNote(note.id).size)
+    }
+
+    @Test
+    fun setReminderDefaultsToneToSystemDefaultAndVibrateOn() = runBlocking {
+        val note = notes.createNote(title = "Plain", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
+        )
+        assertEquals(AlarmToneMode.SYSTEM, saved.alarmToneMode)
+        assertNull(saved.alarmToneUri)
+        assertNull(saved.alarmToneName)
+        assertTrue(saved.alarmVibrate)
+    }
+
+    @Test
+    fun systemModeToneNeverStoresAStaleUri() = runBlocking {
+        val note = notes.createNote(title = "Reset tone", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
+            tone = AlarmToneSettings(
+                mode = AlarmToneMode.SYSTEM,
+                uri = "content://stale/tone",
+                name = "Stale",
+                vibrate = false,
+            ),
+        )
+        assertEquals(AlarmToneMode.SYSTEM, saved.alarmToneMode)
+        assertNull(saved.alarmToneUri)
+        assertNull(saved.alarmToneName)
+        assertFalse(saved.alarmVibrate)
+    }
+
+    @Test
     fun observeRowsJoinsTitlesAndHidesTrashedNotes() = runBlocking {
         val kept = notes.createNote(title = "Kept note", plainBody = "")
         val trashed = notes.createNote(title = "Trashed note", plainBody = "")

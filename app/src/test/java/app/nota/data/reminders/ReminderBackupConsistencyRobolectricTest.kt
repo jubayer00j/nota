@@ -3,10 +3,12 @@ package app.nota.data.reminders
 import androidx.room.Room
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.backup.BackupRepository
+import app.nota.data.backup.RestoreMode
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.repository.NoteRepository
 import app.nota.data.templates.TemplateRepository
+import java.io.File
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -74,6 +76,58 @@ class ReminderBackupConsistencyRobolectricTest {
         assertEquals("pending", bxReminder.status)
         val bxNote = export.notes.single { it.id == note.id }
         assertEquals(triggerAt, bxNote.reminderAt)
+    }
+
+    /**
+     * PR #44: the tone fields are device-local like alertType — the
+     * full backup round-trip must bring the reminder back with the
+     * system default tone and vibrate on (and, per the 2c contract,
+     * as a notification reminder), never the tone picked here.
+     */
+    @Test
+    fun toneFieldsDoNotSurviveABackupRoundTrip() = runBlocking {
+        val note = notes.createNote(title = "Tone trip", plainBody = "body")
+        val triggerAt = 1_900_000_000_000L
+        reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
+            tone = AlarmToneSettings(
+                mode = AlarmToneMode.SYSTEM_PICKER,
+                uri = "content://media/internal/audio/42",
+                name = "Morning",
+                vibrate = false,
+            ),
+        )
+        val zip = File.createTempFile("nota-tone-roundtrip", ".zip")
+        try {
+            backup.exportToFile(zip, null)
+
+            val context = RuntimeEnvironment.getApplication()
+            val db2 = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
+                .allowMainThreadQueries()
+                .build()
+            try {
+                val provider2 = DatabaseProvider.forDatabase(context, db2)
+                val backup2 = BackupRepository(
+                    context,
+                    provider2,
+                    TemplateRepository(context),
+                    AttachmentStore(context, provider2),
+                )
+                backup2.restore(zip, null, RestoreMode.REPLACE)
+                val restored = db2.reminderDao().getForNote(note.id).single()
+                assertEquals(ReminderAlertType.NOTIFICATION, restored.alertType)
+                assertEquals(AlarmToneMode.SYSTEM, restored.alarmToneMode)
+                assertNull(restored.alarmToneUri)
+                assertNull(restored.alarmToneName)
+                assertTrue(restored.alarmVibrate)
+                assertTrue(restored.enabled)
+            } finally {
+                db2.close()
+            }
+        } finally {
+            zip.delete()
+        }
     }
 
     @Test

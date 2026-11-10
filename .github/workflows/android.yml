@@ -103,6 +103,14 @@ jobs:
   # extend the existing B2 lock suite and B backup suite, and
   # the version-history UI suite joins the UI shard's class list
   # in app/build.gradle.kts.)
+  # (Extras bundle: the partition grows to 112 classes —
+  # fast-a +2 (the Clock hand-off intent suite; the dictation
+  # language resolver), B +1 (the 6→7 migration suite); the
+  # tone-persistence, backup-exclusion, theme-mapping and
+  # preference cases extend the existing reminder, theme and
+  # writing-preferences suites, and the extras settings/dialog
+  # suite joins the UI shard's class list in
+  # app/build.gradle.kts.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -148,7 +156,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 63 of 110 non-UI classes)
+      - name: Run fast unit tests (shard A, 65 of 112 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -199,6 +207,7 @@ jobs:
             --tests "app.nota.data.reminders.ReminderNotificationTextTest" \
             --tests "app.nota.data.reminders.ReminderSchedulerTest" \
             --tests "app.nota.feature.reminders.ClockAlarmDatesTest" \
+            --tests "app.nota.feature.reminders.PhoneAlarmIntentsTest" \
             --tests "app.nota.feature.reminders.ReminderTriggerTimesTest" \
             --tests "app.nota.feature.reminders.RemindersSectionTest" \
             --tests "app.nota.data.capture.ShareNormalizerTest" \
@@ -206,6 +215,7 @@ jobs:
             --tests "app.nota.feature.capture.NotePinLabelsTest" \
             --tests "app.nota.feature.widget.WidgetStateMapperTest" \
             --tests "app.nota.feature.voice.SpeechTextTest" \
+            --tests "app.nota.feature.voice.SpeechLanguageTest" \
             --tests "app.nota.feature.voice.SpeechSessionTest" \
             --tests "app.nota.feature.voice.VoiceProbeUiTest" \
             --tests "app.nota.feature.export.NoteExportMarkdownTest" \
@@ -291,7 +301,7 @@ jobs:
       # it touches no AI code — a fork-composition interaction
       # (Robolectric sandbox/classloader neighbours). B2 keeps
       # its pre-4.1 composition, which was green on main.
-      - name: Run fast unit tests (shard B, 20 of 47 shard-B classes)
+      - name: Run fast unit tests (shard B, 21 of 48 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiBackupExclusionTest" \
@@ -301,6 +311,7 @@ jobs:
             --tests "app.nota.data.backup.BackupRestoreSemanticsTest" \
             --tests "app.nota.data.backup.BlockOrderBackupRoundTripTest" \
             --tests "app.nota.data.db.DatabaseProviderSwitchingTest" \
+            --tests "app.nota.data.db.Migration67RobolectricTest" \
             --tests "app.nota.data.drive.DriveRepositoryTest" \
             --tests "app.nota.data.html.NoteDocumentTest" \
             --tests "app.nota.data.html.NoteDocumentNestedTest" \
