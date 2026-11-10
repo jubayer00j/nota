@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import app.nota.data.db.ReminderEntity
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.reminders.ReminderAlertType
@@ -109,10 +110,15 @@ class ExtrasBundleUiTest {
             }
         }
         awaitTrue("Dictation language row") { exists("Dictation language") }
-        composeRule.onNode(
+        // The row sits far down the scrolling Notes column — scroll
+        // it into the viewport before clicking, or the injected
+        // touch lands outside the window and the menu never opens.
+        val dictationRow = composeRule.onNode(
             hasClickAction() and hasAnyDescendant(hasText("Dictation language")),
             useUnmergedTree = true,
-        ).performClick()
+        )
+        dictationRow.performScrollTo()
+        dictationRow.performClick()
         awaitTrue("Language menu open") { exists("Bangla") }
         composeRule.onNodeWithText("Bangla").performClick()
         awaitTrue("Bangla persisted") {
