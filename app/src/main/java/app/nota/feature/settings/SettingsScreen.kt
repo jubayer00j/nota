@@ -92,6 +92,18 @@ private val SETTINGS_CATEGORY_GROUPS: List<List<SettingsCategory>> = listOf(
 )
 
 /**
+ * The Writing pair as one stamp (Phase 6, PR #43 — 1.x's
+ * writingSummary): "17px · 1.7", the line height always to one
+ * decimal with a dot (never a locale comma).
+ */
+fun writingSummary(fontSize: Int, lineHeight: Float): String =
+    "${fontSize}px · ${formatLineHeight(lineHeight)}"
+
+/** One-decimal line-height stamp, locale-proof (see [writingSummary]). */
+fun formatLineHeight(lineHeight: Float): String =
+    String.format(java.util.Locale.US, "%.1f", lineHeight)
+
+/**
  * Settings root (Phase 6 presentation redesign, mock-up approved
  * by Jubayer 2026-11-08): NOT one long scroll — a category list
  * in the Noma pattern, re-expressed in pine & paper. Categories
@@ -147,6 +159,12 @@ fun SettingsScreen(
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
     val oledBlack by preferencesRepository.oledBlack.collectAsState(initial = false)
     val startOnToday by preferencesRepository.startOnToday.collectAsState(initial = false)
+    // Phase 6 (PR #43): the Writing pair, for the Notes & writing
+    // summary (1.x writingSummary: "17px · 1.7").
+    val writingFontSize by preferencesRepository.writingFontSize
+        .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
+    val writingLineHeight by preferencesRepository.writingLineHeight
+        .collectAsState(initial = PreferencesRepository.WRITING_LINE_HEIGHT_DEFAULT)
     val accountId by databaseProvider.accountId.collectAsState()
     // The AI store is suspend-based (per-account slots, sealed
     // keys) — the same reads AiSection's form performs on load.
@@ -186,7 +204,8 @@ fun SettingsScreen(
                 " · OLED ${if (oledBlack) "on" else "off"}"
         }
         SettingsCategory.NOTES ->
-            if (startOnToday) "Starts on Today" else "Starts on Notes"
+            writingSummary(writingFontSize, writingLineHeight) + " · " +
+                if (startOnToday) "Starts on Today" else "Starts on Notes"
         SettingsCategory.AI -> aiSummary ?: "…"
         SettingsCategory.ABOUT ->
             versionName?.let { "Version $it" } ?: "Version unknown"
