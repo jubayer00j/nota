@@ -6,10 +6,11 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 /**
- * Nota's Room database — schema v5 (Phase 1b added saved_searches, Phase 1c
+ * Nota's Room database — schema v7 (Phase 1b added saved_searches, Phase 1c
  * note_links for [[backlinks]], Phase 2b the per-note lock columns,
- * Phase 3c the sync tombstones + sync_meta tables; migrations carry
- * installs forward).
+ * Phase 3c the sync tombstones + sync_meta tables, Phase 5.1 the reminder
+ * alertType column, Phase 6 extras the device-local reminder tone columns;
+ * migrations carry installs forward).
  *
  * Per-account isolation mirrors Noma 1.x (spec §3): one database file per account,
  * named `nota_guest` / `nota_<uid>`.
@@ -29,7 +30,7 @@ import androidx.room.RoomDatabase
         TombstoneEntity::class,
         SyncMetaEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class NotaDatabase : RoomDatabase() {
@@ -55,6 +56,6 @@ abstract class NotaDatabase : RoomDatabase() {
                 context.applicationContext,
                 NotaDatabase::class.java,
                 databaseName(accountId),
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6).build()
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build()
     }
 }

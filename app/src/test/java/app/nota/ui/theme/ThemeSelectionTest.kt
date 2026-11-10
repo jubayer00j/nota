@@ -2,6 +2,8 @@ package app.nota.ui.theme
 
 import android.os.Build
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -62,6 +64,40 @@ class ThemeSelectionTest {
                 sdkInt = 35,
             ),
         )
+    }
+
+    // ---- PR #45: the theme choice → darkTheme mapping -------------
+
+    @Test
+    fun themeMode_pinnedLightWinsOverSystemDark() {
+        assertFalse(resolveDarkTheme("light", systemInDarkTheme = true))
+        assertFalse(resolveDarkTheme("light", systemInDarkTheme = false))
+    }
+
+    @Test
+    fun themeMode_pinnedDarkWinsOverSystemLight() {
+        assertTrue(resolveDarkTheme("dark", systemInDarkTheme = false))
+        assertTrue(resolveDarkTheme("dark", systemInDarkTheme = true))
+    }
+
+    @Test
+    fun themeMode_systemPassesTheSystemStateThrough() {
+        assertTrue(resolveDarkTheme("system", systemInDarkTheme = true))
+        assertFalse(resolveDarkTheme("system", systemInDarkTheme = false))
+    }
+
+    @Test
+    fun themeMode_unknownDegradesToSystem() {
+        assertTrue(resolveDarkTheme("sepia", systemInDarkTheme = true))
+        assertFalse(resolveDarkTheme("sepia", systemInDarkTheme = false))
+    }
+
+    @Test
+    fun themeMode_labelsMatchTheSettingsWording() {
+        assertEquals("System", themeModeLabel("system"))
+        assertEquals("Light", themeModeLabel("light"))
+        assertEquals("Dark", themeModeLabel("dark"))
+        assertEquals("System", themeModeLabel("sepia"))
     }
 
     @Test

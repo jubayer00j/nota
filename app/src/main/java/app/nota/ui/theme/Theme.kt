@@ -156,6 +156,34 @@ private val OledColors = darkColorScheme(
 enum class NotaScheme { Light, Dark, Oled, DynamicLight, DynamicDark }
 
 /**
+ * Phase 6 extras (PR #45): the stored theme choice
+ * (PreferencesRepository THEME_MODE_* — "system" / "light" /
+ * "dark") mapped to the `darkTheme` flag [NotaTheme] consumes. A
+ * pinned Light or Dark wins over the system state; "system" (and
+ * any unknown value, matching the preference layer's degrade-to-
+ * system posture) passes the system state through untouched. Pure,
+ * so the mapping is unit-testable (ThemeSelectionTest).
+ *
+ * The constants are duplicated as literals on purpose: the theme
+ * layer stays free of a preferences dependency, exactly like
+ * PreferencesRepository keeps its GUEST_ACCOUNT_ID literal.
+ */
+fun resolveDarkTheme(themeMode: String, systemInDarkTheme: Boolean): Boolean =
+    when (themeMode) {
+        "light" -> false
+        "dark" -> true
+        else -> systemInDarkTheme
+    }
+
+/** The theme choice's user-facing label (Settings summaries). */
+fun themeModeLabel(themeMode: String): String =
+    when (themeMode) {
+        "light" -> "Light"
+        "dark" -> "Dark"
+        else -> "System"
+    }
+
+/**
  * Pure scheme selection. Phase 1.5 fix 5: OLED used to be gated on
  * `darkTheme && oledBlack`, but darkTheme comes only from the system —
  * the app has no in-app dark-mode control — so flipping the OLED switch

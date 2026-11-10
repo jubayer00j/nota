@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.nota.data.reminders.AlarmToneSettings
 import app.nota.data.reminders.ReminderAlertType
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.data.reminders.ReminderRepository
@@ -196,6 +197,9 @@ private fun ReminderRowItem(
                         onClick = {
                             val intent = PhoneAlarmIntents.buildSetAlarmIntent(
                                 row.noteTitle, reminder.triggerAt,
+                                vibrate = reminder.alarmVibrate,
+                                ringtoneUri = AlarmToneSettings
+                                    .fromEntity(reminder).uri,
                             )
                             val opened = PhoneAlarmIntents.canHandle(context, intent) &&
                                 runCatching { context.startActivity(intent) }.isSuccess

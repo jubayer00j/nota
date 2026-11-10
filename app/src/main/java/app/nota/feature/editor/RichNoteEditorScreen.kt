@@ -1159,7 +1159,7 @@ fun RichNoteEditorScreen(
     // character before the caret is whitespace or a block start).
     val speechContext = LocalContext.current
     val speechEngine = remember(noteId) {
-        app.nota.feature.voice.AndroidSpeechEngine(speechContext)
+        app.nota.feature.voice.AndroidSpeechEngine(speechContext, preferencesRepository)
     }
     app.nota.feature.voice.rememberSpeechPermissionRequester(speechEngine)
     val speechController = remember(noteId) {
@@ -2835,8 +2835,8 @@ fun RichNoteEditorScreen(
                 noteTitle = noteForReminder.title,
                 existing = reminder,
                 onDismiss = { showReminderDialog = false },
-                onSave = { triggerAt, alertType ->
-                    viewModel.setReminder(triggerAt, alertType)
+                onSave = { triggerAt, alertType, tone ->
+                    viewModel.setReminder(triggerAt, alertType, tone)
                 },
                 onRemove = if (reminder != null) {
                     { viewModel.removeReminder() }

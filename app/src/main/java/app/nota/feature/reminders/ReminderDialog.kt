@@ -1,6 +1,11 @@
 package app.nota.feature.reminders
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -20,12 +25,15 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +43,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import app.nota.data.db.ReminderEntity
+import app.nota.data.reminders.AlarmToneMode
+import app.nota.data.reminders.AlarmToneSettings
 import app.nota.data.reminders.ReminderAlertType
 import app.nota.data.reminders.ReminderNotificationText
 import app.nota.ui.theme.NotaSpacing
@@ -67,6 +77,14 @@ private fun defaultTriggerAt(nowMillis: Long): Long {
  * hand-off (checked BEFORE saving as a phone-alarm — with no Clock
  * app the reminder is kept as a notification reminder and the user is
  * told), and the exact-alarm settings route.
+ *
+ * Phase 6 extras (PR #45): for Clock-alarm reminders the dialog also
+ * carries 1.x's tone controls — the system ringtone picker, a custom
+ * audio file (persistable read permission), a system-default reset,
+ * a preview play/stop, and the vibrate switch. The tone fields are
+ * per-reminder and device-local ([AlarmToneSettings]); a stored tone
+ * that can no longer be read is reset to the system default with a
+ * notice, on open and again at save time, exactly like 1.x.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,7 +92,7 @@ fun ReminderDialog(
     noteTitle: String,
     existing: ReminderEntity?,
     onDismiss: () -> Unit,
-    onSave: (triggerAtMillis: Long, alertType: String) -> Unit,
+    onSave: (triggerAtMillis: Long, alertType: String, tone: AlarmToneSettings) -> Unit,
     onRemove: (() -> Unit)?,
 ) {
     val context = LocalContext.current
@@ -85,6 +103,18 @@ fun ReminderDialog(
     var alertType by remember {
         mutableStateOf(existing?.alertType ?: ReminderAlertType.NOTIFICATION)
     }
+    // Tone state (phone-alarm only; kept on the row either way so
+    // switching alert styles back and forth loses nothing).
+    var toneMode by remember {
+        mutableStateOf(
+            existing?.let { AlarmToneMode.resolve(it.alarmToneMode) }
+                ?: AlarmToneMode.SYSTEM,
+        )
+    }
+    var toneUri by remember { mutableStateOf(existing?.alarmToneUri) }
+    var toneName by remember { mutableStateOf(existing?.alarmToneName) }
+    var toneVibrate by remember { mutableStateOf(existing?.alarmVibrate ?: true) }
+    var toneNotice by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
     var showTimePicker by remember { mutableStateOf(false) }
@@ -101,6 +131,100 @@ fun ReminderDialog(
         initialHour = initialZoned.hour,
         initialMinute = initialZoned.minute,
         is24Hour = android.text.format.DateFormat.is24HourFormat(context),
+    )
+
+    // --- Tone preview + pickers (PR #45) --------------------------------
+    val previewRingtone = remember { mutableStateOf<Ringtone?>(null) }
+    var previewPlaying by remember { mutableStateOf(false) }
+
+    fun stopTonePreview() {
+        previewRingtone.value?.let { runCatching { it.stop() } }
+        previewPlaying = false
+    }
+
+    fun toggleTonePreview() {
+        if (previewPlaying) {
+            stopTonePreview()
+            return
+        }
+        val uri = toneUri ?: return
+        val ringtone = runCatching {
+            RingtoneManager.getRingtone(context, Uri.parse(uri))
+        }.getOrNull() ?: return
+        previewRingtone.value = ringtone
+        if (runCatching { ringtone.play() }.isSuccess) {
+            previewPlaying = true
+        }
+    }
+
+    // The preview never outlives the dialog or the tone it plays.
+    DisposableEffect(Unit) {
+        onDispose {
+            previewRingtone.value?.let { runCatching { it.stop() } }
+        }
+    }
+    LaunchedEffect(toneUri) { stopTonePreview() }
+
+    val ringtonePickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            @Suppress("DEPRECATION")
+            val picked: Uri? =
+                result.data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            if (picked != null) {
+                toneMode = AlarmToneMode.SYSTEM_PICKER
+                toneUri = picked.toString()
+                toneName = AlarmTonePlatform.toneDisplayName(context, picked.toString())
+                    ?: "Custom tone"
+                toneNotice = null
+            } else {
+                // 1.x: picking "Silent" / nothing falls back to the
+                // system default.
+                toneMode = AlarmToneMode.SYSTEM
+                toneUri = null
+                toneName = null
+            }
+        }
+    }
+
+    val customToneLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+            toneMode = AlarmToneMode.CUSTOM
+            toneUri = uri.toString()
+            toneName = AlarmTonePlatform.toneDisplayName(context, uri.toString())
+                ?: "Custom tone"
+            toneNotice = null
+        }
+    }
+
+    // 1.x parity: on open, a stored tone that can no longer be read
+    // resets to the system default with a plain notice.
+    LaunchedEffect(Unit) {
+        val stored = existing ?: return@LaunchedEffect
+        val uri = stored.alarmToneUri ?: return@LaunchedEffect
+        if (AlarmToneMode.resolve(stored.alarmToneMode) == AlarmToneMode.SYSTEM) {
+            return@LaunchedEffect
+        }
+        if (!AlarmTonePlatform.isToneAccessible(context, uri)) {
+            toneMode = AlarmToneMode.SYSTEM
+            toneUri = null
+            toneName = null
+            toneNotice = "The previously selected alarm tone is no longer " +
+                "available, so the system default will be used."
+        }
+    }
+
+    /** The tone as currently picked in the dialog (unvalidated). */
+    fun pickedTone(): AlarmToneSettings = AlarmToneSettings(
+        mode = toneMode, uri = toneUri, name = toneName, vibrate = toneVibrate,
     )
 
     fun computeTriggerAt(): Long {
@@ -121,8 +245,31 @@ fun ReminderDialog(
             return
         }
         if (finalAlertType == ReminderAlertType.PHONE_ALARM) {
-            onSave(triggerAt, ReminderAlertType.PHONE_ALARM)
-            val intent = PhoneAlarmIntents.buildSetAlarmIntent(noteTitle, triggerAt, zone)
+            // 1.x re-validates the tone right before the hand-off: a
+            // tone that went missing since the dialog opened falls
+            // back to the system default, with a warning.
+            var tone = pickedTone()
+            val pickedUri = tone.uri
+            if (pickedUri != null &&
+                !AlarmTonePlatform.isToneAccessible(context, pickedUri)
+            ) {
+                Toast.makeText(
+                    context,
+                    "The selected alarm tone is no longer available, so the " +
+                        "system default will be used.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                tone = AlarmToneSettings(vibrate = tone.vibrate)
+                toneMode = AlarmToneMode.SYSTEM
+                toneUri = null
+                toneName = null
+            }
+            onSave(triggerAt, ReminderAlertType.PHONE_ALARM, tone)
+            val intent = PhoneAlarmIntents.buildSetAlarmIntent(
+                noteTitle, triggerAt, zone,
+                vibrate = tone.vibrate,
+                ringtoneUri = tone.uri,
+            )
             val opened = runCatching { context.startActivity(intent) }.isSuccess
             Toast.makeText(
                 context,
@@ -134,7 +281,7 @@ fun ReminderDialog(
                 Toast.LENGTH_LONG,
             ).show()
         } else {
-            onSave(triggerAt, ReminderAlertType.NOTIFICATION)
+            onSave(triggerAt, ReminderAlertType.NOTIFICATION, pickedTone())
         }
         onDismiss()
     }
@@ -285,6 +432,92 @@ fun ReminderDialog(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(NotaSpacing.md))
+                    Text("Alarm sound", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (toneMode == AlarmToneMode.SYSTEM) {
+                            "System default"
+                        } else {
+                            toneName ?: "Custom tone"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row {
+                        TextButton(
+                            onClick = {
+                                val pickerIntent =
+                                    Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                        putExtra(
+                                            RingtoneManager.EXTRA_RINGTONE_TYPE,
+                                            RingtoneManager.TYPE_ALARM,
+                                        )
+                                        putExtra(
+                                            RingtoneManager.EXTRA_RINGTONE_TITLE,
+                                            "Choose alarm sound",
+                                        )
+                                        putExtra(
+                                            RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT,
+                                            false,
+                                        )
+                                        putExtra(
+                                            RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT,
+                                            true,
+                                        )
+                                        val current = toneUri
+                                        if (toneMode == AlarmToneMode.SYSTEM_PICKER &&
+                                            current != null
+                                        ) {
+                                            putExtra(
+                                                RingtoneManager.EXTRA_RINGTONE_EXISTING_URI,
+                                                Uri.parse(current),
+                                            )
+                                        }
+                                    }
+                                runCatching { ringtonePickerLauncher.launch(pickerIntent) }
+                            },
+                        ) { Text("Choose tone…") }
+                        TextButton(
+                            onClick = {
+                                runCatching {
+                                    customToneLauncher.launch(arrayOf("audio/*"))
+                                }
+                            },
+                        ) { Text("Custom file…") }
+                    }
+                    if (toneMode != AlarmToneMode.SYSTEM) {
+                        Row {
+                            TextButton(
+                                onClick = {
+                                    stopTonePreview()
+                                    toneMode = AlarmToneMode.SYSTEM
+                                    toneUri = null
+                                    toneName = null
+                                    toneNotice = null
+                                },
+                            ) { Text("System default") }
+                            TextButton(onClick = { toggleTonePreview() }) {
+                                Text(if (previewPlaying) "Stop" else "Preview")
+                            }
+                        }
+                    }
+                    if (toneNotice != null) {
+                        Text(
+                            toneNotice!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Vibrate", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = toneVibrate,
+                            onCheckedChange = { toneVibrate = it },
+                        )
+                    }
                     if (existing?.alertType == ReminderAlertType.PHONE_ALARM) {
                         Spacer(Modifier.height(NotaSpacing.sm))
                         Surface(color = MaterialTheme.colorScheme.tertiaryContainer) {

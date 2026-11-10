@@ -9,6 +9,7 @@ import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -52,6 +53,7 @@ import app.nota.notes.R
 import app.nota.ui.navigation.NotaNavShell
 import app.nota.ui.theme.NotaSpacing
 import app.nota.ui.theme.NotaTheme
+import app.nota.ui.theme.resolveDarkTheme
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -214,9 +216,21 @@ class MainActivity : FragmentActivity() {
                 .collectAsState(initial = false)
             val oledBlack by preferencesRepository.oledBlack
                 .collectAsState(initial = false)
+            // Phase 6 extras (PR #45): the theme choice — "system"
+            // (the default; behaviour identical to before PR #45),
+            // "light" or "dark" — resolves against the live system
+            // state through the pure mapping in the theme layer.
+            // selectScheme keeps deciding OLED / dynamic colour
+            // exactly as before.
+            val themeMode by preferencesRepository.themeMode
+                .collectAsState(initial = PreferencesRepository.THEME_MODE_SYSTEM)
             val startOnToday by preferencesRepository.startOnToday
                 .collectAsState(initial = false)
-            NotaTheme(dynamicColor = dynamicColour, oledBlack = oledBlack) {
+            NotaTheme(
+                darkTheme = resolveDarkTheme(themeMode, isSystemInDarkTheme()),
+                dynamicColor = dynamicColour,
+                oledBlack = oledBlack,
+            ) {
                 // Phase 2a App Lock gate: until the persisted lock state
                 // has loaded (ready), show only the brand mark — notes
                 // must never flash on a locked cold start. While locked,

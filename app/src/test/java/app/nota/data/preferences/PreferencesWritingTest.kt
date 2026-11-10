@@ -57,6 +57,55 @@ class PreferencesWritingTest {
         assertEquals(2.0f, fresh.writingLineHeightNow(), 0.0001f)
     }
 
+    // ---- PR #45: theme choice + dictation language -----------------
+
+    @Test
+    fun themeMode_defaultsToSystem_andRoundTrips() = runBlocking {
+        val store = scratchStore()
+        val prefs = PreferencesRepository(store)
+        assertEquals(
+            PreferencesRepository.THEME_MODE_SYSTEM, prefs.themeModeNow(),
+        )
+        prefs.setThemeMode(PreferencesRepository.THEME_MODE_DARK)
+        assertEquals(
+            PreferencesRepository.THEME_MODE_DARK, prefs.themeModeNow(),
+        )
+        // A fresh repository over the same store reads it back.
+        assertEquals(
+            PreferencesRepository.THEME_MODE_DARK,
+            PreferencesRepository(store).themeModeNow(),
+        )
+        // Unknown values degrade to system on write AND on read.
+        prefs.setThemeMode("sepia")
+        assertEquals(
+            PreferencesRepository.THEME_MODE_SYSTEM, prefs.themeModeNow(),
+        )
+    }
+
+    @Test
+    fun speechLanguage_defaultsToSystem_andRoundTrips() = runBlocking {
+        val store = scratchStore()
+        val prefs = PreferencesRepository(store)
+        assertEquals(
+            PreferencesRepository.SPEECH_LANGUAGE_SYSTEM,
+            prefs.speechLanguageNow(),
+        )
+        prefs.setSpeechLanguage(PreferencesRepository.SPEECH_LANGUAGE_BANGLA)
+        assertEquals(
+            PreferencesRepository.SPEECH_LANGUAGE_BANGLA,
+            prefs.speechLanguageNow(),
+        )
+        assertEquals(
+            PreferencesRepository.SPEECH_LANGUAGE_BANGLA,
+            PreferencesRepository(store).speechLanguageNow(),
+        )
+        prefs.setSpeechLanguage("fr")
+        assertEquals(
+            PreferencesRepository.SPEECH_LANGUAGE_SYSTEM,
+            prefs.speechLanguageNow(),
+        )
+    }
+
     @Test
     fun setters_clampToThe1xRanges() = runBlocking {
         val prefs = PreferencesRepository(scratchStore())

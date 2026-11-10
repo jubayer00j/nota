@@ -111,10 +111,26 @@ fun SettingsAppearanceScreen(
 ) {
     val dynamicColour by preferencesRepository.dynamicColour.collectAsState(initial = false)
     val oledBlack by preferencesRepository.oledBlack.collectAsState(initial = false)
+    // Phase 6 extras (PR #45): the theme choice — System stays the
+    // default; Light / Dark pin the app regardless of the device.
+    val themeMode by preferencesRepository.themeMode
+        .collectAsState(initial = PreferencesRepository.THEME_MODE_SYSTEM)
     val scope = rememberCoroutineScope()
 
     SettingsSubScreen(SettingsCategory.APPEARANCE, INTRO_APPEARANCE, onBack) {
         SettingsCard {
+            SettingsChoiceRow(
+                title = "Theme",
+                selectedValue = themeMode,
+                options = listOf(
+                    PreferencesRepository.THEME_MODE_SYSTEM to "System",
+                    PreferencesRepository.THEME_MODE_LIGHT to "Light",
+                    PreferencesRepository.THEME_MODE_DARK to "Dark",
+                ),
+                onSelect = { value ->
+                    scope.launch { preferencesRepository.setThemeMode(value) }
+                },
+            )
             val dynamicSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
             SettingsSwitchRow(
                 title = "Material You dynamic colour",
@@ -157,6 +173,9 @@ fun SettingsNotesScreen(
         .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
     val writingLineHeight by preferencesRepository.writingLineHeight
         .collectAsState(initial = PreferencesRepository.WRITING_LINE_HEIGHT_DEFAULT)
+    // Phase 6 extras (PR #45): 1.x's dictation language choice.
+    val speechLanguage by preferencesRepository.speechLanguage
+        .collectAsState(initial = PreferencesRepository.SPEECH_LANGUAGE_SYSTEM)
     val scope = rememberCoroutineScope()
 
     SettingsSubScreen(SettingsCategory.NOTES, INTRO_NOTES, onBack) {
@@ -240,6 +259,24 @@ fun SettingsNotesScreen(
                 "Swipes in the notes list. Delete archives the note and shows " +
                     "Undo — the note is only removed for good when you empty " +
                     "the trash.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            SettingsChoiceRow(
+                title = "Dictation language",
+                selectedValue = speechLanguage,
+                options = listOf(
+                    PreferencesRepository.SPEECH_LANGUAGE_SYSTEM to "System default",
+                    PreferencesRepository.SPEECH_LANGUAGE_ENGLISH to "English",
+                    PreferencesRepository.SPEECH_LANGUAGE_BANGLA to "Bangla",
+                ),
+                onSelect = { value ->
+                    scope.launch { preferencesRepository.setSpeechLanguage(value) }
+                },
+            )
+            Text(
+                "The language the editor mic and voice notes listen " +
+                    "in. System default follows your phone.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

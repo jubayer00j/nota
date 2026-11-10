@@ -14,6 +14,7 @@ import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
 import app.nota.data.html.TextSegment
+import app.nota.data.reminders.AlarmToneSettings
 import app.nota.data.reminders.ReminderRepository
 import app.nota.data.reminders.ReminderScheduler
 import app.nota.data.repository.NoteLockRepository
@@ -211,10 +212,14 @@ class RichNoteEditorViewModel(
     /** Sets/replaces the note's pending reminder and arms it (the
      *  scheduler no-ops phone-alarm reminders — the screen hands those
      *  to the Clock app after this call). */
-    fun setReminder(triggerAt: Long, alertType: String) {
+    fun setReminder(
+        triggerAt: Long,
+        alertType: String,
+        tone: AlarmToneSettings = AlarmToneSettings(),
+    ) {
         val noteId = _note.value?.id ?: return
         viewModelScope.launch {
-            val saved = reminderRepository.setReminder(noteId, triggerAt, alertType)
+            val saved = reminderRepository.setReminder(noteId, triggerAt, alertType, tone = tone)
             reminderScheduler.schedule(saved)
         }
     }

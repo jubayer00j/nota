@@ -175,7 +175,29 @@ class SyncApplier(
                 }
             }
             for (reminder in merged.reminders) {
-                if (reminder.noteId in mergedNoteIds) reminderDao.upsert(reminder.toEntity())
+                if (reminder.noteId in mergedNoteIds) {
+                    val incoming = reminder.toEntity()
+                    val existing = reminderDao.getById(reminder.id)
+                    // Device-local fields (Phase 5.1 alertType, PR #45
+                    // tone quartet) are NOT in the sync wire format —
+                    // toEntity() defaults them. A background sync must
+                    // not silently unpick choices the user made on
+                    // THIS device, so an existing row's local fields
+                    // carry over the merge (Codex PR #45 round 1).
+                    reminderDao.upsert(
+                        if (existing == null) {
+                            incoming
+                        } else {
+                            incoming.copy(
+                                alertType = existing.alertType,
+                                alarmToneMode = existing.alarmToneMode,
+                                alarmToneUri = existing.alarmToneUri,
+                                alarmToneName = existing.alarmToneName,
+                                alarmVibrate = existing.alarmVibrate,
+                            )
+                        },
+                    )
+                }
             }
             for (plan in planned) attachmentDao.upsert(plan.row)
 
