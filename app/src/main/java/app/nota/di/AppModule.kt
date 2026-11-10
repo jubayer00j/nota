@@ -25,7 +25,6 @@ import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.data.templates.TemplateRepository
 import app.nota.feature.ask.AskViewModel
-import app.nota.feature.editor.PlainNoteEditorViewModel
 import app.nota.feature.editor.RichNoteEditorViewModel
 import app.nota.feature.graph.LinkGraphViewModel
 import app.nota.feature.notes.NotesViewModel
@@ -159,7 +158,6 @@ val appModule = module {
         )
     }
     viewModel { NotesViewModel(get(), get(), get(), get(), get()) }
-    viewModel { PlainNoteEditorViewModel(get()) }
     viewModel { RichNoteEditorViewModel(get(), get(), get(), get(), get(), get()) }
     viewModel { app.nota.feature.reminders.RemindersViewModel(get(), get(), androidContext()) }
     viewModel { TemplatesViewModel(get(), get()) }
