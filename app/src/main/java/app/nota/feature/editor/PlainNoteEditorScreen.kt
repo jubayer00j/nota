@@ -35,9 +35,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import app.nota.ui.theme.NotaEditorBody
+import app.nota.data.preferences.PreferencesRepository
+import app.nota.ui.theme.notaEditorBody
 import app.nota.ui.theme.NotaSpacing
 import org.koin.androidx.compose.koinViewModel
+import org.koin.compose.koinInject
 
 /**
  * Plain-text editor (Phase 1b) — route `note/{noteId}`. Title, serif body,
@@ -51,8 +53,16 @@ fun PlainNoteEditorScreen(
     noteId: String,
     onBack: () -> Unit = {},
     viewModel: PlainNoteEditorViewModel = koinViewModel(),
+    // Phase 6 (PR #43): the Writing typography preferences — the
+    // body field follows the same derived style as the rich editor.
+    preferencesRepository: PreferencesRepository = koinInject(),
 ) {
     LaunchedEffect(noteId) { viewModel.load(noteId) }
+    val writingFontSize by preferencesRepository.writingFontSize
+        .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
+    val writingLineHeight by preferencesRepository.writingLineHeight
+        .collectAsState(initial = PreferencesRepository.WRITING_LINE_HEIGHT_DEFAULT)
+    val editorBodyStyle = notaEditorBody(writingFontSize, writingLineHeight)
     val note by viewModel.currentNote.collectAsState()
     val folders by viewModel.folders.collectAsState()
     val existingTags by viewModel.tagNames.collectAsState()
@@ -215,7 +225,7 @@ fun PlainNoteEditorScreen(
                 // text colour merging (same Unspecified-colour hazard as
                 // the rich editor, even though Material3 fields resolve
                 // it to the content colour today).
-                textStyle = NotaEditorBody.copy(color = MaterialTheme.colorScheme.onSurface),
+                textStyle = editorBodyStyle.copy(color = MaterialTheme.colorScheme.onSurface),
                 colors = TextFieldDefaults.colors(
                     focusedContainerColor = Color.Transparent,
                     unfocusedContainerColor = Color.Transparent,

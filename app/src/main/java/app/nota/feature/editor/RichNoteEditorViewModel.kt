@@ -7,6 +7,7 @@ import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteVersionEntity
 import app.nota.data.db.ReminderEntity
 import app.nota.data.html.DocSegment
 import app.nota.data.html.FileSegment
@@ -610,6 +611,49 @@ class RichNoteEditorViewModel(
 
     fun markEditing() {
         if (_saveState.value is SaveState.Saved) _saveState.value = SaveState.Editing
+    }
+
+    // --- Version history (Phase 6, PR #43) ---------------------------
+
+    /** The open note's earlier states, newest first (1.x versions). */
+    fun observeVersions(noteId: String): kotlinx.coroutines.flow.Flow<List<NoteVersionEntity>> =
+        repository.observeVersions(noteId)
+
+    /** The history dialog's Clear: every version of the note goes. */
+    fun clearVersions(noteId: String) {
+        viewModelScope.launch { repository.clearVersions(noteId) }
+    }
+
+    /**
+     * Restores a version of the open note. The repository force-
+     * snapshots the current state first (the restore is itself
+     * undoable), then this VM re-baselines to the restored row so
+     * the editor's next autosave compares against the restored
+     * text. [onDone] receives the restored note (null = the
+     * restore failed and nothing was written) — the screen
+     * re-seeds its working segments from exactly that row.
+     */
+    fun restoreVersion(versionId: String, onDone: (NoteEntity?) -> Unit) {
+        viewModelScope.launch {
+            val ok = repository.restoreVersion(versionId)
+            if (!ok) {
+                onDone(null)
+                return@launch
+            }
+            val restored = loadedNoteId?.let { repository.getById(it) }
+            if (restored != null) {
+                _note.value = restored
+                baselineHtml = NoteDocument.serialize(
+                    NoteDocument.stripTrailingEmptyTextSegments(
+                        NoteDocument.parse(restored.contentHtml),
+                    ),
+                )
+                baselineTitle = restored.title
+                baselineFolderId = restored.folderId
+                _saveState.value = SaveState.Saved(System.currentTimeMillis())
+            }
+            onDone(restored)
+        }
     }
 
     // --- Attachments ---------------------------------------------------------
