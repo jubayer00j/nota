@@ -1,6 +1,8 @@
 package app.nota.data.preferences
 
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.Preferences
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.flow.first
@@ -21,21 +23,15 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 class PreferencesWritingTest {
 
-    private fun scratchRepository(): Pair<PreferencesRepository, File> {
+    private fun scratchStore(): DataStore<Preferences> {
         val dir = Files.createTempDirectory("nota-writing-prefs").toFile()
         val file = File(dir, "writing.preferences_pb")
-        val store = PreferenceDataStoreFactory.create(produceFile = { file })
-        return PreferencesRepository(store) to file
+        return PreferenceDataStoreFactory.create(produceFile = { file })
     }
-
-    private fun repositoryOver(file: File): PreferencesRepository =
-        PreferencesRepository(
-            PreferenceDataStoreFactory.create(produceFile = { file }),
-        )
 
     @Test
     fun defaults_are17pxAnd1Point7() = runBlocking {
-        val (prefs, _) = scratchRepository()
+        val prefs = PreferencesRepository(scratchStore())
         assertEquals(17, prefs.writingFontSize.first())
         assertEquals(1.7f, prefs.writingLineHeight.first(), 0.0001f)
         assertEquals(17, prefs.writingFontSizeNow())
@@ -43,23 +39,27 @@ class PreferencesWritingTest {
     }
 
     @Test
-    fun set_roundTrips_andPersistsAcrossInstances() = runBlocking {
-        val (prefs, file) = scratchRepository()
+    fun set_roundTrips_andReadsBackAcrossInstances() = runBlocking {
+        val store = scratchStore()
+        val prefs = PreferencesRepository(store)
         prefs.setWritingFontSize(20)
         prefs.setWritingLineHeight(2.0f)
         assertEquals(20, prefs.writingFontSizeNow())
         assertEquals(2.0f, prefs.writingLineHeightNow(), 0.0001f)
 
-        // A fresh repository over the same store file reads the
-        // same values back — the settings survive a restart.
-        val fresh = repositoryOver(file)
+        // A second repository over the same store reads the same
+        // values back — the repository itself caches nothing, so
+        // what it serves IS the persisted state. (A second STORE
+        // over the same file is not an option: DataStore allows
+        // only one active store per file per process.)
+        val fresh = PreferencesRepository(store)
         assertEquals(20, fresh.writingFontSizeNow())
         assertEquals(2.0f, fresh.writingLineHeightNow(), 0.0001f)
     }
 
     @Test
     fun setters_clampToThe1xRanges() = runBlocking {
-        val (prefs, _) = scratchRepository()
+        val prefs = PreferencesRepository(scratchStore())
         prefs.setWritingFontSize(99)
         assertEquals(22, prefs.writingFontSizeNow())
         prefs.setWritingFontSize(1)

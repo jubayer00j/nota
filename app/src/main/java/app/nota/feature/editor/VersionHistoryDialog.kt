@@ -157,38 +157,47 @@ fun VersionHistoryDialog(
             }
         },
         confirmButton = {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "History is kept on this device.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (selected == null && !versions.isNullOrEmpty()) {
-                    if (confirmingClear) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                "Clear all versions?",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                            Spacer(Modifier.width(NotaSpacing.sm))
-                            TextButton(
-                                onClick = { handleClear() },
-                                enabled = !busy,
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.error,
-                                ),
-                            ) { Text("Clear") }
-                            TextButton(
-                                onClick = { confirmingClear = false },
-                                enabled = !busy,
-                            ) { Text("Cancel") }
-                        }
-                    } else {
+            // Two postures, never one wide row: the resting footer
+            // (device note + Clear history) and the clear confirm
+            // (question + Clear/Cancel) each get the full width —
+            // side by side they overflow a phone-width dialog and
+            // push the confirm action off-screen.
+            if (confirmingClear) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Clear all versions?",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.width(NotaSpacing.sm))
+                    TextButton(
+                        onClick = { handleClear() },
+                        enabled = !busy,
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    ) { Text("Clear") }
+                    TextButton(
+                        onClick = { confirmingClear = false },
+                        enabled = !busy,
+                    ) { Text("Cancel") }
+                }
+            } else {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "History is kept on this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (selected == null && !versions.isNullOrEmpty()) {
                         TextButton(
                             onClick = { confirmingClear = true },
                             enabled = !busy,
