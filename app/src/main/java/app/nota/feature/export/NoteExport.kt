@@ -1118,7 +1118,13 @@ object NoteExport {
             is FileSegment -> "<p>[File: ${escapeHtmlText(segment.fileName)}]</p>"
             DividerSegment -> "<hr>"
             is ChartSegment ->
-                "<p class=\"noma-chart-placeholder\">${chartPlaceholder(segment)}</p>"
+                // Charts PR-B + Codex P2: the placeholder now
+                // carries the chart's TITLE (user/imported data),
+                // so the HTML path escapes it like every other
+                // text branch — a title holding markup must land
+                // as text, never as live HTML. The Markdown and
+                // plain-text paths keep the readable raw form.
+                "<p class=\"noma-chart-placeholder\">${escapeHtmlText(chartPlaceholder(segment))}</p>"
             is OpaqueSegment -> resolveOpaqueImages(sanitizeOpaqueHtml(segment.rawHtml), resolve)
         }
 

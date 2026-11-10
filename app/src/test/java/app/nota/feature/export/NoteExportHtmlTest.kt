@@ -153,6 +153,34 @@ class NoteExportHtmlTest {
     }
 
     @Test
+    fun chartTitleIsEscapedInHtmlExport() {
+        // Charts PR-B (Codex P2): the placeholder carries the
+        // chart's title, which is user/imported data. In the HTML
+        // export it must be escaped to text — a title holding an
+        // <img onerror> payload must not become live markup when
+        // the exported file is opened.
+        val chart = app.nota.data.html.ChartSegment(
+            payload = "",
+            rawHtml = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+                "data-chart-type=\"bar\" " +
+                "data-title=\"&lt;img src=x onerror=alert(1)&gt;\" data-subtitle=\"\" " +
+                "data-categories='[\"Q1\"]' " +
+                "data-series='[{\"name\":\"S\",\"values\":[1]}]'></div>",
+        )
+        val out = NoteExport.noteToHtml("T", listOf(chart))
+        assertTrue(
+            out.contains(
+                "<p class=\"noma-chart-placeholder\">" +
+                    "[Bar chart: &lt;img src=x onerror=alert(1)&gt;]</p>",
+            ),
+        )
+        assertFalse(out.contains("<img src=x onerror"))
+        // The plain-text export keeps the readable, unescaped title.
+        val text = NoteExport.noteToPlainText("T", listOf(chart))
+        assertTrue(text.contains("[Bar chart: <img src=x onerror=alert(1)>]"))
+    }
+
+    @Test
     fun opaqueHtmlIsScrubbedOfActiveContentOnExport() {
         // The in-note round-trip keeps foreign HTML byte-faithful,
         // but the exported standalone file is opened in a browser:
