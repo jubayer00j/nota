@@ -187,6 +187,7 @@ import app.nota.ui.theme.NotaSpacing
 import coil3.compose.AsyncImage
 import com.mohamedrejeb.richeditor.annotation.ExperimentalRichTextApi
 import com.mohamedrejeb.richeditor.model.HeadingStyle
+import com.mohamedrejeb.richeditor.model.RichSpanStyle
 import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
 import java.text.SimpleDateFormat
@@ -2841,6 +2842,7 @@ private fun SegmentEditor(
     when (val segment = ui.segment) {
         is TextSegment -> {
             val state = stateFor()
+            AutolinkEffect(state)
             var editorModifier = Modifier.fillMaxWidth().then(focusModifier).then(activeModifier)
             if (focusRequester != null) {
                 editorModifier = editorModifier.focusRequester(focusRequester)
@@ -2871,6 +2873,7 @@ private fun SegmentEditor(
         }
         is QuoteSegment -> {
             val state = stateFor()
+            AutolinkEffect(state)
             Row(Modifier.fillMaxWidth().then(focusModifier)) {
                 Box(
                     Modifier.width(3.dp).heightIn(min = 48.dp)
@@ -3516,6 +3519,59 @@ private fun evictCellRichStates(
 }
 
 /**
+ * Phase 6 (Editor Refinement #3): watches one rich state's TEXT
+ * for the autolink triggers (see [AutoLink]) and linkifies the
+ * token through the library's own range link application, so the
+ * stored bytes are exactly the shape the link dialog writes.
+ *
+ * The flow is keyed on the plain text only: applying a link
+ * changes spans, not text, so the linkify can never re-trigger
+ * itself. Both editor hosts (the list slot and the drag ghost)
+ * may collect the same state during a drag; the collectors run
+ * sequentially on the main thread and the already-linked guard
+ * in [applyAutolink] reads live state, so a second collector
+ * always sees the first one's link and stands down.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
+private fun AutolinkEffect(state: RichTextState) {
+    LaunchedEffect(state) {
+        var previous = state.annotatedString.text
+        snapshotFlow { state.annotatedString.text }.collect { current ->
+            if (current != previous) {
+                val before = previous
+                previous = current
+                applyAutolink(state, before, current)
+            }
+        }
+    }
+}
+
+/**
+ * Applies one detected autolink trigger to [state]. Guards, per
+ * the chapter audit: never inside an in-progress [[...]] trigger
+ * (an unclosed "[[" before the caret — the user is writing a
+ * link query, and a URL-shaped query is not prose), and never
+ * over a range that already carries a link span. The link
+ * application itself neither moves the caret nor alters text.
+ */
+@OptIn(ExperimentalRichTextApi::class)
+private fun applyAutolink(state: RichTextState, previous: String, current: String) {
+    val token = AutoLink.triggeredToken(previous, current) ?: return
+    val caret = state.selection.end.coerceIn(0, current.length)
+    val beforeCaret = current.substring(0, caret)
+    val open = beforeCaret.lastIndexOf("[[")
+    if (open >= 0 && beforeCaret.lastIndexOf("]]") < open) return
+    for (i in token.range) {
+        if (state.getRichSpanStyle(TextRange(i, i + 1)) is RichSpanStyle.Link) return
+    }
+    state.addLinkToTextRange(
+        url = token.href,
+        textRange = TextRange(token.range.first, token.range.last + 1),
+    )
+}
+
+/**
  * Phase 6 (rich table cells): one table cell's rich editor. The
  * cell's [RichTextState] is hoisted into the screen-owned
  * [cellRichStates] map (the EditableCellText hoist, one level up):
@@ -3563,6 +3619,7 @@ private fun RichCellText(
             }
         }
     }
+    AutolinkEffect(state)
     BasicRichTextEditor(
         state = state,
         textStyle = MaterialTheme.typography.bodySmall.copy(
