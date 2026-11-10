@@ -1,26 +1,39 @@
 package app.nota.feature.chart
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -28,6 +41,10 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
@@ -36,6 +53,8 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import app.nota.data.chart.ChartColors
 import app.nota.data.chart.ChartData
@@ -66,15 +85,35 @@ import kotlin.math.sin
  *
  * Geometry follows 1.x where it is visible: bars get 4dp rounded
  * outer corners unless stacked, line stroke 2.5dp with 3.5dp
- * markers, area fill at 40% alpha, radar fill at 50%, pie labels
- * for slices over 5%, and the donut hole at
- * min(innerRadius, 45) / 65 of the outer radius — 1.x's Recharts
- * radii. The y-axis title is drawn small at the plot's top-left
- * instead of rotated (a documented simplification; rotated canvas
- * text tested poorly on the J7's narrow cards).
+ * markers, radar fill at 50%, pie labels for slices over 5%, and
+ * the donut hole at min(innerRadius, 45) / 65 of the outer radius
+ * — 1.x's Recharts radii. The y-axis title is drawn small at the
+ * plot's top-left instead of rotated (a documented simplification;
+ * rotated canvas text tested poorly on the J7's narrow cards).
+ *
+ * Charts polish pack (PR #40): the canvas plays a one-shot
+ * entrance animation (bars grow, lines/areas reveal left-to-right,
+ * pie slices sweep in order, radar radii grow), area fills are a
+ * vertical gradient, grouped bars and stacks can carry value
+ * labels, and — when [interactive] — a tap on a bar, point or
+ * slice raises a callout chip with that datum's exact value.
+ * None of this touches the stored data: it is purely how the
+ * chart draws and responds.
  */
+
+/** Test tag for the chart canvas (the tap target). */
+const val CHART_CANVAS_TAG = "chartCanvas"
+
+/** Test tag for the tap-for-values callout chip. */
+const val CHART_CALLOUT_TAG = "chartCallout"
+
 @Composable
-fun ChartView(data: ChartData, modifier: Modifier = Modifier) {
+fun ChartView(
+    data: ChartData,
+    modifier: Modifier = Modifier,
+    animateEntrance: Boolean = true,
+    interactive: Boolean = true,
+) {
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = data.title,
@@ -105,6 +144,8 @@ fun ChartView(data: ChartData, modifier: Modifier = Modifier) {
         }
         ChartCanvas(
             data = data,
+            animateEntrance = animateEntrance,
+            interactive = interactive,
             modifier = Modifier
                 .fillMaxWidth()
                 .height(220.dp)
@@ -153,22 +194,147 @@ private fun ChartLegend(entries: List<Pair<String, Color>>) {
 }
 
 @Composable
-private fun ChartCanvas(data: ChartData, modifier: Modifier) {
+private fun ChartCanvas(
+    data: ChartData,
+    modifier: Modifier,
+    animateEntrance: Boolean,
+    interactive: Boolean,
+) {
     val textMeasurer = rememberTextMeasurer()
     val labelStyle = MaterialTheme.typography.labelSmall
     val axisColor = MaterialTheme.colorScheme.onSurfaceVariant
     val gridColor = MaterialTheme.colorScheme.outlineVariant
-    Canvas(modifier) {
-        if (data.categories.isEmpty() || data.series.isEmpty()) {
-            drawCenteredNote(textMeasurer, labelStyle, axisColor, "No chart data")
-            return@Canvas
+
+    // Entrance animation: a one-shot 0→1 progress. The editor
+    // dialog's live preview opts out (it re-renders per keystroke;
+    // replaying on every edit would be nauseating).
+    val anim = remember { Animatable(if (animateEntrance) 0f else 1f) }
+    LaunchedEffect(animateEntrance) {
+        if (animateEntrance && anim.value < 1f) {
+            anim.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(durationMillis = 650, easing = FastOutSlowInEasing),
+            )
         }
-        when (data.type) {
-            ChartType.PIE -> drawPieChart(data, donut = false, textMeasurer, labelStyle, gridColor, axisColor)
-            ChartType.DONUT -> drawPieChart(data, donut = true, textMeasurer, labelStyle, gridColor, axisColor)
-            ChartType.RADAR -> drawRadarChart(data, textMeasurer, labelStyle, axisColor, gridColor)
-            else -> drawCartesianChart(data, textMeasurer, labelStyle, axisColor, gridColor)
+    }
+
+    // Tap-for-values: hit targets recorded by the draw pass at
+    // final geometry; the current selection drives the callout.
+    val hitStore = remember { ChartHitStore() }
+    var selection by remember(data) { mutableStateOf<ChartHitTarget?>(null) }
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+
+    Box(modifier = modifier.onSizeChanged { canvasSize = it }) {
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                .testTag(CHART_CANVAS_TAG)
+                .then(
+                    if (interactive) {
+                        Modifier.pointerInput(data) {
+                            detectTapGestures { offset ->
+                                val hit = hitTest(
+                                    hitStore.targets,
+                                    offset.x,
+                                    offset.y,
+                                    28.dp.toPx(),
+                                )
+                                val current = selection
+                                // Re-tapping the selected target (or
+                                // tapping empty space) dismisses;
+                                // tapping another target moves the
+                                // callout to it.
+                                selection = when {
+                                    hit == null -> null
+                                    current != null &&
+                                        current.kind == hit.kind &&
+                                        current.categoryIndex == hit.categoryIndex &&
+                                        current.seriesIndex == hit.seriesIndex -> null
+                                    else -> hit
+                                }
+                            }
+                        }
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
+            val targets = mutableListOf<ChartHitTarget>()
+            if (data.categories.isEmpty() || data.series.isEmpty()) {
+                drawCenteredNote(textMeasurer, labelStyle, axisColor, "No chart data")
+                hitStore.targets = targets
+                return@Canvas
+            }
+            val progress = anim.value
+            when (data.type) {
+                ChartType.PIE -> drawPieChart(
+                    data, donut = false, textMeasurer, labelStyle, gridColor, axisColor,
+                    progress, targets,
+                )
+                ChartType.DONUT -> drawPieChart(
+                    data, donut = true, textMeasurer, labelStyle, gridColor, axisColor,
+                    progress, targets,
+                )
+                ChartType.RADAR -> drawRadarChart(
+                    data, textMeasurer, labelStyle, axisColor, gridColor, progress, targets,
+                )
+                else -> drawCartesianChart(
+                    data, textMeasurer, labelStyle, axisColor, gridColor, progress, targets,
+                )
+            }
+            hitStore.targets = targets
         }
+
+        val selected = selection
+        if (interactive && selected != null) {
+            var calloutSize by remember { mutableStateOf(IntSize.Zero) }
+            Surface(
+                color = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shape = RoundedCornerShape(8.dp),
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .onSizeChanged { calloutSize = it }
+                    .offset {
+                        val maxX = (canvasSize.width - calloutSize.width)
+                            .coerceAtLeast(0).toFloat()
+                        val maxY = (canvasSize.height - calloutSize.height)
+                            .coerceAtLeast(0).toFloat()
+                        val x = (selected.anchorX - calloutSize.width / 2f)
+                            .coerceIn(0f, maxX)
+                        // Above the anchor when it fits, below it
+                        // when the anchor hugs the top edge.
+                        val above = selected.anchorY - calloutSize.height - 8.dp.toPx()
+                        val y = if (above >= 0f) {
+                            above
+                        } else {
+                            (selected.anchorY + 12.dp.toPx()).coerceAtMost(maxY)
+                        }
+                        IntOffset(x.roundToInt(), y.roundToInt())
+                    }
+                    .testTag(CHART_CALLOUT_TAG),
+            ) {
+                Text(
+                    text = calloutText(data, selected),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+/** The callout's words for a hit: "Feb · Series 1: 150", pie "Feb: 150 (33%)". */
+private fun calloutText(data: ChartData, hit: ChartHitTarget): String {
+    val category = data.categories.getOrNull(hit.categoryIndex) ?: ""
+    val percent = hit.percent
+    return if (percent != null) {
+        "$category: ${formatChartValue(hit.value)} (${(percent * 100).roundToInt()}%)"
+    } else {
+        val series = data.series.getOrNull(hit.seriesIndex)?.name ?: ""
+        "$category · $series: ${formatChartValue(hit.value)}"
     }
 }
 
@@ -203,6 +369,8 @@ private fun DrawScope.drawCartesianChart(
     labelStyle: TextStyle,
     axisColor: Color,
     gridColor: Color,
+    progress: Float,
+    targets: MutableList<ChartHitTarget>,
 ) {
     val cats = data.categories
     val n = cats.size
@@ -379,6 +547,10 @@ private fun DrawScope.drawCartesianChart(
         if (barIdx.isNotEmpty()) {
             val groupW = bandW * 0.72f
             val barW = groupW / barIdx.size
+            // Polish pack: value labels above grouped bars when
+            // the chart is sparse enough to stay readable (total
+            // bar count = categories × bar series ≤ 12).
+            val showBarLabels = n * barIdx.size <= 12
             barIdx.forEachIndexed { order, si ->
                 val s = data.series[si]
                 val color = ChartColors.seriesColor(s.color, si)
@@ -388,7 +560,42 @@ private fun DrawScope.drawCartesianChart(
                     val x = plotL + bandW * ci + (bandW - groupW) / 2f + barW * order + barW * 0.06f
                     val yTop = yOf(max(v, 0.0))
                     val yBot = yOf(min(v, 0.0))
-                    drawBar(x, yTop, barW * 0.88f, yBot - yTop, color, 4.dp.toPx(), roundTop = v > 0)
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.RECT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        left = x,
+                        top = yTop,
+                        right = x + barW * 0.88f,
+                        bottom = yBot,
+                        anchorX = x + barW * 0.44f,
+                        anchorY = if (v > 0) yTop else yBot,
+                    )
+                    // Entrance: the bar grows from the baseline —
+                    // its full height scaled by the progress (down
+                    // from the zero line for negative values).
+                    val fullH = yBot - yTop
+                    drawBar(
+                        x,
+                        if (v > 0) yBot - fullH * progress else yTop,
+                        barW * 0.88f, fullH * progress,
+                        color, 4.dp.toPx(), roundTop = v > 0,
+                    )
+                    if (showBarLabels) {
+                        drawValueLabel(
+                            measurer, labelStyle, axisColor,
+                            text = formatChartValue(v),
+                            centerX = x + barW * 0.44f,
+                            edgeY = if (v > 0) {
+                                yBot - fullH * progress
+                            } else {
+                                yTop + fullH * progress
+                            },
+                            above = v > 0,
+                            maxWidth = bandW,
+                        )
+                    }
                 }
             }
         }
@@ -417,10 +624,30 @@ private fun DrawScope.drawCartesianChart(
                     }
                     val yTop = yOf(max(from, to))
                     val yBot = yOf(min(from, to))
+                    val segX = x0 + bandW * ci + groupW * 0.05f
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.RECT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        left = segX,
+                        top = yTop,
+                        right = segX + groupW * 0.9f,
+                        bottom = yBot,
+                        anchorX = segX + groupW * 0.45f,
+                        anchorY = if (v > 0) yTop else yBot,
+                    )
+                    // Entrance: cumulative stack heights scale by
+                    // the progress, so the whole stack grows from
+                    // the baseline as one column.
+                    val animFrom = from * progress
+                    val animTo = to * progress
+                    val animTop = yOf(max(animFrom, animTo))
+                    val animBot = yOf(min(animFrom, animTo))
                     drawRect(
                         color = color,
-                        topLeft = Offset(x0 + bandW * ci + groupW * 0.05f, yTop),
-                        size = Size(groupW * 0.9f, yBot - yTop),
+                        topLeft = Offset(segX, animTop),
+                        size = Size(groupW * 0.9f, animBot - animTop),
                     )
                 }
             }
@@ -437,6 +664,16 @@ private fun DrawScope.drawCartesianChart(
                     val base = if (v >= 0) posAcc[ci] else negAcc[ci]
                     tops[ci] = Offset(centerX(ci), yOf(satAdd(base, v)))
                     bottoms[ci] = Offset(centerX(ci), yOf(base))
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.POINT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        cx = tops[ci]!!.x,
+                        cy = tops[ci]!!.y,
+                        anchorX = tops[ci]!!.x,
+                        anchorY = tops[ci]!!.y,
+                    )
                     if (v >= 0) posAcc[ci] = satAdd(posAcc[ci], v) else negAcc[ci] = satAdd(negAcc[ci], v)
                 }
                 var ci = 0
@@ -459,22 +696,24 @@ private fun DrawScope.drawCartesianChart(
                             }
                             close()
                         }
-                        drawPath(fill, color.copy(alpha = 0.4f))
                         val strokePath = Path().apply {
                             for (k in ci..end) {
                                 val p = tops[k]!!
                                 if (k == ci) moveTo(p.x, p.y) else lineTo(p.x, p.y)
                             }
                         }
-                        drawPath(
-                            strokePath,
-                            color,
-                            style = Stroke(
-                                width = 2.5.dp.toPx(),
-                                cap = StrokeCap.Round,
-                                join = StrokeJoin.Round,
-                            ),
-                        )
+                        withRevealClip(plotL, plotW, progress) {
+                            drawPath(fill, areaGradient(color, tops, bottoms, ci, end))
+                            drawPath(
+                                strokePath,
+                                color,
+                                style = Stroke(
+                                    width = 2.5.dp.toPx(),
+                                    cap = StrokeCap.Round,
+                                    join = StrokeJoin.Round,
+                                ),
+                            )
+                        }
                     }
                     ci = end + 1
                 }
@@ -483,24 +722,172 @@ private fun DrawScope.drawCartesianChart(
                 val pts = (0 until n).map { ci ->
                     s.values.getOrNull(ci)?.let { Offset(centerX(ci), yOf(it)) }
                 }
-                drawAreaRuns(pts, color, plotB, smooth = data.options.smoothLine)
+                pts.forEachIndexed { ci, p ->
+                    if (p != null) {
+                        targets += ChartHitTarget(
+                            kind = ChartHitKind.POINT,
+                            categoryIndex = ci,
+                            seriesIndex = si,
+                            value = s.values[ci]!!,
+                            cx = p.x,
+                            cy = p.y,
+                            anchorX = p.x,
+                            anchorY = p.y,
+                        )
+                    }
+                }
+                withRevealClip(plotL, plotW, progress) {
+                    drawAreaRuns(pts, color, plotB, smooth = data.options.smoothLine)
+                }
             }
             kinds[si] == SeriesKind.LINE -> {
                 val pts = (0 until n).map { ci ->
                     s.values.getOrNull(ci)?.let { Offset(centerX(ci), yOf(it)) }
                 }
-                drawLineRuns(
-                    pts = pts,
-                    color = color,
-                    smooth = data.options.smoothLine,
-                    markers = data.options.showMarkers,
-                    strokeW = 2.5.dp.toPx(),
-                    markerR = 3.5.dp.toPx(),
-                )
+                pts.forEachIndexed { ci, p ->
+                    if (p != null) {
+                        targets += ChartHitTarget(
+                            kind = ChartHitKind.POINT,
+                            categoryIndex = ci,
+                            seriesIndex = si,
+                            value = s.values[ci]!!,
+                            cx = p.x,
+                            cy = p.y,
+                            anchorX = p.x,
+                            anchorY = p.y,
+                        )
+                    }
+                }
+                withRevealClip(plotL, plotW, progress) {
+                    drawLineRuns(
+                        pts = pts,
+                        color = color,
+                        smooth = data.options.smoothLine,
+                        markers = data.options.showMarkers,
+                        strokeW = 2.5.dp.toPx(),
+                        markerR = 3.5.dp.toPx(),
+                    )
+                }
             }
             else -> Unit // grouped bars were drawn above
         }
     }
+
+    // Polish pack: stack TOTAL labels — the positive total above
+    // each stack, the negative total below it — when the chart is
+    // sparse enough to stay readable (≤ 12 categories). The
+    // accumulators now hold the final totals; the labels ride the
+    // animated stack tops.
+    if (stackActive && hasBar && n <= 12) {
+        for (ci in 0 until n) {
+            val center = plotL + bandW * ci + bandW / 2f
+            val pos = posAcc[ci]
+            if (pos > 0.0) {
+                drawValueLabel(
+                    measurer, labelStyle, axisColor,
+                    text = formatChartValue(pos),
+                    centerX = center,
+                    edgeY = yOf(pos * progress),
+                    above = true,
+                    maxWidth = bandW,
+                )
+            }
+            val neg = negAcc[ci]
+            if (neg < 0.0) {
+                drawValueLabel(
+                    measurer, labelStyle, axisColor,
+                    text = formatChartValue(neg),
+                    centerX = center,
+                    edgeY = yOf(neg * progress),
+                    above = false,
+                    maxWidth = bandW,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The entrance reveal for line/area drawing: the series draws
+ * normally inside a clip that grows from the plot's left edge to
+ * its full width with [progress]. At progress 1 the draw is
+ * unclipped, so nothing at the plot's edge is ever shaved.
+ */
+private fun DrawScope.withRevealClip(
+    plotL: Float,
+    plotW: Float,
+    progress: Float,
+    block: DrawScope.() -> Unit,
+) {
+    if (progress >= 1f) {
+        block()
+    } else {
+        clipRect(
+            left = plotL,
+            top = 0f,
+            right = plotL + plotW * progress,
+            bottom = size.height,
+        ) { block() }
+    }
+}
+
+/** The polish-pack area fill: series colour at 45% alpha at the run's top fading to 6% at its base. */
+private fun areaGradient(
+    color: Color,
+    tops: Array<Offset?>,
+    bottoms: Array<Offset?>,
+    from: Int,
+    to: Int,
+): Brush {
+    var topY = Float.MAX_VALUE
+    var baseY = Float.MIN_VALUE
+    for (k in from..to) {
+        tops[k]?.let { if (it.y < topY) topY = it.y }
+        bottoms[k]?.let { if (it.y > baseY) baseY = it.y }
+    }
+    if (topY == Float.MAX_VALUE) {
+        topY = 0f
+        baseY = 1f
+    }
+    return Brush.verticalGradient(
+        colors = listOf(color.copy(alpha = 0.45f), color.copy(alpha = 0.06f)),
+        startY = topY,
+        endY = max(baseY, topY + 1f),
+    )
+}
+
+/**
+ * A bar/stack value label in labelSmall, centred on [centerX] and
+ * sitting just outside the bar's value edge ([edgeY], the
+ * ANIMATED edge, so the label rides the growing bar). Clamped
+ * inside the canvas so the tallest bar's label stays visible.
+ */
+private fun DrawScope.drawValueLabel(
+    measurer: TextMeasurer,
+    style: TextStyle,
+    color: Color,
+    text: String,
+    centerX: Float,
+    edgeY: Float,
+    above: Boolean,
+    maxWidth: Float,
+) {
+    val layout = measurer.measure(
+        AnnotatedString(text),
+        style = style,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        constraints = Constraints(maxWidth = maxWidth.toInt().coerceAtLeast(1)),
+    )
+    val gap = 2.dp.toPx()
+    val y = if (above) {
+        (edgeY - layout.size.height - gap).coerceAtLeast(0f)
+    } else {
+        (edgeY + gap).coerceAtMost((size.height - layout.size.height).coerceAtLeast(0f))
+    }
+    val x = (centerX - layout.size.width / 2f)
+        .coerceIn(0f, (size.width - layout.size.width).coerceAtLeast(0f))
+    drawText(layout, color = color, topLeft = Offset(x, y))
 }
 
 /** A bar with only its outer (value-side) corners rounded, like 1.x's radius [4,4,0,0]. */
@@ -615,7 +1002,17 @@ private fun DrawScope.drawAreaRuns(
             lineTo(run.first().x, baseY)
             close()
         }
-        drawPath(fill, color.copy(alpha = 0.4f))
+        // Polish pack: gradient fill — 45% alpha at the line
+        // fading to 6% at the baseline (was a flat 40%).
+        val topY = run.minOf { it.y }
+        drawPath(
+            fill,
+            Brush.verticalGradient(
+                colors = listOf(color.copy(alpha = 0.45f), color.copy(alpha = 0.06f)),
+                startY = topY,
+                endY = max(baseY, topY + 1f),
+            ),
+        )
         drawPath(
             top,
             color,
@@ -634,6 +1031,8 @@ private fun DrawScope.drawPieChart(
     labelStyle: TextStyle,
     ringColor: Color,
     noteColor: Color,
+    progress: Float,
+    targets: MutableList<ChartHitTarget>,
 ) {
     val series = data.series.first()
     val values = data.categories.indices.map { ci ->
@@ -669,48 +1068,77 @@ private fun DrawScope.drawPieChart(
         0f
     }
     var start = -90f
+    // Entrance: a sweep budget of 360° × progress, consumed slice
+    // by slice in order (pacman-style) — earlier slices complete
+    // before later ones begin.
+    var remaining = 360f * progress
     scaled.forEachIndexed { i, v ->
         val sweep = (v / total * 360.0).toFloat()
         if (sweep > 0f) {
-            val color = ChartColors.pieSliceColor(i)
-            if (donut) {
-                val mid = (innerR + radius) / 2f
-                drawArc(
-                    color = color,
-                    startAngle = start,
-                    sweepAngle = sweep,
-                    useCenter = false,
-                    topLeft = Offset(cx - mid, cy - mid),
-                    size = Size(mid * 2, mid * 2),
-                    style = Stroke(width = radius - innerR),
-                )
-            } else {
-                drawArc(
-                    color = color,
-                    startAngle = start,
-                    sweepAngle = sweep,
-                    useCenter = true,
-                    topLeft = Offset(cx - radius, cy - radius),
-                    size = Size(radius * 2, radius * 2),
-                )
-            }
             val frac = v / total
-            if (frac > 0.05) {
-                val midAngle = Math.toRadians((start + sweep / 2f).toDouble())
-                val labelR = if (donut) (innerR + radius) / 2f else radius * 0.66f
-                val lx = cx + (labelR * cos(midAngle)).toFloat()
-                val ly = cy + (labelR * sin(midAngle)).toFloat()
-                val layout = measurer.measure(
-                    AnnotatedString("${(frac * 100).roundToInt()}%"),
-                    style = labelStyle,
-                    maxLines = 1,
-                    constraints = Constraints(maxWidth = radius.toInt().coerceAtLeast(1)),
-                )
-                drawText(
-                    layout,
-                    color = Color.White,
-                    topLeft = Offset(lx - layout.size.width / 2f, ly - layout.size.height / 2f),
-                )
+            // Hit target at FINAL geometry, whatever the
+            // animation's current frame shows.
+            val targetMid = Math.toRadians((start + sweep / 2f).toDouble())
+            val targetLabelR = if (donut) (innerR + radius) / 2f else radius * 0.66f
+            targets += ChartHitTarget(
+                kind = ChartHitKind.SLICE,
+                categoryIndex = i,
+                seriesIndex = 0,
+                value = values[i],
+                percent = frac,
+                cx = cx,
+                cy = cy,
+                innerRadius = innerR,
+                outerRadius = radius,
+                startAngle = ((start % 360f) + 360f) % 360f,
+                sweepAngle = sweep,
+                anchorX = cx + (targetLabelR * cos(targetMid)).toFloat(),
+                anchorY = cy + (targetLabelR * sin(targetMid)).toFloat(),
+            )
+            val drawnSweep = min(sweep, remaining)
+            remaining = (remaining - drawnSweep).coerceAtLeast(0f)
+            if (drawnSweep > 0f) {
+                val color = ChartColors.pieSliceColor(i)
+                if (donut) {
+                    val mid = (innerR + radius) / 2f
+                    drawArc(
+                        color = color,
+                        startAngle = start,
+                        sweepAngle = drawnSweep,
+                        useCenter = false,
+                        topLeft = Offset(cx - mid, cy - mid),
+                        size = Size(mid * 2, mid * 2),
+                        style = Stroke(width = radius - innerR),
+                    )
+                } else {
+                    drawArc(
+                        color = color,
+                        startAngle = start,
+                        sweepAngle = drawnSweep,
+                        useCenter = true,
+                        topLeft = Offset(cx - radius, cy - radius),
+                        size = Size(radius * 2, radius * 2),
+                    )
+                }
+                // The % label appears once its slice has fully
+                // swept in (its mid-angle is meaningless mid-sweep).
+                if (drawnSweep >= sweep && frac > 0.05) {
+                    val midAngle = Math.toRadians((start + sweep / 2f).toDouble())
+                    val labelR = if (donut) (innerR + radius) / 2f else radius * 0.66f
+                    val lx = cx + (labelR * cos(midAngle)).toFloat()
+                    val ly = cy + (labelR * sin(midAngle)).toFloat()
+                    val layout = measurer.measure(
+                        AnnotatedString("${(frac * 100).roundToInt()}%"),
+                        style = labelStyle,
+                        maxLines = 1,
+                        constraints = Constraints(maxWidth = radius.toInt().coerceAtLeast(1)),
+                    )
+                    drawText(
+                        layout,
+                        color = Color.White,
+                        topLeft = Offset(lx - layout.size.width / 2f, ly - layout.size.height / 2f),
+                    )
+                }
             }
         }
         start += sweep
@@ -726,6 +1154,8 @@ private fun DrawScope.drawRadarChart(
     labelStyle: TextStyle,
     axisColor: Color,
     gridColor: Color,
+    progress: Float,
+    targets: MutableList<ChartHitTarget>,
 ) {
     val n = data.categories.size
     var maxV = 0.0
@@ -759,9 +1189,24 @@ private fun DrawScope.drawRadarChart(
     }
     data.series.forEachIndexed { si, s ->
         val color = ChartColors.seriesColor(s.color, si)
-        val pts = (0 until n).map { ci ->
-            vertex(ci, ((s.values.getOrNull(ci) ?: 0.0).coerceAtLeast(0.0) / maxV).toFloat())
+        val fracs = (0 until n).map { ci ->
+            ((s.values.getOrNull(ci) ?: 0.0).coerceAtLeast(0.0) / maxV).toFloat()
         }
+        fracs.forEachIndexed { ci, frac ->
+            val p = vertex(ci, frac)
+            targets += ChartHitTarget(
+                kind = ChartHitKind.POINT,
+                categoryIndex = ci,
+                seriesIndex = si,
+                value = s.values.getOrNull(ci) ?: 0.0,
+                cx = p.x,
+                cy = p.y,
+                anchorX = p.x,
+                anchorY = p.y,
+            )
+        }
+        // Entrance: the polygon's radii scale with the progress.
+        val pts = fracs.mapIndexed { ci, frac -> vertex(ci, frac * progress) }
         val polygon = Path().apply {
             pts.forEachIndexed { i, p -> if (i == 0) moveTo(p.x, p.y) else lineTo(p.x, p.y) }
             close()
@@ -770,7 +1215,7 @@ private fun DrawScope.drawRadarChart(
         drawPath(
             polygon,
             color,
-            style = Stroke(width = 2.dp.toPx(), join = StrokeJoin.Round),
+            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
         )
         pts.forEach { p -> drawCircle(color, 2.5.dp.toPx(), p) }
     }

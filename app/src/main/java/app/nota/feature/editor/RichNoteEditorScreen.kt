@@ -2883,7 +2883,13 @@ private fun SegmentEditor(
                                         .clickable { chartEditing = chartData }
                                         .testTag(CHART_BLOCK_EDIT_TAG),
                                 ) {
-                                    ChartView(chartData)
+                                    // Charts polish: interactive =
+                                    // false — the tap here belongs
+                                    // to tap-to-edit, so the canvas
+                                    // takes no tap handling of its
+                                    // own (the entrance animation
+                                    // still plays).
+                                    ChartView(chartData, interactive = false)
                                     Text(
                                         "Tap to edit chart",
                                         style = MaterialTheme.typography.bodySmall,

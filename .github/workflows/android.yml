@@ -87,6 +87,9 @@ jobs:
   # pure-JVM chart serialiser class; the chart editor dialog suite
   # joins the UI shard's class list in app/build.gradle.kts, and
   # the full-screen chart edit cases extend EditorReadModeUiTest.)
+  # (Charts polish: the partition grows to 103 classes — fast-a +1
+  # pure-JVM chart hit-model class; the chart view interaction
+  # suite joins the UI shard's class list in app/build.gradle.kts.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -132,7 +135,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 60 of 102 non-UI classes)
+      - name: Run fast unit tests (shard A, 61 of 103 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -145,6 +148,7 @@ jobs:
             --tests "app.nota.data.chart.ChartDataParserTest" \
             --tests "app.nota.data.chart.ChartColorsTest" \
             --tests "app.nota.data.chart.ChartSerializerTest" \
+            --tests "app.nota.feature.chart.ChartHitModelTest" \
             --tests "app.nota.feature.settings.AiSettingsFormTest" \
             --tests "app.nota.feature.settings.AiSetupCopyTest" \
             --tests "app.nota.feature.ask.AskThreadTest" \

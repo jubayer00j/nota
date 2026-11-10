@@ -252,7 +252,10 @@ fun ChartEditorDialog(
                         .verticalScroll(rememberScrollState()),
                 ) {
                     // Live preview of the in-dialog state.
-                    ChartView(data)
+                    // Charts polish: no entrance animation (the
+                    // preview re-renders per keystroke), but taps
+                    // still raise value callouts.
+                    ChartView(data, animateEntrance = false)
                     Spacer(Modifier.height(NotaSpacing.sm))
                     TabRow(selectedTabIndex = tab) {
                         Tab(
