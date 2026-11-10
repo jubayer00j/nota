@@ -64,6 +64,25 @@ val MIGRATION_5_6: Migration = object : Migration(5, 6) {
     }
 }
 
+/**
+ * Phase 6 extras (PR #44) adds the phone-alarm tone fields to
+ * reminders — per-reminder, device-local, exactly like alertType:
+ * the backup wire format carries none of them, so restored
+ * reminders come back with these same defaults. Plain ADD COLUMNs
+ * in the MIGRATION_5_6 style; existing rows get the system default
+ * tone and vibrate on, which is exactly how every pre-extras
+ * phone-alarm reminder behaved (the Clock intent hardcoded
+ * vibrate on and sent no ringtone).
+ */
+val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `reminders` ADD COLUMN `alarmToneMode` TEXT NOT NULL DEFAULT 'system'")
+        db.execSQL("ALTER TABLE `reminders` ADD COLUMN `alarmToneUri` TEXT")
+        db.execSQL("ALTER TABLE `reminders` ADD COLUMN `alarmToneName` TEXT")
+        db.execSQL("ALTER TABLE `reminders` ADD COLUMN `alarmVibrate` INTEGER NOT NULL DEFAULT 1")
+    }
+}
+
 val MIGRATION_4_5: Migration = object : Migration(4, 5) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL(

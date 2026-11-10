@@ -155,8 +155,27 @@ data class ReminderEntity(
      * alertType. Device-local by design: the backup crossover (BxReminder)
      * carries no alertType, so a restored reminder comes back as a
      * notification reminder (the shipped Phase 2c contract).
+     *
+     * The Phase 6 extras tone fields below follow the SAME
+     * device-local discipline: a tone lives on THIS device (a
+     * system ringtone URI or a user-picked file), so they are
+     * per-reminder, are never written into the backup wire
+     * format or a sync payload, and a restored reminder always
+     * comes back with the system default tone and vibrate on.
+     * [alarmToneMode] is one of the
+     * app.nota.data.reminders.AlarmToneMode values: "system"
+     * (the Clock app's default — no ringtone extra is sent),
+     * "system-picker" (chosen from the system ringtone picker)
+     * or "custom" (a picked audio file). [alarmToneUri] and
+     * [alarmToneName] are only meaningful for the latter two.
+     * The tone fields apply to phone-alarm reminders only; the
+     * notification path ignores them.
      */
     val alertType: String = "notification",
+    val alarmToneMode: String = "system",
+    val alarmToneUri: String? = null,
+    val alarmToneName: String? = null,
+    val alarmVibrate: Boolean = true,
 )
 
 /** Local-only version history (never synced/backed up, spec §7). */

@@ -85,10 +85,17 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         triggerAt: Long,
         alertType: String,
         nowMillis: Long = System.currentTimeMillis(),
+        tone: AlarmToneSettings = AlarmToneSettings(),
     ): ReminderEntity {
         require(alertType == ReminderAlertType.NOTIFICATION || alertType == ReminderAlertType.PHONE_ALARM) {
             "Unknown reminder alertType: $alertType"
         }
+        // The tone fields are device-local extras (PR #44): they are
+        // stored on the row like alertType but never cross into a
+        // backup or sync payload (the BxReminder crossover has no
+        // tone fields, so a restored reminder comes back with the
+        // entity defaults — system tone, vibrate on).
+        val storedTone = tone.normalised()
         return db.withTransaction {
             val existing = dao().getForNote(noteId)
             val primary = existing.firstOrNull()
@@ -103,6 +110,10 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     repeatRule = null,
                     enabled = true,
                     alertType = alertType,
+                    alarmToneMode = storedTone.mode,
+                    alarmToneUri = storedTone.uri,
+                    alarmToneName = storedTone.name,
+                    alarmVibrate = storedTone.vibrate,
                 )
             } else {
                 ReminderEntity(
@@ -113,6 +124,10 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     enabled = true,
                     createdAt = nowMillis,
                     alertType = alertType,
+                    alarmToneMode = storedTone.mode,
+                    alarmToneUri = storedTone.uri,
+                    alarmToneName = storedTone.name,
+                    alarmVibrate = storedTone.vibrate,
                 )
             }
             dao().upsert(saved)

@@ -15,6 +15,11 @@ import java.time.ZoneId
  * app will open so you can confirm"). Ringing, snooze and dismiss
  * belong to the Clock app; Nota arms nothing and posts nothing for
  * these reminders.
+ *
+ * Phase 6 extras (PR #44): the hand-off now carries the reminder's
+ * stored tone choices — EXTRA_VIBRATE from the stored flag (5.1
+ * hardcoded it on, which stays the default) and EXTRA_RINGTONE only
+ * when a tone URI is stored, exactly as 1.x forwards them.
  */
 object PhoneAlarmIntents {
 
@@ -22,6 +27,8 @@ object PhoneAlarmIntents {
         noteTitle: String,
         triggerAtMillis: Long,
         zone: ZoneId = ZoneId.systemDefault(),
+        vibrate: Boolean = true,
+        ringtoneUri: String? = null,
     ): Intent {
         val time = Instant.ofEpochMilli(triggerAtMillis).atZone(zone)
         return Intent(AlarmClock.ACTION_SET_ALARM).apply {
@@ -32,7 +39,12 @@ object PhoneAlarmIntents {
                 AlarmClock.EXTRA_MESSAGE,
                 "Nota: ${noteTitle.trim().ifBlank { ReminderNotificationText.UNTITLED }}",
             )
-            putExtra(AlarmClock.EXTRA_VIBRATE, true)
+            putExtra(AlarmClock.EXTRA_VIBRATE, vibrate)
+            // Only when the user picked a tone: with no extra the
+            // Clock app uses its own default.
+            if (ringtoneUri != null) {
+                putExtra(AlarmClock.EXTRA_RINGTONE, ringtoneUri)
+            }
             putExtra(AlarmClock.EXTRA_SKIP_UI, false)
         }
     }
