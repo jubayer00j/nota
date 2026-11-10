@@ -272,6 +272,40 @@ class VersionHistoryRobolectricTest {
         assertEquals("<p>current body</p>", undone.contentHtml)
     }
 
+    @Test
+    fun restoreOfVersionReferencingDeletedAttachment_restoresVerbatim() =
+        runBlocking {
+            // Codex P2 (PR #43), adjudicated as 1.x parity: versions
+            // store content verbatim and restore verbatim — 1.x
+            // versions.ts does exactly the same, so a version whose
+            // attachment was deleted in the meantime restores with
+            // the reference intact. The renderers degrade
+            // gracefully on a missing attachment (file blocks fall
+            // back to the segment's stored file name; image blocks
+            // show their empty state) and the block stays deletable
+            // in the editor, so nothing is trapped or crashes.
+            // Copying attachment files into every version was
+            // rejected: up to 50 duplicated image sets per note.
+            val now = System.currentTimeMillis()
+            val htmlWithImage =
+                "<p>before</p><img data-attachment-id=\"att-gone\" />"
+            seedNote(
+                title = "With image",
+                contentHtml = htmlWithImage,
+                updatedAt = now - 120_000,
+            )
+            // No attachment row for att-gone exists (deleted).
+            val stored = db.noteDao().getById("n1")!!
+            repository.updateRichBody(stored, "With image", "<p>after</p>")
+            val rows = versions("n1")
+            assertEquals(1, rows.size)
+            assertEquals(htmlWithImage, rows[0].contentHtml)
+
+            assertTrue(repository.restoreVersion(rows[0].id))
+            val restored = db.noteDao().getById("n1")!!
+            assertEquals(htmlWithImage, restored.contentHtml)
+        }
+
     // ------------------------------------------------ other writers
 
     @Test

@@ -36,6 +36,14 @@ import kotlinx.coroutines.flow.Flow
  *   note-level conflict copies instead. The one exception is the
  *   guest→account library copy, which moves the rows with the
  *   library on the same device.
+ * - Versions store content verbatim — including attachment
+ *   references. If an attachment is deleted after a version was
+ *   taken, restoring that version brings the reference back with
+ *   no file behind it; the renderers degrade gracefully (a file
+ *   block shows its stored name, an image block its empty state)
+ *   and the block stays deletable. This is 1.x's behaviour too;
+ *   copying attachment files into versions was rejected (up to
+ *   [MAX_VERSIONS] duplicated image sets per note).
  *
  * Restore lives on [NoteRepository.restoreVersion]: it force-
  * snapshots the current state through here, then writes the
