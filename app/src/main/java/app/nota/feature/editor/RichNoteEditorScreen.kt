@@ -1825,8 +1825,10 @@ fun RichNoteEditorScreen(
                     focusedTableCell = null
                 },
                 onTaskItemFocus = { path ->
-                    focusedTaskItem = ui.id to path
-                    focusedTableCell = null
+                    // A null path clears the task focus (an item
+                    // was removed from under it — Codex P2, PR #41).
+                    focusedTaskItem = path?.let { ui.id to it }
+                    if (path != null) focusedTableCell = null
                 },
                 onTableCellFocus = { r, c ->
                     focusedTableCell = Triple(ui.id, r, c)
@@ -2800,7 +2802,7 @@ private fun SegmentEditor(
     onFocus: () -> Unit,
     // Phase 6 (Editor Refinement #2): a task item field gained
     // focus — the screen records it as the "Make text" target.
-    onTaskItemFocus: (List<Int>) -> Unit = {},
+    onTaskItemFocus: (List<Int>?) -> Unit = {},
     onChange: (DocSegment) -> Unit,
     onRemove: () -> Unit,
     attachments: List<AttachmentEntity>,
@@ -3327,7 +3329,7 @@ private fun ReadTaskRows(
             )
             val itemState = remember(blockId, itemPath.joinToString("."), item.contentHtml) {
                 RichTextState().apply {
-                    setHtml(item.contentHtml + item.contentAfterHtml)
+                    setHtml(item.contentHtml)
                 }
             }
             BasicRichText(
@@ -3347,6 +3349,34 @@ private fun ReadTaskRows(
             }
         }
         ReadTaskRows(blockId, item.children, itemPath, depth + 1, onToggle)
+        // Codex P2 (PR #41): the item's trailing content renders
+        // AFTER its child rows — the stored order (own -> children
+        // -> trailing), as a continuation row under the item's text.
+        if (item.contentAfterHtml.isNotBlank()) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = (depth * 24).dp),
+            ) {
+                Spacer(Modifier.width(48.dp))
+                val afterState = remember(
+                    blockId, itemPath.joinToString("."), item.contentAfterHtml,
+                ) {
+                    RichTextState().apply { setHtml(item.contentAfterHtml) }
+                }
+                BasicRichText(
+                    state = afterState,
+                    style = if (item.checked) {
+                        readTextStyle.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        readTextStyle
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
     }
 }
 
@@ -3806,8 +3836,10 @@ private fun TaskListBlock(
     // Phase 6 (Editor Refinement #2): an item field gained focus —
     // reported so the toolbar can offer "Make text" for that item.
     // Phase 6 (nested checklists): the report is the item's PATH in
-    // the tree, not a flat index.
-    onItemFocus: (List<Int>) -> Unit = {},
+    // the tree, not a flat index. A null report clears the focus
+    // (the focused item was removed, or its path was rebased by a
+    // removal — the block reports the new path then).
+    onItemFocus: (List<Int>?) -> Unit = {},
 ) {
     // The focused item's path — the target of the footer's nesting
     // actions. Local to the block (the footer renders here); the
@@ -3879,7 +3911,23 @@ private fun TaskListBlock(
                     }
                     IconButton(onClick = {
                         evictCellTextStates(cellTextStates, blockId)
-                        if (focusedPath == path) focusedPath = null
+                        // Codex P2 (PR #41): removing an item can
+                        // stale the focused path — the focused item
+                        // itself, a descendant of the removed item,
+                        // or a later sibling whose index just
+                        // shifted. Rebase (or clear) BOTH focus
+                        // copies, or the footer actions and the
+                        // toolbar's "Make text" would act on the
+                        // wrong item.
+                        val fpNow = focusedPath
+                        if (fpNow != null) {
+                            val rebased =
+                                TaskTree.rebasePathAfterRemoval(fpNow, path)
+                            if (rebased != fpNow) {
+                                focusedPath = rebased
+                                onItemFocus(rebased)
+                            }
+                        }
                         onChange(TaskListSegment(TaskTree.removeAt(list.items, path)))
                     }) {
                         Icon(Icons.Filled.Close, contentDescription = "Remove item")

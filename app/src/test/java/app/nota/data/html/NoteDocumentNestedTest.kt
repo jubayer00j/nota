@@ -180,4 +180,21 @@ class NoteDocumentNestedTest {
                 text.indexOf("Child open") < text.indexOf("Sibling"),
         )
     }
+
+    @Test
+    fun plainTextProjectionPutsTrailingContentAfterChildren() {
+        // Codex P2 (PR #41): the projection follows the stored
+        // reading order — own content, children, THEN the trailing
+        // content that followed the nested list.
+        val mid = "<ul data-type=\"taskList\">" +
+            "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Before</p>" +
+            "<ul data-type=\"taskList\">" +
+            "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Kid</p></div></li>" +
+            "</ul><p>After</p></div></li></ul>"
+        val text = NoteDocument.plainText(NoteDocument.parse(mid))
+        assertTrue(
+            text.indexOf("Before") < text.indexOf("Kid") &&
+                text.indexOf("Kid") < text.indexOf("After"),
+        )
+    }
 }

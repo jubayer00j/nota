@@ -178,6 +178,32 @@ class TaskTreeTest {
     }
 
     @Test
+    fun rebasePathAfterRemoval_clearsShiftsOrKeeps() {
+        // Codex P2 (PR #41): focus bookkeeping after a removal.
+        // The removed item itself, and anything inside its subtree.
+        assertEquals(null, TaskTree.rebasePathAfterRemoval(listOf(1), listOf(1)))
+        assertEquals(null, TaskTree.rebasePathAfterRemoval(listOf(1, 0), listOf(1)))
+        assertEquals(null, TaskTree.rebasePathAfterRemoval(listOf(0, 1), listOf(0, 1)))
+        // A later sibling shifts down, at the top level and nested.
+        assertEquals(listOf(1), TaskTree.rebasePathAfterRemoval(listOf(2), listOf(0)))
+        assertEquals(
+            listOf(0, 1),
+            TaskTree.rebasePathAfterRemoval(listOf(0, 2), listOf(0, 0)),
+        )
+        assertEquals(
+            listOf(0, 0),
+            TaskTree.rebasePathAfterRemoval(listOf(1, 0), listOf(0)),
+        )
+        // An earlier sibling, an ancestor, and other subtrees stay.
+        assertEquals(listOf(0), TaskTree.rebasePathAfterRemoval(listOf(0), listOf(1)))
+        assertEquals(listOf(0), TaskTree.rebasePathAfterRemoval(listOf(0), listOf(0, 0)))
+        assertEquals(
+            listOf(0, 0),
+            TaskTree.rebasePathAfterRemoval(listOf(0, 0), listOf(1)),
+        )
+    }
+
+    @Test
     fun outdent_movesItemAfterItsParent_subtreeTravels() {
         val out = TaskTree.outdent(tree, listOf(0, 0))
         assertEquals(listOf("A", "A2", "A1", "B", "C", "C1"), texts(out))

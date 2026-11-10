@@ -104,6 +104,31 @@ object TaskTree {
         }
     }
 
+    /**
+     * Where a [focused] path points after the item at [removed] is
+     * removed: null when the focused item was the removed item or
+     * inside its subtree; shifted down by one when a preceding
+     * sibling — at the top level or at any ancestor level — was the
+     * removed one; unchanged otherwise. Keeps the editor's focus
+     * bookkeeping aimed at the item the user actually focused
+     * (Codex P2, PR #41).
+     */
+    fun rebasePathAfterRemoval(focused: List<Int>, removed: List<Int>): List<Int>? {
+        if (focused.size >= removed.size &&
+            focused.subList(0, removed.size) == removed
+        ) {
+            return null
+        }
+        val depth = removed.size - 1
+        if (focused.size > depth &&
+            focused.subList(0, depth) == removed.subList(0, depth) &&
+            focused[depth] > removed[depth]
+        ) {
+            return focused.toMutableList().also { it[depth] = it[depth] - 1 }
+        }
+        return focused
+    }
+
     /** Inserts [newItem] directly after the item at [path], same level. */
     fun insertAfter(
         items: List<TaskItem>,

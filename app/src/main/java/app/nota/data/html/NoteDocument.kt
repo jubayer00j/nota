@@ -1293,14 +1293,16 @@ object NoteDocument {
     /**
      * One plain-text line per task item, children after their
      * parent at every depth (the order a reader sees). An item's
-     * own trailing content (after its nested list) folds into the
-     * item's own line.
+     * own trailing content (after its nested list) projects as
+     * its own line AFTER the children — the stored reading order
+     * (Codex P2, PR #41).
      */
     private fun taskItemsPlainText(items: List<TaskItem>): List<String> =
         items.flatMap { item ->
-            listOf(
-                PlainTextCodec.htmlToText(item.contentHtml + item.contentAfterHtml),
-            ) + taskItemsPlainText(item.children)
+            listOf(PlainTextCodec.htmlToText(item.contentHtml)) +
+                taskItemsPlainText(item.children) +
+                listOf(PlainTextCodec.htmlToText(item.contentAfterHtml))
+                    .filter { it.isNotBlank() }
         }
 
     /** Headings inside text segments, in document order (in-note outline, §12). */
