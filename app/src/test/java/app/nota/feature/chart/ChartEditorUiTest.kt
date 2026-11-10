@@ -98,7 +98,10 @@ class ChartEditorUiTest {
         composeDialog(seed, editing = true, onSave = { saved = it })
 
         composeRule.onNodeWithTag(CHART_TAB_CHART_TAG).performClick()
-        composeRule.onNodeWithTag(CHART_TITLE_FIELD_TAG).assertTextEquals("Quarterly Sales")
+        // The field's label merges into its semantics text, so the
+        // assertion names both the label and the seeded value.
+        composeRule.onNodeWithTag(CHART_TITLE_FIELD_TAG)
+            .assertTextEquals("Title", "Quarterly Sales")
         composeRule.onNodeWithTag(CHART_TITLE_FIELD_TAG)
             .performTextReplacement("Annual Sales")
         composeRule.onNodeWithTag(CHART_SAVE_TAG).performClick()
