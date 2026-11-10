@@ -180,4 +180,22 @@ class AutoLinkTest {
         // linkifies — only the delimiter after it does.
         assertNull(AutoLink.triggeredToken("see example.com", "see example.comx"))
     }
+
+    @Test
+    fun pasteTrigger_wrappedOrPunctuatedUrlStillLinkifies() {
+        // Codex P2 (PR #42): urlTokenEndingAt strips wrappers and
+        // sentence punctuation from the token; the paste must
+        // still count as one pasted URL.
+        val dotted = AutoLink.triggeredToken("", "example.com.")
+        assertEquals("https://example.com", dotted?.href)
+        assertEquals(0..10, dotted?.range)
+        val wrapped = AutoLink.triggeredToken("", "(example.com)")
+        assertEquals("https://example.com", wrapped?.href)
+        assertEquals(1..11, wrapped?.range)
+        val quoted = AutoLink.triggeredToken("", "\"https://a.io/x\"")
+        assertEquals("https://a.io/x", quoted?.href)
+        // But words around the URL still disqualify the paste.
+        assertNull(AutoLink.triggeredToken("", "(see example.com)"))
+        assertNull(AutoLink.triggeredToken("", "go to example.com."))
+    }
 }

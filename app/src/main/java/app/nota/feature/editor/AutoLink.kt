@@ -158,14 +158,21 @@ object AutoLink {
             // The candidate must be the chunk and nothing but the
             // chunk: a token that reaches back into text that was
             // already there (the paste merely completed a word)
-            // is not a pasted URL.
-            return if (token.range.first == chunkStart &&
-                token.range.last == chunkEnd - 1
+            // is not a pasted URL. Wrapper brackets/quotes and
+            // sentence punctuation AROUND the token are fine,
+            // though — urlTokenEndingAt strips them from the
+            // token, and a paste like "(example.com)." is still
+            // one pasted URL (Codex P2, PR #42).
+            if (token.range.first < chunkStart ||
+                token.range.last > chunkEnd - 1
             ) {
-                token
-            } else {
-                null
+                return null
             }
+            val before = current.substring(chunkStart, token.range.first)
+            val after = current.substring(token.range.last + 1, chunkEnd)
+            val wrappable = before.all { it in LEADING_WRAP } &&
+                after.all { it in TRAILING_PUNCT || it in "\"')]}" }
+            return if (wrappable) token else null
         }
         return null
     }
