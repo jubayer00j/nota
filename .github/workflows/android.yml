@@ -103,10 +103,10 @@ jobs:
   # extend the existing B2 lock suite and B backup suite, and
   # the version-history UI suite joins the UI shard's class list
   # in app/build.gradle.kts.)
-  # (Extras bundle: the partition grows to 112 classes —
-  # fast-a +2 (the Clock hand-off intent suite; the dictation
-  # language resolver), B +1 (the 6→7 migration suite); the
-  # tone-persistence, backup-exclusion, theme-mapping and
+  # (Extras bundle: the enumerated partition now stands at 114
+  # classes — fast-a +2 (the Clock hand-off intent suite; the
+  # dictation language resolver), B +1 (the 6→7 migration suite);
+  # the tone-persistence, backup-exclusion, theme-mapping and
   # preference cases extend the existing reminder, theme and
   # writing-preferences suites, and the extras settings/dialog
   # suite joins the UI shard's class list in
@@ -156,7 +156,7 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 65 of 112 non-UI classes)
+      - name: Run fast unit tests (shard A, 66 of 114 non-UI classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
