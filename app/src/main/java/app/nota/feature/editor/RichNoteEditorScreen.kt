@@ -1834,6 +1834,11 @@ fun RichNoteEditorScreen(
                     focusedTableCell = Triple(ui.id, r, c)
                     focusedTaskItem = null
                 },
+                onTableCellFocusCleared = {
+                    // Only this block's route clears (a structural
+                    // op in ANOTHER table must not drop it).
+                    if (focusedTableCell?.first == ui.id) focusedTableCell = null
+                },
                 onChange = { updateBlock(ui.id, it) },
                 onRemove = { removeBlock(ui.id) },
                 attachments = attachments,
@@ -2799,6 +2804,7 @@ private fun SegmentEditor(
     // routing keys on.
     cellRichStates: MutableMap<String, RichTextState>,
     onTableCellFocus: (Int, Int) -> Unit = { _, _ -> },
+    onTableCellFocusCleared: () -> Unit = {},
     onFocus: () -> Unit,
     // Phase 6 (Editor Refinement #2): a task item field gained
     // focus — the screen records it as the "Make text" target.
@@ -2913,6 +2919,7 @@ private fun SegmentEditor(
                         is TableSegment -> TableBlock(
                             ui.id, segment, cellTextStates, cellRichStates,
                             onChange, onRemove, onTableCellFocus,
+                            onTableCellFocusCleared,
                         )
                         is TaskListSegment -> TaskListBlock(
                             ui.id, segment, cellTextStates, onChange, onRemove, onTaskItemFocus,
@@ -3616,6 +3623,11 @@ private fun TableBlock(
     // reported so the screen can route the formatting toolbar to
     // that cell's rich state.
     onCellFocus: (Int, Int) -> Unit = { _, _ -> },
+    // Codex P2 (PR #41): a structural change evicts the cell
+    // states — the screen's focused-cell route must clear with
+    // them, or the toolbar keeps aiming at coordinates whose
+    // state no longer exists.
+    onCellFocusCleared: () -> Unit = {},
 ) {
     // Phase 6 (Editor Refinement #1, A3): the cell the at-cell
     // row/column operations act on — set when a cell field gains
@@ -3624,10 +3636,15 @@ private fun TableBlock(
     // coordinate would aim the next operation at shifted content).
     var selectedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     // Structural ops evict BOTH hoisted cell maps together — the
-    // positional keys would otherwise name shifted cells.
+    // positional keys would otherwise name shifted cells. The
+    // screen's focused-cell toolbar route clears with them
+    // (Codex P2, PR #41): its coordinates named a now-evicted
+    // state, and tapping a cell again re-establishes the route
+    // through the normal focus-gain report.
     fun evictCells() {
         evictCellTextStates(cellTextStates, blockId)
         evictCellRichStates(cellRichStates, blockId)
+        onCellFocusCleared()
     }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),

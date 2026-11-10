@@ -723,6 +723,6 @@ class NoteExportMarkdownTest {
                 ),
             ),
         )
-        assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n      After"))
+        assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n  After"))
     }
 }

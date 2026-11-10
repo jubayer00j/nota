@@ -303,6 +303,36 @@ class RichCellsNestedUiTest {
     }
 
     @Test
+    fun editMode_structuralTableOp_clearsCellToolbarRouting() {
+        // Codex P2 (PR #41): a structural table op evicts the cell
+        // states — the screen's focused-cell route must clear with
+        // them, so the block-style row comes back instead of the
+        // toolbar silently aiming at an evicted cell state.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Routing clear",
+                contentHtml = "<p>Body para</p>" +
+                    "<table><tbody><tr><td><p>Cell one</p></td>" +
+                    "<td><p>Cell two</p></td></tr></tbody></table>",
+            )
+        }
+        composeEditor(note.id)
+        enterEditMode()
+
+        composeRule.onNodeWithText("Cell one").performClick()
+        awaitTrue("block styles hidden with cell focus") {
+            exists("no H1") { composeRule.onNodeWithText("H1").assertDoesNotExist() }
+        }
+        // The at-cell operations row is showing for the focused
+        // cell; "Row below" is a structural op (it evicts the
+        // cell states).
+        composeRule.onNodeWithText("Row below").performClick()
+        awaitTrue("block styles back after the structural op") {
+            exists("H1") { composeRule.onNodeWithText("H1").assertExists() }
+        }
+    }
+
+    @Test
     fun editMode_untouchedRichCells_persistByteIdentical() {
         val note = runBlocking {
             repository.createRichNote(

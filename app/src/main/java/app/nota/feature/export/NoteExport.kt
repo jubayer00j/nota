@@ -358,13 +358,19 @@ object NoteExport {
                         // Codex P2 (PR #41): trailing own content
                         // exports AFTER the children (the stored
                         // order), as a continuation line under the
-                        // item — never folded into the item's line.
+                        // item. The indent is the parent item's
+                        // MARKDOWN continuation indent — the depth
+                        // indent plus the two-space "- " marker.
+                        // Anything deeper (e.g. aligned under the
+                        // "[ ]" text) would attach the line to the
+                        // last CHILD item in CommonMark, or render
+                        // as an indented code block (round 4).
                         val after = mdInline(
                             parseFragment(item.contentAfterHtml),
                             resolve,
                         ).trim()
                         if (after.isNotEmpty()) {
-                            lines += "  ".repeat(depth) + "      " + after
+                            lines += "  ".repeat(depth) + "  " + after
                         }
                     }
                 }
