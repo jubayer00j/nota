@@ -213,6 +213,27 @@ class NoteExportMarkdownTest {
     }
 
     @Test
+    fun chartTitleIsEscapedInMarkdownExport() {
+        // Charts PR-B (Codex P2): the Markdown placeholder carries
+        // the chart title verbatim; a title holding raw HTML must
+        // be entity-escaped so a Markdown renderer that allows raw
+        // HTML shows it as text instead of executing it. The
+        // rendered placeholder is unchanged (entities render as
+        // the literal characters).
+        val chart = app.nota.data.html.ChartSegment(
+            payload = "",
+            rawHtml = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+                "data-chart-type=\"bar\" " +
+                "data-title=\"&lt;img src=x onerror=alert(1)&gt;\" data-subtitle=\"\" " +
+                "data-categories='[\"Q1\"]' " +
+                "data-series='[{\"name\":\"S\",\"values\":[1]}]'></div>",
+        )
+        val out = NoteExport.noteToMarkdown("T", listOf(chart))
+        assertTrue(out.contains("[Bar chart: &lt;img src=x onerror=alert(1)&gt;]"))
+        assertFalse(out.contains("<img src=x onerror"))
+    }
+
+    @Test
     fun standaloneImages() {
         val out = md()
         assertTrue(out.contains("![Cat]($EXPORT_DATA_URL)"))

@@ -334,7 +334,14 @@ object NoteExport {
             // as a link and rewrite the placeholder.
             is FileSegment -> listOf("[File: ${escapeMdText(segment.fileName)}]")
             DividerSegment -> listOf("---")
-            is ChartSegment -> listOf(chartPlaceholder(segment))
+            // The title is user data too (Codex P2, PR #39): a
+            // title holding raw HTML would otherwise sit verbatim
+            // in the .md, and Markdown renderers that allow raw
+            // HTML would execute it. HTML-escaping keeps the
+            // rendered placeholder identical (entities render as
+            // the literal characters); the plain-text path keeps
+            // the raw readable form.
+            is ChartSegment -> listOf(escapeHtmlText(chartPlaceholder(segment)))
             is OpaqueSegment -> {
                 val nodes = parseFragment(segment.rawHtml)
                 val parts = opaqueParts(nodes)
