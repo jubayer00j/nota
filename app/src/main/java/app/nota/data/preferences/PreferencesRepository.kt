@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -220,6 +221,41 @@ class PreferencesRepository internal constructor(
     suspend fun setStartOnToday(enabled: Boolean) {
         safeEdit { this[KEY_START_ON_TODAY] = enabled }
     }
+
+    // ---- Writing typography (Phase 6, PR #43) ----------------------
+    // Noma 1.x's Writing settings: the font size + line height the
+    // note body renders at, in the editor and the read view alike.
+    // Reads clamp into the slider ranges: a stored value outside
+    // them (hand-edited file, future range change) degrades to the
+    // nearest in-range value instead of rendering absurd type.
+
+    val writingFontSize: Flow<Int> = dataStore.safeData.map { prefs ->
+        (prefs[KEY_WRITING_FONT_SIZE] ?: WRITING_FONT_SIZE_DEFAULT)
+            .coerceIn(WRITING_FONT_SIZE_MIN, WRITING_FONT_SIZE_MAX)
+    }
+
+    val writingLineHeight: Flow<Float> = dataStore.safeData.map { prefs ->
+        (prefs[KEY_WRITING_LINE_HEIGHT] ?: WRITING_LINE_HEIGHT_DEFAULT)
+            .coerceIn(WRITING_LINE_HEIGHT_MIN, WRITING_LINE_HEIGHT_MAX)
+    }
+
+    suspend fun setWritingFontSize(size: Int) {
+        safeEdit {
+            this[KEY_WRITING_FONT_SIZE] =
+                size.coerceIn(WRITING_FONT_SIZE_MIN, WRITING_FONT_SIZE_MAX)
+        }
+    }
+
+    suspend fun setWritingLineHeight(lineHeight: Float) {
+        safeEdit {
+            this[KEY_WRITING_LINE_HEIGHT] =
+                lineHeight.coerceIn(WRITING_LINE_HEIGHT_MIN, WRITING_LINE_HEIGHT_MAX)
+        }
+    }
+
+    suspend fun writingFontSizeNow(): Int = writingFontSize.first()
+
+    suspend fun writingLineHeightNow(): Float = writingLineHeight.first()
 
     // ---- Swipe actions (Phase 3.5, D3) -------------------------------
     // Per-direction actions for the main notes list, chosen in
@@ -625,6 +661,19 @@ class PreferencesRepository internal constructor(
         val KEY_DRIVE_BACKUP_INTERVAL_HOURS = intPreferencesKey("drive_backup_interval_hours")
         val KEY_SWIPE_RIGHT_ACTION = stringPreferencesKey("swipe_right_action")
         val KEY_SWIPE_LEFT_ACTION = stringPreferencesKey("swipe_left_action")
+        val KEY_WRITING_FONT_SIZE = intPreferencesKey("writing_font_size")
+        val KEY_WRITING_LINE_HEIGHT = floatPreferencesKey("writing_line_height")
+
+        // Writing typography (Phase 6, PR #43 — Noma 1.x parity):
+        // the reading/editor comfort pair from 1.x's Writing
+        // settings. Device-local display choices, like every other
+        // preference in this store: they never enter a backup.
+        const val WRITING_FONT_SIZE_DEFAULT = 17
+        const val WRITING_FONT_SIZE_MIN = 14
+        const val WRITING_FONT_SIZE_MAX = 22
+        const val WRITING_LINE_HEIGHT_DEFAULT = 1.7f
+        const val WRITING_LINE_HEIGHT_MIN = 1.4f
+        const val WRITING_LINE_HEIGHT_MAX = 2.2f
 
         const val DRIVE_MODE_OFF = "off"
         const val DRIVE_MODE_SCHEDULED = "scheduled"
