@@ -277,6 +277,12 @@ class AndroidSpeechEngine(
     }
 
     override fun stop() {
+        // Invalidate any pending start FIRST (synchronously, before
+        // the stop below is even posted) — the mirror of cancel(): if
+        // the user stops while the start-time language read is still
+        // in flight, the delayed start must not begin listening after
+        // they stopped. A later start() issues a fresh ticket.
+        startGate.invalidate()
         mainHandler.post {
             try {
                 recognizer?.stopListening()
