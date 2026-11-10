@@ -1,5 +1,6 @@
 package app.nota.feature.export
 
+import app.nota.data.chart.ChartParser
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.DividerSegment
@@ -265,14 +266,26 @@ object NoteExport {
         "composed" to "Composed",
     )
 
-    /** "[Bar chart]" for a known chart type, "[Chart]" otherwise (1.x). */
+    /**
+     * "[Bar chart]" for a known chart type, "[Chart]" otherwise
+     * (1.x). Charts PR-B: when the segment PARSES and carries a
+     * title, the title joins the placeholder — "[Bar chart:
+     * Quarterly Sales]" — so an exported note still says what the
+     * chart was about. The parsed title is the normalised one (a
+     * blank stored title normalises to "Chart", exactly what the
+     * app displays); an unparseable segment keeps the plain
+     * placeholder, as do the existing shape tests' fixtures.
+     */
     fun chartPlaceholder(segment: ChartSegment): String {
         val fromAttr = Regex("""data-chart-type\s*=\s*"([^"]+)"""")
             .find(segment.rawHtml)?.groupValues?.get(1)
         val fromPayload = Regex(""""type"\s*:\s*"([A-Za-z]+)"""")
             .find(segment.payload)?.groupValues?.get(1)
         val label = CHART_TYPE_LABELS[(fromAttr ?: fromPayload)?.lowercase()]
-        return if (label != null) "[$label chart]" else "[Chart]"
+        val base = if (label != null) "[$label chart]" else "[Chart]"
+        val title = ChartParser.parse(segment.rawHtml)?.title
+            ?.takeIf { it.isNotBlank() } ?: return base
+        return base.dropLast(1) + ": " + title + "]"
     }
 
     // ------------------------------------------------------------ Markdown

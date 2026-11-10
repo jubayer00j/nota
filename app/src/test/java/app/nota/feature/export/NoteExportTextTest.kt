@@ -74,6 +74,29 @@ class NoteExportTextTest {
     }
 
     @Test
+    fun titledChart_placeholderCarriesTheTitle() {
+        // Charts PR-B: a parseable chart's placeholder names it —
+        // "[Bar chart: Quarterly Sales]" — in every format (the
+        // placeholder is shared by the text/Markdown/HTML paths).
+        val chart = app.nota.data.html.ChartSegment(
+            payload = "",
+            rawHtml = "<div data-type=\"noma-chart\" data-version=\"2\" " +
+                "data-chart-type=\"bar\" data-title=\"Quarterly Sales\" data-subtitle=\"\" " +
+                "data-categories='[\"Q1\",\"Q2\"]' " +
+                "data-series='[{\"name\":\"Revenue\",\"values\":[10,25]}]'></div>",
+        )
+        assertEquals("[Bar chart: Quarterly Sales]", NoteExport.chartPlaceholder(chart))
+        val out = NoteExport.noteToPlainText("T", listOf(chart))
+        assertTrue(out.contains("[Bar chart: Quarterly Sales]"))
+        // An unparseable segment keeps the plain placeholder.
+        val stray = app.nota.data.html.ChartSegment(
+            payload = "{\"type\":\"pie\"}",
+            rawHtml = "<div data-nota-chart=\"1\"></div>",
+        )
+        assertEquals("[Pie chart]", NoteExport.chartPlaceholder(stray))
+    }
+
+    @Test
     fun linkWithUrlEqualToTextIsNotDoubled() {
         val out = NoteExport.noteToPlainText(
             "T",
