@@ -9,9 +9,11 @@ import kotlin.math.hypot
  * geometry, deliberately free of Compose types so the whole model
  * is plain-JVM unit-testable.
  *
- * Targets are RECORDED DURING THE DRAW PASS in ChartView, from the
- * same coordinates that were just drawn (never a parallel copy
- * that could drift), and always at their FINAL (progress = 1)
+ * Targets are computed by ChartView from the chart model and the
+ * canvas size (see `computeHitTargets`), replicating the draw
+ * pass's geometry formula for formula — the same arrangement the
+ * link graph uses (its tap handler hit-tests model geometry, not
+ * drawn pixels). They always describe the FINAL (progress = 1)
  * geometry, so a tap lands even while the entrance animation is
  * still running. All coordinates are canvas pixels.
  */
@@ -44,15 +46,6 @@ internal data class ChartHitTarget(
     val anchorY: Float = 0f,
 )
 
-/**
- * The draw pass's mailbox for hit targets: ChartView's draw
- * functions replace [targets] wholesale each pass; the tap handler
- * reads whatever the latest pass recorded. A plain var on purpose
- * — this is draw-phase scratch, not snapshot state.
- */
-internal class ChartHitStore {
-    var targets: List<ChartHitTarget> = emptyList()
-}
 
 /**
  * Resolves a tap at ([x], [y]) against [targets]. Pie/donut

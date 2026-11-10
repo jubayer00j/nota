@@ -5,7 +5,8 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,8 +43,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextMeasurer
@@ -53,6 +56,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -218,23 +222,37 @@ private fun ChartCanvas(
         }
     }
 
-    // Tap-for-values: hit targets recorded by the draw pass at
-    // final geometry; the current selection drives the callout.
-    val hitStore = remember { ChartHitStore() }
+    // Tap-for-values: hit targets computed from the model and
+    // the canvas size at final geometry (see computeHitTargets);
+    // the current selection drives the callout.
+    val density = LocalDensity.current
     var selection by remember(data) { mutableStateOf<ChartHitTarget?>(null) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+    val hitTargets = remember(data, canvasSize, density) {
+        if (canvasSize.width <= 0 || canvasSize.height <= 0) {
+            emptyList()
+        } else {
+            computeHitTargets(
+                data,
+                canvasSize.width.toFloat(),
+                canvasSize.height.toFloat(),
+                density,
+            )
+        }
+    }
 
-    Box(modifier = modifier.onSizeChanged { canvasSize = it }) {
+    Box(modifier = modifier) {
         Canvas(
             Modifier
                 .fillMaxSize()
+                .onSizeChanged { canvasSize = it }
                 .testTag(CHART_CANVAS_TAG)
                 .then(
                     if (interactive) {
-                        Modifier.pointerInput(data) {
-                            detectTapGestures { offset ->
+                        Modifier.pointerInput(hitTargets) {
+                            detectChartTap { offset ->
                                 val hit = hitTest(
-                                    hitStore.targets,
+                                    hitTargets,
                                     offset.x,
                                     offset.y,
                                     28.dp.toPx(),
@@ -259,30 +277,27 @@ private fun ChartCanvas(
                     },
                 ),
         ) {
-            val targets = mutableListOf<ChartHitTarget>()
             if (data.categories.isEmpty() || data.series.isEmpty()) {
                 drawCenteredNote(textMeasurer, labelStyle, axisColor, "No chart data")
-                hitStore.targets = targets
                 return@Canvas
             }
             val progress = anim.value
             when (data.type) {
                 ChartType.PIE -> drawPieChart(
                     data, donut = false, textMeasurer, labelStyle, gridColor, axisColor,
-                    progress, targets,
+                    progress,
                 )
                 ChartType.DONUT -> drawPieChart(
                     data, donut = true, textMeasurer, labelStyle, gridColor, axisColor,
-                    progress, targets,
+                    progress,
                 )
                 ChartType.RADAR -> drawRadarChart(
-                    data, textMeasurer, labelStyle, axisColor, gridColor, progress, targets,
+                    data, textMeasurer, labelStyle, axisColor, gridColor, progress,
                 )
                 else -> drawCartesianChart(
-                    data, textMeasurer, labelStyle, axisColor, gridColor, progress, targets,
+                    data, textMeasurer, labelStyle, axisColor, gridColor, progress,
                 )
             }
-            hitStore.targets = targets
         }
 
         val selected = selection
@@ -324,6 +339,342 @@ private fun ChartCanvas(
             }
         }
     }
+}
+
+/**
+ * Tap detection for the chart canvas, hand-rolled after the link
+ * graph's detectMapGestures: a clean press-and-release that never
+ * leaves the touch slop taps; anything else (a scroll in the
+ * surrounding column takes the gesture over) never does. No
+ * press timeouts are involved — the raw event loop answers under
+ * any clock, which the stock detectTapGestures machinery does
+ * not in the Robolectric harness.
+ */
+private suspend fun PointerInputScope.detectChartTap(onTap: (Offset) -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var pastTouchSlop = false
+        var upPosition: Offset? = null
+        var cancelled = false
+        do {
+            val event = awaitPointerEvent()
+            cancelled = event.changes.any { it.isConsumed }
+            if (!cancelled) {
+                for (change in event.changes) {
+                    if (change.id == down.id) {
+                        if ((change.position - down.position).getDistance() >
+                            viewConfiguration.touchSlop
+                        ) {
+                            pastTouchSlop = true
+                        }
+                        if (!change.pressed) upPosition = change.position
+                    }
+                }
+            }
+        } while (!cancelled && event.changes.any { it.pressed })
+        if (!pastTouchSlop) upPosition?.let(onTap)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Tap-for-values geometry. These functions replicate the draw
+// pass's geometry formula for formula (plot pads, band math, the
+// unit-domain scale, stack accumulators, pie peak-scaling) so a
+// tap resolves against exactly what is drawn — the arrangement
+// the link graph uses, and one that does not depend on a draw
+// pass having run before the tap arrives. Targets always
+// describe the FINAL (progress = 1) geometry.
+
+private fun computeHitTargets(
+    data: ChartData,
+    widthPx: Float,
+    heightPx: Float,
+    density: Density,
+): List<ChartHitTarget> {
+    if (data.categories.isEmpty() || data.series.isEmpty()) return emptyList()
+    return when (data.type) {
+        ChartType.PIE -> computePieTargets(data, donut = false, widthPx, heightPx, density)
+        ChartType.DONUT -> computePieTargets(data, donut = true, widthPx, heightPx, density)
+        ChartType.RADAR -> computeRadarTargets(data, widthPx, heightPx, density)
+        else -> computeCartesianTargets(data, widthPx, heightPx, density)
+    }
+}
+
+private fun computeCartesianTargets(
+    data: ChartData,
+    widthPx: Float,
+    heightPx: Float,
+    density: Density,
+): List<ChartHitTarget> = with(density) {
+    val targets = mutableListOf<ChartHitTarget>()
+    val cats = data.categories
+    val n = cats.size
+    val leftPad = 36.dp.toPx()
+    val rightPad = 8.dp.toPx()
+    val topPad = if (data.options.yAxisLabel.isNotEmpty()) 15.dp.toPx() else 6.dp.toPx()
+    val bottomPad = 18.dp.toPx() + if (data.options.xAxisLabel.isNotEmpty()) 14.dp.toPx() else 0f
+    val plotL = leftPad
+    val plotT = topPad
+    val plotR = widthPx - rightPad
+    val plotB = heightPx - bottomPad
+    val plotW = (plotR - plotL).coerceAtLeast(1f)
+    val plotH = (plotB - plotT).coerceAtLeast(1f)
+    val bandW = plotW / n
+    fun centerX(ci: Int): Float = plotL + bandW * (ci + 0.5f)
+
+    val kinds: List<SeriesKind> = data.series.mapIndexed { idx, s ->
+        when (data.type) {
+            ChartType.BAR -> SeriesKind.BAR
+            ChartType.LINE -> SeriesKind.LINE
+            ChartType.AREA -> SeriesKind.AREA
+            else -> s.type ?: if (idx % 2 == 1) SeriesKind.LINE else SeriesKind.BAR
+        }
+    }
+    val stacked = data.options.stacked
+    val stackActive = stacked && kinds.any { it != SeriesKind.LINE }
+    val hasBar = kinds.any { it == SeriesKind.BAR }
+
+    var lo = Double.POSITIVE_INFINITY
+    var hi = Double.NEGATIVE_INFINITY
+    fun consider(v: Double) {
+        if (v < lo) lo = v
+        if (v > hi) hi = v
+    }
+    if (stackActive) {
+        for (ci in 0 until n) {
+            var pos = 0.0
+            var neg = 0.0
+            data.series.forEachIndexed { si, s ->
+                if (kinds[si] == SeriesKind.LINE) return@forEachIndexed
+                val v = s.values.getOrNull(ci) ?: 0.0
+                if (v >= 0) pos = satAdd(pos, v) else neg = satAdd(neg, v)
+            }
+            consider(pos)
+            consider(neg)
+        }
+    }
+    data.series.forEachIndexed { si, s ->
+        if (stackActive && kinds[si] != SeriesKind.LINE) return@forEachIndexed
+        s.values.forEach { v -> if (v != null) consider(v) }
+    }
+    if (hasBar || stackActive) consider(0.0)
+    if (!lo.isFinite() || !hi.isFinite()) {
+        lo = 0.0
+        hi = 1.0
+    } else if (!hasBar && !stackActive) {
+        val pad = (hi - lo) * 0.05
+        if (pad > 0) {
+            lo -= pad
+            hi += pad
+        }
+    }
+    val scale = niceScale(lo, hi)
+    fun yOf(v: Double): Float =
+        (plotB - ((v / scale.unit - scale.loUnit) / (scale.hiUnit - scale.loUnit)) * plotH).toFloat()
+
+    // Grouped bars (drawn first in the draw pass).
+    if (!stackActive) {
+        val barIdx = kinds.indices.filter { kinds[it] == SeriesKind.BAR }
+        if (barIdx.isNotEmpty()) {
+            val groupW = bandW * 0.72f
+            val barW = groupW / barIdx.size
+            barIdx.forEachIndexed { order, si ->
+                val s = data.series[si]
+                for (ci in 0 until n) {
+                    val v = s.values.getOrNull(ci) ?: continue
+                    if (v == 0.0) continue
+                    val x = plotL + bandW * ci + (bandW - groupW) / 2f + barW * order + barW * 0.06f
+                    val yTop = yOf(max(v, 0.0))
+                    val yBot = yOf(min(v, 0.0))
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.RECT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        left = x,
+                        top = yTop,
+                        right = x + barW * 0.88f,
+                        bottom = yBot,
+                        anchorX = x + barW * 0.44f,
+                        anchorY = if (v > 0) yTop else yBot,
+                    )
+                }
+            }
+        }
+    }
+    // Stack participants and line/area series, in series order,
+    // sharing the draw pass's accumulator walk exactly.
+    val posAcc = DoubleArray(n)
+    val negAcc = DoubleArray(n)
+    data.series.forEachIndexed { si, s ->
+        when {
+            kinds[si] == SeriesKind.BAR && stackActive -> {
+                val groupW = bandW * 0.6f
+                val x0 = plotL + (bandW - groupW) / 2f
+                for (ci in 0 until n) {
+                    val v = s.values.getOrNull(ci) ?: 0.0
+                    if (v == 0.0) continue
+                    val from: Double
+                    val to: Double
+                    if (v >= 0) {
+                        from = posAcc[ci]
+                        to = satAdd(posAcc[ci], v)
+                        posAcc[ci] = to
+                    } else {
+                        from = negAcc[ci]
+                        to = satAdd(negAcc[ci], v)
+                        negAcc[ci] = to
+                    }
+                    val yTop = yOf(max(from, to))
+                    val yBot = yOf(min(from, to))
+                    val segX = x0 + bandW * ci + groupW * 0.05f
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.RECT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        left = segX,
+                        top = yTop,
+                        right = segX + groupW * 0.9f,
+                        bottom = yBot,
+                        anchorX = segX + groupW * 0.45f,
+                        anchorY = if (v > 0) yTop else yBot,
+                    )
+                }
+            }
+            kinds[si] == SeriesKind.AREA && stackActive -> {
+                for (ci in 0 until n) {
+                    val v = s.values.getOrNull(ci) ?: continue
+                    val base = if (v >= 0) posAcc[ci] else negAcc[ci]
+                    val topY = yOf(satAdd(base, v))
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.POINT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        cx = centerX(ci),
+                        cy = topY,
+                        anchorX = centerX(ci),
+                        anchorY = topY,
+                    )
+                    if (v >= 0) posAcc[ci] = satAdd(posAcc[ci], v) else negAcc[ci] = satAdd(negAcc[ci], v)
+                }
+            }
+            kinds[si] == SeriesKind.AREA || kinds[si] == SeriesKind.LINE -> {
+                for (ci in 0 until n) {
+                    val v = s.values.getOrNull(ci) ?: continue
+                    val py = yOf(v)
+                    targets += ChartHitTarget(
+                        kind = ChartHitKind.POINT,
+                        categoryIndex = ci,
+                        seriesIndex = si,
+                        value = v,
+                        cx = centerX(ci),
+                        cy = py,
+                        anchorX = centerX(ci),
+                        anchorY = py,
+                    )
+                }
+            }
+            else -> Unit // grouped bars were collected above
+        }
+    }
+    targets
+}
+
+private fun computePieTargets(
+    data: ChartData,
+    donut: Boolean,
+    widthPx: Float,
+    heightPx: Float,
+    density: Density,
+): List<ChartHitTarget> = with(density) {
+    val targets = mutableListOf<ChartHitTarget>()
+    val series = data.series.first()
+    val values = data.categories.indices.map { ci ->
+        (series.values.getOrNull(ci) ?: 0.0).coerceAtLeast(0.0)
+    }
+    val peak = values.maxOrNull() ?: 0.0
+    val scaled = if (peak > 0.0) values.map { it / peak } else values
+    val total = scaled.sum()
+    val cx = widthPx / 2f
+    val cy = heightPx / 2f
+    val radius = min(widthPx, heightPx) / 2f - 6.dp.toPx()
+    if (radius <= 0f || total <= 0.0) return@with targets
+    val innerR = if (donut) {
+        radius * (min(data.options.innerRadius, 45.0) / 65.0).toFloat()
+    } else {
+        0f
+    }
+    var start = -90f
+    scaled.forEachIndexed { i, v ->
+        val sweep = (v / total * 360.0).toFloat()
+        if (sweep > 0f) {
+            val frac = v / total
+            val mid = Math.toRadians((start + sweep / 2f).toDouble())
+            val labelR = if (donut) (innerR + radius) / 2f else radius * 0.66f
+            targets += ChartHitTarget(
+                kind = ChartHitKind.SLICE,
+                categoryIndex = i,
+                seriesIndex = 0,
+                value = values[i],
+                percent = frac,
+                cx = cx,
+                cy = cy,
+                innerRadius = innerR,
+                outerRadius = radius,
+                startAngle = ((start % 360f) + 360f) % 360f,
+                sweepAngle = sweep,
+                anchorX = cx + (labelR * cos(mid)).toFloat(),
+                anchorY = cy + (labelR * sin(mid)).toFloat(),
+            )
+        }
+        start += sweep
+    }
+    targets
+}
+
+private fun computeRadarTargets(
+    data: ChartData,
+    widthPx: Float,
+    heightPx: Float,
+    density: Density,
+): List<ChartHitTarget> = with(density) {
+    val targets = mutableListOf<ChartHitTarget>()
+    val n = data.categories.size
+    var maxV = 0.0
+    data.series.forEach { s ->
+        s.values.forEach { v -> if (v != null && v > maxV) maxV = v }
+    }
+    if (maxV <= 0.0) maxV = 1.0
+    val labelPad = 30.dp.toPx()
+    val cx = widthPx / 2f
+    val cy = heightPx / 2f
+    val radius = (min(widthPx, heightPx) / 2f - labelPad).coerceAtLeast(10f)
+    fun vertex(ci: Int, frac: Float): Offset {
+        val ang = Math.toRadians(-90.0 + 360.0 * ci / n)
+        return Offset(
+            cx + (radius * frac * cos(ang)).toFloat(),
+            cy + (radius * frac * sin(ang)).toFloat(),
+        )
+    }
+    data.series.forEachIndexed { si, s ->
+        for (ci in 0 until n) {
+            val frac = ((s.values.getOrNull(ci) ?: 0.0).coerceAtLeast(0.0) / maxV).toFloat()
+            val p = vertex(ci, frac)
+            targets += ChartHitTarget(
+                kind = ChartHitKind.POINT,
+                categoryIndex = ci,
+                seriesIndex = si,
+                value = s.values.getOrNull(ci) ?: 0.0,
+                cx = p.x,
+                cy = p.y,
+                anchorX = p.x,
+                anchorY = p.y,
+            )
+        }
+    }
+    targets
 }
 
 /** The callout's words for a hit: "Feb · Series 1: 150", pie "Feb: 150 (33%)". */
@@ -370,7 +721,6 @@ private fun DrawScope.drawCartesianChart(
     axisColor: Color,
     gridColor: Color,
     progress: Float,
-    targets: MutableList<ChartHitTarget>,
 ) {
     val cats = data.categories
     val n = cats.size
@@ -560,18 +910,6 @@ private fun DrawScope.drawCartesianChart(
                     val x = plotL + bandW * ci + (bandW - groupW) / 2f + barW * order + barW * 0.06f
                     val yTop = yOf(max(v, 0.0))
                     val yBot = yOf(min(v, 0.0))
-                    targets += ChartHitTarget(
-                        kind = ChartHitKind.RECT,
-                        categoryIndex = ci,
-                        seriesIndex = si,
-                        value = v,
-                        left = x,
-                        top = yTop,
-                        right = x + barW * 0.88f,
-                        bottom = yBot,
-                        anchorX = x + barW * 0.44f,
-                        anchorY = if (v > 0) yTop else yBot,
-                    )
                     // Entrance: the bar grows from the baseline —
                     // its full height scaled by the progress (down
                     // from the zero line for negative values).
@@ -625,18 +963,6 @@ private fun DrawScope.drawCartesianChart(
                     val yTop = yOf(max(from, to))
                     val yBot = yOf(min(from, to))
                     val segX = x0 + bandW * ci + groupW * 0.05f
-                    targets += ChartHitTarget(
-                        kind = ChartHitKind.RECT,
-                        categoryIndex = ci,
-                        seriesIndex = si,
-                        value = v,
-                        left = segX,
-                        top = yTop,
-                        right = segX + groupW * 0.9f,
-                        bottom = yBot,
-                        anchorX = segX + groupW * 0.45f,
-                        anchorY = if (v > 0) yTop else yBot,
-                    )
                     // Entrance: cumulative stack heights scale by
                     // the progress, so the whole stack grows from
                     // the baseline as one column.
@@ -664,16 +990,6 @@ private fun DrawScope.drawCartesianChart(
                     val base = if (v >= 0) posAcc[ci] else negAcc[ci]
                     tops[ci] = Offset(centerX(ci), yOf(satAdd(base, v)))
                     bottoms[ci] = Offset(centerX(ci), yOf(base))
-                    targets += ChartHitTarget(
-                        kind = ChartHitKind.POINT,
-                        categoryIndex = ci,
-                        seriesIndex = si,
-                        value = v,
-                        cx = tops[ci]!!.x,
-                        cy = tops[ci]!!.y,
-                        anchorX = tops[ci]!!.x,
-                        anchorY = tops[ci]!!.y,
-                    )
                     if (v >= 0) posAcc[ci] = satAdd(posAcc[ci], v) else negAcc[ci] = satAdd(negAcc[ci], v)
                 }
                 var ci = 0
@@ -722,20 +1038,6 @@ private fun DrawScope.drawCartesianChart(
                 val pts = (0 until n).map { ci ->
                     s.values.getOrNull(ci)?.let { Offset(centerX(ci), yOf(it)) }
                 }
-                pts.forEachIndexed { ci, p ->
-                    if (p != null) {
-                        targets += ChartHitTarget(
-                            kind = ChartHitKind.POINT,
-                            categoryIndex = ci,
-                            seriesIndex = si,
-                            value = s.values[ci]!!,
-                            cx = p.x,
-                            cy = p.y,
-                            anchorX = p.x,
-                            anchorY = p.y,
-                        )
-                    }
-                }
                 withRevealClip(plotL, plotW, progress) {
                     drawAreaRuns(pts, color, plotB, smooth = data.options.smoothLine)
                 }
@@ -743,20 +1045,6 @@ private fun DrawScope.drawCartesianChart(
             kinds[si] == SeriesKind.LINE -> {
                 val pts = (0 until n).map { ci ->
                     s.values.getOrNull(ci)?.let { Offset(centerX(ci), yOf(it)) }
-                }
-                pts.forEachIndexed { ci, p ->
-                    if (p != null) {
-                        targets += ChartHitTarget(
-                            kind = ChartHitKind.POINT,
-                            categoryIndex = ci,
-                            seriesIndex = si,
-                            value = s.values[ci]!!,
-                            cx = p.x,
-                            cy = p.y,
-                            anchorX = p.x,
-                            anchorY = p.y,
-                        )
-                    }
                 }
                 withRevealClip(plotL, plotW, progress) {
                     drawLineRuns(
@@ -1032,7 +1320,6 @@ private fun DrawScope.drawPieChart(
     ringColor: Color,
     noteColor: Color,
     progress: Float,
-    targets: MutableList<ChartHitTarget>,
 ) {
     val series = data.series.first()
     val values = data.categories.indices.map { ci ->
@@ -1076,25 +1363,6 @@ private fun DrawScope.drawPieChart(
         val sweep = (v / total * 360.0).toFloat()
         if (sweep > 0f) {
             val frac = v / total
-            // Hit target at FINAL geometry, whatever the
-            // animation's current frame shows.
-            val targetMid = Math.toRadians((start + sweep / 2f).toDouble())
-            val targetLabelR = if (donut) (innerR + radius) / 2f else radius * 0.66f
-            targets += ChartHitTarget(
-                kind = ChartHitKind.SLICE,
-                categoryIndex = i,
-                seriesIndex = 0,
-                value = values[i],
-                percent = frac,
-                cx = cx,
-                cy = cy,
-                innerRadius = innerR,
-                outerRadius = radius,
-                startAngle = ((start % 360f) + 360f) % 360f,
-                sweepAngle = sweep,
-                anchorX = cx + (targetLabelR * cos(targetMid)).toFloat(),
-                anchorY = cy + (targetLabelR * sin(targetMid)).toFloat(),
-            )
             val drawnSweep = min(sweep, remaining)
             remaining = (remaining - drawnSweep).coerceAtLeast(0f)
             if (drawnSweep > 0f) {
@@ -1155,7 +1423,6 @@ private fun DrawScope.drawRadarChart(
     axisColor: Color,
     gridColor: Color,
     progress: Float,
-    targets: MutableList<ChartHitTarget>,
 ) {
     val n = data.categories.size
     var maxV = 0.0
@@ -1191,19 +1458,6 @@ private fun DrawScope.drawRadarChart(
         val color = ChartColors.seriesColor(s.color, si)
         val fracs = (0 until n).map { ci ->
             ((s.values.getOrNull(ci) ?: 0.0).coerceAtLeast(0.0) / maxV).toFloat()
-        }
-        fracs.forEachIndexed { ci, frac ->
-            val p = vertex(ci, frac)
-            targets += ChartHitTarget(
-                kind = ChartHitKind.POINT,
-                categoryIndex = ci,
-                seriesIndex = si,
-                value = s.values.getOrNull(ci) ?: 0.0,
-                cx = p.x,
-                cy = p.y,
-                anchorX = p.x,
-                anchorY = p.y,
-            )
         }
         // Entrance: the polygon's radii scale with the progress.
         val pts = fracs.mapIndexed { ci, frac -> vertex(ci, frac * progress) }
