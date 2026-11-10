@@ -73,7 +73,11 @@ class TaskTreeTest {
     }
 
     @Test
-    fun setText_keepsFormattingAndClearsTrailingContent() {
+    fun setText_keepsFormattingAndLeavesTrailingContentAlone() {
+        // Codex P2 (PR #41): the label field edits ONLY the item's
+        // own leading content — trailing content keeps its place
+        // after the children and its own formatting, with its own
+        // write path (setAfterText).
         val rich = listOf(
             TaskItem(
                 "<p><strong>Old</strong></p>",
@@ -85,8 +89,12 @@ class TaskTreeTest {
         val out = TaskTree.setText(rich, listOf(0), "New")
         val edited = out[0]
         assertEquals("<p><strong>New</strong></p>", edited.contentHtml)
-        assertEquals("", edited.contentAfterHtml)
+        assertEquals("<p>Tail</p>", edited.contentAfterHtml)
         assertEquals(1, edited.children.size)
+
+        val out2 = TaskTree.setAfterText(rich, listOf(0), "New tail")
+        assertEquals("<p>New tail</p>", out2[0].contentAfterHtml)
+        assertEquals("<p><strong>Old</strong></p>", out2[0].contentHtml)
     }
 
     @Test

@@ -77,16 +77,35 @@ object TaskTree {
     /**
      * Replaces the item's label text via the editor's text-run
      * surgery ([NoteDocument.replaceTaskItemText]) — inline
-     * formatting survives, the N5 rule. Any trailing own content
-     * (content that followed the item's nested list) was folded
-     * into the label field the user just edited, so it is cleared:
-     * keeping it would print that text twice.
+     * formatting survives, the N5 rule. The item's TRAILING
+     * content ([TaskItem.contentAfterHtml]) is NOT touched: it is
+     * a separate field in the editor, rendered after the item's
+     * children (Codex P2, PR #41 — an earlier design folded it
+     * into the label field, and the first keystroke moved it in
+     * front of the children and stripped its formatting).
      */
     fun setText(items: List<TaskItem>, path: List<Int>, newText: String): List<TaskItem> =
         updateAt(items, path) {
             it.copy(
                 contentHtml = NoteDocument.replaceTaskItemText(it.contentHtml, newText),
-                contentAfterHtml = "",
+            )
+        }
+
+    /**
+     * Replaces the item's TRAILING content text (the content that
+     * follows its nested list) via the same text-run surgery —
+     * the trailing field's write path, the twin of [setText].
+     */
+    fun setAfterText(
+        items: List<TaskItem>,
+        path: List<Int>,
+        newText: String,
+    ): List<TaskItem> =
+        updateAt(items, path) {
+            it.copy(
+                contentAfterHtml = NoteDocument.replaceTaskItemText(
+                    it.contentAfterHtml, newText,
+                ),
             )
         }
 

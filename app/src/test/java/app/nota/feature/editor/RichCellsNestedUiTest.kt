@@ -521,4 +521,38 @@ class RichCellsNestedUiTest {
             storedHtml(note.id).split("<ul data-type=\"taskList\">").size - 1 == 3,
         )
     }
+
+    @Test
+    fun editMode_labelEdit_keepsTrailingContentAfterChildren() {
+        // Codex P2 (PR #41): an item's trailing content (after its
+        // nested list) has its OWN field after the child rows —
+        // editing the item's label must not drag it in front of
+        // the children.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Trailing",
+                contentHtml = "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Before</p>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Kid</p></div></li>" +
+                    "</ul><p>After</p></div></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+        enterEditMode()
+        composeRule.onNodeWithText("After").assertExists()
+        replaceFieldText("Before", "Before edited")
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        val html = storedHtml(note.id)
+        assertTrue(
+            "stored order stays Before -> Kid -> After: $html",
+            html.indexOf("Before edited") < html.indexOf("Kid") &&
+                html.indexOf("Kid") < html.indexOf("After"),
+        )
+    }
 }

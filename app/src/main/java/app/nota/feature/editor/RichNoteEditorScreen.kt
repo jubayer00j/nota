@@ -578,6 +578,14 @@ fun RichNoteEditorScreen(
     }
 
     fun removeBlock(id: String) {
+        // Codex P2 (PR #41): a removed block takes its focus routes
+        // and hoisted cell states with it — a stale focused-cell
+        // route would keep the toolbar aiming at an orphan state
+        // whose edits go nowhere, and its map entry would linger.
+        if (focusedTableCell?.first == id) focusedTableCell = null
+        if (focusedTaskItem?.first == id) focusedTaskItem = null
+        evictCellTextStates(cellTextStates, id)
+        evictCellRichStates(cellRichStates, id)
         segments = ensureTrailing(segments.filterNot { it.id == id })
     }
 
@@ -3843,6 +3851,39 @@ private fun doneCheckboxColors() = CheckboxDefaults.colors(
     checkmarkColor = MaterialTheme.colorScheme.onPrimary,
 )
 
+/** One rendered row of the task block: an item row, or the
+ *  trailing-content row that follows an item's subtree. */
+private sealed interface TaskBlockRow {
+    data class Item(val flat: TaskTree.FlatItem) : TaskBlockRow
+    data class Trailing(
+        val path: List<Int>,
+        val depth: Int,
+        val item: TaskItem,
+    ) : TaskBlockRow
+}
+
+/**
+ * The task block's rows in reading order — an item, its children,
+ * then its trailing content. Codex P2 (PR #41): the trailing
+ * content is edited in its true position after the children,
+ * never folded into the item's label field.
+ */
+private fun taskBlockRows(items: List<TaskItem>): List<TaskBlockRow> {
+    val out = mutableListOf<TaskBlockRow>()
+    fun walk(list: List<TaskItem>, prefix: List<Int>, depth: Int) {
+        list.forEachIndexed { index, item ->
+            val path = prefix + index
+            out += TaskBlockRow.Item(TaskTree.FlatItem(path, depth, item))
+            walk(item.children, path, depth + 1)
+            if (item.contentAfterHtml.isNotBlank()) {
+                out += TaskBlockRow.Trailing(path, depth, item)
+            }
+        }
+    }
+    walk(items, emptyList(), 0)
+    return out
+}
+
 @Composable
 private fun TaskListBlock(
     blockId: String,
@@ -3871,9 +3912,46 @@ private fun TaskListBlock(
             // Phase 6 (nested checklists): the tree renders
             // FLATTENED — one row per item at every depth, indented
             // 24dp per level, each with its own checkbox, label
-            // field and remove. All mutations go through TaskTree's
-            // path operations on the whole tree.
-            TaskTree.flatten(list.items).forEach { flat ->
+            // field and remove; an item's trailing content gets
+            // its own field row after its children. All mutations
+            // go through TaskTree's path operations on the tree.
+            taskBlockRows(list.items).forEach { taskRow ->
+                if (taskRow is TaskBlockRow.Trailing) {
+                    val tItem = taskRow.item
+                    val tPath = taskRow.path
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(start = (taskRow.depth * 24).dp),
+                    ) {
+                        Spacer(Modifier.width(48.dp))
+                        EditableCellText(
+                            key = "$blockId-item-${tPath.joinToString(".")}-after",
+                            initial = PlainTextCodec.htmlToCellText(
+                                tItem.contentAfterHtml,
+                            ),
+                            bodyStyle = true,
+                            dimmed = tItem.checked,
+                            cellTextStates = cellTextStates,
+                            modifier = Modifier.weight(1f),
+                            onFocus = {
+                                focusedPath = tPath
+                                onItemFocus(tPath)
+                            },
+                            onEdit = { newText ->
+                                onChange(
+                                    TaskListSegment(
+                                        TaskTree.setAfterText(
+                                            list.items, tPath, newText,
+                                        ),
+                                    ),
+                                )
+                            },
+                        )
+                    }
+                    return@forEach
+                }
+                val flat = (taskRow as TaskBlockRow.Item).flat
                 val item = flat.item
                 val path = flat.path
                 Row(
@@ -3902,11 +3980,12 @@ private fun TaskListBlock(
                     )
                     EditableCellText(
                         key = "$blockId-item-${path.joinToString(".")}",
-                        // The label field shows the item's own
-                        // content whole — leading content plus any
-                        // trailing content after its nested list.
+                        // The label field shows the item's OWN
+                        // leading content only — trailing content
+                        // after its nested list has its own field
+                        // row after the children (Codex P2, PR #41).
                         initial = PlainTextCodec.htmlToCellText(
-                            item.contentHtml + item.contentAfterHtml,
+                            item.contentHtml,
                         ),
                         bodyStyle = true,
                         dimmed = item.checked,
