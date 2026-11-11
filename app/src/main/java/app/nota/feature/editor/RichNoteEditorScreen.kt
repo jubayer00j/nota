@@ -178,6 +178,7 @@ import app.nota.data.html.CodeSegment
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.DividerSegment
 import app.nota.data.html.DocSegment
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
@@ -374,6 +375,15 @@ fun RichNoteEditorScreen(
     // Charts PR-B: the insert-chart dialog (the chart editor,
     // seeded with the default chart; edit opens from the block).
     var showChartInsertDialog by remember { mutableStateOf(false) }
+    // PR #51: the audio recorder sheet (insert menu) and the
+    // one-active-playback controller every audio row in this note
+    // shares, in read and edit mode alike; released with the
+    // screen so a player can never outlive the note.
+    var showAudioRecorder by remember { mutableStateOf(false) }
+    val audioPlayback = remember { AudioPlaybackController() }
+    DisposableEffect(Unit) {
+        onDispose { audioPlayback.release() }
+    }
     var showImageUrlDialog by remember { mutableStateOf(false) }
     var imageUrl by remember { mutableStateOf("") }
     var imageUrlError by remember { mutableStateOf(false) }
@@ -2074,6 +2084,7 @@ fun RichNoteEditorScreen(
                 onRemove = { removeBlock(ui.id) },
                 attachments = attachments,
                 fileFor = { viewModel.attachmentFile(it) },
+                audioPlayback = audioPlayback,
                 bringIntoView = bringIntoView,
                 onPinchingChange = { imagePinchActive = it },
                 bodyStyle = editorBodyStyle,
@@ -2200,6 +2211,7 @@ fun RichNoteEditorScreen(
                                 onChange = { updateBlock(ui.id, it) },
                                 attachments = attachments,
                                 fileFor = { viewModel.attachmentFile(it) },
+                                audioPlayback = audioPlayback,
                                 bodyStyle = editorBodyStyle,
                             )
                         }
@@ -2343,7 +2355,8 @@ fun RichNoteEditorScreen(
                             segments = ensureTrailing(
                                 segments.filterNot {
                                     (it.segment as? ImageSegment)?.src == targetSrc ||
-                                        (it.segment as? FileSegment)?.attachmentId == attachment.id
+                                        (it.segment as? FileSegment)?.attachmentId == attachment.id ||
+                                        (it.segment as? AudioSegment)?.attachmentId == attachment.id
                                 },
                             )
                             viewModel.deleteAttachment(attachment)
@@ -2679,6 +2692,7 @@ fun RichNoteEditorScreen(
                             filePicker.launch(arrayOf("*/*"))
                         }
                     },
+                    onRecordAudioRequest = { showAudioRecorder = true },
                     onInsertBlock = { insertBlock(it) },
                 )
                 if (turnIntoExpanded && turnIntoTargets.isNotEmpty()) {
@@ -2793,6 +2807,42 @@ fun RichNoteEditorScreen(
                         rawHtml = ChartSerializer.serialize(data),
                     ),
                 )
+            },
+        )
+    }
+
+    if (showAudioRecorder) {
+        // PR #51: record a voice note. The sheet owns the take
+        // until Stop; Stop imports the temp file into attachment
+        // storage and inserts the audio block AT THE CARET through
+        // the same insertBlockAtCaret funnel as every other caret
+        // insert, then closes the sheet. A failed import keeps the
+        // honest toast and inserts nothing (the sheet has already
+        // discarded its recorder; its dispose path removes the
+        // temp file). Cancel inside the sheet just closes it —
+        // the sheet's own dispose discards the take.
+        AudioRecorderSheet(
+            onDismiss = { showAudioRecorder = false },
+            onSave = { file, displayName, durationMs ->
+                viewModel.importAudioFile(file, displayName) { attachment ->
+                    file.delete()
+                    showAudioRecorder = false
+                    if (attachment != null) {
+                        insertBlockAtCaret(
+                            AudioSegment(
+                                attachmentId = attachment.id,
+                                durationMillis = durationMs,
+                                displayName = displayName,
+                            ),
+                        )
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "Couldn't save the recording.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
             },
         )
     }
@@ -3117,6 +3167,8 @@ private fun SegmentEditor(
     onRemove: () -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
+    // PR #51: the note's shared one-active-playback controller.
+    audioPlayback: AudioPlaybackController,
     bringIntoView: BringIntoViewRequester,
     // Phase 3.6 (G4): lets the screen suspend list scrolling while an
     // image pinch is live.
@@ -3269,6 +3321,9 @@ private fun SegmentEditor(
                             segment, attachments, fileFor, onChange, onRemove, onPinchingChange,
                         )
                         is FileSegment -> FileBlock(segment, attachments, onRemove)
+                        is AudioSegment -> AudioBlock(
+                            segment, attachments, fileFor, audioPlayback, onRemove,
+                        )
                         is ChartSegment -> BlockShell(onRemove) {
                             // Charts PR-A/PR-B: the chart RENDERS
                             // from a parse of its stored div. In
@@ -3401,6 +3456,9 @@ internal fun SegmentReadView(
     onChange: (DocSegment) -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
+    // PR #51: the surface's shared one-active-playback controller
+    // (the note screen's, or the version preview's own).
+    audioPlayback: AudioPlaybackController,
     // Phase 6 (PR #43): the Writing-preference body style, threaded
     // from the screen (the read-mode title of truth for body size).
     bodyStyle: TextStyle,
@@ -3568,6 +3626,12 @@ internal fun SegmentReadView(
                     }
                 }
             }
+        }
+        is AudioSegment -> {
+            // PR #51: playback lives in read mode too — listening
+            // never requires entering edit mode. No remove here:
+            // removal stays edit-mode-only per the block rules.
+            AudioBlock(segment, attachments, fileFor, audioPlayback)
         }
         is CodeSegment -> {
             Box(
@@ -3780,7 +3844,7 @@ private fun FileBlock(
 }
 
 @Composable
-private fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
+internal fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -5097,6 +5161,8 @@ private fun EditorToolbar(
     onInsertImage: () -> Unit,
     onInsertImageUrl: () -> Unit,
     onInsertFile: () -> Unit,
+    // PR #51: opens the audio recorder sheet.
+    onRecordAudioRequest: () -> Unit = {},
     onInsertTableRequest: () -> Unit,
     onInsertChartRequest: () -> Unit = {},
     onInsertBlock: (DocSegment) -> Unit,
@@ -5342,6 +5408,11 @@ private fun EditorToolbar(
                     text = { Text("File attachment…") },
                     leadingIcon = { Icon(Icons.Filled.AttachFile, contentDescription = null) },
                     onClick = { onInsertMenuChange(false); onInsertFile() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Record audio…") },
+                    leadingIcon = { Icon(Icons.Filled.Mic, contentDescription = null) },
+                    onClick = { onInsertMenuChange(false); onRecordAudioRequest() },
                 )
                 DropdownMenuItem(
                     text = { Text("Table…") },

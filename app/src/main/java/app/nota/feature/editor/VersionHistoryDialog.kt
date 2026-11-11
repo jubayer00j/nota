@@ -27,6 +27,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -298,6 +299,13 @@ private fun VersionPreview(
             NoteDocument.parse(version.contentHtml),
         ).map { UiSegment(newUiId(), it) }
     }
+    // PR #51: the preview's own one-active-playback controller —
+    // audio blocks in a historical version stay playable, and the
+    // player is released when the preview leaves composition.
+    val previewPlayback = remember { AudioPlaybackController() }
+    DisposableEffect(previewPlayback) {
+        onDispose { previewPlayback.release() }
+    }
     // The screen's richStateFor pattern, scoped to this preview:
     // one library state per text/quote segment, seeded from the
     // stored HTML. Rendering only — toggles and edits go nowhere
@@ -362,6 +370,7 @@ private fun VersionPreview(
                         onChange = {},
                         attachments = attachments,
                         fileFor = fileFor,
+                        audioPlayback = previewPlayback,
                         bodyStyle = bodyStyle,
                     )
                 }
