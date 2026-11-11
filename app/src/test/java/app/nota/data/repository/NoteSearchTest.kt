@@ -61,6 +61,64 @@ class NoteSearchTest {
         assertEquals(3, NoteSearch.score("Notes", "textbook", emptyList(), null, listOf("ook")))
     }
 
+    // ---- Bengali probe (G9) --------------------------------------
+    // Post-quality-pass search is substring scoring over the
+    // corpus, exactly like 1.x, so Bengali text must behave like
+    // any other text through every pure seam: tokenisation,
+    // field weights, mid-word fragments, snippet windowing and
+    // highlight ranges — including words built from combining
+    // vowel signs, where a code-unit slip would show up as a
+    // shifted window or range.
+
+    @Test
+    fun bengaliTermsAndFieldWeightsMatchEnglish() {
+        assertEquals(listOf("ঢাকা", "ভ্রমণ"), NoteSearch.terms("ঢাকা  ভ্রমণ"))
+        assertEquals(6, NoteSearch.score("ঢাকা ভ্রমণ", "", emptyList(), null, listOf("ঢাকা")))
+        assertEquals(3, NoteSearch.score("নোট", "আমার শহর ঢাকা", emptyList(), null, listOf("ঢাকা")))
+        assertEquals(2, NoteSearch.score("নোট", "", listOf("বাংলা"), null, listOf("বাংলা")))
+        assertEquals(1, NoteSearch.score("নোট", "", emptyList(), "ভ্রমণ ডায়েরি", listOf("ভ্রমণ")))
+        // AND across terms holds for Bengali too.
+        assertNull(
+            NoteSearch.score("ঢাকা", "ভ্রমণ কথা", emptyList(), null, listOf("ঢাকা", "চট্টগ্রাম")),
+        )
+    }
+
+    @Test
+    fun bengaliMidWordFragmentScoresAsAMatch() {
+        // "লাদে" sits mid-word inside "বাংলাদেশ" — never a
+        // token prefix, so only the substring rule finds it.
+        assertEquals(
+            3,
+            NoteSearch.score("নোট", "আমি বাংলাদেশ থেকে এসেছি", emptyList(), null, listOf("লাদে")),
+        )
+    }
+
+    @Test
+    fun bengaliSnippetCentresADeepMatch() {
+        val text = "কথা ".repeat(50) + "লক্ষ্য" + " কথা".repeat(50)
+        val snippet = NoteSearch.snippet(text, listOf("লক্ষ্য"))
+        // The match starts at code unit 200; the window is the
+        // same −30/+110 as for English, ellipses on both ends.
+        assertEquals("…" + text.substring(170, 310) + "…", snippet)
+        assertTrue(snippet.contains("লক্ষ্য"))
+    }
+
+    @Test
+    fun bengaliHighlightRangesAreExactAroundCombiningSigns() {
+        // "বাংলা" is five code units (ব + া + ং + ল + া — two
+        // combining signs); the range must cover exactly the
+        // rendered word, no drift from the marks around it.
+        assertEquals(
+            listOf(4..8),
+            NoteSearch.highlightRanges("আমি বাংলা বলি", listOf("বাংলা")),
+        )
+        // "কী" is ক + the combining ী sign: two code units.
+        assertEquals(
+            listOf(5..6),
+            NoteSearch.highlightRanges("তুমি কী করো", listOf("কী")),
+        )
+    }
+
     // ---- Snippets (G2) ------------------------------------------
 
     @Test

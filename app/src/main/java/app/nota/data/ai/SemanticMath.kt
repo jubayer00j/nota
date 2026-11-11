@@ -75,10 +75,18 @@ object SemanticMath {
      * [floor], best first. [chunksByNote] maps note id → its
      * stored chunk vectors; ties break by note id so the order
      * is deterministic for tests and stable across calls.
+     *
+     * A null entry is a chunk position with NO usable vector
+     * (G10: the stored chunk at that position no longer answers
+     * for the note's current text there). Nulls are skipped,
+     * never scored — and positions are preserved, so a hit's
+     * [SemanticHit.bestChunkIndex] always names the chunk's
+     * position in the note's full chunk list, the index the
+     * snippet re-chunking in the search UI relies on.
      */
     fun relatedHits(
         queryVector: FloatArray,
-        chunksByNote: Map<String, List<FloatArray>>,
+        chunksByNote: Map<String, List<FloatArray?>>,
         floor: Double,
         limit: Int = 10,
     ): List<SemanticHit> {
@@ -87,6 +95,7 @@ object SemanticMath {
             var best = Double.NEGATIVE_INFINITY
             var bestIndex = -1
             for ((index, chunk) in chunks.withIndex()) {
+                if (chunk == null) continue
                 val score = cosine(queryVector, chunk)
                 if (score > best) {
                     best = score

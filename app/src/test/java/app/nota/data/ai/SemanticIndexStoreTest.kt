@@ -1,6 +1,8 @@
 package app.nota.data.ai
 
+import java.io.DataOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -29,11 +31,14 @@ class SemanticIndexStoreTest {
         notes = linkedMapOf(
             "note-1" to StoredNoteVectors(
                 "fp-1",
-                listOf(floatArrayOf(0.1f, 0.2f, 0.3f), floatArrayOf(-1f, 0f, 1f)),
+                listOf(
+                    StoredChunk("cfp-1a", floatArrayOf(0.1f, 0.2f, 0.3f)),
+                    StoredChunk("cfp-1b", floatArrayOf(-1f, 0f, 1f)),
+                ),
             ),
             "note-2" to StoredNoteVectors(
                 "fp-2",
-                listOf(floatArrayOf(3.25f, -0.5f, 0.125f)),
+                listOf(StoredChunk("cfp-2a", floatArrayOf(3.25f, -0.5f, 0.125f))),
             ),
         ),
     )
@@ -47,11 +52,42 @@ class SemanticIndexStoreTest {
         assertEquals(3, loaded.dims)
         assertEquals(setOf("note-1", "note-2"), loaded.notes.keys)
         assertEquals("fp-1", loaded.notes["note-1"]!!.fingerprint)
+        // Per-chunk fingerprints round-trip too (format v2, G10).
+        assertEquals("cfp-1a", loaded.notes["note-1"]!!.chunks[0].fingerprint)
         val chunk = loaded.notes["note-1"]!!.chunks[1]
-        assertEquals(-1f, chunk[0])
-        assertEquals(0f, chunk[1])
-        assertEquals(1f, chunk[2])
-        assertEquals(3.25f, loaded.notes["note-2"]!!.chunks[0][0])
+        assertEquals("cfp-1b", chunk.fingerprint)
+        assertEquals(-1f, chunk.vector[0])
+        assertEquals(0f, chunk.vector[1])
+        assertEquals(1f, chunk.vector[2])
+        assertEquals(3.25f, loaded.notes["note-2"]!!.chunks[0].vector[0])
+    }
+
+    @Test
+    fun version1FilesReadAsNoIndex() {
+        // Format v1 stored bare vectors — no per-chunk
+        // fingerprints exist to validate chunks against, so a
+        // v1 file reads as "no index" under the store's standing
+        // contract (an unreadable file costs a rebuild, never a
+        // crash) and the first reconcile under v2 rebuilds it.
+        // The bytes below are the v1 layout, written by hand.
+        val store = store()
+        val file = store.fileFor("guest")
+        file.parentFile.mkdirs()
+        DataOutputStream(FileOutputStream(file)).use { output ->
+            output.writeInt(0x4E494458) // MAGIC "NIDX"
+            output.writeInt(1) // VERSION 1
+            output.writeUTF("gemini|native|gemini-embedding-001")
+            output.writeInt(3) // dims
+            output.writeInt(1) // note count
+            output.writeUTF("note-1")
+            output.writeUTF("fp-1")
+            output.writeInt(1) // chunk count
+            output.writeInt(3) // vector size
+            output.writeFloat(0.1f)
+            output.writeFloat(0.2f)
+            output.writeFloat(0.3f)
+        }
+        assertNull(store.load("guest"))
     }
 
     @Test
