@@ -2562,8 +2562,7 @@ fun RichNoteEditorScreen(
                 val turnIntoTargets: List<TurnIntoTarget> = when {
                     focusedCellState != null -> emptyList()
                     makeTextAvailable -> listOf(TurnIntoTarget.Paragraph)
-                    activeUi?.segment is QuoteSegment && activeState != null &&
-                        activeState!!.annotatedString.text.isNotEmpty() ->
+                    activeUi?.segment is QuoteSegment && activeState != null ->
                         listOf(TurnIntoTarget.Paragraph)
                     activeUi?.segment is CodeSegment ->
                         listOf(TurnIntoTarget.Paragraph)

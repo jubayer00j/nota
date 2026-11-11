@@ -7,6 +7,8 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.onAllNodes
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
@@ -393,6 +395,57 @@ class EditorRefinementUiTest {
         awaitTrue("stored as a plain paragraph again") {
             val html = storedHtml(note.id)
             html.contains("<p>Quote me</p>") && !html.contains("blockquote")
+        }
+    }
+
+    @Test
+    fun turnInto_emptyQuoteOffersParagraph() {
+        // Codex PR #50 R1 (P2): a newly inserted or cleared quote
+        // holds no text, and the Turn into eligibility used to
+        // require non-empty text on the quote branch — so an empty
+        // quote offered no Paragraph conversion, only deletion.
+        // quoteToText itself has no content precondition; the offer
+        // must not either (the code branch never had the check).
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Empty quote",
+                contentHtml = "<blockquote><p></p></blockquote>",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("edit door") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+
+        // Focus the empty quote field: the SetText nodes are the
+        // title first, then the quote's own field (empty text).
+        awaitTrue("quote field present") {
+            composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().size >= 2
+        }
+        composeRule.onAllNodes(hasSetTextAction())[1].performClick()
+        awaitTrue("Turn into offered for the empty quote") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Paragraph offered for the empty quote") {
+            exists("paragraph") {
+                composeRule.onNodeWithText("Paragraph").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Paragraph").performClick()
+        awaitTrue("empty quote stored as text, blockquote gone") {
+            !storedHtml(note.id).contains("blockquote")
         }
     }
 
