@@ -462,11 +462,14 @@ class EditorRefinementUiTest {
         // PR #50 scope pin: a heading converts to Quote and Code
         // block, but the task conversion stays plain-paragraph-only
         // — "Task list" must not be offered with the caret in a
-        // heading.
+        // heading. The fixture is heading-ONLY on purpose: a rich
+        // field's semantics text is its segment's WHOLE text, so a
+        // following paragraph would make the "Head line" query
+        // match nothing (the two blocks share one text node).
         val note = runBlocking {
             repository.createRichNote(
                 title = "Headed",
-                contentHtml = "<h2>Head line</h2><p>Body text</p>",
+                contentHtml = "<h2>Head line</h2>",
             )
         }
         composeEditor(note.id)
