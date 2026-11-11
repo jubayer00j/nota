@@ -55,9 +55,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -295,7 +297,11 @@ private fun AskHeroMark(modifier: Modifier = Modifier) {
         )
         // The glyph itself, gradient-swept (kept only where the
         // glyph's own alpha is — BlendMode.SrcIn over the drawn
-        // painter).
+        // painter). The draw runs inside a saveLayer: SrcIn masks
+        // against the destination alpha, and without isolation that
+        // destination includes the halo and disc already painted
+        // into this canvas, so the gradient would slab across the
+        // icon's whole rect instead of following the N.
         Icon(
             painter = painterResource(R.drawable.ic_nota_glyph),
             contentDescription = null,
@@ -303,6 +309,8 @@ private fun AskHeroMark(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .size(width = 58.dp, height = 50.dp)
                 .drawWithContent {
+                    val canvas = drawContext.canvas
+                    canvas.saveLayer(Rect(Offset.Zero, size), Paint())
                     drawContent()
                     drawRect(
                         brush = Brush.linearGradient(
@@ -317,6 +325,7 @@ private fun AskHeroMark(modifier: Modifier = Modifier) {
                         ),
                         blendMode = BlendMode.SrcIn,
                     )
+                    canvas.restore()
                 },
         )
     }
