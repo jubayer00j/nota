@@ -6,7 +6,7 @@ import org.junit.Test
 
 /**
  * Vector scoring (Phase 4.2): cosine correctness, best-chunk
- * note scoring, the per-provider floors, and deterministic
+ * note scoring, the model-keyed floors, and deterministic
  * ordering. Pure JVM.
  */
 class SemanticMathTest {
@@ -31,11 +31,35 @@ class SemanticMathTest {
     }
 
     @Test
-    fun floorsMirrorTheCalibration() {
-        assertEquals(0.50, SemanticMath.floorFor(AiProviderId.GEMINI), 0.0)
-        assertEquals(0.38, SemanticMath.floorFor(AiProviderId.OPENAI), 0.0)
-        assertEquals(0.38, SemanticMath.floorFor(AiProviderId.OPENROUTER), 0.0)
-        assertEquals(0.38, SemanticMath.floorFor(AiProviderId.CUSTOM), 0.0)
+    fun floorsAreKeyedToTheModelNotTheProvider() {
+        // Search Quality Pass (v0.27.0): 1.x keys the floor to
+        // the embedding MODEL (semantic.ts similarityFloorFor) —
+        // only text-embedding-3-large earns 0.38, however it is
+        // reached; everything else sits at the 0.5 default. This
+        // replaces the provider-keyed table: at each provider's
+        // DEFAULT model the behaviour is unchanged (Gemini's
+        // default gemini-embedding-001 → 0.5; OpenAI's and
+        // OpenRouter's default 3-large → 0.38 — OpenRouter's
+        // being vendor-prefixed, which the rule strips).
+        assertEquals(0.38, SemanticMath.floorFor("text-embedding-3-large"), 0.0)
+        assertEquals(0.38, SemanticMath.floorFor("openai/text-embedding-3-large"), 0.0)
+        // Case and stray whitespace never change the verdict.
+        assertEquals(0.38, SemanticMath.floorFor(" Text-Embedding-3-Large "), 0.0)
+        assertEquals(0.50, SemanticMath.floorFor("text-embedding-3-small"), 0.0)
+        assertEquals(0.50, SemanticMath.floorFor("text-embedding-ada-002"), 0.0)
+        // Gemini's default embeds at 0.5, as before.
+        assertEquals(0.50, SemanticMath.floorFor("gemini-embedding-001"), 0.0)
+        assertEquals(0.50, SemanticMath.floorFor("gemini-embedding-2-preview"), 0.0)
+        // Unknown / blank models get the conservative default.
+        // (The old table gave a Custom endpoint 0.38 sight
+        // unseen; a Custom config has no default model at all —
+        // semantic search cannot run there until a model is
+        // chosen, and then the model's own floor applies.)
+        assertEquals(0.50, SemanticMath.floorFor("some-local-model"), 0.0)
+        assertEquals(0.50, SemanticMath.floorFor(""), 0.0)
+        // And a 3-large reached through any route DOES earn
+        // 0.38 now — the one deliberate change of the keying.
+        assertEquals(0.38, SemanticMath.floorFor("models/text-embedding-3-large"), 0.0)
     }
 
     @Test

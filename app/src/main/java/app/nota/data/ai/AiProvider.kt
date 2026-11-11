@@ -213,8 +213,8 @@ class GeminiProvider(private val http: AiHttpClient) : AiProvider, AiEmbeddingPr
      * key in the `x-goog-api-key` header; the vector lives at
      * embedding.values. The task type follows [kind] — documents
      * and queries are embedded into the space differently, as in
-     * 1.x. One text per call (the batch endpoint is a later
-     * optimisation; indexing is a background, best-effort flow).
+     * 1.x. One text per call; multi-text embedding goes through
+     * the batch endpoint instead (see [embedAll]).
      */
     override suspend fun embed(
         config: AiEmbeddingConfig,
@@ -270,8 +270,99 @@ class GeminiProvider(private val http: AiHttpClient) : AiProvider, AiEmbeddingPr
             ?: throw AiException(AiErrorKind.BAD_RESPONSE)
     }
 
+    /**
+     * Search Quality Pass (v0.27.0): batch embedding via
+     * :batchEmbedContents — 1.x's shape (ai.ts embedViaGemini),
+     * chunked at [EMBED_BATCH_SIZE] requests per call, each
+     * request pinning the same task type [embed] would send for
+     * [kind]. Until this override, the interface default ran one
+     * sequential :embedContent round trip per ~500-char chunk,
+     * so an index build over a handful of long notes cost dozens
+     * of calls where 1.x makes a few. Requests deliberately
+     * mirror the single-call shape (model, content, taskType —
+     * no outputDimensionality): the vectors must stay in the
+     * exact space the existing index was written in. The reply
+     * carries one embedding per request, in request order; a
+     * count or shape mismatch is a BAD_RESPONSE, never a
+     * silently misaligned vector. Error mapping is the shared
+     * [postOrThrow] one, identical to [embed].
+     */
+    override suspend fun embedAll(
+        config: AiEmbeddingConfig,
+        texts: List<String>,
+        kind: EmbedKind,
+    ): List<FloatArray> {
+        if (texts.isEmpty()) return emptyList()
+        if (texts.size == 1) return listOf(embed(config, texts.single(), kind))
+        val key = config.apiKey.trim()
+        if (key.isBlank()) throw AiException.noKey()
+        val model = config.resolvedEmbeddingModel()
+        if (model.isBlank()) {
+            throw AiException.notConfigured(
+                "Choose an embedding model for this provider in Settings → AI features.",
+            )
+        }
+        val url = "$API_BASE/models/$model:batchEmbedContents"
+        if (url.toHttpUrlOrNull() == null) {
+            throw AiException.notConfigured(
+                "That embedding model name doesn't look usable — check it in Settings → AI features.",
+            )
+        }
+        val taskType = when (kind) {
+            EmbedKind.DOCUMENT -> "RETRIEVAL_DOCUMENT"
+            EmbedKind.QUERY -> "RETRIEVAL_QUERY"
+        }
+        val out = ArrayList<FloatArray>(texts.size)
+        for (batch in texts.chunked(EMBED_BATCH_SIZE)) {
+            val requests = JSONArray()
+            for (text in batch) {
+                requests.put(
+                    JSONObject()
+                        .put("model", "models/$model")
+                        .put(
+                            "content",
+                            JSONObject().put(
+                                "parts",
+                                JSONArray().put(JSONObject().put("text", text)),
+                            ),
+                        )
+                        .put("taskType", taskType),
+                )
+            }
+            val body = JSONObject().put("requests", requests).toString()
+            val responseBody = postOrThrow(
+                http = http,
+                url = url,
+                headers = mapOf("x-goog-api-key" to key),
+                jsonBody = body,
+                apiKey = key,
+                model = model,
+                invalidKeyStatuses = setOf(400, 401, 403),
+            )
+            val root = try {
+                JSONObject(responseBody)
+            } catch (e: Exception) {
+                throw AiException(AiErrorKind.BAD_RESPONSE)
+            }
+            val embeddings = root.optJSONArray("embeddings")
+                ?: throw AiException(AiErrorKind.BAD_RESPONSE)
+            if (embeddings.length() != batch.size) {
+                throw AiException(AiErrorKind.BAD_RESPONSE)
+            }
+            for (i in 0 until embeddings.length()) {
+                out += parseEmbeddingVector(embeddings.optJSONObject(i)?.optJSONArray("values"))
+                    ?: throw AiException(AiErrorKind.BAD_RESPONSE)
+            }
+        }
+        return out
+    }
+
     companion object {
         const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+        /** Requests per :batchEmbedContents call (1.x's
+         *  EMBED_BATCH_SIZE). */
+        const val EMBED_BATCH_SIZE = 100
     }
 }
 

@@ -405,17 +405,27 @@ class SemanticIndexer(
         if (queryVector.size != stored.dims) return emptyList()
         val chunksByNote = stored.notes.mapValues { it.value.chunks }
         val raw = SemanticMath.relatedHits(
-            queryVector, chunksByNote, SemanticMath.floorFor(config.providerId),
+            queryVector, chunksByNote,
+            SemanticMath.floorFor(config.resolvedEmbeddingModel()),
+            limit = SEARCH_HIT_LIMIT,
         )
         if (raw.isEmpty()) return raw
         // Defence in depth (1.x's merge rule): a hit only ever
         // surfaces a note that is eligible RIGHT NOW — a stale
         // vector can never resurrect a locked/trashed/archived/
-        // deleted note into the results.
+        // deleted note into the results. The hit must also still
+        // answer for the note's CURRENT text — the same stored-
+        // fingerprint check Ask's retrieval runs: between an edit
+        // and the next reconcile, the stored vectors describe
+        // text the note may no longer contain, and neither a
+        // search boost nor a meaning-only row may ride on them.
         val noteDao = databaseProvider.current.noteDao()
+        val storedById = stored.notes
         return raw.filter { hit ->
             val note = noteDao.getById(hit.noteId)
-            note != null && isIndexEligible(note)
+            note != null && isIndexEligible(note) &&
+                storedById[hit.noteId]?.fingerprint ==
+                fingerprint(note.title, note.plainText)
         }
     }
 
@@ -481,7 +491,7 @@ class SemanticIndexer(
         val queryVector = AiEmbeddings.create(config.providerId, http)
             .embed(config, question, EmbedKind.QUERY)
         if (queryVector.size != stored.dims) return emptyList()
-        val floor = SemanticMath.floorFor(config.providerId)
+        val floor = SemanticMath.floorFor(config.resolvedEmbeddingModel())
 
         // Post-embed revalidation (Codex PR #25 P1): the
         // candidates above were validated BEFORE the embedding
@@ -644,7 +654,30 @@ class SemanticIndexer(
         }
     }
 
+    /**
+     * The similarity floor the active embedding config's model
+     * carries (Search Quality Pass: floors follow the MODEL —
+     * see [SemanticMath.floorFor]) — the same value [search] and
+     * Ask retrieval apply, exposed so the search UI's blend
+     * judges hits by the identical threshold instead of a second
+     * copy of the rule. [SemanticMath.DEFAULT_FLOOR] when no
+     * config resolves (semantic search cannot run then anyway,
+     * so the value is never actually applied to a hit).
+     */
+    suspend fun similarityFloor(accountId: String): Double {
+        val config = settings.activeEmbeddingConfig(accountId) ?: return SemanticMath.DEFAULT_FLOOR
+        return SemanticMath.floorFor(config.resolvedEmbeddingModel())
+    }
+
     private companion object {
         const val SAVE_EVERY_NOTES = 25
+
+        /** How many meaning hits one search returns (Search
+         *  Quality Pass): the blend ranks semantic-only notes
+         *  INTO the keyword list, so the Phase 4.2 section cap
+         *  of 10 would silently drop blend candidates; 50 keeps
+         *  the pass bounded while covering any realistic set of
+         *  above-floor notes in a personal library. */
+        const val SEARCH_HIT_LIMIT = 50
     }
 }

@@ -39,6 +39,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import app.nota.data.repository.NoteSearch
 import app.nota.ui.components.NotaSecondaryButton
 import app.nota.ui.components.NoteCard
 import app.nota.ui.theme.NotaSpacing
@@ -60,7 +65,6 @@ fun SearchScreen(
 ) {
     val query by viewModel.query.collectAsState()
     val results by viewModel.results.collectAsState()
-    val semanticResults by viewModel.semanticResults.collectAsState()
     val semanticHint by viewModel.semanticHint.collectAsState()
     val saved by viewModel.savedSearches.collectAsState()
     val focusRequester = remember { FocusRequester() }
@@ -149,49 +153,37 @@ fun SearchScreen(
                     NotaSecondaryButton(text = "Save this search", onClick = { showSaveDialog = true })
                 }
                 Spacer(Modifier.height(NotaSpacing.sm))
-                if (results.isEmpty() && semanticResults.isEmpty()) {
+                if (results.isEmpty()) {
                     Text(
                         "No notes match \"$query\".",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
+                    // Search Quality Pass: ONE ranked list. Every
+                    // card shows the match-window snippet with the
+                    // query terms highlighted (1.x's <mark>);
+                    // meaning-only hits carry the "By meaning"
+                    // badge and show their matching passage.
+                    val terms = NoteSearch.terms(query)
                     LazyColumn(
                         contentPadding = PaddingValues(bottom = NotaSpacing.md),
                         verticalArrangement = Arrangement.spacedBy(NotaSpacing.md),
                     ) {
-                        items(results, key = { it.id }) { note ->
+                        items(results, key = { it.id }) { result ->
+                            val note = result.row
                             NoteCard(
                                 title = note.title,
-                                snippet = if (note.locked) "" else note.excerpt,
+                                snippet = result.snippet,
+                                snippetAnnotated = if (result.snippet.isBlank()) null
+                                    else highlightedSnippet(result.snippet, terms),
+                                badgeText = if (result.byMeaning) "By meaning" else null,
                                 updatedLabel = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(note.updatedAt)),
                                 pinned = note.pinned,
                                 favourite = note.favourite,
                                 locked = note.locked,
                                 onClick = { onOpenNote(note.id) },
                             )
-                        }
-                        // Phase 4.2: meaning-based matches the
-                        // keyword pass didn't already surface.
-                        if (semanticResults.isNotEmpty()) {
-                            item {
-                                Text(
-                                    "Related by meaning",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    modifier = Modifier.padding(top = NotaSpacing.sm),
-                                )
-                            }
-                            items(semanticResults, key = { "semantic-" + it.id }) { note ->
-                                NoteCard(
-                                    title = note.title,
-                                    snippet = if (note.locked) "" else note.excerpt,
-                                    updatedLabel = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(note.updatedAt)),
-                                    pinned = note.pinned,
-                                    favourite = note.favourite,
-                                    locked = note.locked,
-                                    onClick = { onOpenNote(note.id) },
-                                )
-                            }
                         }
                     }
                 }
@@ -228,5 +220,32 @@ fun SearchScreen(
                 TextButton(onClick = { showSaveDialog = false }) { Text("Cancel") }
             },
         )
+    }
+}
+
+/**
+ * Search Quality Pass: the snippet with every query-term
+ * occurrence styled — 1.x's `<mark>` (accent-soft background +
+ * full-strength text) mapped onto Nota's palette: the term
+ * reads at full onSurface strength in Medium weight against
+ * the card's muted body text. Ranges come from the pure
+ * [NoteSearch.highlightRanges] seam.
+ */
+@Composable
+private fun highlightedSnippet(snippet: String, terms: List<String>): AnnotatedString {
+    val markStyle = SpanStyle(
+        color = MaterialTheme.colorScheme.onSurface,
+        fontWeight = FontWeight.Medium,
+    )
+    return remember(snippet, terms, markStyle) {
+        val ranges = NoteSearch.highlightRanges(snippet, terms)
+        if (ranges.isEmpty()) {
+            AnnotatedString(snippet)
+        } else {
+            buildAnnotatedString {
+                append(snippet)
+                for (range in ranges) addStyle(markStyle, range.first, range.last + 1)
+            }
+        }
     }
 }

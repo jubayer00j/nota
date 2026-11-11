@@ -47,6 +47,24 @@ class SemanticIndexCacheRobolectricTest {
         ): AiHttpResponse {
             if (transportFailure) throw AiNetworkException(IOException("no route"))
             val body = JSONObject(jsonBody)
+            if (url.contains(":batchEmbedContents")) {
+                // Search Quality Pass: indexing embeds a note's
+                // chunks in ONE batch call — answer like the real
+                // endpoint, one embedding per request, in order.
+                val requests = body.getJSONArray("requests")
+                val embeddings = JSONArray()
+                for (i in 0 until requests.length()) {
+                    val text = requests.getJSONObject(i).getJSONObject("content")
+                        .getJSONArray("parts").getJSONObject(0).getString("text")
+                    val values = JSONArray()
+                    vectorFor(text).forEach { values.put(it.toDouble()) }
+                    embeddings.put(JSONObject().put("values", values))
+                }
+                return AiHttpResponse(
+                    200,
+                    JSONObject().put("embeddings", embeddings).toString(),
+                )
+            }
             val text = body.getJSONObject("content").getJSONArray("parts")
                 .getJSONObject(0).getString("text")
             val values = JSONArray()

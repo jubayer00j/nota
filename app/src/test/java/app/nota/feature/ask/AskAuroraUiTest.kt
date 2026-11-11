@@ -76,6 +76,24 @@ class AskAuroraUiTest {
             headers: Map<String, String>,
             jsonBody: String,
         ): AiHttpResponse = when {
+            url.contains(":batchEmbedContents") -> {
+                // Search Quality Pass: indexing embeds a note's
+                // chunks in ONE batch call — answer like the real
+                // endpoint, one embedding per request, in order.
+                val requests = JSONObject(jsonBody).getJSONArray("requests")
+                val embeddings = JSONArray()
+                for (i in 0 until requests.length()) {
+                    val text = requests.getJSONObject(i).getJSONObject("content")
+                        .getJSONArray("parts").getJSONObject(0).getString("text")
+                    val values = JSONArray()
+                    vectorFor(text).forEach { values.put(it.toDouble()) }
+                    embeddings.put(JSONObject().put("values", values))
+                }
+                AiHttpResponse(
+                    200,
+                    JSONObject().put("embeddings", embeddings).toString(),
+                )
+            }
             url.contains(":embedContent") -> {
                 val body = JSONObject(jsonBody)
                 val text = body.getJSONObject("content").getJSONArray("parts")

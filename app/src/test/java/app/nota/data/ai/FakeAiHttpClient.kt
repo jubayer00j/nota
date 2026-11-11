@@ -10,13 +10,21 @@ class FakeAiHttpClient : AiHttpClient {
     var next: AiHttpResponse = AiHttpResponse(200, "{}")
     var failure: Throwable? = null
 
+    /** Optional per-call responder (Search Quality Pass): when
+     *  set it answers each call from the recorded request —
+     *  the batch-embedding tests need replies whose size follows
+     *  the request. Takes precedence over [next]. */
+    var handler: ((Call) -> AiHttpResponse)? = null
+
     override suspend fun post(
         url: String,
         headers: Map<String, String>,
         jsonBody: String,
     ): AiHttpResponse {
-        calls += Call(url, headers, jsonBody)
+        val call = Call(url, headers, jsonBody)
+        calls += call
         failure?.let { throw it }
+        handler?.let { return it(call) }
         return next
     }
 }

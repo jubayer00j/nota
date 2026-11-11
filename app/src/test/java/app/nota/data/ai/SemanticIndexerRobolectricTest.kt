@@ -65,6 +65,24 @@ class SemanticIndexerRobolectricTest {
             onCall?.invoke()
             if (transportFailure) throw AiNetworkException(IOException("no route"))
             val body = JSONObject(jsonBody)
+            if (url.contains(":batchEmbedContents")) {
+                // Search Quality Pass: indexing embeds a note's
+                // chunks in ONE batch call — answer like the real
+                // endpoint, one embedding per request, in order.
+                val requests = body.getJSONArray("requests")
+                val embeddings = JSONArray()
+                for (i in 0 until requests.length()) {
+                    val text = requests.getJSONObject(i).getJSONObject("content")
+                        .getJSONArray("parts").getJSONObject(0).getString("text")
+                    val values = JSONArray()
+                    vectorFor(text).forEach { values.put(it.toDouble()) }
+                    embeddings.put(JSONObject().put("values", values))
+                }
+                return AiHttpResponse(
+                    200,
+                    JSONObject().put("embeddings", embeddings).toString(),
+                )
+            }
             val text = body.getJSONObject("content").getJSONArray("parts")
                 .getJSONObject(0).getString("text")
             val values = JSONArray()
@@ -240,6 +258,26 @@ class SemanticIndexerRobolectricTest {
         indexer.reconcile(account)
         assertNull(indexStore.load(account))
         assertTrue(indexer.search(account, "apple").isEmpty())
+    }
+
+    @Test
+    fun searchDropsHitsWhoseTextChangedAfterEmbedding() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Fruit bowl", "<p>apple apple</p>")
+        indexer.reconcile(account)
+        assertEquals(listOf(note.id), indexer.search(account, "apple").map { it.noteId })
+
+        // Edit WITHOUT a reconcile: the stored vectors still
+        // describe the apple text, but the note no longer does.
+        // The stale hit must not surface — Ask's retrieval has
+        // always validated this fingerprint; search does too
+        // (Codex PR #48 R1).
+        notes.updateRichBody(note, "Fruit bowl", "<p>banana banana banana</p>")
+        assertTrue(indexer.search(account, "apple").none { it.noteId == note.id })
+
+        // After the reconcile the note answers for its new text.
+        indexer.reconcile(account)
+        assertEquals(listOf(note.id), indexer.search(account, "banana").map { it.noteId })
     }
 
     @Test

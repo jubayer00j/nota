@@ -83,6 +83,41 @@ val MIGRATION_6_7: Migration = object : Migration(6, 7) {
     }
 }
 
+/**
+ * Search Quality Pass (v0.27.0) widens the FTS index: notes_fts
+ * gains `tagsText` and `folderName` columns so tag and folder
+ * names are searchable with 1.x's weights. An FTS4 table cannot
+ * gain a column in place, so the table is dropped, recreated in
+ * the v8 shape (matching NoteFtsEntity exactly, so Room's
+ * post-migration schema validation passes) and REBUILT from the
+ * live library in the same pass: every non-trashed note gets a
+ * fresh row — body blanked for locked notes (the seal), tag
+ * names joined from note_tags, folder name from folders. An
+ * install that skips this rebuild would search an empty index
+ * until every note happened to be re-saved, so the rebuild is
+ * part of the migration, not a later backfill.
+ */
+val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("DROP TABLE IF EXISTS `notes_fts`")
+        db.execSQL(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS `notes_fts` USING FTS4(" +
+                "`noteId` TEXT NOT NULL, `title` TEXT NOT NULL, " +
+                "`plainText` TEXT NOT NULL, `tagsText` TEXT NOT NULL, " +
+                "`folderName` TEXT NOT NULL)",
+        )
+        db.execSQL(
+            "INSERT INTO `notes_fts` (`noteId`, `title`, `plainText`, `tagsText`, `folderName`) " +
+                "SELECT n.`id`, n.`title`, " +
+                "CASE WHEN n.`locked` = 1 THEN '' ELSE n.`plainText` END, " +
+                "COALESCE((SELECT GROUP_CONCAT(t.`name`, ' ') FROM `note_tags` nt " +
+                "JOIN `tags` t ON t.`id` = nt.`tagId` WHERE nt.`noteId` = n.`id`), ''), " +
+                "COALESCE((SELECT f.`name` FROM `folders` f WHERE f.`id` = n.`folderId`), '') " +
+                "FROM `notes` n WHERE n.`trashedAt` IS NULL",
+        )
+    }
+}
+
 val MIGRATION_4_5: Migration = object : Migration(4, 5) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL(

@@ -4,10 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.nota.data.ai.AiProviderId
 import app.nota.data.ai.AiSettingsStore
+import app.nota.data.ai.NoteChunker
+import app.nota.data.ai.SemanticHit
 import app.nota.data.ai.SemanticIndexer
-import app.nota.data.db.NoteListRow
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.repository.NoteRepository
+import app.nota.data.repository.NoteSearch
+import app.nota.data.repository.NoteSearchResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +19,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Which "search by meaning is off" guidance Search shows, if
  *  any — see [SearchViewModel.semanticHint]. */
@@ -29,16 +34,17 @@ class SearchViewModel(
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query
 
-    private val _results = MutableStateFlow<List<NoteListRow>>(emptyList())
-    val results: StateFlow<List<NoteListRow>> = _results
-
-    /** Phase 4.2: "Related by meaning" — semantic hits for the
-     *  current query, best first, excluding anything the keyword
-     *  results already show. Empty whenever semantic search can't
-     *  run (no key, no index, offline, provider error): the
-     *  keyword search is completely unaffected either way. */
-    private val _semanticResults = MutableStateFlow<List<NoteListRow>>(emptyList())
-    val semanticResults: StateFlow<List<NoteListRow>> = _semanticResults
+    /** The ONE ranked result list (Search Quality Pass): keyword
+     *  results first, re-ranked in place when the meaning pass
+     *  lands — it boosts keyword hits that also match by meaning
+     *  and interleaves meaning-only notes (flagged
+     *  [NoteSearchResult.byMeaning]), instead of the Phase 4.2
+     *  separate "Related by meaning" section. Meaning results
+     *  simply never arrive when semantic search can't run (no
+     *  key, no index, offline, provider error): the keyword
+     *  search is completely unaffected either way. */
+    private val _results = MutableStateFlow<List<NoteSearchResult>>(emptyList())
+    val results: StateFlow<List<NoteSearchResult>> = _results
 
     /** Beginner AI Setup #1 (F7), made config-aware in fix
      *  round 2 (Codex P2) and endpoint-aware in fix round 3:
@@ -95,7 +101,8 @@ class SearchViewModel(
         }
     }
 
-    private var searchJob: Job? = null
+    private var keywordJob: Job? = null
+    private var semanticJob: Job? = null
 
     val savedSearches: StateFlow<List<SavedSearchEntity>> = repository.observeSavedSearches()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -104,49 +111,126 @@ class SearchViewModel(
         _query.value = value
         // Cancel any in-flight search: a slower older query must never
         // overwrite the results of a newer one (Codex F5). The current-
-        // query guard below is a second line of defence if a search
+        // query guards below are a second line of defence if a search
         // completes despite cancellation.
-        searchJob?.cancel()
+        keywordJob?.cancel()
+        semanticJob?.cancel()
         if (value.isBlank()) {
             _results.value = emptyList()
-            _semanticResults.value = emptyList()
             return
         }
-        searchJob = viewModelScope.launch {
-            // Small debounce: coalesce rapid keystrokes into one search.
-            delay(200)
-            val found = repository.searchNotes(value)
+        // Keyword pass (Search Quality Pass): NO debounce — 1.x's
+        // keyword search answers per keystroke, and the old flat
+        // 200 ms delay was pure added latency in front of it.
+        // The pass runs on Dispatchers.Default (Codex PR #48 R2):
+        // the substring widening scores the whole corpus, and
+        // that per-note work must never sit on the UI thread; a
+        // superseded scan also aborts at its next note (the
+        // repository checks for cancellation inside its scoring
+        // loop) instead of finishing for a stale query.
+        // Cancellation above remains the ordering guard, with
+        // the current-query check below as the second line.
+        val keywordResults = kotlinx.coroutines.CompletableDeferred<List<NoteSearchResult>>()
+        keywordJob = viewModelScope.launch {
+            val found = withContext(Dispatchers.Default) {
+                repository.searchNotes(value)
+            }
+            keywordResults.complete(found)
             if (_query.value == value) _results.value = found
-            // Semantic pass for the same (still-current) query. It
-            // costs a provider call, so it runs after the keyword
-            // results are already on screen; any failure degrades
-            // to "no related section", silently.
-            _semanticResults.value = emptyList()
+        }
+        // Meaning pass: it costs a provider call, so it keeps a
+        // debounce of its own (1.x: 300 ms) and lands after the
+        // keyword results are on screen, BLENDING into the same
+        // list (NoteSearch.blend, 1.x's mergeSemanticResults)
+        // instead of trailing it as a separate section. Any
+        // failure degrades to "keyword results stand", silently.
+        semanticJob = viewModelScope.launch {
+            delay(SEMANTIC_DEBOUNCE_MS)
             val indexer = semanticIndexer ?: return@launch
+            // Blend against THIS query's keyword results,
+            // handed over directly by the sibling job — never
+            // whatever an older query left in the state flow,
+            // and if that pass failed there is nothing honest
+            // to blend into, so the meaning pass stands down.
+            val keyword = try {
+                keywordResults.await()
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                return@launch
+            }
+            if (_query.value != value) return@launch
             val hits = try {
                 indexer.search(accountIdProvider(), value)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 emptyList()
             }
-            if (_query.value != value) return@launch
-            val keywordIds = found.mapTo(HashSet()) { it.id }
-            val related = ArrayList<NoteListRow>(hits.size)
+            if (_query.value != value || hits.isEmpty()) return@launch
+            val floor = indexer.similarityFloor(accountIdProvider())
+            val keywordIds = keyword.mapTo(HashSet()) { it.id }
+            val updatedAtById = HashMap<String, Long>()
+            for (result in keyword) updatedAtById[result.id] = result.row.updatedAt
+            // Meaning-only rows, fetched live: a stale vector
+            // must never surface a note that no longer qualifies
+            // (the indexer re-checks eligibility too).
+            val meaningRows = HashMap<String, NoteSearchResult>()
             for (hit in hits) {
                 if (hit.noteId in keywordIds) continue
-                // Phase 6.1: the row carries every flag this check
-                // reads (locked/trashed/archived) plus everything the
-                // result card renders — no full-entity fetch per hit.
-                val note = repository.getRowById(hit.noteId) ?: continue
+                // Phase 6.1: the row carries every flag this
+                // check reads (locked/trashed/archived) plus
+                // everything the result card renders.
+                val row = repository.getRowById(hit.noteId) ?: continue
                 // Archived notes stay out of search everywhere —
                 // keyword results above already exclude them via
-                // FTS; the semantic section must agree (Jules
+                // FTS; the meaning pass must agree (Jules
                 // PR #23 P2).
-                if (note.locked || note.trashedAt != null || note.archived) continue
-                related += note
+                if (row.locked || row.trashedAt != null || row.archived) continue
+                updatedAtById[row.id] = row.updatedAt
+                meaningRows[row.id] = NoteSearchResult(
+                    row = row,
+                    score = 0.0,
+                    snippet = passageSnippet(hit),
+                    byMeaning = true,
+                )
             }
-            if (_query.value == value) _semanticResults.value = related
+            val blended = NoteSearch.blend(
+                keyword = keyword.map {
+                    NoteSearch.KeywordScore(it.id, it.score.toInt(), it.row.updatedAt)
+                },
+                similarities = hits.associate { it.noteId to it.score },
+                floor = floor,
+                updatedAtById = updatedAtById,
+            )
+            if (_query.value != value) return@launch
+            val keywordById = keyword.associateBy { it.id }
+            _results.value = blended.mapNotNull { entry ->
+                val base = keywordById[entry.noteId] ?: meaningRows[entry.noteId]
+                    ?: return@mapNotNull null
+                base.copy(score = entry.score, byMeaning = entry.byMeaning)
+            }
         }
+    }
+
+    /**
+     * The snippet for a meaning-only result: the text of the
+     * chunk that scored best for the query — the passage that
+     * actually matched — re-derived by re-chunking the note's
+     * current text (the index stores vectors, not text; Ask
+     * relies on the same reproduction). Chunk 0 opens with the
+     * note's title, which the card already shows, so the
+     * passage starts after it.
+     */
+    private suspend fun passageSnippet(hit: SemanticHit): String {
+        val note = repository.getById(hit.noteId) ?: return ""
+        val chunks = NoteChunker.chunk(note.title, note.plainText)
+        val chunk = chunks.getOrNull(hit.bestChunkIndex) ?: return ""
+        val firstLine = chunk.lineSequence().firstOrNull() ?: return chunk
+        val passage = if (note.title.isNotBlank() && firstLine.trim() == note.title.trim()) {
+            chunk.substring(firstLine.length).trimStart('\n')
+        } else {
+            chunk
+        }
+        return passage.ifBlank { chunk }
     }
 
     fun applySaved(search: SavedSearchEntity) = setQuery(search.query)
@@ -159,5 +243,13 @@ class SearchViewModel(
 
     fun deleteSaved(search: SavedSearchEntity) {
         viewModelScope.launch { repository.deleteSavedSearch(search) }
+    }
+
+    private companion object {
+        /** The meaning pass's own debounce (1.x's semantic
+         *  debounce): long enough that fast typing doesn't burn
+         *  a provider call per keystroke, short enough that the
+         *  blend lands as part of the same search gesture. */
+        const val SEMANTIC_DEBOUNCE_MS = 300L
     }
 }
