@@ -147,18 +147,26 @@ class SemanticIndexerRobolectricTest {
     private fun markedParagraph(marker: String, fruit: String, count: Int): String =
         "$fruit ".repeat(count) + marker + " " + "filler ".repeat(38)
 
-    /** Every chunk text a batch embed call carried, in order. */
+    /** Every chunk text an embed call carried, in order —
+     *  both wire shapes: :batchEmbedContents requests, and the
+     *  single :embedContent call Gemini's embedAll delegates
+     *  to when exactly one text is pending (the shape a
+     *  one-chunk reconcile produces). */
     private fun embeddedDocumentTexts(
         calls: List<KeywordEmbeddingHttpClient.Call>,
     ): List<String> {
         val texts = mutableListOf<String>()
         for (call in calls) {
             val body = JSONObject(call.body)
-            if (!body.has("requests")) continue
-            val requests = body.getJSONArray("requests")
-            for (i in 0 until requests.length()) {
-                texts += requests.getJSONObject(i).getJSONObject("content")
-                    .getJSONArray("parts").getJSONObject(0).getString("text")
+            if (body.has("requests")) {
+                val requests = body.getJSONArray("requests")
+                for (i in 0 until requests.length()) {
+                    texts += requests.getJSONObject(i).getJSONObject("content")
+                        .getJSONArray("parts").getJSONObject(0).getString("text")
+                }
+            } else if (body.has("content")) {
+                texts += body.getJSONObject("content").getJSONArray("parts")
+                    .getJSONObject(0).getString("text")
             }
         }
         return texts
