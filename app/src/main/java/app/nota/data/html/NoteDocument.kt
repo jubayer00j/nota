@@ -110,6 +110,28 @@ data class FileSegment(
     val mimeType: String = "",
 ) : DocSegment
 
+/**
+ * A voice recording placed IN the document (PR #51, audio notes —
+ * a capability 1.x never had: its voice features stored transcripts
+ * only, never audio). Like [FileSegment] it rides an attachment:
+ * the binary lives in the attachments table/store under
+ * [attachmentId] and rides the backup/sync formats unchanged. It is
+ * a DEDICATED segment rather than a reused [FileSegment] because
+ * the in-note player is the product: [durationMillis] and
+ * [displayName] are insert-time snapshots the player renders before
+ * (and without) resolving the attachment row. Serialised as a
+ * `<div data-nota-audio="…">` mirroring the data-nota-file shape —
+ * a div 1.x preserves opaquely. The plain-text projection
+ * contributes NOTHING for a recording (the file block's name
+ * projects; a recording's timestamped name is player chrome, not
+ * note text), so FTS, Ask and semantic search never see audio.
+ */
+data class AudioSegment(
+    val attachmentId: String,
+    val durationMillis: Long = 0,
+    val displayName: String = "Recording",
+) : DocSegment
+
 /** A blockquote; [innerHtml] is edited as rich text like a text segment. */
 data class QuoteSegment(val innerHtml: String) : DocSegment
 
@@ -271,6 +293,26 @@ object NoteDocument {
                                     attachmentId = attr(tag.attrs, "data-nota-file"),
                                     fileName = attr(tag.attrs, "data-name"),
                                     mimeType = attr(tag.attrs, "data-mime"),
+                                )
+                            }
+                            // PR #51: an in-document audio block,
+                            // the data-nota-file pattern with the
+                            // player's snapshot attributes. Duration
+                            // and name are optional in the wild (a
+                            // hand-written or older div may lack
+                            // them): a missing/unparseable duration
+                            // reads as 0 and a blank name as
+                            // "Recording". A blank id is not ours
+                            // and falls through to opaque, exactly
+                            // like the file div.
+                            attr(tag.attrs, "data-nota-audio").isNotBlank() -> {
+                                flushText()
+                                out += AudioSegment(
+                                    attachmentId = attr(tag.attrs, "data-nota-audio"),
+                                    durationMillis = attr(tag.attrs, "data-nota-duration")
+                                        .toLongOrNull()?.coerceAtLeast(0) ?: 0,
+                                    displayName = attr(tag.attrs, "data-nota-name")
+                                        .ifBlank { "Recording" },
                                 )
                             }
                             isChartBlock(tag.attrs) -> {
@@ -614,6 +656,13 @@ object NoteDocument {
                     append("<div data-nota-file=\"").append(escapeAttr(segment.attachmentId))
                         .append("\" data-name=\"").append(escapeAttr(segment.fileName))
                         .append("\" data-mime=\"").append(escapeAttr(segment.mimeType))
+                        .append("\"></div>")
+                }
+                is AudioSegment -> {
+                    append("<div data-nota-audio=\"").append(escapeAttr(segment.attachmentId))
+                        .append("\" data-nota-duration=\"")
+                        .append(segment.durationMillis.coerceAtLeast(0))
+                        .append("\" data-nota-name=\"").append(escapeAttr(segment.displayName))
                         .append("\"></div>")
                 }
                 is QuoteSegment -> append("<blockquote>").append(segment.innerHtml).append("</blockquote>")
@@ -1469,6 +1518,12 @@ object NoteDocument {
                     .joinToString("\n")
                 is ImageSegment -> segment.alt
                 is FileSegment -> segment.fileName
+                // PR #51: a recording contributes NOTHING to the
+                // plain-text projection (unlike the file block's
+                // name above — a recording's display name is a
+                // timestamp, player chrome rather than note text),
+                // so FTS, Ask and semantic search never see audio.
+                is AudioSegment -> ""
                 is QuoteSegment -> PlainTextCodec.htmlToText(segment.innerHtml)
                 is CodeSegment -> segment.text
                 DividerSegment -> ""

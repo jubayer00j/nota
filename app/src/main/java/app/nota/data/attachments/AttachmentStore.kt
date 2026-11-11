@@ -119,6 +119,44 @@ class AttachmentStore(
     suspend fun importFile(noteId: String, uri: Uri): AttachmentEntity =
         fileMutex.withLock { importFileLocked(noteId, uri) }
 
+    /**
+     * Imports a finished voice recording (PR #51) from a plain
+     * [source] file — the recorder's temp take — copying it
+     * byte-for-byte into the note's attachment storage exactly as
+     * [importFile] does for a picked file. The recorder writes
+     * AAC-LC in an .m4a container, so the row's mime type is pinned
+     * to audio/mp4 rather than probed, and [displayName] (the
+     * "Recording · <date, time>" label minted at Stop) is stored
+     * verbatim as the row's file name. The caller owns [source]:
+     * it is read, never moved or deleted here.
+     */
+    suspend fun importAudioFile(
+        noteId: String,
+        source: File,
+        displayName: String,
+    ): AttachmentEntity = fileMutex.withLock {
+        withContext(Dispatchers.IO) {
+            require(source.exists() && source.length() > 0) { "Recording is empty" }
+            val dir = File(root, noteId).apply { mkdirs() }
+            val storedName = "${UUID.randomUUID()}-recording.m4a"
+            val file = File(dir, storedName)
+            source.inputStream().use { input ->
+                file.outputStream().use { output -> input.copyTo(output) }
+            }
+            val entity = AttachmentEntity(
+                id = UUID.randomUUID().toString(),
+                noteId = noteId,
+                fileName = displayName,
+                mimeType = "audio/mp4",
+                sizeBytes = file.length(),
+                localPath = "attachments/$noteId/$storedName",
+                createdAt = System.currentTimeMillis(),
+            )
+            attachmentDao.upsert(entity)
+            entity
+        }
+    }
+
     private suspend fun importFileLocked(noteId: String, uri: Uri): AttachmentEntity = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val originalName = displayName(uri) ?: "file"

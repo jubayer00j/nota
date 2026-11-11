@@ -1,6 +1,7 @@
 package app.nota.feature.export
 
 import app.nota.data.chart.ChartParser
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.DividerSegment
@@ -387,6 +388,11 @@ object NoteExport {
             // text, or a name containing "](" would re-parse
             // as a link and rewrite the placeholder.
             is FileSegment -> listOf("[File: ${escapeMdText(segment.fileName)}]")
+            // PR #51: a recording exports as the same bracketed
+            // placeholder treatment as a file block — the audio
+            // bytes never embed in an export (the file block's
+            // rule), and its display name gets the same escaping.
+            is AudioSegment -> listOf("[Audio: ${escapeMdText(segment.displayName)}]")
             DividerSegment -> listOf("---")
             // The title is escaped inside chartPlaceholder with
             // escapeMdText (see its doc): neither raw HTML nor a
@@ -956,6 +962,7 @@ object NoteExport {
         is CodeSegment -> listOf(segment.text.trimEnd('\n'))
         is ImageSegment -> listOf(textImage(segment.alt))
         is FileSegment -> listOf("[File: ${segment.fileName}]")
+        is AudioSegment -> listOf("[Audio: ${segment.displayName}]")
         DividerSegment -> listOf("---")
         is ChartSegment -> listOf(chartPlaceholder(segment))
         is OpaqueSegment -> {
@@ -1181,6 +1188,7 @@ object NoteExport {
                 }
             }
             is FileSegment -> "<p>[File: ${escapeHtmlText(segment.fileName)}]</p>"
+            is AudioSegment -> "<p>[Audio: ${escapeHtmlText(segment.displayName)}]</p>"
             DividerSegment -> "<hr>"
             is ChartSegment ->
                 // Charts PR-B + Codex P2: the placeholder carries

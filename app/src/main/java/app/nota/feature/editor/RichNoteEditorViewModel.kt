@@ -9,6 +9,7 @@ import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteVersionEntity
 import app.nota.data.db.ReminderEntity
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.DocSegment
 import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
@@ -680,6 +681,23 @@ class RichNoteEditorViewModel(
         }
     }
 
+    /** PR #51: imports a finished recording's temp file (the
+     *  recorder sheet's Stop path) under the name minted at Stop. */
+    fun importAudioFile(
+        source: java.io.File,
+        displayName: String,
+        onDone: (AttachmentEntity?) -> Unit,
+    ) {
+        val noteId = loadedNoteId ?: return onDone(null)
+        viewModelScope.launch {
+            onDone(
+                runCatching {
+                    attachmentStore.importAudioFile(noteId, source, displayName)
+                }.getOrNull(),
+            )
+        }
+    }
+
     fun deleteAttachment(attachment: AttachmentEntity) {
         viewModelScope.launch {
             attachmentStore.delete(attachment)
@@ -701,9 +719,11 @@ class RichNoteEditorViewModel(
             val targetSrc = NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
             // Phase 3.5 (D4): file blocks reference the attachment by
             // id directly — strip them on the same rule as images.
+            // PR #51: audio blocks reference it the same way.
             val cleaned = segments.filterNot {
                 (it is ImageSegment && it.src == targetSrc) ||
-                    (it is FileSegment && it.attachmentId == attachment.id)
+                    (it is FileSegment && it.attachmentId == attachment.id) ||
+                    (it is AudioSegment && it.attachmentId == attachment.id)
             }
             if (cleaned.size != segments.size) {
                 val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
@@ -750,10 +770,12 @@ class RichNoteEditorViewModel(
             // enhancement, not done here.)
             // Phase 3.5 (D4): a file block references this note's
             // attachment id exactly the same way — strip those too.
+            // PR #51: an audio block is the same dangling reference.
             val cleaned = segments.filterNot {
                 (it is ImageSegment &&
                     it.src.startsWith(NoteDocument.ATTACHMENT_SRC_PREFIX)) ||
-                    it is FileSegment
+                    it is FileSegment ||
+                    it is AudioSegment
             }
             val kept = cleaned.ifEmpty { listOf(TextSegment("")) }
             templateRepository.add(
