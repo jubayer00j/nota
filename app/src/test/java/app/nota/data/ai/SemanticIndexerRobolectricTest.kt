@@ -598,4 +598,45 @@ class SemanticIndexerRobolectricTest {
             indexer.search(account, "apple").map { it.noteId },
         )
     }
+
+    @Test
+    fun revalidateAskCitationsValidatesPerChunkAgainstTheSentText() = runBlocking {
+        // PR #49 fix round (Codex R1): the post-generation
+        // gate validates each citation against the excerpt
+        // text retrieval actually sent — a sibling chunk's
+        // edit cannot kill it, and an edit to the cited
+        // chunk itself still does.
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Fruit notes",
+            "<p>${markedParagraph("bananapatch", "banana", 20)}</p>" +
+                "<p>${markedParagraph("applepatch", "apple", 10)}</p>",
+        )
+        indexer.reconcile(account)
+        val chunks = NoteChunker.chunk(note.title, note.plainText)
+        assertEquals(2, chunks.size)
+        val sent = chunks.mapIndexed { index, text ->
+            AskExcerpt(note.id, index, note.title, text, 0.9)
+        }
+        val citations = listOf(
+            AskCitation(1, note.id, 0),
+            AskCitation(2, note.id, 1),
+        )
+        // Nothing edited: both citations validate.
+        assertEquals(
+            setOf(1, 2),
+            indexer.revalidateAskCitations(account, sent, citations),
+        )
+        // Edit chunk 1 only: citation 2 dies; citation 1 —
+        // to a different chunk of the same note — survives.
+        notes.updateRichBody(
+            note, "Fruit notes",
+            "<p>${markedParagraph("bananapatch", "banana", 20)}</p>" +
+                "<p>${markedParagraph("zebrapatch", "zebra", 10)}</p>",
+        )
+        assertEquals(
+            setOf(1),
+            indexer.revalidateAskCitations(account, sent, citations),
+        )
+    }
 }

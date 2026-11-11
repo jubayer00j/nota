@@ -451,12 +451,18 @@ class SemanticIndexer(
         // a search boost nor a meaning-only row may ride on
         // them — while the note's untouched chunks keep it
         // findable by the meaning it still contains.
-        val noteDao = databaseProvider.current.noteDao()
+        // ONE batch read for every live row (Codex PR #49 R1):
+        // the eligibility-filtered projection the status count
+        // already uses. The per-note getById loop this replaces
+        // cost a Room round trip per indexed note on every
+        // search; a stored note missing from the batch is gone
+        // or ineligible — exactly the rows that loop skipped.
+        val liveById = databaseProvider.current.noteDao()
+            .getIndexCandidates().associateBy { it.id }
         val aligned = LinkedHashMap<String, List<FloatArray?>>()
         for ((noteId, storedNote) in stored.notes) {
-            val note = noteDao.getById(noteId) ?: continue
-            if (!isIndexEligible(note)) continue
-            val liveChunks = NoteChunker.chunk(note.title, note.plainText)
+            val live = liveById[noteId] ?: continue
+            val liveChunks = NoteChunker.chunk(live.title, live.plainText)
             if (liveChunks.isEmpty()) continue
             val pairs = validChunkPairs(liveChunks, storedNote)
             if (pairs.isEmpty()) continue
@@ -609,49 +615,67 @@ class SemanticIndexer(
     }
 
     /**
-     * Post-generation revalidation for Ask (Jules PR #25 P1):
-     * of [noteIds], the ones whose note is STILL quotable right
-     * now — live row eligible ([isIndexEligible]) AND its
-     * current text's fingerprint still equal to the stored one.
-     * Deliberately NOTE-strict even though retrieval validates
-     * per chunk (G10): this is the post-generation citation
-     * gate, where any edit since retrieval retires the note's
-     * citations wholesale — the stricter rule is the safe one
-     * for text already shown to the model.
-     * Ask calls this AFTER the generation call returns and
-     * before the answer renders: a note locked, archived,
-     * trashed, deleted or edited while the model was answering
-     * loses its citations (and with them its source card) even
-     * though it was valid when retrieved. Local reads only —
-     * no provider, no config — and fail-closed: a note that
-     * cannot be re-read counts as no longer valid rather than
-     * letting an unverifiable citation render.
+     * Post-generation revalidation for Ask (Jules PR #25 P1,
+     * re-based on retrieval-time state in PR #49): of the
+     * answer's [citations], the numbers whose quoted passage
+     * is STILL the note's current text. A citation survives
+     * exactly when its note is live and eligible right now
+     * ([isIndexEligible] — locked, trashed, archived and
+     * deleted notes are out) AND the chunk at the citation's
+     * position in the note's CURRENT chunking still hashes
+     * to the fingerprint of the excerpt text that was
+     * actually sent to the model.
+     *
+     * Why retrieval-time state and not the stored index
+     * (Codex PR #49 R1): retrieval already validated every
+     * excerpt against the note's live text, pairing text
+     * with a stored vector per chunk (G10) — so an edit that
+     * landed BEFORE retrieval, in a different chunk, with
+     * the reconcile still pending, must not kill a citation
+     * to an untouched passage. The previous form compared
+     * the whole note against the stale stored fingerprint
+     * and did exactly that, degrading valid answers to
+     * refusals in precisely the window G10 opened. What this
+     * gate still guarantees, unchanged from PR #25: a change
+     * landing DURING generation in the cited chunk itself —
+     * or shifting chunk boundaries so the cited position
+     * now holds different text — retires that citation
+     * before anything renders. Sent excerpts carry whole
+     * chunks at the prompt's current caps, so the fingerprint
+     * comparison is exact. Local reads only — no provider,
+     * no config — and fail-closed: a note that cannot be
+     * re-read, or a citation naming an excerpt that was
+     * never sent, counts as no longer valid.
      */
-    suspend fun revalidateAskNotes(
+    suspend fun revalidateAskCitations(
         accountId: String,
-        noteIds: Collection<String>,
-    ): Set<String> {
-        if (noteIds.isEmpty()) return emptySet()
+        sentExcerpts: List<AskExcerpt>,
+        citations: List<AskCitation>,
+    ): Set<Int> {
+        if (citations.isEmpty()) return emptySet()
         if (accountId != databaseProvider.accountId.value) return emptySet()
-        val stored = try {
-            loadIndex(accountId)
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            return emptySet()
-        } ?: return emptySet()
+        val sentByChunk = HashMap<Pair<String, Int>, AskExcerpt>()
+        for (excerpt in sentExcerpts) {
+            sentByChunk[excerpt.noteId to excerpt.chunkIndex] = excerpt
+        }
         val noteDao = databaseProvider.current.noteDao()
-        val valid = HashSet<String>()
-        for (noteId in noteIds) {
-            val storedNote = stored.notes[noteId] ?: continue
+        val valid = HashSet<Int>()
+        for (citation in citations) {
+            val excerpt = sentByChunk[citation.noteId to citation.chunkIndex]
+                ?: continue
             val live = try {
-                noteDao.getById(noteId)
+                noteDao.getById(citation.noteId)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 null
             } ?: continue
             if (!isIndexEligible(live)) continue
-            if (fingerprint(live.title, live.plainText) != storedNote.fingerprint) continue
-            valid += noteId
+            val liveChunk = NoteChunker.chunk(live.title, live.plainText)
+                .getOrNull(citation.chunkIndex) ?: continue
+            if (chunkFingerprint(liveChunk) != chunkFingerprint(excerpt.text)) {
+                continue
+            }
+            valid += citation.n
         }
         return valid
     }
