@@ -358,6 +358,10 @@ fun RichNoteEditorScreen(
 
     var menuExpanded by remember { mutableStateOf(false) }
     var insertMenuExpanded by remember { mutableStateOf(false) }
+    // PR #50: the "Turn into" strip's expanded state, hoisted
+    // like the insert menu's so picking a target (in the toolbar
+    // call below) collapses it from the screen's side.
+    var turnIntoExpanded by remember { mutableStateOf(false) }
     var showLinkDialog by remember { mutableStateOf(false) }
     var linkUrl by remember { mutableStateOf("") }
     // Phase 6 (Editor Refinement #1): the link dialog's honesty
@@ -866,6 +870,125 @@ fun RichNoteEditorScreen(
         if (rebuilt.none { it.id == blockId }) {
             evictCellTextStates(cellTextStates, blockId)
         }
+        dropDeadTextStates(rebuilt)
+        textStates[textUi.id]?.setHtml((textUi.segment as TextSegment).html)
+        segments = ensureTrailing(rebuilt)
+        focusedTaskItem = null
+        activeSegmentId = textUi.id
+        pendingFocusParagraph = textUi.id to conversion.convertedOrdinal
+        persistNow()
+    }
+
+    /**
+     * PR #50: the shared tail of the two caret-split "Turn into"
+     * conversions (quote, code) — [makeTaskAtCaret]'s discipline:
+     * rebuild the segment ids through the conversion contract, a
+     * surviving text half re-seeded from the caret parts (the half
+     * that kept the active segment's id IS the still-mounted
+     * editor), dead states dropped, the trailing text segment
+     * guaranteed, then persist. Where the caret lands afterwards is
+     * each conversion's one difference, expressed by [focus].
+     */
+    fun applyCaretBlockConversion(
+        conversion: NoteDocument.ParagraphConversion,
+        active: UiSegment,
+        parts: ParagraphParts,
+        focus: (List<UiSegment>) -> Unit,
+    ) {
+        val rebuilt = rewrapConversion(conversion)
+        val survivor = rebuilt.firstOrNull {
+            it.id == active.id && it.segment is TextSegment
+        }
+        if (survivor != null) {
+            val survivorIndex = rebuilt.indexOf(survivor)
+            textStates[survivor.id]?.setHtml(
+                if (survivorIndex < conversion.convertedIndex) {
+                    parts.beforeHtml
+                } else {
+                    parts.afterHtml
+                },
+            )
+        }
+        dropDeadTextStates(rebuilt)
+        val ensured = ensureTrailing(rebuilt)
+        segments = ensured
+        focus(ensured)
+        persistNow()
+    }
+
+    /**
+     * PR #50 ("Turn into" -> Quote): the caret's paragraph (or
+     * heading) becomes a quote block. The caret follows INTO the
+     * quote — a quote is a text-bearing field with a focus
+     * requester, unlike a task list, so the split-insert focus
+     * pattern applies directly.
+     */
+    fun makeQuoteAtCaret() {
+        val active = segments.firstOrNull { it.id == activeSegmentId } ?: return
+        if (active.segment !is TextSegment) return
+        val state = textStates[active.id] ?: return
+        val parts = paragraphPartsAtCaret(state) ?: return
+        val activeIndex = segments.indexOfFirst { it.id == active.id }
+        if (activeIndex < 0) return
+        val conversion = NoteDocument.paragraphToQuote(
+            syncSegments(), activeIndex,
+            parts.beforeHtml, parts.paragraphHtml, parts.afterHtml,
+        ) ?: return
+        applyCaretBlockConversion(conversion, active, parts) { ensured ->
+            val quoteUi = ensured[conversion.convertedIndex]
+            activeSegmentId = quoteUi.id
+            pendingCaretFocusId = quoteUi.id
+        }
+    }
+
+    /**
+     * PR #50 ("Turn into" -> Code block): the caret's paragraph (or
+     * heading) becomes a code block holding its plain text. A code
+     * field cannot take a focus requester (its editor is a plain
+     * text field), so the caret follows Make task's discipline:
+     * the first text/quote segment after the converted block.
+     */
+    fun makeCodeAtCaret() {
+        val active = segments.firstOrNull { it.id == activeSegmentId } ?: return
+        if (active.segment !is TextSegment) return
+        val state = textStates[active.id] ?: return
+        val parts = paragraphPartsAtCaret(state) ?: return
+        val activeIndex = segments.indexOfFirst { it.id == active.id }
+        if (activeIndex < 0) return
+        val conversion = NoteDocument.paragraphToCode(
+            syncSegments(), activeIndex,
+            parts.beforeHtml, parts.paragraphHtml, parts.afterHtml,
+        ) ?: return
+        applyCaretBlockConversion(conversion, active, parts) { ensured ->
+            val follower = ensured.drop(conversion.convertedIndex + 1)
+                .firstOrNull { it.segment is TextSegment || it.segment is QuoteSegment }
+            if (follower != null) {
+                activeSegmentId = follower.id
+                pendingCaretFocusId = follower.id
+            }
+        }
+    }
+
+    /**
+     * PR #50 ("Turn into" -> Paragraph) for the ACTIVE quote or
+     * code block: the whole segment becomes a text segment through
+     * [convert] ([NoteDocument.quoteToText] /
+     * [NoteDocument.codeToText]), mirroring
+     * [makeTextFromFocusedTaskItem]'s landing — the converted
+     * segment keeps its identity (its source index is its own), its
+     * editor state is re-seeded with the converted HTML (a quote's
+     * live state still holds the pre-conversion fragment until
+     * told; a code block has no state and seeds fresh), and the
+     * caret lands at the start of the converted paragraph.
+     */
+    fun makeTextFromBlock(
+        convert: (List<DocSegment>, Int) -> NoteDocument.ParagraphConversion?,
+    ) {
+        val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
+        if (activeIndex < 0) return
+        val conversion = convert(syncSegments(), activeIndex) ?: return
+        val rebuilt = rewrapConversion(conversion)
+        val textUi = rebuilt[conversion.convertedIndex]
         dropDeadTextStates(rebuilt)
         textStates[textUi.id]?.setHtml((textUi.segment as TextSegment).html)
         segments = ensureTrailing(rebuilt)
@@ -2409,17 +2532,22 @@ fun RichNoteEditorScreen(
                 }
             }
             if (editing) {
-                // Phase 6 (Editor Refinement #2): the paragraph ⇄
-                // task conversion action for this frame. A focused
-                // task item wins — the caret is in its field, not in
-                // a text state. Otherwise the caret's paragraph in
-                // the active TEXT segment decides, and only a plain
-                // top-level paragraph offers "Make task" (a heading
-                // or list item offers nothing).
+                // PR #50: the "Turn into" targets for this frame,
+                // replacing Refinement #2's single Make task / Make
+                // text action. A focused task item wins — the caret
+                // is in its field, not in a text state — and a
+                // top-level childless item offers Paragraph. An
+                // active quote or code block offers Paragraph. In a
+                // text segment, a plain paragraph offers Task list +
+                // Quote + Code block and a heading offers Quote +
+                // Code block (never Task list: the task rule stays
+                // plain-paragraph-only). A list item offers nothing,
+                // and quote <-> code direct is deliberately not
+                // offered (it routes via Paragraph).
                 val focusedTask = focusedTaskItem
                 val activeUi = segments.firstOrNull { it.id == activeSegmentId }
-                // Phase 6 (nested checklists): "Make text" is
-                // offered only for a TOP-LEVEL item with no
+                // Phase 6 (nested checklists): the Paragraph offer
+                // applies only to a TOP-LEVEL item with no
                 // children (see makeTextFromFocusedTaskItem).
                 val focusedTaskModel = focusedTask?.let { (blockId, path) ->
                     segments.firstOrNull { it.id == blockId }
@@ -2431,9 +2559,13 @@ fun RichNoteEditorScreen(
                     focusedTask.second.size == 1 &&
                     focusedTaskModel != null &&
                     focusedTaskModel.children.isEmpty()
-                val taskActionLabel = when {
-                    focusedCellState != null -> null
-                    makeTextAvailable -> "Make text"
+                val turnIntoTargets: List<TurnIntoTarget> = when {
+                    focusedCellState != null -> emptyList()
+                    makeTextAvailable -> listOf(TurnIntoTarget.Paragraph)
+                    activeUi?.segment is QuoteSegment && activeState != null ->
+                        listOf(TurnIntoTarget.Paragraph)
+                    activeUi?.segment is CodeSegment ->
+                        listOf(TurnIntoTarget.Paragraph)
                     activeUi?.segment is TextSegment && activeState != null &&
                         activeState!!.annotatedString.text.isNotEmpty() -> {
                         // Eligibility from the format state only —
@@ -2443,32 +2575,58 @@ fun RichNoteEditorScreen(
                         // the editor state perpetually busy and the
                         // composition never idles; the click path
                         // re-validates against the real HTML via
-                        // NoteDocument.paragraphToTask, so an exotic
-                        // paragraph can at worst no-op, never
-                        // convert wrongly. A plain paragraph is
-                        // exactly: no heading style, no list.
+                        // the NoteDocument conversions, so an exotic
+                        // block can at worst no-op, never convert
+                        // wrongly. A plain paragraph is exactly: no
+                        // heading style, no list.
                         val format = activeState!!.toolbarFormatState()
-                        if (format.heading == HeadingStyle.Normal &&
-                            !format.unorderedList && !format.orderedList
-                        ) {
-                            "Make task"
-                        } else {
-                            null
+                        when {
+                            format.unorderedList || format.orderedList ->
+                                emptyList()
+                            format.heading == HeadingStyle.Normal -> listOf(
+                                TurnIntoTarget.TaskList,
+                                TurnIntoTarget.Quote,
+                                TurnIntoTarget.CodeBlock,
+                            )
+                            else -> listOf(
+                                TurnIntoTarget.Quote,
+                                TurnIntoTarget.CodeBlock,
+                            )
                         }
                     }
-                    else -> null
+                    else -> emptyList()
+                }
+                // One pick handler for the toolbar's "Turn into"
+                // button strip and the strip itself: picking a
+                // target collapses the strip and runs the
+                // conversion, which re-validates the caret's
+                // context against the real HTML before touching
+                // anything.
+                val onTurnIntoPick: (TurnIntoTarget) -> Unit = { target ->
+                    turnIntoExpanded = false
+                    when (target) {
+                        TurnIntoTarget.Paragraph -> when {
+                            focusedTaskItem != null ->
+                                makeTextFromFocusedTaskItem()
+                            segments.firstOrNull { it.id == activeSegmentId }
+                                ?.segment is QuoteSegment ->
+                                makeTextFromBlock(NoteDocument::quoteToText)
+                            segments.firstOrNull { it.id == activeSegmentId }
+                                ?.segment is CodeSegment ->
+                                makeTextFromBlock(NoteDocument::codeToText)
+                            else -> Unit
+                        }
+                        TurnIntoTarget.TaskList -> makeTaskAtCaret()
+                        TurnIntoTarget.Quote -> makeQuoteAtCaret()
+                        TurnIntoTarget.CodeBlock -> makeCodeAtCaret()
+                    }
                 }
                 EditorToolbar(
                     state = toolbarState,
                     blockStylesVisible = focusedCellState == null,
-                    taskActionLabel = taskActionLabel,
-                    onTaskAction = {
-                        if (taskActionLabel == "Make text") {
-                            makeTextFromFocusedTaskItem()
-                        } else if (taskActionLabel == "Make task") {
-                            makeTaskAtCaret()
-                        }
-                    },
+                    turnIntoTargets = turnIntoTargets,
+                    turnIntoExpanded = turnIntoExpanded,
+                    onTurnIntoExpandedChange = { turnIntoExpanded = it },
                     modifier = Modifier.alpha(chromeAlpha),
                     micVisible = speechAvailable && focusedCellState == null,
                     micListening = speechSnapshot.state ==
@@ -2523,6 +2681,13 @@ fun RichNoteEditorScreen(
                     },
                     onInsertBlock = { insertBlock(it) },
                 )
+                if (turnIntoExpanded && turnIntoTargets.isNotEmpty()) {
+                    TurnIntoStrip(
+                        targets = turnIntoTargets,
+                        modifier = Modifier.alpha(chromeAlpha),
+                        onPick = onTurnIntoPick,
+                    )
+                }
             }
         }
         if (pickerFlushPending) {
@@ -4865,6 +5030,44 @@ private fun TableInsertDialog(
     )
 }
 
+/**
+ * PR #50: one "Turn into" conversion target. The screen computes
+ * which targets the caret's context offers; [label] is the strip
+ * button's text.
+ */
+internal enum class TurnIntoTarget(val label: String) {
+    Paragraph("Paragraph"),
+    TaskList("Task list"),
+    Quote("Quote"),
+    CodeBlock("Code block"),
+}
+
+/**
+ * PR #50: the expanded "Turn into" strip — a second toolbar row
+ * under the formatting toolbar holding one button per offered
+ * target. An inline row, NOT a popup menu, on purpose: popup menu
+ * content is unreachable by the repo's Robolectric UI harness
+ * (proven on PR #34, where menu items timed out under two query
+ * styles), and this menu's offering is behaviour the UI tests
+ * must pin. Mirrors the toolbar row's scroll/padding idiom.
+ */
+@Composable
+private fun TurnIntoStrip(
+    targets: List<TurnIntoTarget>,
+    modifier: Modifier = Modifier,
+    onPick: (TurnIntoTarget) -> Unit,
+) {
+    Row(
+        modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+            .padding(horizontal = NotaSpacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        targets.forEach { target ->
+            ToolbarButton(target.label, enabled = true) { onPick(target) }
+        }
+    }
+}
+
 @OptIn(ExperimentalRichTextApi::class)
 @Composable
 private fun EditorToolbar(
@@ -4881,11 +5084,15 @@ private fun EditorToolbar(
     // no meaning inside a cell, so it hides; the inline row keeps
     // acting, on the cell's state.
     blockStylesVisible: Boolean = true,
-    // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
-    // conversion action's label ("Make task" / "Make text"), or
-    // null when the caret's context offers neither.
-    taskActionLabel: String? = null,
-    onTaskAction: () -> Unit = {},
+    // PR #50: the "Turn into" conversion menu — the targets the
+    // caret's context offers (empty = no menu), the strip's
+    // expanded state (hoisted; picking a target in the strip
+    // collapses it). Replaces Refinement #2's single Make task /
+    // Make text action. The strip itself renders under the
+    // toolbar at the call site (see TurnIntoStrip).
+    turnIntoTargets: List<TurnIntoTarget> = emptyList(),
+    turnIntoExpanded: Boolean = false,
+    onTurnIntoExpandedChange: (Boolean) -> Unit = {},
     onLinkRequest: () -> Unit,
     onInsertImage: () -> Unit,
     onInsertImageUrl: () -> Unit,
@@ -4976,14 +5183,16 @@ private fun EditorToolbar(
             Icon(Icons.Filled.FormatListNumbered, contentDescription = "Numbered list")
         }
         }
-        // Phase 6 (Editor Refinement #2): the paragraph ⇄ task
-        // conversion — a text button in the toolbar's own idiom,
-        // present only when the caret's context offers it (a plain
-        // paragraph for "Make task", a focused task item for
-        // "Make text"). It is not gated on [enabled]: a focused task
-        // item has no RichTextState, so [state] is null there.
-        if (taskActionLabel != null) {
-            ToolbarButton(taskActionLabel, enabled = true) { onTaskAction() }
+        // PR #50: the "Turn into" entry — a text button in the
+        // toolbar's own idiom, present only when the caret's
+        // context offers at least one target; tapping it toggles
+        // the target strip under the toolbar. It is not gated on
+        // [enabled]: a focused task item or code block has no
+        // RichTextState, so [state] can be null there.
+        if (turnIntoTargets.isNotEmpty()) {
+            ToolbarButton("Turn into", enabled = true) {
+                onTurnIntoExpandedChange(!turnIntoExpanded)
+            }
         }
         IconButton(
             onClick = onLinkRequest,
