@@ -1287,6 +1287,174 @@ object NoteDocument {
         }
     }
 
+    // ------------------------------------- "Turn into" conversions (PR #50)
+
+    /** Block tags a caret conversion may act on: a paragraph or a heading. */
+    private val CONVERTIBLE_BLOCK_TAGS = setOf("p", "h1", "h2", "h3", "h4", "h5", "h6")
+
+    /**
+     * The caret block a paragraph-to-quote/code conversion may act
+     * on: exactly ONE top-level `<p>` or `<h1>`..`<h6>` element
+     * spanning the whole fragment — [paragraphToTask]'s "the caret's
+     * block must BE one block" discipline, widened to headings (a
+     * heading converts to quote and code, never to a task). Returns
+     * the block's INNER HTML, or null when the fragment is anything
+     * else: a list item (serialises as a `<ul>` chunk), several
+     * blocks, a bare text run, an unbalanced element.
+     */
+    fun convertibleBlockInnerHtml(html: String): String? {
+        val chunks = topLevelChunks(html)
+        if (chunks.size != 1) return null
+        val chunk = chunks.single()
+        if (chunk.first != 0 || chunk.last != html.length - 1) return null
+        val tag = readTag(html, 0) ?: return null
+        if (tag.closing || tag.name !in CONVERTIBLE_BLOCK_TAGS) return null
+        val close = findClose(html, tag.end, tag.name) ?: return null
+        if (close.second != html.length) return null
+        return html.substring(tag.end, close.first)
+    }
+
+    /**
+     * The shared split for paragraph-to-quote and paragraph-to-code:
+     * the caret's segment is replaced by [before half][converted
+     * block][after half], the halves staying text segments (an empty
+     * half drops out) — [paragraphToTask]'s non-joining path, since
+     * quotes and code blocks never fuse with their neighbours the
+     * way task lists do. The converted block is minted by the
+     * conversion (source index -1); the halves derive from the
+     * source segment. [ParagraphConversion.convertedOrdinal] is 0:
+     * the converted block is a whole segment, not an item in a list.
+     */
+    private fun splitSegmentAroundBlock(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+        beforeHtml: String,
+        afterHtml: String,
+        block: DocSegment,
+    ): ParagraphConversion {
+        val out = mutableListOf<DocSegment>()
+        val sources = mutableListOf<Int>()
+        for (index in 0 until segmentIndex) {
+            out += segments[index]
+            sources += index
+        }
+        val before = beforeHtml.trim()
+        if (before.isNotEmpty()) {
+            out += TextSegment(before)
+            sources += segmentIndex
+        }
+        val convertedIndex = out.size
+        out += block
+        sources += -1
+        val after = afterHtml.trim()
+        if (after.isNotEmpty()) {
+            out += TextSegment(after)
+            sources += segmentIndex
+        }
+        for (index in segmentIndex + 1 until segments.size) {
+            out += segments[index]
+            sources += index
+        }
+        return ParagraphConversion(out, convertedIndex, 0, sources)
+    }
+
+    /**
+     * "Turn into" -> Quote: the caret's paragraph (or heading — the
+     * heading level drops) becomes a [QuoteSegment] holding the
+     * block's inner HTML; the surrounding halves stay text,
+     * mirroring [paragraphToTask]'s split. Null when the segment is
+     * not a text segment or the caret's block is not exactly one
+     * top-level paragraph/heading.
+     */
+    fun paragraphToQuote(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+        beforeHtml: String,
+        paragraphHtml: String,
+        afterHtml: String,
+    ): ParagraphConversion? {
+        if (segments.getOrNull(segmentIndex) !is TextSegment) return null
+        val inner = convertibleBlockInnerHtml(paragraphHtml) ?: return null
+        return splitSegmentAroundBlock(
+            segments, segmentIndex, beforeHtml, afterHtml, QuoteSegment(inner),
+        )
+    }
+
+    /**
+     * "Turn into" -> Paragraph for a quote: the quote's inner HTML
+     * becomes a text segment as-is when it is already block
+     * structured, wrapped in a `<p>` when it is a bare inline
+     * fragment (the shape [paragraphToQuote] mints) — the
+     * [asTextHtml] rule, so paragraph -> quote -> paragraph restores
+     * the original bytes. The text segment DERIVES from the quote
+     * (source index = the quote's own index, so it keeps the
+     * quote's identity and live editor state) and does NOT merge
+     * with neighbouring text segments — the model tolerates adjacent
+     * text segments (Make task's split halves produce them too).
+     * Null when the segment is not a quote.
+     */
+    fun quoteToText(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+    ): ParagraphConversion? {
+        val quote = segments.getOrNull(segmentIndex) as? QuoteSegment ?: return null
+        val out = segments.toMutableList()
+        out[segmentIndex] = TextSegment(asTextHtml(quote.innerHtml))
+        return ParagraphConversion(out, segmentIndex, 0, segments.indices.toList())
+    }
+
+    /**
+     * "Turn into" -> Code block: the caret's paragraph (or heading)
+     * becomes a [CodeSegment] holding the block's PLAIN text — the
+     * document's existing plain-text projection
+     * ([PlainTextCodec.htmlToText]) — so marks and structure drop BY
+     * DESIGN: a code block is raw text. Splits around the caret
+     * exactly like [paragraphToQuote], under the same refusals.
+     */
+    fun paragraphToCode(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+        beforeHtml: String,
+        paragraphHtml: String,
+        afterHtml: String,
+    ): ParagraphConversion? {
+        if (segments.getOrNull(segmentIndex) !is TextSegment) return null
+        if (convertibleBlockInnerHtml(paragraphHtml) == null) return null
+        val text = PlainTextCodec.htmlToText(paragraphHtml)
+        return splitSegmentAroundBlock(
+            segments, segmentIndex, beforeHtml, afterHtml, CodeSegment(text),
+        )
+    }
+
+    /**
+     * "Turn into" -> Paragraph for a code block: the code's lines
+     * become paragraphs, one `<p>` per line, each line's raw text
+     * HTML-escaped — Nota does not sanitise at ingest, so text
+     * arriving in a format must be escaped for that format (the
+     * per-note export principle): a line reading `<b>x</b>` stays
+     * literal text, never markup. A trailing newline is a
+     * terminator, not a final empty line, so trailing empty lines
+     * drop; interior blank lines survive as empty paragraphs; an
+     * empty code block becomes one empty paragraph. The text
+     * segment DERIVES from the code segment (keeps its identity).
+     * Null when the segment is not a code block.
+     */
+    fun codeToText(
+        segments: List<DocSegment>,
+        segmentIndex: Int,
+    ): ParagraphConversion? {
+        val code = segments.getOrNull(segmentIndex) as? CodeSegment ?: return null
+        val lines = code.text.split('\n').dropLastWhile { it.isEmpty() }
+        val html = if (lines.isEmpty()) {
+            "<p></p>"
+        } else {
+            lines.joinToString("") { line -> "<p>${escapeText(line)}</p>" }
+        }
+        val out = segments.toMutableList()
+        out[segmentIndex] = TextSegment(html)
+        return ParagraphConversion(out, segmentIndex, 0, segments.indices.toList())
+    }
+
     // ---------------------------------------------------------- projections
 
     /** Plain-text projection of the whole document (snippets + FTS + word count). */

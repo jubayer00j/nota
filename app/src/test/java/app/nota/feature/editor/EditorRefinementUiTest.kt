@@ -61,6 +61,11 @@ import org.robolectric.shadows.ShadowLooper
  * and its insert runs through the photo picker's own pre-existing
  * caret-insert funnel.
  *
+ * PR #50: the "Turn into" conversion menu is an INLINE strip
+ * under the toolbar for exactly that reason — a popup menu's
+ * targets would be untestable here. Its offering and conversions
+ * are driven end-to-end below.
+ *
  * The window is extra wide so the whole formatting toolbar —
  * including the conversion actions, which sit far along its
  * horizontally scrolling row — is on screen for real clicks.
@@ -250,12 +255,15 @@ class EditorRefinementUiTest {
     }
 
     @Test
-    fun makeTaskThenMakeText_roundTripsThroughTheToolbar() {
-        // Editor Refinement #2: the paragraph ⇄ task conversion,
-        // driven end-to-end through the real toolbar. The note is
-        // one plain paragraph; the caret lands in it, "Make task"
-        // converts it, and focusing the new item offers "Make
-        // text", which converts it straight back.
+    fun turnIntoTaskListAndBack_roundTripsThroughTheToolbar() {
+        // Editor Refinement #2's paragraph <-> task conversion,
+        // since PR #50 driven through the "Turn into" menu: the
+        // note is one plain paragraph; the caret lands in it,
+        // "Turn into" -> "Task list" converts it, and focusing the
+        // new item offers "Turn into" -> "Paragraph", which
+        // converts it straight back. (Adapted from
+        // makeTaskThenMakeText_roundTripsThroughTheToolbar, which
+        // clicked the old single "Make task" / "Make text" action.)
         val note = runBlocking {
             repository.createRichNote(
                 title = "Convertible",
@@ -277,14 +285,21 @@ class EditorRefinementUiTest {
             }
         }
 
-        // Caret into the paragraph → the toolbar offers Make task.
+        // Caret into the paragraph -> the toolbar offers Turn into;
+        // expanding it offers Task list for a plain paragraph.
         composeRule.onNodeWithText("Make me a task").performClick()
-        awaitTrue("Make task offered") {
-            exists("make task") {
-                composeRule.onNodeWithText("Make task").assertIsDisplayed()
+        awaitTrue("Turn into offered") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
             }
         }
-        composeRule.onNodeWithText("Make task").performClick()
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Task list offered") {
+            exists("task list") {
+                composeRule.onNodeWithText("Task list").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Task list").performClick()
 
         // The stored body is now a task list holding the paragraph.
         awaitTrue("stored as a task list") {
@@ -292,18 +307,203 @@ class EditorRefinementUiTest {
             html.contains("taskList") && html.contains("Make me a task")
         }
 
-        // Focus the task item's field → the toolbar offers Make
-        // text; taking it restores the plain paragraph.
+        // Focus the task item's field -> Turn into offers
+        // Paragraph; taking it restores the plain paragraph.
         composeRule.onNodeWithText("Make me a task").performClick()
-        awaitTrue("Make text offered") {
-            exists("make text") {
-                composeRule.onNodeWithText("Make text").assertIsDisplayed()
+        awaitTrue("Turn into offered for the item") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
             }
         }
-        composeRule.onNodeWithText("Make text").performClick()
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Paragraph offered") {
+            exists("paragraph") {
+                composeRule.onNodeWithText("Paragraph").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Paragraph").performClick()
         awaitTrue("stored as a plain paragraph again") {
             val html = storedHtml(note.id)
             html.contains("<p>Make me a task</p>") && !html.contains("taskList")
+        }
+    }
+
+    @Test
+    fun turnIntoQuoteAndBack_throughTheToolbar() {
+        // PR #50: paragraph -> quote -> paragraph through the
+        // "Turn into" strip, asserting the stored shapes.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Quotable",
+                contentHtml = "<p>Quote me</p>",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("edit door") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+
+        composeRule.onNodeWithText("Quote me").performClick()
+        awaitTrue("Turn into offered") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Quote offered") {
+            exists("quote") {
+                composeRule.onNodeWithText("Quote").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Quote").performClick()
+        awaitTrue("stored as a quote") {
+            storedHtml(note.id).contains("<blockquote>Quote me</blockquote>")
+        }
+
+        // The quote itself, focused, offers Paragraph — and NOT a
+        // direct Code block (quote <-> code routes via Paragraph).
+        composeRule.onNodeWithText("Quote me").performClick()
+        awaitTrue("Turn into offered for the quote") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Paragraph offered for the quote") {
+            exists("paragraph") {
+                composeRule.onNodeWithText("Paragraph").assertIsDisplayed()
+            }
+        }
+        assertFalse(
+            "quote must not offer a direct Code block conversion",
+            exists("code block") {
+                composeRule.onNodeWithText("Code block").assertIsDisplayed()
+            },
+        )
+        composeRule.onNodeWithText("Paragraph").performClick()
+        awaitTrue("stored as a plain paragraph again") {
+            val html = storedHtml(note.id)
+            html.contains("<p>Quote me</p>") && !html.contains("blockquote")
+        }
+    }
+
+    @Test
+    fun turnIntoCodeAndBack_throughTheToolbar() {
+        // PR #50: paragraph -> code block -> paragraph through the
+        // "Turn into" strip.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Codable",
+                contentHtml = "<p>Code me</p>",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("edit door") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+
+        composeRule.onNodeWithText("Code me").performClick()
+        awaitTrue("Turn into offered") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Code block offered") {
+            exists("code block") {
+                composeRule.onNodeWithText("Code block").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Code block").performClick()
+        awaitTrue("stored as a code block") {
+            storedHtml(note.id).contains("<pre><code>Code me</code></pre>")
+        }
+
+        // Focus the code field -> Turn into offers Paragraph.
+        composeRule.onNodeWithText("Code me").performClick()
+        awaitTrue("Turn into offered for the code block") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Paragraph offered for the code block") {
+            exists("paragraph") {
+                composeRule.onNodeWithText("Paragraph").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Paragraph").performClick()
+        awaitTrue("stored as a plain paragraph again") {
+            val html = storedHtml(note.id)
+            html.contains("<p>Code me</p>") && !html.contains("<pre>")
+        }
+    }
+
+    @Test
+    fun turnInto_headingOffersQuoteAndCodeButNotTaskList() {
+        // PR #50 scope pin: a heading converts to Quote and Code
+        // block, but the task conversion stays plain-paragraph-only
+        // — "Task list" must not be offered with the caret in a
+        // heading.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Headed",
+                contentHtml = "<h2>Head line</h2><p>Body text</p>",
+            )
+        }
+        composeEditor(note.id)
+
+        awaitTrue("edit door") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+
+        composeRule.onNodeWithText("Head line").performClick()
+        awaitTrue("Turn into offered") {
+            exists("turn into") {
+                composeRule.onNodeWithText("Turn into").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Turn into").performClick()
+        awaitTrue("Quote offered for the heading") {
+            exists("quote") {
+                composeRule.onNodeWithText("Quote").assertIsDisplayed()
+            }
+        }
+        assertFalse(
+            "a heading must not offer the task conversion",
+            exists("task list") {
+                composeRule.onNodeWithText("Task list").assertIsDisplayed()
+            },
+        )
+        composeRule.onNodeWithText("Quote").performClick()
+        awaitTrue("stored as a quote") {
+            storedHtml(note.id).contains("<blockquote>Head line</blockquote>")
         }
     }
 

@@ -1098,6 +1098,255 @@ class NoteDocumentTest {
         assertEquals(null, NoteDocument.taskItemToText(withList, 3, 0))
     }
 
+    // ------------------------------------------------- PR #50: Turn into
+
+    @Test
+    fun convertibleBlock_acceptsParagraphsAndHeadingsOnly() {
+        assertEquals("Hello", NoteDocument.convertibleBlockInnerHtml("<p>Hello</p>"))
+        assertEquals(
+            "Hello",
+            NoteDocument.convertibleBlockInnerHtml("<p class=\"x\">Hello</p>"),
+        )
+        assertEquals("Title", NoteDocument.convertibleBlockInnerHtml("<h1>Title</h1>"))
+        assertEquals("Title", NoteDocument.convertibleBlockInnerHtml("<h6>Title</h6>"))
+        assertEquals(null, NoteDocument.convertibleBlockInnerHtml(""))
+        assertEquals(null, NoteDocument.convertibleBlockInnerHtml("Bare text"))
+        assertEquals(
+            null,
+            NoteDocument.convertibleBlockInnerHtml("<ul><li>Item</li></ul>"),
+        )
+        assertEquals(
+            null,
+            NoteDocument.convertibleBlockInnerHtml("<p>One</p><p>Two</p>"),
+        )
+        assertEquals(
+            null,
+            NoteDocument.convertibleBlockInnerHtml("<blockquote>Q</blockquote>"),
+        )
+    }
+
+    @Test
+    fun turnIntoQuote_middleParagraph_splitsTextAroundTheQuote() {
+        val segments = listOf(TextSegment("<p>One</p><p>Two</p><p>Three</p>"))
+        val conversion = NoteDocument.paragraphToQuote(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "<p>Three</p>",
+        )!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>One</p>"),
+                QuoteSegment("Two"),
+                TextSegment("<p>Three</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+        assertEquals(0, conversion.convertedOrdinal)
+        // The halves derive from the split segment; the quote is minted.
+        assertEquals(listOf(0, -1, 0), conversion.sourceIndices)
+    }
+
+    @Test
+    fun turnIntoQuote_heading_dropsTheHeadingLevel() {
+        val segments = listOf(TextSegment("<h2>Title</h2><p>Body</p>"))
+        val conversion = NoteDocument.paragraphToQuote(
+            segments, 0, "", "<h2>Title</h2>", "<p>Body</p>",
+        )!!
+        assertEquals(
+            listOf(QuoteSegment("Title"), TextSegment("<p>Body</p>")),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+    }
+
+    @Test
+    fun turnIntoQuote_refusesListsMultiBlockAndNonTextSegments() {
+        val segments = listOf(TextSegment("<ul><li>Item</li></ul>"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToQuote(
+                segments, 0, "", "<ul><li>Item</li></ul>", "",
+            ),
+        )
+        val text = listOf(TextSegment("<p>One</p><p>Two</p>"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToQuote(text, 0, "", "<p>One</p><p>Two</p>", ""),
+        )
+        val withBlock = listOf(QuoteSegment("Q"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToQuote(withBlock, 0, "", "<p>Body</p>", ""),
+        )
+    }
+
+    @Test
+    fun turnIntoQuoteThenText_restoresTheOriginalBytes() {
+        val segments = listOf(
+            TextSegment("<p>One</p><p>Two <strong>bold</strong></p>"),
+        )
+        val quoted = NoteDocument.paragraphToQuote(
+            segments, 0, "<p>One</p>", "<p>Two <strong>bold</strong></p>", "",
+        )!!
+        val back = NoteDocument.quoteToText(quoted.segments, quoted.convertedIndex)!!
+        // The way back does NOT merge with the text above (adjacent
+        // text segments are ordinary), but the bytes are the same.
+        assertEquals(
+            "<p>One</p><p>Two <strong>bold</strong></p>",
+            NoteDocument.serialize(back.segments),
+        )
+    }
+
+    @Test
+    fun quoteToText_blockStructuredInner_staysAsIs() {
+        val segments = listOf(
+            TextSegment("<p>Intro</p>"),
+            QuoteSegment("<p>One</p><p>Two</p>"),
+        )
+        val conversion = NoteDocument.quoteToText(segments, 1)!!
+        assertEquals(
+            listOf(
+                TextSegment("<p>Intro</p>"),
+                TextSegment("<p>One</p><p>Two</p>"),
+            ),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+        // The text segment derives from the quote itself.
+        assertEquals(listOf(0, 1), conversion.sourceIndices)
+    }
+
+    @Test
+    fun quoteToText_refusesNonQuoteSegments() {
+        val segments = listOf(TextSegment("<p>Body</p>"), CodeSegment("x"))
+        assertEquals(null, NoteDocument.quoteToText(segments, 0))
+        assertEquals(null, NoteDocument.quoteToText(segments, 1))
+        assertEquals(null, NoteDocument.quoteToText(segments, 4))
+    }
+
+    @Test
+    fun turnIntoCode_marksDropByDesign() {
+        val segments = listOf(TextSegment("<p>a <strong>b</strong> &lt; c</p>"))
+        val conversion = NoteDocument.paragraphToCode(
+            segments, 0, "", "<p>a <strong>b</strong> &lt; c</p>", "",
+        )!!
+        assertEquals(listOf(CodeSegment("a b < c")), conversion.segments)
+        assertEquals(0, conversion.convertedIndex)
+        assertEquals(listOf(-1), conversion.sourceIndices)
+    }
+
+    @Test
+    fun turnIntoCode_heading_splitsAroundLikeQuote() {
+        val segments = listOf(TextSegment("<p>Intro</p><h3>Head</h3>"))
+        val conversion = NoteDocument.paragraphToCode(
+            segments, 0, "<p>Intro</p>", "<h3>Head</h3>", "",
+        )!!
+        assertEquals(
+            listOf(TextSegment("<p>Intro</p>"), CodeSegment("Head")),
+            conversion.segments,
+        )
+        assertEquals(1, conversion.convertedIndex)
+    }
+
+    @Test
+    fun turnIntoCode_refusesListsAndNonTextSegments() {
+        val segments = listOf(TextSegment("<ul><li>Item</li></ul>"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToCode(
+                segments, 0, "", "<ul><li>Item</li></ul>", "",
+            ),
+        )
+        val withBlock = listOf(CodeSegment("x"))
+        assertEquals(
+            null,
+            NoteDocument.paragraphToCode(withBlock, 0, "", "<p>Body</p>", ""),
+        )
+    }
+
+    @Test
+    fun codeToText_linesBecomeEscapedParagraphs() {
+        val segments = listOf(CodeSegment("if (a < b) {\n  return a & b\n}"))
+        val conversion = NoteDocument.codeToText(segments, 0)!!
+        assertEquals(
+            listOf(
+                TextSegment(
+                    "<p>if (a &lt; b) {</p><p>  return a &amp; b</p><p>}</p>",
+                ),
+            ),
+            conversion.segments,
+        )
+        assertEquals(0, conversion.convertedIndex)
+        // The text segment derives from the code block itself.
+        assertEquals(listOf(0), conversion.sourceIndices)
+    }
+
+    @Test
+    fun codeToText_trailingNewlineIsATerminatorNotAnEmptyParagraph() {
+        val segments = listOf(CodeSegment("one\ntwo\n"))
+        val conversion = NoteDocument.codeToText(segments, 0)!!
+        assertEquals(
+            listOf(TextSegment("<p>one</p><p>two</p>")),
+            conversion.segments,
+        )
+        // Interior blank lines survive as empty paragraphs.
+        val withGap = NoteDocument.codeToText(listOf(CodeSegment("one\n\ntwo")), 0)!!
+        assertEquals(
+            listOf(TextSegment("<p>one</p><p></p><p>two</p>")),
+            withGap.segments,
+        )
+        // An empty code block becomes one empty paragraph.
+        val empty = NoteDocument.codeToText(listOf(CodeSegment("")), 0)!!
+        assertEquals(listOf(TextSegment("<p></p>")), empty.segments)
+    }
+
+    @Test
+    fun codeToText_refusesNonCodeSegments() {
+        val segments = listOf(TextSegment("<p>Body</p>"), QuoteSegment("Q"))
+        assertEquals(null, NoteDocument.codeToText(segments, 0))
+        assertEquals(null, NoteDocument.codeToText(segments, 1))
+        assertEquals(null, NoteDocument.codeToText(segments, 4))
+    }
+
+    @Test
+    fun turnIntoCodeThenText_preservesTheText() {
+        val segments = listOf(TextSegment("<p>One</p><p>a &lt; b</p>"))
+        val coded = NoteDocument.paragraphToCode(
+            segments, 0, "<p>One</p>", "<p>a &lt; b</p>", "",
+        )!!
+        val back = NoteDocument.codeToText(coded.segments, coded.convertedIndex)!!
+        assertEquals(
+            "<p>One</p><p>a &lt; b</p>",
+            NoteDocument.serialize(back.segments),
+        )
+    }
+
+    @Test
+    fun turnInto_serialisesThroughTheExistingWireFormat() {
+        val segments = listOf(TextSegment("<p>One</p><p>Two</p>"))
+        val quoted = NoteDocument.paragraphToQuote(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "",
+        )!!
+        assertEquals(
+            "<p>One</p><blockquote>Two</blockquote>",
+            NoteDocument.serialize(quoted.segments),
+        )
+        assertEquals(
+            quoted.segments,
+            NoteDocument.parse(NoteDocument.serialize(quoted.segments)),
+        )
+        val coded = NoteDocument.paragraphToCode(
+            segments, 0, "<p>One</p>", "<p>Two</p>", "",
+        )!!
+        assertEquals(
+            "<p>One</p><pre><code>Two</code></pre>",
+            NoteDocument.serialize(coded.segments),
+        )
+        assertEquals(
+            coded.segments,
+            NoteDocument.parse(NoteDocument.serialize(coded.segments)),
+        )
+    }
+
     @Test
     fun chartDivV2_survivesParseSerializeByteIdentically() {
         // Charts PR-A's hard invariant: rendering must never cost
