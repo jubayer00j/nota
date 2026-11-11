@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import app.nota.data.ai.AiHttpClient
@@ -209,9 +210,14 @@ class AskAuroraUiTest {
             "Answers come from your notes only — and every answer " +
                 "shows the note it came from.",
         ).assertIsDisplayed()
-        composeRule.onNodeWithText("Summarise my newest notes").assertIsDisplayed()
-        composeRule.onNodeWithText("What's due this week?").assertIsDisplayed()
-        composeRule.onNodeWithText("What did I decide recently?").assertIsDisplayed()
+        // The hero scrolls on short windows (the Robolectric
+        // display is one): scroll each chip into view first.
+        composeRule.onNodeWithText("Summarise my newest notes")
+            .performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("What's due this week?")
+            .performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("What did I decide recently?")
+            .performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -220,7 +226,8 @@ class AskAuroraUiTest {
         composeAsk(vm, darkTheme = true)
         awaitTrue("gate reaches READY") { vm.gate.value == AskGate.READY }
         composeRule.onNodeWithText("Ask your notes anything.").assertIsDisplayed()
-        composeRule.onNodeWithText("What's due this week?").assertIsDisplayed()
+        composeRule.onNodeWithText("What's due this week?")
+            .performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -228,7 +235,8 @@ class AskAuroraUiTest {
         val vm = readyViewModel()
         composeAsk(vm)
         awaitTrue("gate reaches READY") { vm.gate.value == AskGate.READY }
-        composeRule.onNodeWithText("What's due this week?").performClick()
+        composeRule.onNodeWithText("What's due this week?")
+            .performScrollTo().performClick()
         awaitTrue("the chip's question lands in the thread") {
             vm.entries.value.any {
                 it is AskEntry.Question && it.text == "What's due this week?"
