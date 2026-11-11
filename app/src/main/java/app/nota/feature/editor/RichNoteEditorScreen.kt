@@ -144,6 +144,9 @@ import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.nota.data.ai.AiErrorKind
 import app.nota.data.ai.AiException
 import app.nota.data.ai.AiService
@@ -2695,7 +2698,21 @@ fun RichNoteEditorScreen(
                             filePicker.launch(arrayOf("*/*"))
                         }
                     },
-                    onRecordAudioRequest = { viewModel.showAudioRecorder() },
+                    onRecordAudioRequest = {
+                        // PR #51 fix (Codex R3): dictation and the
+                        // recorder must never fight over the
+                        // microphone — simultaneous capture clients
+                        // can silence each other. Stop an active
+                        // dictation session first, with the same
+                        // stop the toolbar mic button performs,
+                        // before the recorder sheet opens.
+                        if (speechSnapshot.state ==
+                            app.nota.feature.voice.SpeechSessionState.LISTENING
+                        ) {
+                            speechController.stop()
+                        }
+                        viewModel.showAudioRecorder()
+                    },
                     onInsertBlock = { insertBlock(it) },
                 )
                 if (turnIntoExpanded && turnIntoTargets.isNotEmpty()) {
@@ -2812,6 +2829,31 @@ fun RichNoteEditorScreen(
                 )
             },
         )
+    }
+
+    // PR #51 fix (Codex R3): backgrounding the app mid-take
+    // pauses the recording session (the ViewModel intent no-ops
+    // unless a take is RECORDING). Since Android 9 a backgrounded
+    // app with no foreground service is denied real microphone
+    // input, so a take left running across a Home press or a
+    // screen lock would capture silence — and Stop would save
+    // that silence as a good recording. The observer lives HERE,
+    // in the screen's unconditional composition, not in the
+    // recorder sheet: a dismissed sheet leaves a live take
+    // recording in the session, and that take must pause on
+    // backgrounding too. It keys on the lifecycle's ON_PAUSE —
+    // never on composition disposal, which a rotation also causes
+    // and which the R2 fix proved must not touch the take.
+    // Resuming stays manual, from the sheet's Resume control.
+    val audioLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(audioLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                viewModel.pauseAudioRecordingIfRecording()
+            }
+        }
+        audioLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { audioLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     if (showAudioRecorder) {

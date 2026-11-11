@@ -388,4 +388,66 @@ override fun sealCipherResult(): StepResult<Cipher> =
         assertTrue("cancel deletes the take's temp file", !takeFile.exists())
         assertTrue(!session.sheetVisible)
     }
+
+    /**
+     * PR #51 fix (Codex R3): backgrounding the app mid-take must
+     * not let the take keep "recording" — since Android 9 a
+     * backgrounded app with no foreground service is fed silence,
+     * and Stop would save that silence as a good recording. The
+     * editor screen forwards the lifecycle's ON_PAUSE to
+     * [RichNoteEditorViewModel.pauseAudioRecordingIfRecording];
+     * these pins drive that intent on the real ViewModel: a live
+     * take pauses, its timer stops accruing, the intent is a
+     * no-op when nothing is recording or the take is already
+     * paused, and the take returns to RECORDING only through the
+     * sheet's own resume (the session's resume — nothing
+     * auto-resumes).
+     */
+    @Test
+    fun audioRecording_backgroundingPausesTheTake_resumeStaysManual() {
+        val context = RuntimeEnvironment.getApplication()
+        val vm = newViewModel()
+        val session = vm.recordingSession
+
+        // The intent on an idle session is a no-op.
+        vm.pauseAudioRecordingIfRecording()
+        assertEquals(RecordingTimer.State.IDLE, session.phase)
+        assertEquals(RecordingTimer.State.IDLE, session.timer.state)
+
+        // Begin a take, then background the app (ON_PAUSE).
+        vm.showAudioRecorder()
+        session.begin(context)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        val takeFile = session.tempFile
+        assertNotNull(takeFile)
+
+        vm.pauseAudioRecordingIfRecording()
+        assertEquals(RecordingTimer.State.PAUSED, session.phase)
+        assertEquals(RecordingTimer.State.PAUSED, session.timer.state)
+        assertTrue("pausing keeps the take's temp file", takeFile!!.exists())
+
+        // While paused the timer does not accrue: the elapsed is
+        // the banked amount at any later clock reading.
+        val banked = session.timer.elapsedAt(1_000_000L)
+        assertEquals(banked, session.timer.elapsedAt(1_060_000L))
+        assertEquals(banked, session.timer.elapsedAt(9_999_999L))
+
+        // A second backgrounding while already paused is a no-op.
+        vm.pauseAudioRecordingIfRecording()
+        assertEquals(RecordingTimer.State.PAUSED, session.phase)
+        assertEquals(banked, session.timer.elapsedAt(9_999_999L))
+
+        // Resume is the sheet's own control (the session's
+        // resume): the take returns to RECORDING, same file.
+        session.resume()
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(RecordingTimer.State.RECORDING, session.timer.state)
+        assertEquals(takeFile, session.tempFile)
+        assertTrue(takeFile.exists())
+
+        // Clean up through the explicit discard.
+        vm.cancelAudioRecording()
+        assertEquals(RecordingTimer.State.IDLE, session.phase)
+        assertTrue(!takeFile.exists())
+    }
 }

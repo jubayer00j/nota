@@ -721,6 +721,25 @@ class RichNoteEditorViewModel(
         recordingSession.cancel()
     }
 
+    /**
+     * PR #51 fix (Codex R3): the editor screen's ON_PAUSE hook.
+     * Backgrounding the app mid-take must pause the session:
+     * since Android 9 a backgrounded app with no foreground
+     * service is denied real microphone input, so a take left
+     * RECORDING across a Home press or a screen lock would keep
+     * "recording" silence — and Stop would save that silence as
+     * a good recording. Pausing banks the real audio up to the
+     * backgrounding moment (RecordingTimer stops accruing) and
+     * leaves the take exactly where the user left it. A no-op
+     * unless a take is RECORDING; resuming stays MANUAL, from
+     * the sheet's Resume control — nothing auto-resumes.
+     */
+    fun pauseAudioRecordingIfRecording() {
+        if (recordingSession.phase == RecordingTimer.State.RECORDING) {
+            recordingSession.pause()
+        }
+    }
+
     /** The screen's import + caret insert has run for a stopped
      *  take (saved, or honestly failed): the session closes out. */
     fun onAudioRecordingSaved() {
