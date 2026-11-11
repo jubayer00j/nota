@@ -91,10 +91,10 @@ class NoteSearchTest {
     fun snippetSkipsGeneratedListMarkers() {
         val text = "1. first\n2. second\nThe answer is 2 eggs"
         val snippet = NoteSearch.snippet(text, listOf("2"))
-        // The window centres on the REAL "2" (index 32, the
+        // The window centres on the REAL "2" (index 33, the
         // eggs), not the "2." list marker at index 9: it starts
         // 30 chars before the real match and runs to the end.
-        assertEquals("…" + text.substring(2, 39) + "…", snippet)
+        assertEquals("…" + text.substring(3, 39) + "…", snippet)
         assertTrue(snippet.contains("2 eggs"))
     }
 

@@ -139,6 +139,19 @@ override fun sealCipherResult(): StepResult<Cipher> =
             jsonBody: String,
         ): AiHttpResponse {
             val values = org.json.JSONArray().put(1.0).put(0.0).put(0.5)
+            if (url.contains(":batchEmbedContents")) {
+                // Search Quality Pass: batch calls get one
+                // (constant) embedding per request, in order.
+                val count = org.json.JSONObject(jsonBody).getJSONArray("requests").length()
+                val embeddings = org.json.JSONArray()
+                repeat(count) {
+                    embeddings.put(org.json.JSONObject().put("values", values))
+                }
+                return AiHttpResponse(
+                    200,
+                    org.json.JSONObject().put("embeddings", embeddings).toString(),
+                )
+            }
             return AiHttpResponse(
                 200,
                 org.json.JSONObject()
