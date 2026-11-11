@@ -17,6 +17,7 @@ import app.nota.data.security.StepResult
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
 import app.nota.data.templates.TemplateRepository
+import java.io.File
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -449,5 +450,63 @@ override fun sealCipherResult(): StepResult<Cipher> =
         vm.cancelAudioRecording()
         assertEquals(RecordingTimer.State.IDLE, session.phase)
         assertTrue(!takeFile.exists())
+    }
+
+    /**
+     * PR #51 fix (Codex R4): a recreation during the post-Stop
+     * import orphaned the recording. The import ran in the
+     * ViewModel, but its completion lambda was created in the
+     * screen composition and inserted into THAT composition's
+     * segment list: rotate right after Stop and the callback
+     * mutated the dead composition, the recreated screen had
+     * already seeded from the saved note, the session was
+     * cleared, and the imported attachment was left unreferenced.
+     * The outcome now lands in ViewModel state for the live
+     * screen to deliver. These pins drive the real import path
+     * with NO screen consuming — the recreation window — and pin
+     * that exactly one pending insert waits in the ViewModel,
+     * that it names the attachment the import really created,
+     * that consuming it hands the segment data out once, and
+     * that a second consume finds nothing.
+     */
+    @Test
+    fun audioImport_outcomeWaitsInViewModelState_consumedExactlyOnce() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val note = notes.createRichNote(title = "Voice", contentHtml = "<p>body</p>")
+        val vm = newViewModel()
+        vm.load(note.id)
+        awaitCondition("note loaded") { vm.note.value?.id == note.id }
+
+        // A finished take's temp file, as the session's stop()
+        // hands one over: a real file with real bytes.
+        val takeFile = File(context.cacheDir, "r4-take.m4a")
+        takeFile.writeBytes(byteArrayOf(1, 2, 3, 4, 5))
+        assertTrue(takeFile.exists())
+
+        // The import runs with no live consumer at all.
+        vm.importAudioFile(takeFile, "Voice note.m4a", 12_345L)
+        awaitCondition("pending audio insert published") {
+            vm.pendingAudioInsert.value != null
+        }
+        awaitCondition("imported attachment published") {
+            vm.attachments.value.size == 1
+        }
+
+        // Exactly one pending insert, carrying the data the
+        // screen needs to build the audio block — and its id is
+        // the attachment the import really created for this note.
+        val pending = vm.pendingAudioInsert.value!!
+        assertEquals("Voice note.m4a", pending.displayName)
+        assertEquals(12_345L, pending.durationMillis)
+        assertEquals(vm.attachments.value.single().id, pending.attachmentId)
+        // The temp-file semantics are the session's contract: the
+        // importer copied it and the import path deleted it.
+        assertTrue("the import consumed the take's temp file", !takeFile.exists())
+
+        // Consuming hands the segment data out exactly once.
+        val first = vm.consumePendingAudioInsert()
+        assertEquals(pending, first)
+        assertNull(vm.pendingAudioInsert.value)
+        assertNull("a second consume delivers nothing", vm.consumePendingAudioInsert())
     }
 }

@@ -2856,16 +2856,50 @@ fun RichNoteEditorScreen(
         onDispose { audioLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    // PR #51 fix (Codex R4): deliver a finished import's outcome
+    // from ViewModel state. The import runs in the ViewModel and
+    // can complete while THIS composition is dead (a rotation
+    // right after Stop): its outcome waits in the ViewModel's
+    // pendingAudioInsert / audioImportError, and whichever
+    // composition is live — including the recreated screen, whose
+    // segments were seeded from the saved note — delivers it
+    // here, through its own insertBlockAtCaret, exactly once:
+    // delivery consumes the state, so a recomposition sees null
+    // and inserts nothing. A failed import's message toasts from
+    // the live composition the same way. After a mid-import
+    // recreation the block lands at this screen's caret rather
+    // than the original one — accepted residue: the recording is
+    // never lost, only its position may shift.
+    val pendingAudioInsert by viewModel.pendingAudioInsert.collectAsState()
+    LaunchedEffect(pendingAudioInsert) {
+        val insert = viewModel.consumePendingAudioInsert()
+            ?: return@LaunchedEffect
+        insertBlockAtCaret(
+            AudioSegment(
+                attachmentId = insert.attachmentId,
+                durationMillis = insert.durationMillis,
+                displayName = insert.displayName,
+            ),
+        )
+    }
+    val audioImportError by viewModel.audioImportError.collectAsState()
+    LaunchedEffect(audioImportError) {
+        val message = viewModel.consumeAudioImportError()
+            ?: return@LaunchedEffect
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+    }
+
     if (showAudioRecorder) {
         // PR #51: record a voice note. The take lives in the
         // ViewModel's recording session — the sheet only renders
         // it — so a rotation mid-recording loses nothing: the
         // sheet reopens on the live take and Stop still finalises
-        // it. Stop imports the temp file into attachment storage
-        // and inserts the audio block AT THE CARET through the
-        // same insertBlockAtCaret funnel as every other caret
-        // insert, then closes the sheet. A failed import keeps
-        // the honest toast and inserts nothing. Cancel inside the
+        // it. Stop hands the finished take to the ViewModel's
+        // import; the outcome (the audio block at the caret, or
+        // the honest failure toast) is delivered from ViewModel
+        // state by the effects above — never through a callback
+        // captured by this composition (Codex R4) — and the
+        // session closes out in the ViewModel. Cancel inside the
         // sheet discards the take through the session's explicit
         // cancel; a dismissal only hides the sheet and leaves a
         // live take recording (reopen it from the insert menu).
@@ -2874,25 +2908,7 @@ fun RichNoteEditorScreen(
             onDismiss = { viewModel.dismissAudioRecorderSheet() },
             onCancel = { viewModel.cancelAudioRecording() },
             onSave = { file, displayName, durationMs ->
-                viewModel.importAudioFile(file, displayName) { attachment ->
-                    file.delete()
-                    viewModel.onAudioRecordingSaved()
-                    if (attachment != null) {
-                        insertBlockAtCaret(
-                            AudioSegment(
-                                attachmentId = attachment.id,
-                                durationMillis = durationMs,
-                                displayName = displayName,
-                            ),
-                        )
-                    } else {
-                        Toast.makeText(
-                            context,
-                            "Couldn't save the recording.",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    }
-                }
+                viewModel.importAudioFile(file, displayName, durationMs)
             },
         )
     }

@@ -42,6 +42,18 @@ sealed interface SaveState {
 }
 
 /**
+ * PR #51 (Codex R4): a finished audio import awaiting insertion
+ * into the editor — everything the live screen needs to build the
+ * [AudioSegment] at its caret once the import has landed in
+ * ViewModel state. See [RichNoteEditorViewModel.pendingAudioInsert].
+ */
+data class PendingAudioInsert(
+    val attachmentId: String,
+    val durationMillis: Long,
+    val displayName: String,
+)
+
+/**
  * Backing VM for the Phase 1c rich editor. The screen owns the working
  * segment list + RichTextStates; this VM owns persistence: it serialises
  * through [NoteDocument] (HTML stays canonical in Room, spec §3), derives
@@ -740,26 +752,102 @@ class RichNoteEditorViewModel(
         }
     }
 
-    /** The screen's import + caret insert has run for a stopped
-     *  take (saved, or honestly failed): the session closes out. */
+    /**
+     * PR #51 fix (Codex R4): a stopped take whose import has
+     * finished but whose audio block no screen has inserted yet.
+     * The import runs HERE — it survives an activity recreation —
+     * but the insert is composition work (the segment list is
+     * composition state), so the outcome waits in this ViewModel
+     * state for the CURRENT composition to deliver it through its
+     * own insertBlockAtCaret and consume it. Before this, the
+     * import's completion lambda was created in the screen
+     * composition and inserted into THAT composition's segments:
+     * rotate after Stop, while the import was in flight, and the
+     * callback mutated the dead composition — the recreated screen
+     * had already seeded from the saved note (no audio block), the
+     * session was cleared, and the imported attachment was left
+     * orphaned. Delivery is exactly-once:
+     * [consumePendingAudioInsert] hands the pending insert out
+     * once and clears it, so a recomposition can never insert the
+     * block twice.
+     */
+    private val _pendingAudioInsert = MutableStateFlow<PendingAudioInsert?>(null)
+    val pendingAudioInsert: StateFlow<PendingAudioInsert?> = _pendingAudioInsert
+
+    /** Take and clear the pending audio insert, if any: the one
+     *  delivery of a finished import to the live screen. */
+    fun consumePendingAudioInsert(): PendingAudioInsert? {
+        val pending = _pendingAudioInsert.value
+        _pendingAudioInsert.value = null
+        return pending
+    }
+
+    /**
+     * The one-shot failure message for a stopped take's import
+     * (Codex R4): the failure used to be toasted from the same
+     * dead-composition callback as the insert, so a failure across
+     * a recreation was as silent as the lost insert. The live
+     * screen observes this, toasts it once and consumes it via
+     * [consumeAudioImportError].
+     */
+    private val _audioImportError = MutableStateFlow<String?>(null)
+    val audioImportError: StateFlow<String?> = _audioImportError
+
+    /** Take and clear the pending audio-import failure message. */
+    fun consumeAudioImportError(): String? {
+        val message = _audioImportError.value
+        _audioImportError.value = null
+        return message
+    }
+
+    /** A stopped take's import has finished (saved, or honestly
+     *  failed): the session closes out. Called by [importAudioFile]
+     *  itself — the session is ViewModel state and closes with the
+     *  import here, not with any composition's insert. */
     fun onAudioRecordingSaved() {
         recordingSession.onSaveConsumed()
     }
 
-    /** PR #51: imports a finished recording's temp file (the
-     *  recorder sheet's Stop path) under the name minted at Stop. */
+    /**
+     * PR #51: imports a finished recording's temp file (the
+     * recorder sheet's Stop path) under the name minted at Stop.
+     * The outcome does NOT return through a caller callback: on
+     * success it lands in [pendingAudioInsert] for the live screen
+     * to deliver and consume; on failure it lands in
+     * [audioImportError]. The temp file and the session close out
+     * here in both cases — the temp file is the importer's to copy
+     * and this function's to delete, as the session's contract
+     * states (session [AudioRecordingSession.onSaveConsumed]).
+     * Accepted residue (Codex R4): if a recreation lands
+     * mid-import, the block is inserted at the RECREATED screen's
+     * caret, not the original one — the recording is never lost,
+     * only its position may shift.
+     */
     fun importAudioFile(
         source: java.io.File,
         displayName: String,
-        onDone: (AttachmentEntity?) -> Unit,
+        durationMillis: Long,
     ) {
-        val noteId = loadedNoteId ?: return onDone(null)
         viewModelScope.launch {
-            onDone(
+            val noteId = loadedNoteId
+            val attachment = if (noteId == null) {
+                null
+            } else {
                 runCatching {
                     attachmentStore.importAudioFile(noteId, source, displayName)
-                }.getOrNull(),
-            )
+                }.getOrNull()
+            }
+            source.delete()
+            onAudioRecordingSaved()
+            if (attachment != null) {
+                _pendingAudioInsert.value = PendingAudioInsert(
+                    attachmentId = attachment.id,
+                    durationMillis = durationMillis,
+                    displayName = displayName,
+                )
+            } else {
+                _audioImportError.value = "Couldn't save the recording."
+            }
         }
     }
 
