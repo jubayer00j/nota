@@ -608,10 +608,12 @@ class EditorRefinementUiTest {
                 composeRule.onNodeWithText("1:05").assertIsDisplayed()
             }
         }
+        // The name renders in the player row AND in the
+        // attachments section below it, so the singular text
+        // matcher can never match exactly one node — count instead.
         awaitTrue("recording name renders") {
-            exists("name") {
-                composeRule.onNodeWithText("Recording · test").assertIsDisplayed()
-            }
+            composeRule.onAllNodesWithText("Recording · test")
+                .fetchSemanticsNodes().isNotEmpty()
         }
 
         composeRule.onNodeWithContentDescription("Edit note").performClick()
