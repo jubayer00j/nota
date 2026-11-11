@@ -332,4 +332,60 @@ override fun sealCipherResult(): StepResult<Cipher> =
             assertEquals(0, afterOpen.failedAttempts)
             assertNull(afterOpen.lockoutUntil)
         }
+
+    /**
+     * PR #51 fix (Codex R2): rotation during recording silently
+     * lost the take — the recorder sheet held the recorder, temp
+     * file, timer and phase in `remember` and discarded on ANY
+     * dispose, and a configuration change disposes everything.
+     * The session now lives in the ViewModel. These pins drive the
+     * real ViewModel (this class is the existing one that
+     * constructs it; there is no dedicated VM test class) and pin
+     * the discard decision: a dismissal — the state a rotation
+     * leaves behind, sheet disposed and recomposed on the same
+     * ViewModel — touches nothing, a re-begin on the recomposed
+     * sheet is a no-op on the live take, and ONLY the explicit
+     * cancel throws the take away.
+     */
+    @Test
+    fun audioRecordingTake_survivesDismissalAndReopen_discardedOnlyByCancel() {
+        val context = RuntimeEnvironment.getApplication()
+        val vm = newViewModel()
+        val session = vm.recordingSession
+
+        // Open the recorder; the sheet's auto-start begins the take.
+        vm.showAudioRecorder()
+        assertTrue(session.sheetVisible)
+        session.begin(context)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(RecordingTimer.State.RECORDING, session.timer.state)
+        val takeFile = session.tempFile
+        assertNotNull(takeFile)
+        assertTrue("the take's temp file exists while recording", takeFile!!.exists())
+
+        // Dismissal hides the sheet and touches NOTHING else: the
+        // same take keeps recording in the ViewModel.
+        vm.dismissAudioRecorderSheet()
+        assertTrue(!session.sheetVisible)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(RecordingTimer.State.RECORDING, session.timer.state)
+        assertTrue("dismissal must not delete the take", takeFile.exists())
+
+        // The recomposed sheet (post-rotation) re-runs its
+        // auto-start: on a live session that is a no-op — same
+        // take, same file, still recording.
+        vm.showAudioRecorder()
+        session.begin(context)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(takeFile, session.tempFile)
+        assertTrue(takeFile.exists())
+
+        // Explicit Cancel is the one user path that discards.
+        vm.cancelAudioRecording()
+        assertEquals(RecordingTimer.State.IDLE, session.phase)
+        assertEquals(RecordingTimer.State.IDLE, session.timer.state)
+        assertNull(session.tempFile)
+        assertTrue("cancel deletes the take's temp file", !takeFile.exists())
+        assertTrue(!session.sheetVisible)
+    }
 }

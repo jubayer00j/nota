@@ -375,11 +375,14 @@ fun RichNoteEditorScreen(
     // Charts PR-B: the insert-chart dialog (the chart editor,
     // seeded with the default chart; edit opens from the block).
     var showChartInsertDialog by remember { mutableStateOf(false) }
-    // PR #51: the audio recorder sheet (insert menu) and the
-    // one-active-playback controller every audio row in this note
-    // shares, in read and edit mode alike; released with the
-    // screen so a player can never outlive the note.
-    var showAudioRecorder by remember { mutableStateOf(false) }
+    // PR #51: the one-active-playback controller every audio row
+    // in this note shares, in read and edit mode alike; released
+    // with the screen so a player can never outlive the note. The
+    // recorder sheet's visibility is NOT a remember here (Codex
+    // R2 fix): it lives in the ViewModel's recording session, so
+    // a configuration change that recreates this screen reopens
+    // the sheet on the still-live take.
+    val showAudioRecorder = viewModel.recordingSession.sheetVisible
     val audioPlayback = remember { AudioPlaybackController() }
     DisposableEffect(Unit) {
         onDispose { audioPlayback.release() }
@@ -2692,7 +2695,7 @@ fun RichNoteEditorScreen(
                             filePicker.launch(arrayOf("*/*"))
                         }
                     },
-                    onRecordAudioRequest = { showAudioRecorder = true },
+                    onRecordAudioRequest = { viewModel.showAudioRecorder() },
                     onInsertBlock = { insertBlock(it) },
                 )
                 if (turnIntoExpanded && turnIntoTargets.isNotEmpty()) {
@@ -2812,21 +2815,26 @@ fun RichNoteEditorScreen(
     }
 
     if (showAudioRecorder) {
-        // PR #51: record a voice note. The sheet owns the take
-        // until Stop; Stop imports the temp file into attachment
-        // storage and inserts the audio block AT THE CARET through
-        // the same insertBlockAtCaret funnel as every other caret
-        // insert, then closes the sheet. A failed import keeps the
-        // honest toast and inserts nothing (the sheet has already
-        // discarded its recorder; its dispose path removes the
-        // temp file). Cancel inside the sheet just closes it —
-        // the sheet's own dispose discards the take.
+        // PR #51: record a voice note. The take lives in the
+        // ViewModel's recording session — the sheet only renders
+        // it — so a rotation mid-recording loses nothing: the
+        // sheet reopens on the live take and Stop still finalises
+        // it. Stop imports the temp file into attachment storage
+        // and inserts the audio block AT THE CARET through the
+        // same insertBlockAtCaret funnel as every other caret
+        // insert, then closes the sheet. A failed import keeps
+        // the honest toast and inserts nothing. Cancel inside the
+        // sheet discards the take through the session's explicit
+        // cancel; a dismissal only hides the sheet and leaves a
+        // live take recording (reopen it from the insert menu).
         AudioRecorderSheet(
-            onDismiss = { showAudioRecorder = false },
+            session = viewModel.recordingSession,
+            onDismiss = { viewModel.dismissAudioRecorderSheet() },
+            onCancel = { viewModel.cancelAudioRecording() },
             onSave = { file, displayName, durationMs ->
                 viewModel.importAudioFile(file, displayName) { attachment ->
                     file.delete()
-                    showAudioRecorder = false
+                    viewModel.onAudioRecordingSaved()
                     if (attachment != null) {
                         insertBlockAtCaret(
                             AudioSegment(

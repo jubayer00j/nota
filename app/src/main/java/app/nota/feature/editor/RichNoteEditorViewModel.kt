@@ -392,6 +392,11 @@ class RichNoteEditorViewModel(
     }
 
     override fun onCleared() {
+        // PR #51 fix (Codex R2): a recording in progress dies with
+        // the editor — its recorder is released and the temp take
+        // deleted here, the one non-user discard path (the session
+        // itself documents the rule).
+        recordingSession.release()
         endSession()
         super.onCleared()
     }
@@ -679,6 +684,47 @@ class RichNoteEditorViewModel(
         viewModelScope.launch {
             onDone(runCatching { attachmentStore.importFile(noteId, uri) }.getOrNull())
         }
+    }
+
+    // --- Audio recording session (PR #51, Codex R2 fix) -----------------
+
+    /**
+     * The in-progress recording take: recorder, temp file, timer,
+     * phase and the recorder sheet's visibility. It lives HERE,
+     * not in composition — a configuration change recreates the
+     * activity and disposes the sheet, and a take held in the
+     * sheet's `remember` died with it (the recorder was never
+     * stop()ed, so the partial file was unplayable and was
+     * deleted unseen, and the sheet never reopened). The sheet
+     * now only renders this session. The discard decision is
+     * deliberately narrow: a take is thrown away ONLY by
+     * [cancelAudioRecording] (the sheet's explicit Cancel) or by
+     * [onCleared] above — [dismissAudioRecorderSheet] hides the
+     * sheet and leaves a live take recording.
+     */
+    val recordingSession = AudioRecordingSession()
+
+    /** Insert menu → "Record audio…": open the sheet on the session. */
+    fun showAudioRecorder() {
+        recordingSession.showSheet()
+    }
+
+    /** Sheet dismissal (swipe, the denied panel's Close): hide the
+     *  sheet ONLY — a live take keeps recording in the session and
+     *  the sheet reopens on it. */
+    fun dismissAudioRecorderSheet() {
+        recordingSession.dismissSheet()
+    }
+
+    /** The sheet's explicit Cancel: discard the take and close. */
+    fun cancelAudioRecording() {
+        recordingSession.cancel()
+    }
+
+    /** The screen's import + caret insert has run for a stopped
+     *  take (saved, or honestly failed): the session closes out. */
+    fun onAudioRecordingSaved() {
+        recordingSession.onSaveConsumed()
     }
 
     /** PR #51: imports a finished recording's temp file (the

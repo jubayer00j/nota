@@ -1,6 +1,7 @@
 package app.nota.feature.editor
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.media.MediaRecorder
@@ -147,6 +148,252 @@ class RecordingTimer {
         bankedMs = 0
         segmentStartMs = null
         state = State.IDLE
+    }
+}
+
+/**
+ * One in-progress recording take, owned by [RichNoteEditorViewModel]
+ * so it survives the activity recreations a configuration change
+ * (rotation) causes (PR #51 fix, Codex R2): the recorder, its temp
+ * file, the [RecordingTimer] and the phase live HERE, not in
+ * composition — the recorder sheet only renders this state, so the
+ * sheet being disposed and recomposed never touches the take.
+ *
+ * The discard rule is the point. A take is thrown away ONLY by an
+ * explicit [cancel] (the sheet's Cancel, or the error panel's
+ * Close) or by [release] when the owning ViewModel is cleared.
+ * [dismissSheet] — a swipe-dismiss, the denied panel's Close, the
+ * sheet leaving composition for any reason — hides the sheet and
+ * touches nothing else, because an un-stopped recorder's file has
+ * no finalised moov atom and is unplayable: merely keeping the file
+ * while the recorder died with the composition would preserve a
+ * corpse, not a take. Here the [MediaRecorder] that started the
+ * take is the one that later stops it, so [stop] after any number
+ * of recreations still finalises a playable file.
+ */
+class AudioRecordingSession {
+
+    /** A stopped take, handed to the screen's import + caret insert. */
+    class FinishedTake(
+        val file: File,
+        val displayName: String,
+        val durationMillis: Long,
+    )
+
+    val timer = RecordingTimer()
+
+    /**
+     * Snapshot mirror of [timer]'s phase — the sheet's UI and its
+     * ticker key on this; every transition writes both together
+     * (the [RecordingTimer] itself stays a pure, non-snapshot
+     * class, exactly as before).
+     */
+    var phase by mutableStateOf(RecordingTimer.State.IDLE)
+        private set
+
+    /**
+     * Whether the recorder sheet is up. ViewModel-held so a
+     * configuration change reopens the sheet on the live session
+     * instead of stranding the take behind a closed UI.
+     */
+    var sheetVisible by mutableStateOf(false)
+        private set
+
+    /**
+     * The current start/stop failure, rendered by the sheet's
+     * error panel; null while the session is healthy. A failed
+     * start is retried only through [retry] (the panel's
+     * deliberate Try again), never by the auto-start effect.
+     */
+    var error by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * True between a successful [stop] and the screen's import
+     * completing ([onSaveConsumed]): the auto-start guard and the
+     * sheet's dismissal gate both read it.
+     */
+    var saving by mutableStateOf(false)
+        private set
+
+    /**
+     * The take's temp file in cacheDir, minted by [begin]; null
+     * when no take exists. The file is created up front, so its
+     * presence IS the take's footprint: discarding deletes it,
+     * [stop] hands it to the importer.
+     */
+    var tempFile: File? = null
+        private set
+
+    private var recorder: MediaRecorder? = null
+
+    /** The insert menu's entry: show the sheet on this session. */
+    fun showSheet() {
+        sheetVisible = true
+    }
+
+    /**
+     * Hides the sheet WITHOUT touching the take (a dismissal is
+     * not a decision about the recording). A live take keeps
+     * recording; the sheet reopens on it from the insert menu, or
+     * reappears on its own after a configuration change.
+     */
+    fun dismissSheet() {
+        sheetVisible = false
+    }
+
+    /**
+     * Starts recording into a fresh temp file — unless a take is
+     * already live, a save is in flight, or a failure is showing
+     * (the error panel owns the retry). Those guards are what
+     * make the sheet's auto-start effect safe to re-run after a
+     * recreation: on a live session this is a no-op and the SAME
+     * recorder, file and timer carry on.
+     */
+    fun begin(context: Context) {
+        if (recorder != null || saving || error != null) return
+        val appContext = context.applicationContext
+        val file = File(
+            File(appContext.cacheDir, "nota-recording"),
+            "take-${UUID.randomUUID()}.m4a",
+        )
+        file.parentFile?.mkdirs()
+        // The file exists from the moment recording starts (the
+        // recorder truncates and writes it as it runs): creating
+        // it here makes the take's footprint observable to the
+        // discard paths without consulting the recorder.
+        runCatching { file.createNewFile() }
+        val newRecorder = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(appContext)
+            } else {
+                @Suppress("DEPRECATION") MediaRecorder()
+            }
+        } catch (e: Exception) {
+            file.delete()
+            error = "Couldn't start recording. The microphone may be in use by another app."
+            return
+        }
+        try {
+            newRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            newRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            newRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            newRecorder.setAudioChannels(1)
+            newRecorder.setAudioSamplingRate(44_100)
+            newRecorder.setAudioEncodingBitRate(96_000)
+            newRecorder.setOutputFile(file.absolutePath)
+            newRecorder.prepare()
+            newRecorder.start()
+        } catch (e: Exception) {
+            runCatching { newRecorder.reset() }
+            runCatching { newRecorder.release() }
+            file.delete()
+            error = "Couldn't start recording. The microphone may be in use by another app."
+            return
+        }
+        recorder = newRecorder
+        tempFile = file
+        timer.start(System.currentTimeMillis())
+        phase = RecordingTimer.State.RECORDING
+    }
+
+    /** The error panel's deliberate retry: clear the failure, start again. */
+    fun retry(context: Context) {
+        error = null
+        begin(context)
+    }
+
+    fun pause() {
+        if (phase != RecordingTimer.State.RECORDING) return
+        runCatching { recorder?.pause() }
+        timer.pause(System.currentTimeMillis())
+        phase = RecordingTimer.State.PAUSED
+    }
+
+    fun resume() {
+        if (phase != RecordingTimer.State.PAUSED) return
+        runCatching { recorder?.resume() }
+        timer.resume(System.currentTimeMillis())
+        phase = RecordingTimer.State.RECORDING
+    }
+
+    /**
+     * Finalises the take: the recorder that started it stops it
+     * (which is what writes a playable file), and the finished
+     * take is returned for the screen's import + caret insert;
+     * [saving] gates the sheet until [onSaveConsumed]. A stop
+     * that captured nothing reports the honest error and returns
+     * null — nothing is handed over.
+     */
+    fun stop(): FinishedTake? {
+        val active = recorder ?: return null
+        val durationMs = timer.stop(System.currentTimeMillis())
+        phase = RecordingTimer.State.IDLE
+        val stopped = runCatching { active.stop() }.isSuccess
+        releaseRecorder()
+        val file = tempFile
+        if (!stopped || file == null || !file.exists() || file.length() == 0L) {
+            file?.delete()
+            tempFile = null
+            error = "That recording didn't save — nothing was captured."
+            return null
+        }
+        saving = true
+        return FinishedTake(file, recordingDisplayName(), durationMs)
+    }
+
+    /**
+     * The screen's import + insert has run (saved, or honestly
+     * failed — either way the take is consumed and the temp file
+     * was the importer's to copy and the screen's to delete):
+     * close the session out.
+     */
+    fun onSaveConsumed() {
+        saving = false
+        tempFile = null
+        sheetVisible = false
+    }
+
+    /**
+     * Explicit Cancel (and the error panel's Close — an explicit
+     * abandon): the take is thrown away and the sheet closes.
+     * The ONLY user action that discards.
+     */
+    fun cancel() {
+        discardTake()
+        sheetVisible = false
+    }
+
+    /**
+     * The owning ViewModel is gone (the editor closed for real):
+     * a recorder must never outlive it, so the take is discarded
+     * with it.
+     */
+    fun release() {
+        discardTake()
+    }
+
+    private fun discardTake() {
+        recorder?.let { active ->
+            if (timer.state != RecordingTimer.State.IDLE) {
+                runCatching { active.stop() }
+            }
+        }
+        releaseRecorder()
+        timer.cancel()
+        phase = RecordingTimer.State.IDLE
+        error = null
+        saving = false
+        tempFile?.delete()
+        tempFile = null
+    }
+
+    private fun releaseRecorder() {
+        recorder?.let { active ->
+            runCatching { active.reset() }
+            runCatching { active.release() }
+        }
+        recorder = null
     }
 }
 
@@ -404,40 +651,38 @@ fun AudioBlock(
 
 /**
  * The recorder (PR #51): a modal sheet opened from the editor's
- * insert menu ("Record audio…"). The take records into a temp file
- * in cacheDir and exists only there until Stop — Stop hands the
- * file to [onSave] (the screen imports it into attachment storage
- * and inserts the [AudioSegment] at the caret, the insert funnel
- * every block uses); Cancel, a swipe-dismiss, or the sheet leaving
- * composition for any other reason discards the take (the
- * DisposableEffect below is the guarantee: a recorder can never
- * run behind the app). RECORD_AUDIO is requested in context when
- * the sheet opens if not already granted — denial shows the honest
- * panel and records nothing.
+ * insert menu ("Record audio…") that RENDERS the ViewModel-owned
+ * [AudioRecordingSession] and forwards it the user's intents. The
+ * take itself — recorder, temp file, timer, phase — lives in the
+ * session, so this sheet can be disposed and recomposed freely (a
+ * rotation recreates the activity mid-recording) without the take
+ * noticing; there is deliberately NO dispose-time discard here
+ * (PR #51 fix, Codex R2 — the pre-fix sheet held the take in
+ * `remember` and threw it away on ANY disposal, rotation
+ * included, and the sheet never reopened). The take is discarded
+ * only through the session's explicit cancel ([onCancel]) or
+ * when the owning ViewModel is cleared.
+ *
+ * Recording auto-starts once permission is in hand; Stop hands
+ * the finished take to [onSave] (the screen imports it into
+ * attachment storage and inserts the [AudioSegment] at the caret,
+ * the insert funnel every block uses). A dismissal ([onDismiss])
+ * hides the sheet and leaves a live take recording in the
+ * session — it reopens from the insert menu. RECORD_AUDIO is
+ * requested in context when the sheet opens if not already
+ * granted — denial shows the honest panel and records nothing.
  *
  * Format: AAC-LC in .m4a, mono, 96 kbps / 44.1 kHz (~0.7 MB/min).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AudioRecorderSheet(
+    session: AudioRecordingSession,
     onDismiss: () -> Unit,
+    onCancel: () -> Unit,
     onSave: (file: File, displayName: String, durationMillis: Long) -> Unit,
 ) {
     val context = LocalContext.current
-    val timer = remember { RecordingTimer() }
-    val tempFile = remember {
-        File(
-            File(context.cacheDir, "nota-recording"),
-            "take-${UUID.randomUUID()}.m4a",
-        )
-    }
-    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
-    // RecordingTimer is deliberately NOT snapshot state (it is a
-    // pure, clock-injected class); the sheet mirrors its phase
-    // here so the pause/resume UI and the ticker effect have a
-    // Compose-observable to key on. Every transition below writes
-    // both together.
-    var phase by remember { mutableStateOf(RecordingTimer.State.IDLE) }
     var permissionGranted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -446,81 +691,7 @@ fun AudioRecorderSheet(
         )
     }
     var denied by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
     var tick by remember { mutableLongStateOf(0L) }
-
-    fun releaseRecorder() {
-        mediaRecorder?.let { recorder ->
-            runCatching { recorder.reset() }
-            runCatching { recorder.release() }
-        }
-        mediaRecorder = null
-    }
-
-    fun discardTake() {
-        mediaRecorder?.let { recorder ->
-            if (timer.state != RecordingTimer.State.IDLE) {
-                runCatching { recorder.stop() }
-            }
-        }
-        releaseRecorder()
-        timer.cancel()
-        phase = RecordingTimer.State.IDLE
-        tempFile.delete()
-    }
-
-    fun startRecording() {
-        tempFile.parentFile?.mkdirs()
-        tempFile.delete()
-        val recorder = try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(context)
-            } else {
-                @Suppress("DEPRECATION") MediaRecorder()
-            }
-        } catch (e: Exception) {
-            error = "Couldn't start recording. The microphone may be in use by another app."
-            return
-        }
-        try {
-            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            recorder.setAudioChannels(1)
-            recorder.setAudioSamplingRate(44_100)
-            recorder.setAudioEncodingBitRate(96_000)
-            recorder.setOutputFile(tempFile.absolutePath)
-            recorder.prepare()
-            recorder.start()
-        } catch (e: Exception) {
-            runCatching { recorder.reset() }
-            runCatching { recorder.release() }
-            tempFile.delete()
-            error = "Couldn't start recording. The microphone may be in use by another app."
-            return
-        }
-        mediaRecorder = recorder
-        timer.start(System.currentTimeMillis())
-        phase = RecordingTimer.State.RECORDING
-        tick = System.currentTimeMillis()
-        error = null
-    }
-
-    fun stopAndSave() {
-        val recorder = mediaRecorder ?: return
-        val durationMs = timer.stop(System.currentTimeMillis())
-        phase = RecordingTimer.State.IDLE
-        val stopped = runCatching { recorder.stop() }.isSuccess
-        releaseRecorder()
-        if (!stopped || !tempFile.exists() || tempFile.length() == 0L) {
-            tempFile.delete()
-            error = "That recording didn't save — nothing was captured."
-            return
-        }
-        saving = true
-        onSave(tempFile, recordingDisplayName(), durationMs)
-    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -537,31 +708,29 @@ fun AudioRecorderSheet(
         }
     }
     // Recording starts on its own once permission is in hand (the
-    // voice sheet's pattern); the error guard keeps a failed start
-    // from retry-looping — Try again is the deliberate retry.
+    // voice sheet's pattern). The session's own guards make this
+    // safe to re-run when the sheet is recomposed after a
+    // recreation: a live take, an in-flight save and a showing
+    // error each make begin a no-op — a failed start never
+    // retry-loops, and Try again stays the deliberate retry.
     LaunchedEffect(permissionGranted) {
-        if (permissionGranted && mediaRecorder == null && !saving && error == null) {
-            startRecording()
+        if (permissionGranted) {
+            session.begin(context)
         }
     }
     // Elapsed ticker while recording (paused time stands still:
     // RecordingTimer simply stops accruing).
+    val phase = session.phase
     LaunchedEffect(phase) {
         while (phase == RecordingTimer.State.RECORDING) {
             tick = System.currentTimeMillis()
             delay(200)
         }
     }
-    // The discard guarantee: leaving the sheet by ANY path other
-    // than a completed Stop (which nulled the recorder and stopped
-    // the timer first) throws the take away.
-    DisposableEffect(Unit) {
-        onDispose {
-            if (mediaRecorder != null || tempFile.exists()) discardTake()
-        }
-    }
 
-    val elapsedMs = timer.elapsedAt(
+    val saving = session.saving
+    val error = session.error
+    val elapsedMs = session.timer.elapsedAt(
         if (phase == RecordingTimer.State.RECORDING) {
             tick
         } else {
@@ -598,14 +767,14 @@ fun AudioRecorderSheet(
                 }
                 error != null -> {
                     Text(
-                        error!!,
+                        error,
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.error,
                     )
                     Spacer(Modifier.height(NotaSpacing.md))
                     Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
-                        TextButton(onClick = onDismiss) { Text("Close") }
-                        OutlinedButton(onClick = { startRecording() }) {
+                        TextButton(onClick = onCancel) { Text("Close") }
+                        OutlinedButton(onClick = { session.retry(context) }) {
                             Text("Try again")
                         }
                     }
@@ -621,7 +790,7 @@ fun AudioRecorderSheet(
                         horizontalArrangement = Arrangement.End,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        TextButton(onClick = onDismiss) { Text("Cancel") }
+                        TextButton(onClick = onCancel) { Text("Cancel") }
                     }
                 }
                 else -> {
@@ -640,29 +809,28 @@ fun AudioRecorderSheet(
                     )
                     Spacer(Modifier.height(NotaSpacing.md))
                     Row(horizontalArrangement = Arrangement.spacedBy(NotaSpacing.sm)) {
-                        TextButton(onClick = onDismiss, enabled = !saving) {
+                        TextButton(onClick = onCancel, enabled = !saving) {
                             Text("Cancel")
                         }
                         if (phase == RecordingTimer.State.PAUSED) {
                             OutlinedButton(
                                 enabled = !saving,
-                                onClick = {
-                                    runCatching { mediaRecorder?.resume() }
-                                    timer.resume(System.currentTimeMillis())
-                                    phase = RecordingTimer.State.RECORDING
-                                },
+                                onClick = { session.resume() },
                             ) { Text("Resume") }
                         } else {
                             OutlinedButton(
                                 enabled = !saving,
-                                onClick = {
-                                    runCatching { mediaRecorder?.pause() }
-                                    timer.pause(System.currentTimeMillis())
-                                    phase = RecordingTimer.State.PAUSED
-                                },
+                                onClick = { session.pause() },
                             ) { Text("Pause") }
                         }
-                        Button(onClick = { stopAndSave() }, enabled = !saving) {
+                        Button(
+                            enabled = !saving,
+                            onClick = {
+                                session.stop()?.let { take ->
+                                    onSave(take.file, take.displayName, take.durationMillis)
+                                }
+                            },
+                        ) {
                             Text(if (saving) "Saving…" else "Stop & insert")
                         }
                     }
@@ -671,5 +839,3 @@ fun AudioRecorderSheet(
         }
     }
 }
-
-
