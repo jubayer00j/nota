@@ -1,12 +1,15 @@
 package app.nota.feature.ask
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -21,18 +24,23 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedCard
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -44,9 +52,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.nota.data.ai.SemanticIndexStatus
+import app.nota.notes.R
+import app.nota.ui.theme.LocalNotaDarkTheme
+import app.nota.ui.theme.NotaPalette
 import app.nota.ui.theme.NotaSpacing
 import org.koin.androidx.compose.koinViewModel
 
@@ -60,6 +79,13 @@ import org.koin.androidx.compose.koinViewModel
  * honest states are the UI's own words, never the model's:
  * a refusal renders as "Not in your notes", a no-evidence
  * exchange as "No matching passages".
+ *
+ * Ask Aurora (v0.26.0): a presentation-only reskin of this
+ * surface over the approved "Aurora" direction — an aurora
+ * backdrop, Nota's own N glyph re-presented as the hero mark,
+ * glassy answer cards and a gradient input pill. The engine,
+ * the ViewModel contract, the gate states, the refusal copy
+ * and the citation wiring are exactly as Phase 4.3 shipped.
  */
 @Composable
 fun AskScreen(
@@ -77,48 +103,335 @@ fun AskScreen(
 
     LaunchedEffect(Unit) { viewModel.refreshGate() }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = NotaSpacing.md, vertical = NotaSpacing.sm),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                "Ask Nota",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.weight(1f),
-            )
-            if (gate == AskGate.READY && entries.isNotEmpty()) {
-                TextButton(onClick = { viewModel.clear() }, enabled = !busy) {
-                    Text("Clear")
+    Box(Modifier.fillMaxSize().auroraBackdrop()) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = NotaSpacing.md, vertical = NotaSpacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Ask Nota",
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                if (gate == AskGate.READY && entries.isNotEmpty()) {
+                    TextButton(onClick = { viewModel.clear() }, enabled = !busy) {
+                        Text("Clear")
+                    }
                 }
             }
+            if (gate == AskGate.READY) {
+                ReadyThread(
+                    entries = entries,
+                    busy = busy,
+                    status = indexStatus,
+                    indexBusy = indexBusy,
+                    onUpdateIndex = { viewModel.buildIndex() },
+                    onOpenNote = onOpenNote,
+                    onAsk = { viewModel.ask(it) },
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                GateContent(
+                    gate = gate,
+                    indexBusy = indexBusy,
+                    indexError = indexError,
+                    rebuildDone = rebuildProgress?.done,
+                    rebuildTotal = rebuildProgress?.total,
+                    onOpenSettings = onOpenSettings,
+                    onBuild = { viewModel.buildIndex() },
+                    onRebuild = { viewModel.rebuildIndex() },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
-        if (gate == AskGate.READY) {
-            ReadyThread(
-                entries = entries,
-                busy = busy,
-                status = indexStatus,
-                indexBusy = indexBusy,
-                onUpdateIndex = { viewModel.buildIndex() },
-                onOpenNote = onOpenNote,
-                onAsk = { viewModel.ask(it) },
-                modifier = Modifier.weight(1f),
-            )
+    }
+}
+
+/**
+ * The aurora backdrop: layered radial-gradient washes over the
+ * scheme background — pine → teal with a blue and a violet
+ * shoulder in dark mode; the same composition as soft mint/pine
+ * washes on paper in light mode. Drawn behind the content only;
+ * every surface above it keeps its own colour roles.
+ */
+@Composable
+private fun Modifier.auroraBackdrop(): Modifier {
+    val dark = LocalNotaDarkTheme.current
+    val background = MaterialTheme.colorScheme.background
+    return this
+        .background(background)
+        .drawBehind {
+            val w = size.width
+            val h = size.height
+            if (dark) {
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            NotaPalette.AuroraGreen.copy(alpha = 0.50f),
+                            Color.Transparent,
+                        ),
+                        center = Offset(w * 0.5f, -h * 0.08f),
+                        radius = w * 0.9f,
+                    ),
+                )
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            NotaPalette.AuroraBlue.copy(alpha = 0.28f),
+                            Color.Transparent,
+                        ),
+                        center = Offset(w * 0.82f, h * 0.16f),
+                        radius = w * 0.6f,
+                    ),
+                )
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            NotaPalette.AuroraViolet.copy(alpha = 0.18f),
+                            Color.Transparent,
+                        ),
+                        center = Offset(w * 0.08f, h * 0.26f),
+                        radius = w * 0.55f,
+                    ),
+                )
+            } else {
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            NotaPalette.Pine500.copy(alpha = 0.16f),
+                            Color.Transparent,
+                        ),
+                        center = Offset(w * 0.5f, -h * 0.08f),
+                        radius = w * 0.9f,
+                    ),
+                )
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            NotaPalette.AuroraBlue.copy(alpha = 0.08f),
+                            Color.Transparent,
+                        ),
+                        center = Offset(w * 0.82f, h * 0.16f),
+                        radius = w * 0.6f,
+                    ),
+                )
+                drawRect(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            NotaPalette.AuroraViolet.copy(alpha = 0.06f),
+                            Color.Transparent,
+                        ),
+                        center = Offset(w * 0.08f, h * 0.26f),
+                        radius = w * 0.55f,
+                    ),
+                )
+            }
+        }
+}
+
+/**
+ * The hero mark: Nota's own N glyph (the traced path data in
+ * R.drawable.ic_nota_glyph — the same geometry as the launcher
+ * mark) re-presented for Ask per Jubayer's amendment: the glyph
+ * swept with an aurora/cream gradient, riding a glowing aurora
+ * disc with a soft halo. Recognisably the same N; clearly a
+ * feature treatment, not the app icon pasted in.
+ */
+@Composable
+private fun AskHeroMark(modifier: Modifier = Modifier) {
+    val dark = LocalNotaDarkTheme.current
+    Box(modifier.size(136.dp), contentAlignment = Alignment.Center) {
+        // Halo.
+        Box(
+            Modifier.size(136.dp).drawBehind {
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(
+                            if (dark) {
+                                NotaPalette.AuroraGreen.copy(alpha = 0.45f)
+                            } else {
+                                NotaPalette.Pine300.copy(alpha = 0.55f)
+                            },
+                            Color.Transparent,
+                        ),
+                        center = Offset(size.width / 2f, size.height / 2f),
+                        radius = size.minDimension / 2f,
+                    ),
+                )
+            },
+        )
+        // Disc.
+        Box(
+            Modifier
+                .size(92.dp)
+                .clip(CircleShape)
+                .drawBehind {
+                    val brush = if (dark) {
+                        Brush.radialGradient(
+                            colors = listOf(
+                                NotaPalette.AuroraGlowCore,
+                                NotaPalette.AuroraDiscMid,
+                                NotaPalette.AuroraDiscDeep,
+                            ),
+                            center = Offset(size.width * 0.34f, size.height * 0.30f),
+                            radius = size.maxDimension * 0.85f,
+                        )
+                    } else {
+                        Brush.radialGradient(
+                            colors = listOf(
+                                NotaPalette.Pine500,
+                                NotaPalette.Pine700,
+                                NotaPalette.Pine900,
+                            ),
+                            center = Offset(size.width * 0.34f, size.height * 0.30f),
+                            radius = size.maxDimension * 0.85f,
+                        )
+                    }
+                    drawRect(brush = brush)
+                },
+        )
+        // The glyph itself, gradient-swept (kept only where the
+        // glyph's own alpha is — BlendMode.SrcIn over the drawn
+        // painter).
+        Icon(
+            painter = painterResource(R.drawable.ic_nota_glyph),
+            contentDescription = null,
+            tint = Color.Unspecified,
+            modifier = Modifier
+                .size(width = 58.dp, height = 50.dp)
+                .drawWithContent {
+                    drawContent()
+                    drawRect(
+                        brush = Brush.linearGradient(
+                            colors = listOf(
+                                NotaPalette.LogoCream,
+                                if (dark) {
+                                    NotaPalette.AuroraGlowCore
+                                } else {
+                                    NotaPalette.Pine100
+                                },
+                            ),
+                        ),
+                        blendMode = BlendMode.SrcIn,
+                    )
+                },
+        )
+    }
+}
+
+/** The three starter questions on the hero — each submits as-is. */
+private val ASK_SUGGESTIONS = listOf(
+    "Summarise my newest notes",
+    "What's due this week?",
+    "What did I decide recently?",
+)
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AskHero(onAsk: (String) -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(NotaSpacing.lg),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        AskHeroMark()
+        Spacer(Modifier.height(NotaSpacing.md))
+        Text(
+            "Ask your notes anything.",
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(NotaSpacing.sm))
+        Text(
+            "Answers come from your notes only — and every answer " +
+                "shows the note it came from.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(NotaSpacing.lg))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(
+                NotaSpacing.sm,
+                Alignment.CenterHorizontally,
+            ),
+            verticalArrangement = Arrangement.spacedBy(NotaSpacing.sm),
+        ) {
+            ASK_SUGGESTIONS.forEach { question ->
+                SuggestionChip(text = question) { onAsk(question) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionChip(text: String, onClick: () -> Unit) {
+    val dark = LocalNotaDarkTheme.current
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        color = if (dark) {
+            Color(0xFF14281E).copy(alpha = 0.55f)
         } else {
-            GateContent(
-                gate = gate,
-                indexBusy = indexBusy,
-                indexError = indexError,
-                rebuildDone = rebuildProgress?.done,
-                rebuildTotal = rebuildProgress?.total,
-                onOpenSettings = onOpenSettings,
-                onBuild = { viewModel.buildIndex() },
-                onRebuild = { viewModel.rebuildIndex() },
-                modifier = Modifier.weight(1f),
-            )
-        }
+            MaterialTheme.colorScheme.surface.copy(alpha = 0.65f)
+        },
+        border = BorderStroke(
+            1.dp,
+            if (dark) {
+                NotaPalette.AuroraMint.copy(alpha = 0.35f)
+            } else {
+                NotaPalette.Pine300
+            },
+        ),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelLarge,
+            color = if (dark) {
+                NotaPalette.Pine100
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.padding(
+                horizontal = NotaSpacing.md,
+                vertical = NotaSpacing.sm,
+            ),
+        )
+    }
+}
+
+/**
+ * The glassy card chrome shared by the answer cards and the
+ * honest-state cards: a translucent surface with a hairline
+ * border, so the aurora backdrop breathes through without the
+ * text ever sitting on the raw gradient.
+ */
+@Composable
+private fun GlassCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val dark = LocalNotaDarkTheme.current
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface.copy(
+            alpha = if (dark) 0.55f else 0.78f,
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(
+                alpha = if (dark) 0.6f else 1f,
+            ),
+        ),
+        modifier = modifier,
+    ) {
+        content()
     }
 }
 
@@ -136,6 +449,10 @@ private fun GateContent(
 ) {
     Box(modifier.fillMaxSize().padding(NotaSpacing.lg), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            if (gate != AskGate.LOADING && gate != AskGate.READY) {
+                AskHeroMark()
+                Spacer(Modifier.height(NotaSpacing.lg))
+            }
             when (gate) {
                 AskGate.LOADING -> {
                     CircularProgressIndicator()
@@ -233,12 +550,13 @@ private fun GateContent(
 
 @Composable
 private fun GateText(title: String, body: String) {
-    Text(title, style = MaterialTheme.typography.titleMedium)
+    Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
     Spacer(Modifier.height(NotaSpacing.sm))
     Text(
         body,
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
     )
 }
 
@@ -296,67 +614,143 @@ private fun ReadyThread(
                 }
             }
         }
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(NotaSpacing.md),
-        ) {
-            if (entries.isEmpty() && !busy) {
-                item {
-                    Text(
-                        "Ask anything about your notes — what did I decide, " +
-                            "when is it due, what did I write about… Answers " +
-                            "cite the notes they came from, and tapping a " +
-                            "citation opens the note.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        if (entries.isEmpty() && !busy) {
+            AskHero(onAsk = onAsk, modifier = Modifier.weight(1f))
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(NotaSpacing.md),
+            ) {
+                items(entries, key = { it.id }) { entry ->
+                    when (entry) {
+                        is AskEntry.Question -> QuestionBubble(entry.text)
+                        is AskEntry.Answer -> AnswerCard(entry, onOpenNote)
+                    }
+                    Spacer(Modifier.height(NotaSpacing.md))
                 }
-            }
-            items(entries, key = { it.id }) { entry ->
-                when (entry) {
-                    is AskEntry.Question -> QuestionBubble(entry.text)
-                    is AskEntry.Answer -> AnswerCard(entry, onOpenNote)
-                }
-                Spacer(Modifier.height(NotaSpacing.md))
-            }
-            if (busy) {
-                item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(18.dp))
-                        Spacer(Modifier.width(NotaSpacing.sm))
-                        Text(
-                            "Searching your notes…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                if (busy) {
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                Modifier.size(18.dp),
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Spacer(Modifier.width(NotaSpacing.sm))
+                            Text(
+                                "Searching your notes…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
         }
-        Row(
+        AskInputBar(
+            input = input,
+            onInputChange = { input = it },
+            busy = busy,
+            onSubmit = {
+                onAsk(input)
+                input = ""
+            },
+        )
+    }
+}
+
+/**
+ * The aurora input bar: a pill field with a subtle gradient
+ * border (green → blue → violet, from the mock-up) and a round
+ * gradient Ask button. The field inside is a plain Material
+ * TextField with transparent chrome — it keeps the theme's
+ * caret and the same enabled/blank rules as before the reskin.
+ */
+@Composable
+private fun AskInputBar(
+    input: String,
+    onInputChange: (String) -> Unit,
+    busy: Boolean,
+    onSubmit: () -> Unit,
+) {
+    val canAsk = !busy && input.isNotBlank()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .imePadding()
+            .padding(NotaSpacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
             Modifier
-                .fillMaxWidth()
-                .imePadding()
-                .padding(NotaSpacing.md),
-            verticalAlignment = Alignment.CenterVertically,
+                .weight(1f)
+                .clip(RoundedCornerShape(28.dp))
+                .background(
+                    MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                )
+                .border(
+                    1.5.dp,
+                    Brush.linearGradient(
+                        listOf(
+                            NotaPalette.AuroraGreen,
+                            NotaPalette.AuroraBlue,
+                            NotaPalette.AuroraViolet,
+                        ),
+                    ),
+                    RoundedCornerShape(28.dp),
+                )
+                .padding(horizontal = NotaSpacing.sm),
         ) {
-            OutlinedTextField(
+            TextField(
                 value = input,
-                onValueChange = { input = it },
+                onValueChange = onInputChange,
                 placeholder = { Text("Ask about your notes…") },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 maxLines = 4,
                 enabled = !busy,
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent,
+                ),
             )
-            Spacer(Modifier.width(NotaSpacing.sm))
-            Button(
-                onClick = {
-                    onAsk(input)
-                    input = ""
+        }
+        Spacer(Modifier.width(NotaSpacing.sm))
+        Box(
+            Modifier
+                .size(48.dp)
+                .clip(CircleShape)
+                .then(
+                    if (canAsk) {
+                        Modifier.background(
+                            Brush.linearGradient(
+                                listOf(
+                                    NotaPalette.AuroraGreen,
+                                    NotaPalette.AuroraDeep,
+                                ),
+                            ),
+                        )
+                    } else {
+                        Modifier.background(
+                            MaterialTheme.colorScheme.surfaceVariant,
+                        )
+                    },
+                )
+                .clickable(enabled = canAsk) { onSubmit() },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.ArrowUpward,
+                contentDescription = "Ask",
+                tint = if (canAsk) {
+                    Color.White
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                enabled = !busy && input.isNotBlank(),
-            ) { Text("Ask") }
+            )
         }
     }
 }
@@ -386,11 +780,7 @@ private fun AnswerCard(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
     Column {
         when (entry.status) {
             AskAnswerStatus.ANSWER -> {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    ),
-                ) {
+                GlassCard {
                     Column(Modifier.padding(NotaSpacing.md)) {
                         AnswerText(entry, onOpenNote)
                         val cards = sourceCardsFor(entry.sentExcerpts, entry.citations)
@@ -419,6 +809,7 @@ private fun AnswerCard(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer,
                     ),
+                    shape = RoundedCornerShape(16.dp),
                 ) {
                     Text(
                         entry.errorMessage ?: "Something went wrong. Try again.",
@@ -442,7 +833,7 @@ private fun AnswerCard(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
 
 @Composable
 private fun HonestStateCard(title: String, body: String) {
-    OutlinedCard {
+    GlassCard {
         Column(Modifier.padding(NotaSpacing.md)) {
             Text(title, style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(NotaSpacing.xs))
@@ -457,11 +848,19 @@ private fun HonestStateCard(title: String, body: String) {
 
 @Composable
 private fun SourceCard(card: AskSourceCard, onClick: () -> Unit) {
+    val dark = LocalNotaDarkTheme.current
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface.copy(
+            alpha = if (dark) 0.45f else 0.65f,
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(
+                alpha = if (dark) 0.6f else 1f,
+            ),
+        ),
     ) {
         Column(Modifier.padding(NotaSpacing.sm)) {
             Text(
@@ -483,16 +882,18 @@ private fun SourceCard(card: AskSourceCard, onClick: () -> Unit) {
 
 /**
  * The answer's text with its validated citations as tappable
- * chips — a small numbered circle in the pine colour, flowed
- * inline with the text ([androidx.compose.foundation.layout
- * .FlowRow], the same pattern as Search's tag chips); tapping
- * opens the cited note. Only numbers the parser validated
- * become chips ([citationSegments] decides); anything else
- * stays literal text.
+ * chips — a small numbered circle (aurora gradient in dark
+ * mode, pine in light), flowed inline with the text
+ * ([androidx.compose.foundation.layout.FlowRow], the same
+ * pattern as Search's tag chips); tapping opens the cited
+ * note. Only numbers the parser validated become chips
+ * ([citationSegments] decides); anything else stays literal
+ * text.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AnswerText(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
+    val dark = LocalNotaDarkTheme.current
     val segments = remember(entry.id) { citationSegments(entry.text, entry.citations) }
     FlowRow(
         modifier = Modifier.fillMaxWidth(),
@@ -508,13 +909,32 @@ private fun AnswerText(entry: AskEntry.Answer, onOpenNote: (String) -> Unit) {
                         Modifier
                             .size(20.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary)
+                            .then(
+                                if (dark) {
+                                    Modifier.background(
+                                        Brush.linearGradient(
+                                            listOf(
+                                                NotaPalette.AuroraGreen,
+                                                NotaPalette.AuroraDeep,
+                                            ),
+                                        ),
+                                    )
+                                } else {
+                                    Modifier.background(
+                                        MaterialTheme.colorScheme.primary,
+                                    )
+                                },
+                            )
                             .clickable { onOpenNote(segment.noteId) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             segment.n.toString(),
-                            color = MaterialTheme.colorScheme.onPrimary,
+                            color = if (dark) {
+                                NotaPalette.Pine950
+                            } else {
+                                MaterialTheme.colorScheme.onPrimary
+                            },
                             style = MaterialTheme.typography.labelSmall,
                         )
                     }

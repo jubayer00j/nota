@@ -8,6 +8,8 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
@@ -203,6 +205,17 @@ fun selectScheme(
     else -> NotaScheme.Light
 }
 
+/**
+ * Ask Aurora (v0.26.0): whether the RESOLVED scheme — the one actually
+ * on screen after the user's pinned theme mode, the OLED switch and
+ * dynamic colour have all had their say — is a dark one. Surfaces
+ * whose ink must follow the resolved theme rather than the system
+ * state read this: the system-bar appearance ([SystemBarAppearance])
+ * and the rich editor's caret/selection accent. Outside [NotaTheme]
+ * it defaults to light, matching the static schemes' default.
+ */
+val LocalNotaDarkTheme = staticCompositionLocalOf { false }
+
 @Composable
 fun NotaTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -211,18 +224,21 @@ fun NotaTheme(
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
-    val colors = when (
-        selectScheme(darkTheme, oledBlack, dynamicColor, Build.VERSION.SDK_INT)
-    ) {
+    val scheme = selectScheme(darkTheme, oledBlack, dynamicColor, Build.VERSION.SDK_INT)
+    val colors = when (scheme) {
         NotaScheme.Oled -> OledColors
         NotaScheme.DynamicDark -> dynamicDarkColorScheme(context)
         NotaScheme.DynamicLight -> dynamicLightColorScheme(context)
         NotaScheme.Dark -> DarkColors
         NotaScheme.Light -> LightColors
     }
-    MaterialTheme(
-        colorScheme = colors,
-        typography = NotaTypography,
-        content = content,
-    )
+    val resolvedDark = scheme == NotaScheme.Dark ||
+        scheme == NotaScheme.Oled || scheme == NotaScheme.DynamicDark
+    CompositionLocalProvider(LocalNotaDarkTheme provides resolvedDark) {
+        MaterialTheme(
+            colorScheme = colors,
+            typography = NotaTypography,
+            content = content,
+        )
+    }
 }

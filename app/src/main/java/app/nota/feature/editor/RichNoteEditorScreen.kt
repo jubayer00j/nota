@@ -35,6 +35,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
@@ -90,6 +91,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -110,6 +112,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -192,6 +195,7 @@ import app.nota.data.text.PlainTextCodec
 import app.nota.feature.lock.LockNoteDialog
 import app.nota.feature.lock.ManageLockDialog
 import app.nota.feature.lock.NoteLockGate
+import app.nota.ui.theme.LocalNotaDarkTheme
 import app.nota.ui.theme.notaEditorBody
 import app.nota.ui.theme.NotaSpacing
 import coil3.compose.AsyncImage
@@ -2968,6 +2972,13 @@ private fun SegmentEditor(
     // (heading styles derive from this base style), while spans with an
     // explicit colour from the document HTML still win over the base.
     val editorTextStyle = bodyStyle.copy(color = MaterialTheme.colorScheme.onSurface)
+    // Ask Aurora (v0.26.0), Part 2: the library's foundation editor
+    // defaults its caret brush to solid black — on the dark schemes
+    // the caret blended into the background and was hard to spot.
+    // Pin the caret and the selection ink to the resolved theme's
+    // accent (the pure mapping lives in EditorCursor.kt).
+    val resolvedDark = LocalNotaDarkTheme.current
+    val cursorBrush = SolidColor(editorCursorColor(resolvedDark))
     when (val segment = ui.segment) {
         is TextSegment -> {
             val state = stateFor()
@@ -2986,9 +2997,13 @@ private fun SegmentEditor(
                 editorModifier = editorModifier.heightIn(min = 56.dp)
             }
             Box(Modifier.fillMaxWidth()) {
+                CompositionLocalProvider(
+                    LocalTextSelectionColors provides editorSelectionColors(resolvedDark),
+                ) {
                 BasicRichTextEditor(
                     state = state,
                     textStyle = editorTextStyle,
+                    cursorBrush = cursorBrush,
                     modifier = editorModifier.onGloballyPositioned { coordinates ->
                         val geometry = fieldGeometries.geometryFor(ui.id)
                         geometry.windowPosition = coordinates.positionInWindow()
@@ -2998,6 +3013,7 @@ private fun SegmentEditor(
                         fieldGeometries.geometryFor(ui.id).layout = result
                     },
                 )
+                }
                 if (showBodyPlaceholder && state.annotatedString.text.isEmpty()) {
                     Text(
                         "Start writing…",
@@ -3016,9 +3032,13 @@ private fun SegmentEditor(
                         .background(MaterialTheme.colorScheme.primary),
                 )
                 Spacer(Modifier.width(NotaSpacing.sm))
+                CompositionLocalProvider(
+                    LocalTextSelectionColors provides editorSelectionColors(resolvedDark),
+                ) {
                 BasicRichTextEditor(
                     state = state,
                     textStyle = editorTextStyle,
+                    cursorBrush = cursorBrush,
                     modifier = Modifier.weight(1f).then(
                         if (focusRequester != null) {
                             Modifier.focusRequester(focusRequester)
@@ -3034,6 +3054,7 @@ private fun SegmentEditor(
                         fieldGeometries.geometryFor(ui.id).layout = result
                     },
                 )
+                }
                 // Phase 6 (Editor Refinement #1 fix): every block
                 // must be deletable — a quote previously had NO
                 // removal path at all (its onRemove went unwired,
@@ -3862,8 +3883,17 @@ private fun RichCellText(
     }
     AutolinkEffect(state)
     val geometry = fieldGeometries.geometryFor(key)
+    // Ask Aurora (v0.26.0), Part 2: the same caret/selection pinning
+    // as the segment editors — the cell editor is a separate
+    // composition of the same library field, with the same
+    // black-caret default on dark schemes.
+    val resolvedDark = LocalNotaDarkTheme.current
+    CompositionLocalProvider(
+        LocalTextSelectionColors provides editorSelectionColors(resolvedDark),
+    ) {
     BasicRichTextEditor(
         state = state,
+        cursorBrush = SolidColor(editorCursorColor(resolvedDark)),
         textStyle = MaterialTheme.typography.bodySmall.copy(
             color = MaterialTheme.colorScheme.onSurface,
             fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
@@ -3884,6 +3914,7 @@ private fun RichCellText(
             }
             .onFocusChanged { if (it.isFocused) onFocus() },
     )
+    }
 }
 @Composable
 private fun EditableCellText(
