@@ -39,6 +39,14 @@ data class NoteSearchResult(
  * - Locked notes are scored by the caller with an EMPTY body
  *   (their sealed text is never a haystack) and get no snippet;
  *   title, tag and folder names stay searchable, as in 1.x.
+ * - Offsets are ALWAYS into the original text. Offset-producing
+ *   matching (snippets, highlight ranges) is per-character
+ *   case-insensitive ([String.indexOf] with ignoreCase): whole-
+ *   string lowercasing can CHANGE LENGTH (U+0130 lowercases to
+ *   two code units), so an index taken from a lowercased copy
+ *   silently shifts — and can run past the end of the original
+ *   and throw. [score] is the exception: it lowercases whole
+ *   strings but only asks contains(), never takes an offset.
  */
 object NoteSearch {
 
@@ -98,37 +106,38 @@ object NoteSearch {
      */
     fun snippet(plainText: String, terms: List<String>): String {
         val firstTerm = terms.firstOrNull() ?: return plainText.take(HEAD_CHARS)
-        val lower = plainText.lowercase()
-        if (lower.indexOf(firstTerm) >= 0) {
-            val idx = findSnippetMatch(lower, firstTerm)
-            if (idx >= 0) {
-                val prefix = if (idx > WINDOW_BEFORE) "…" else ""
-                val end = minOf(plainText.length, idx + WINDOW_AFTER)
-                return prefix + plainText.substring(maxOf(0, idx - WINDOW_BEFORE), end) + "…"
-            }
+        val idx = findSnippetMatch(plainText, firstTerm)
+        if (idx >= 0) {
+            val prefix = if (idx > WINDOW_BEFORE) "…" else ""
+            val end = minOf(plainText.length, idx + WINDOW_AFTER)
+            return prefix + plainText.substring(maxOf(0, idx - WINDOW_BEFORE), end) + "…"
         }
         return plainText.take(HEAD_CHARS)
     }
 
     /**
      * Where to window the snippet for a body match: the first
-     * occurrence of [term] in the lowercased text that is real
-     * note content, skipping occurrences that are generated list
-     * markers — a numeric query would otherwise window on an
-     * item's printed number instead of the match the scoring
-     * actually found. When every occurrence is marker-shaped
-     * (typed text can itself look like "2. …"), fall back to the
-     * first occurrence overall; -1 when the term doesn't occur.
-     * Verbatim port of 1.x's findSnippetMatch.
+     * occurrence of [term] in the text that is real note content,
+     * skipping occurrences that are generated list markers — a
+     * numeric query would otherwise window on an item's printed
+     * number instead of the match the scoring actually found.
+     * When every occurrence is marker-shaped (typed text can
+     * itself look like "2. …"), fall back to the first occurrence
+     * overall; -1 when the term doesn't occur. Port of 1.x's
+     * findSnippetMatch, with one deliberate divergence: matching
+     * is per-character case-insensitive on the ORIGINAL text,
+     * not a search inside a lowercased copy, so the returned
+     * index is always a valid offset into the caller's string
+     * (see the class doc's offset rule).
      */
-    private fun findSnippetMatch(lowerText: String, term: String): Int {
+    private fun findSnippetMatch(text: String, term: String): Int {
         var firstIdx = -1
         var from = 0
         while (true) {
-            val idx = lowerText.indexOf(term, from)
+            val idx = text.indexOf(term, from, ignoreCase = true)
             if (idx < 0) return firstIdx
             if (firstIdx < 0) firstIdx = idx
-            val end = markerTokenEnd(lowerText, idx, term)
+            val end = markerTokenEnd(text, idx, term)
             if (end < 0) return idx
             from = end
         }
@@ -144,14 +153,17 @@ object NoteSearch {
      * followed by "." and a space (or "." at the end of the
      * text). Verbatim port of 1.x's markerTokenEnd.
      */
-    private fun markerTokenEnd(lowerText: String, idx: Int, term: String): Int {
-        fun isAlnum(c: Char) = c in 'a'..'z' || c in '0'..'9'
-        if (idx > 0 && isAlnum(lowerText[idx - 1])) return -1
+    private fun markerTokenEnd(text: String, idx: Int, term: String): Int {
+        // On the original text, so both cases count as token
+        // characters (1.x inspected its lowercased copy, where
+        // only a-z could appear).
+        fun isAlnum(c: Char) = c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9'
+        if (idx > 0 && isAlnum(text[idx - 1])) return -1
         var end = idx
-        while (end < lowerText.length && isAlnum(lowerText[end])) end += 1
+        while (end < text.length && isAlnum(text[end])) end += 1
         if (end - idx < term.length) return -1
-        if (end >= lowerText.length || lowerText[end] != '.') return -1
-        val after: Char? = if (end + 1 < lowerText.length) lowerText[end + 1] else null
+        if (end >= text.length || text[end] != '.') return -1
+        val after: Char? = if (end + 1 < text.length) text[end + 1] else null
         return if (after == null || after == ' ') end else -1
     }
 
@@ -163,13 +175,12 @@ object NoteSearch {
      */
     fun highlightRanges(text: String, terms: List<String>): List<IntRange> {
         if (text.isEmpty() || terms.isEmpty()) return emptyList()
-        val lower = text.lowercase()
         val found = ArrayList<IntRange>()
         for (term in terms) {
             if (term.isEmpty()) continue
             var from = 0
             while (true) {
-                val idx = lower.indexOf(term, from)
+                val idx = text.indexOf(term, from, ignoreCase = true)
                 if (idx < 0) break
                 found += idx until idx + term.length
                 from = idx + 1

@@ -465,20 +465,20 @@ class NoteRepository(
      * Keyword search (Search Quality Pass, v0.27.0): 1.x's ranked
      * local search over the FTS index.
      *
-     * Pipeline: FTS4 proposes candidates by prefix, as before.
-     * When it returns fewer than [SUBSTRING_FALLBACK_THRESHOLD]
-     * rows the candidate set widens to the whole eligible corpus
-     * — 1.x matches raw substrings, so a mid-word fragment
-     * ("xam", "ook") must still find its note, and the prefix
-     * pass alone cannot see those. Either way, EVERY candidate
-     * is then scored by [NoteSearch.score] over its real
-     * haystacks (1.x's weights, AND across terms), sorted
-     * score-then-recency, and given a match-window snippet.
-     * A prefix match is always a substring match in the same
-     * field, so the FTS hits score in the same pass — one
-     * pipeline, no duplicate rows. Locked notes score with an
-     * empty body and show no snippet; archived notes stay out
-     * (Nota's standing rule, kept).
+     * Pipeline: FTS4 runs as a fast prefix pre-pass, and the
+     * candidate set then ALWAYS widens to the whole eligible
+     * corpus — 1.x matches raw substrings over everything, so a
+     * mid-word fragment ("xam", "ook") must still find its note,
+     * and the prefix pass alone cannot see those, however many
+     * prefix hits it already has. EVERY candidate is then
+     * scored by [NoteSearch.score] over its real haystacks
+     * (1.x's weights, AND across terms), sorted score-then-
+     * recency, and given a match-window snippet. A prefix match
+     * is always a substring match in the same field, so the FTS
+     * hits score in the same pass — one pipeline, no duplicate
+     * rows. Locked notes score with an empty body and show no
+     * snippet; archived notes stay out (Nota's standing rule,
+     * kept).
      */
     suspend fun searchNotes(raw: String): List<NoteSearchResult> {
         val terms = NoteSearch.terms(raw)
@@ -489,12 +489,7 @@ class NoteRepository(
         // Id-list queries run in chunks: SQLite's bound-variable
         // ceiling on older Android is 999, and a big library's
         // candidate set must never lean on it.
-        val texts = if (ftsRows.size < SUBSTRING_FALLBACK_THRESHOLD) {
-            noteDao.getSearchTexts()
-        } else {
-            ftsRows.map { it.id }.chunked(ID_QUERY_CHUNK)
-                .flatMap { noteDao.getSearchTexts(it) }
-        }
+        val texts = noteDao.getSearchTexts()
         if (texts.isEmpty()) return emptyList()
         val textById = texts.associateBy { it.id }
 
@@ -541,16 +536,6 @@ class NoteRepository(
     suspend fun search(query: String): List<NoteSearchResult> = searchNotes(query)
 
     private companion object {
-        /**
-         * How thin the FTS prefix pass may come back before the
-         * substring pass widens the candidate set to the whole
-         * corpus. 30 is 1.x's own render cap: a prefix pass that
-         * already fills it has saturated what the user can scan,
-         * and below it the corpus pass is one bounded scan over
-         * eligible notes.
-         */
-        const val SUBSTRING_FALLBACK_THRESHOLD = 30
-
         /** Chunk size for id-list (IN) queries — comfortably
          *  under SQLite's 999 bound-variable ceiling on the
          *  oldest Android versions Nota still runs on. */

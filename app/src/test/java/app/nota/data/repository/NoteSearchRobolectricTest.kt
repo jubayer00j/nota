@@ -157,4 +157,22 @@ class NoteSearchRobolectricTest {
         // (and folder) searchable — only the body is sealed.
         assertEquals(listOf(note.id), repository.searchNotes("vault").map { it.id })
     }
+
+    @Test
+    fun substringOnlyMatchSurvivesASaturatedPrefixPass() = runBlocking {
+        // Saturate the FTS prefix pass: 30 notes whose bodies
+        // hold a token STARTING with "exam"…
+        repeat(30) { i ->
+            repository.createNote(title = "Drill $i", plainBody = "examination practice $i")
+        }
+        // …and one note "exam" only ever touches mid-word.
+        val midWord = repository.createNote(title = "Checklist", plainBody = "preexam checklist")
+
+        val results = repository.searchNotes("exam")
+        // 1.x scans the whole corpus unconditionally — the
+        // mid-word note is a result however full the prefix
+        // pass came back.
+        assertEquals(31, results.size)
+        assertTrue(results.any { it.id == midWord.id })
+    }
 }

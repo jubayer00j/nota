@@ -110,6 +110,20 @@ class NoteSearchTest {
         assertEquals("abcdef", NoteSearch.snippet("abcdef", emptyList()))
     }
 
+    @Test
+    fun snippetOffsetsSurviveLengthChangingCaseFolds() {
+        // U+0130 ("İ") lowercases to TWO code units, so an index
+        // taken from a lowercased copy of this body lands 100
+        // chars too far right — past the end of the string, in
+        // fact: cutting the window from it threw and aborted
+        // the search. Offsets come from the original text, so
+        // the window lands on the real match.
+        val body = "İ".repeat(100) + " exam results"
+        val snippet = NoteSearch.snippet(body, listOf("exam"))
+        assertTrue(snippet.contains("exam results"))
+        assertTrue(snippet.startsWith("…"))
+    }
+
     // ---- Highlight ranges (G2) ----------------------------------
 
     @Test
@@ -120,6 +134,16 @@ class NoteSearchTest {
         )
         assertEquals(emptyList<IntRange>(), NoteSearch.highlightRanges("nothing", listOf("exam")))
         assertEquals(emptyList<IntRange>(), NoteSearch.highlightRanges("exam", emptyList()))
+    }
+
+    @Test
+    fun highlightRangesUseOriginalOffsetsWhenCaseFoldingExpands() {
+        // The same U+0130 trap as the snippet: the ranges must
+        // index the string the UI renders, not its lowercased
+        // expansion (which would put this match at 100..103 in
+        // a 54-char string).
+        val text = "İ".repeat(50) + "exam"
+        assertEquals(listOf(50..53), NoteSearch.highlightRanges(text, listOf("exam")))
     }
 
     @Test

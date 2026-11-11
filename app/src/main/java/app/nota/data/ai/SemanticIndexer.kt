@@ -413,11 +413,19 @@ class SemanticIndexer(
         // Defence in depth (1.x's merge rule): a hit only ever
         // surfaces a note that is eligible RIGHT NOW — a stale
         // vector can never resurrect a locked/trashed/archived/
-        // deleted note into the results.
+        // deleted note into the results. The hit must also still
+        // answer for the note's CURRENT text — the same stored-
+        // fingerprint check Ask's retrieval runs: between an edit
+        // and the next reconcile, the stored vectors describe
+        // text the note may no longer contain, and neither a
+        // search boost nor a meaning-only row may ride on them.
         val noteDao = databaseProvider.current.noteDao()
+        val storedById = stored.notes
         return raw.filter { hit ->
             val note = noteDao.getById(hit.noteId)
-            note != null && isIndexEligible(note)
+            note != null && isIndexEligible(note) &&
+                storedById[hit.noteId]?.fingerprint ==
+                fingerprint(note.title, note.plainText)
         }
     }
 
