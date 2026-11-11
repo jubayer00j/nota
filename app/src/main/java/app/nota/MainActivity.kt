@@ -53,6 +53,7 @@ import app.nota.notes.R
 import app.nota.ui.navigation.NotaNavShell
 import app.nota.ui.theme.NotaSpacing
 import app.nota.ui.theme.NotaTheme
+import app.nota.ui.theme.SystemBarAppearance
 import app.nota.ui.theme.resolveDarkTheme
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -231,6 +232,12 @@ class MainActivity : FragmentActivity() {
                 dynamicColor = dynamicColour,
                 oledBlack = oledBlack,
             ) {
+                // Ask Aurora (v0.26.0), Part 3: keep the system bars'
+                // icon appearance in step with the RESOLVED theme —
+                // enableEdgeToEdge() alone applies it once, from the
+                // system state at creation, so a pinned theme mode
+                // left the icons invisible against the app background.
+                SystemBarAppearance()
                 // Phase 2a App Lock gate: until the persisted lock state
                 // has loaded (ready), show only the brand mark — notes
                 // must never flash on a locked cold start. While locked,

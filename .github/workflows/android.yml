@@ -120,6 +120,11 @@ jobs:
   # (Phase 6.1 fix round: the partition grows to 119 classes —
   # fast-a +1 (the semantic cache slot's generation-discipline
   # suite).)
+  # (Ask Aurora, v0.26.0: the partition grows to 120 classes —
+  # fast-a +1 (the editor caret/selection ink mapping); the
+  # status-bar polarity cases extend the existing theme suite,
+  # and the Ask Aurora UI suite joins the UI shard's class list
+  # in app/build.gradle.kts.)
   test-fast-a:
     runs-on: ubuntu-latest
 
@@ -206,6 +211,7 @@ jobs:
             --tests "app.nota.data.sync.SyncEngineTest" \
             --tests "app.nota.data.text.RichBodyTest" \
             --tests "app.nota.feature.editor.AutoLinkTest" \
+            --tests "app.nota.feature.editor.EditorCursorTest" \
             --tests "app.nota.feature.editor.LinkSuggestionsTest" \
             --tests "app.nota.feature.editor.CaretSplitRobolectricTest" \
             --tests "app.nota.feature.editor.ImagePinchMathTest" \

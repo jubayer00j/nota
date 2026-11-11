@@ -100,6 +100,16 @@ class ThemeSelectionTest {
         assertEquals("System", themeModeLabel("sepia"))
     }
 
+    // Ask Aurora (v0.26.0), Part 3: the system bars sit on the app
+    // background edge-to-edge, so "light bars" (dark icons) is the
+    // exact inverse of the resolved theme being dark — for BOTH the
+    // status bar and the navigation bar (SystemBarAppearance).
+    @Test
+    fun lightBarIcons_isTheInverseOfResolvedDark() {
+        assertTrue(lightBarIcons(resolvedDark = false))
+        assertFalse(lightBarIcons(resolvedDark = true))
+    }
+
     @Test
     fun dynamicColourNeedsApi31() {
         val s = Build.VERSION_CODES.S

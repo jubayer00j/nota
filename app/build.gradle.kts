@@ -43,8 +43,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 38
-        versionName = "0.25.0"
+        versionCode = 39
+        versionName = "0.26.0"
     }
 
     buildTypes {
@@ -120,6 +120,7 @@ val notaUiTestClasses = listOf(
     "app.nota.feature.export.NoteExportUiTest",
     "app.nota.feature.settings.SettingsScreenPolishUiTest",
     "app.nota.feature.settings.ExtrasBundleUiTest",
+    "app.nota.feature.ask.AskAuroraUiTest",
 )
 
 tasks.withType<Test>().configureEach {

@@ -98,4 +98,18 @@ object NotaPalette {
 
     // Scrim (modal barriers) — true black in every scheme.
     val Scrim = Color(0xFF000000)
+
+    // Ask Aurora (v0.26.0): the aurora accent family behind the Ask
+    // feature's hero and glow treatments, and the bright caret/selection
+    // accent the rich editor uses in dark mode. LogoCream is the mark's
+    // own cream, shared with ic_launcher_foreground / ic_nota_mark.
+    val LogoCream = Color(0xFFFCF6EB)
+    val AuroraMint = Color(0xFF7FE3B0)
+    val AuroraGlowCore = Color(0xFFBAFFD9)
+    val AuroraGreen = Color(0xFF2ECC8A)
+    val AuroraDeep = Color(0xFF0D9D5C)
+    val AuroraDiscMid = Color(0xFF25B474)
+    val AuroraDiscDeep = Color(0xFF01603A)
+    val AuroraBlue = Color(0xFF3F8CFF)
+    val AuroraViolet = Color(0xFF9654FF)
 }
