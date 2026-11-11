@@ -40,6 +40,24 @@ data class NoteTextRow(
     val plainText: String,
 )
 
+/** Search Quality Pass: one note's scoring haystacks at text
+ *  weight — the search layer scores (and windows snippets from)
+ *  exactly these columns, fetched for candidate ids only, or for
+ *  the whole eligible corpus when the substring fallback runs. */
+data class SearchTextRow(
+    val id: String,
+    val title: String,
+    val plainText: String,
+    val locked: Boolean,
+)
+
+/** Search Quality Pass: one (note, tag name) pair — the batch
+ *  shape tag haystacks are assembled from. */
+data class NoteTagNameRow(
+    val noteId: String,
+    val tagName: String,
+)
+
 /** Phase 6.1: a [[backlink]] edge endpoint at footer weight — the
  *  editor's Links / Linked-from lists render titles and open by id. */
 data class NoteLinkRow(
@@ -191,6 +209,19 @@ interface NoteDao {
     )
     suspend fun getRowById(id: String): NoteListRow?
 
+    /** Search Quality Pass: [getRowById] for a candidate id set
+     *  (the substring fallback's finds, which have no FTS row in
+     *  the result list yet). */
+    @Query(
+        """
+        SELECT id, folderId, title, substr(plainText, 1, 240) AS excerpt,
+               createdAt, updatedAt, pinned, favourite, archived, trashedAt,
+               colorArgb, dailyDate, locked
+        FROM notes WHERE id IN (:ids)
+        """,
+    )
+    suspend fun getRowsByIds(ids: List<String>): List<NoteListRow>
+
     /** FTS keyword search at row weight (Phase 6.1): same match and
      *  ordering as [searchFts], projected for the search screen. */
     @Query(
@@ -224,6 +255,27 @@ interface NoteDao {
             "WHERE locked = 0 AND trashedAt IS NULL AND archived = 0",
     )
     suspend fun getIndexCandidates(): List<NoteTextRow>
+
+    /** Search Quality Pass: the scoring corpus for the substring
+     *  fallback — every note keyword search may surface, with the
+     *  text the scorer reads. Locked notes ride along (their
+     *  stored plainText is already empty under the seal, and the
+     *  scorer blanks it again by rule). */
+    @Query(
+        "SELECT id, title, plainText, locked FROM notes " +
+            "WHERE trashedAt IS NULL AND archived = 0",
+    )
+    suspend fun getSearchTexts(): List<SearchTextRow>
+
+    /** Search Quality Pass: scoring texts for a candidate id set
+     *  (the FTS pass's hits), at the same weight as [getSearchTexts]. */
+    @Query("SELECT id, title, plainText, locked FROM notes WHERE id IN (:ids)")
+    suspend fun getSearchTexts(ids: List<String>): List<SearchTextRow>
+
+    /** Search Quality Pass: ids of the notes filed in a folder —
+     *  the set a folder rename/delete must re-index for search. */
+    @Query("SELECT id FROM notes WHERE folderId = :folderId")
+    suspend fun getIdsInFolder(folderId: String): List<String>
 
     /** [[ ]] autocomplete targets at (id, title) weight (Phase 6.1):
      *  same eligibility and ordering as [observeLinkable]. */
@@ -283,6 +335,27 @@ interface TagDao {
 
     @Query("SELECT t.* FROM tags t JOIN note_tags nt ON nt.tagId = t.id WHERE nt.noteId = :noteId ORDER BY t.name ASC")
     fun observeForNote(noteId: String): Flow<List<TagEntity>>
+
+    /** Search Quality Pass: a note's tag names — the FTS row's
+     *  tagsText and the scorer's tag haystack read the same list. */
+    @Query(
+        "SELECT t.name FROM tags t JOIN note_tags nt ON nt.tagId = t.id " +
+            "WHERE nt.noteId = :noteId ORDER BY t.name ASC",
+    )
+    suspend fun getTagNamesForNote(noteId: String): List<String>
+
+    /** Search Quality Pass: tag names for a candidate id set,
+     *  one row per (note, tag) pair. */
+    @Query(
+        "SELECT nt.noteId AS noteId, t.name AS tagName FROM note_tags nt " +
+            "JOIN tags t ON t.id = nt.tagId WHERE nt.noteId IN (:noteIds)",
+    )
+    suspend fun getTagNamesForNotes(noteIds: List<String>): List<NoteTagNameRow>
+
+    /** Search Quality Pass: ids of the notes carrying a tag —
+     *  the set a tag rename/delete must re-index for search. */
+    @Query("SELECT noteId FROM note_tags WHERE tagId = :tagId")
+    suspend fun getNoteIdsForTag(tagId: String): List<String>
 
     @Query("SELECT * FROM note_tags")
     fun observeAllCrossRefs(): Flow<List<NoteTagCrossRef>>

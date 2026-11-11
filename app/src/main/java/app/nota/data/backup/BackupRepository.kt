@@ -7,7 +7,7 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
-import app.nota.data.db.NoteFtsEntity
+import app.nota.data.repository.refreshFtsEntry
 import app.nota.data.db.NoteLinkEntity
 import app.nota.data.db.NoteTagCrossRef
 import app.nota.data.db.NotaDatabase
@@ -764,13 +764,10 @@ suspend fun rebuildLibraryIndexes(db: NotaDatabase) {
         linkDao.deleteAll()
         for (note in allNotes) {
             if (note.trashedAt != null) continue
-            ftsDao.insert(
-                NoteFtsEntity(
-                    noteId = note.id,
-                    title = note.title,
-                    plainText = if (note.locked) "" else note.plainText,
-                ),
-            )
+            // Search Quality Pass: rows come from the one shared
+            // builder (FtsSync) so a restore also indexes tag and
+            // folder names, under the same lock discipline.
+            db.refreshFtsEntry(note)
         }
         for (note in allNotes) {
             if (note.locked || note.trashedAt != null) continue

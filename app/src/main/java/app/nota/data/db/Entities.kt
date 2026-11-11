@@ -195,13 +195,24 @@ data class NoteVersionEntity(
 )
 
 /**
- * FTS keyword index over note title + plain text. Standalone (not content-linked)
- * so the repository controls sync explicitly after every note write; [noteId] is the
- * join key back to [NoteEntity]. Rowid is auto-generated.
+ * FTS keyword index over note title + plain text + tag names +
+ * folder name. Standalone (not content-linked) so the repository
+ * controls sync explicitly after every note write; [noteId] is
+ * the join key back to [NoteEntity]. Rowid is auto-generated.
  *
  * Room 2.8 removed the `@Fts5` annotation (verified against room-common 2.8.5 —
  * only Fts3/Fts4 remain); `@Fts4` is the supported FTS entity API and the MATCH
  * query surface Nota uses is identical.
+ *
+ * [tagsText] / [folderName] (Search Quality Pass, v0.27.0,
+ * schema v8) denormalise the note's tag names and folder name
+ * into the index so both are searchable with 1.x's weights —
+ * a MATCH with no column qualifier searches every column, so
+ * the query surface is unchanged. The lock discipline carries
+ * over from [plainText]: a locked note's body column stays
+ * EMPTY (the sealed text is never indexed), while its title,
+ * tag names and folder name stay searchable, exactly as 1.x
+ * exposes them.
  */
 @Fts4
 @Entity(tableName = "notes_fts")
@@ -210,6 +221,8 @@ data class NoteFtsEntity(
     val noteId: String,
     val title: String,
     val plainText: String,
+    val tagsText: String = "",
+    val folderName: String = "",
 )
 
 /** A named, re-runnable search (Phase 1b). Saved from the Search screen. */

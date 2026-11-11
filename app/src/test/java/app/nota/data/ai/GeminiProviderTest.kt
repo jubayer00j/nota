@@ -289,4 +289,82 @@ class GeminiProviderTest {
             assertEquals(AiErrorKind.BAD_RESPONSE, e.kind)
         }
     }
+
+    // ---- Batch embeddings (Search Quality Pass) ----------------
+
+    /** A batch reply: one embedding per request in the call,
+     *  each a 1-vector holding the request's index within the
+     *  call, so ordering across and within calls is assertable. */
+    private fun batchHandler(call: FakeAiHttpClient.Call): AiHttpResponse {
+        val requests = JSONObject(call.body).getJSONArray("requests")
+        val embeddings = org.json.JSONArray()
+        for (i in 0 until requests.length()) {
+            embeddings.put(JSONObject().put("values", org.json.JSONArray().put(i.toDouble())))
+        }
+        return AiHttpResponse(200, JSONObject().put("embeddings", embeddings).toString())
+    }
+
+    @Test
+    fun embedAllBatchesIntoOneCallPreservingOrder() = runBlocking {
+        http.handler = ::batchHandler
+        val texts = (0 until 5).map { "chunk $it" }
+        val vectors = provider.embedAll(embedConfig, texts, EmbedKind.DOCUMENT)
+        assertEquals(5, vectors.size)
+        vectors.forEachIndexed { i, v -> assertEquals(i.toFloat(), v[0]) }
+        val call = http.calls.single()
+        assertEquals(
+            "https://generativelanguage.googleapis.com/v1beta/models/" +
+                "gemini-embedding-001:batchEmbedContents",
+            call.url,
+        )
+        assertEquals("TEST-KEY-123", call.headers["x-goog-api-key"])
+        val requests = JSONObject(call.body).getJSONArray("requests")
+        assertEquals(5, requests.length())
+        val first = requests.getJSONObject(0)
+        assertEquals("models/gemini-embedding-001", first.getString("model"))
+        assertEquals("RETRIEVAL_DOCUMENT", first.getString("taskType"))
+        val text = first.getJSONObject("content").getJSONArray("parts")
+            .getJSONObject(0).getString("text")
+        assertEquals("chunk 0", text)
+    }
+
+    @Test
+    fun embedAllChunksAtOneHundred() = runBlocking {
+        http.handler = ::batchHandler
+        val vectors = provider.embedAll(embedConfig, (0 until 101).map { "t$it" }, EmbedKind.QUERY)
+        assertEquals(101, vectors.size)
+        assertEquals(2, http.calls.size)
+        val sizes = http.calls.map { JSONObject(it.body).getJSONArray("requests").length() }
+        assertEquals(listOf(100, 1), sizes)
+        // The second call's vectors restart at its own indices.
+        assertEquals(99.0f, vectors[99][0])
+        assertEquals(0.0f, vectors[100][0])
+        val firstRequest = JSONObject(http.calls.first().body)
+            .getJSONArray("requests").getJSONObject(0)
+        assertEquals("RETRIEVAL_QUERY", firstRequest.getString("taskType"))
+    }
+
+    @Test
+    fun embedAllCountMismatchIsBadResponse() = runBlocking {
+        // Two texts in, one embedding back: a silently misaligned
+        // vector is worse than an honest failure.
+        http.next = AiHttpResponse(200, """{"embeddings":[{"values":[0.5]}]}""")
+        try {
+            provider.embedAll(embedConfig, listOf("a", "b"), EmbedKind.DOCUMENT)
+            fail("expected AiException")
+        } catch (e: AiException) {
+            assertEquals(AiErrorKind.BAD_RESPONSE, e.kind)
+        }
+    }
+
+    @Test
+    fun embedAllEmptyAndSingleSkipTheBatchEndpoint() = runBlocking {
+        assertTrue(provider.embedAll(embedConfig, emptyList(), EmbedKind.DOCUMENT).isEmpty())
+        assertTrue(http.calls.isEmpty())
+        http.next = AiHttpResponse(200, embedOkBody(0.75))
+        val single = provider.embedAll(embedConfig, listOf("only"), EmbedKind.DOCUMENT)
+        assertEquals(1, single.size)
+        assertEquals(0.75f, single[0][0])
+        assertTrue(http.calls.single().url.endsWith(":embedContent"))
+    }
 }

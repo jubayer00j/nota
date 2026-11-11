@@ -1,5 +1,6 @@
 package app.nota.data.repository
 
+import androidx.room.withTransaction
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.TagEntity
@@ -38,7 +39,14 @@ class LibraryRepository(
 
     suspend fun renameFolder(folder: FolderEntity, name: String): FolderEntity {
         val updated = folder.copy(name = name.trim(), updatedAt = System.currentTimeMillis())
-        folderDao.upsert(updated)
+        db.withTransaction {
+            folderDao.upsert(updated)
+            // Search Quality Pass: the folder's name is
+            // denormalised into every filed note's FTS row — a
+            // rename re-indexes the folder's notes, or search
+            // keeps matching the old name (and missing the new).
+            db.refreshFtsEntries(db.noteDao().getIdsInFolder(folder.id))
+        }
         return updated
     }
 
@@ -50,6 +58,10 @@ class LibraryRepository(
     }
 
     suspend fun deleteFolder(folder: FolderEntity) {
+        // Search Quality Pass: capture the filed notes BEFORE
+        // the delete — the FK's SET_NULL unfiles them, and their
+        // FTS rows must lose the folder name in the same write.
+        val affectedIds = db.noteDao().getIdsInFolder(folder.id)
         // Phase 3c: sync tombstone (see NoteRepository.delete).
         app.nota.data.sync.SyncStore(db).recordTombstone(
             app.nota.data.sync.EntityHash.ENTITY_FOLDER,
@@ -57,6 +69,7 @@ class LibraryRepository(
             System.currentTimeMillis(),
         )
         folderDao.delete(folder)
+        db.refreshFtsEntries(affectedIds)
     }
 
     suspend fun createTag(name: String, colorArgb: Int? = null): TagEntity {
@@ -74,11 +87,19 @@ class LibraryRepository(
 
     suspend fun renameTag(tag: TagEntity, name: String): TagEntity {
         val updated = tag.copy(name = name.trim())
-        tagDao.upsert(updated)
+        db.withTransaction {
+            tagDao.upsert(updated)
+            // Search Quality Pass: tag names are denormalised
+            // into their notes' FTS rows (see renameFolder).
+            db.refreshFtsEntries(tagDao.getNoteIdsForTag(tag.id))
+        }
         return updated
     }
 
     suspend fun deleteTag(tag: TagEntity) {
+        // Search Quality Pass: capture the tagged notes before
+        // the cascade removes their links (see deleteFolder).
+        val affectedIds = tagDao.getNoteIdsForTag(tag.id)
         // Phase 3c: sync tombstone (see NoteRepository.delete).
         app.nota.data.sync.SyncStore(db).recordTombstone(
             app.nota.data.sync.EntityHash.ENTITY_TAG,
@@ -86,5 +107,6 @@ class LibraryRepository(
             System.currentTimeMillis(),
         )
         tagDao.delete(tag)
+        db.refreshFtsEntries(affectedIds)
     }
 }

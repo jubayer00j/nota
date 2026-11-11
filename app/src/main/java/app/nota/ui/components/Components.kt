@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import coil3.compose.AsyncImage
 import java.io.File
@@ -78,6 +79,14 @@ fun NoteCard(
     modifier: Modifier = Modifier,
     folderName: String? = null,
     tagNames: List<String> = emptyList(),
+    /** Search Quality Pass: a pre-styled snippet (the search
+     *  screen's term highlighting). When set, it replaces
+     *  [snippet] as the card's body text. */
+    snippetAnnotated: AnnotatedString? = null,
+    /** Search Quality Pass: a small marker chip rendered ahead
+     *  of the folder/tag chips (search flags meaning-only hits
+     *  with it). */
+    badgeText: String? = null,
     pinned: Boolean = false,
     favourite: Boolean = false,
     coverImagePath: String? = null,
@@ -144,6 +153,15 @@ fun NoteCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            } else if (snippetAnnotated != null) {
+                Spacer(Modifier.height(NotaSpacing.xs))
+                Text(
+                    text = snippetAnnotated,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
             } else if (snippet.isNotBlank()) {
                 Spacer(Modifier.height(NotaSpacing.xs))
                 Text(
@@ -175,7 +193,7 @@ fun NoteCard(
                     )
                 }
             }
-            if (folderName != null || tagNames.isNotEmpty()) {
+            if (badgeText != null || folderName != null || tagNames.isNotEmpty()) {
                 Spacer(Modifier.height(NotaSpacing.xs))
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
@@ -183,6 +201,7 @@ fun NoteCard(
                     verticalArrangement = Arrangement.spacedBy(NotaSpacing.xs),
                     maxLines = 2,
                 ) {
+                    if (badgeText != null) NotaChip(badgeText)
                     if (folderName != null) NotaChip(folderName)
                     tagNames.forEach { NotaChip("#$it") }
                 }

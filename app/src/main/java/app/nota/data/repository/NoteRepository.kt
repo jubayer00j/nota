@@ -5,7 +5,6 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
-import app.nota.data.db.NoteFtsEntity
 import app.nota.data.db.NoteLinkEntity
 import app.nota.data.db.NoteTagCrossRef
 import app.nota.data.db.NoteVersionEntity
@@ -86,18 +85,11 @@ class NoteRepository(
         db.withTransaction {
             val previousTitle = noteDao.getById(note.id)?.title
             noteDao.upsert(note)
-            ftsDao.deleteForNote(note.id)
-            if (note.trashedAt == null) {
-                // Phase 2b title-only discipline: a locked note's FTS row
-                // carries its TITLE and an EMPTY body — body words must
-                // never match (the body is sealed), title words do, so
-                // the locked placeholder is findable exactly like 1.x.
-                // Trashed notes keep no FTS row at all (unchanged).
-                val ftsPlainText = if (note.locked) "" else note.plainText
-                ftsDao.insert(
-                    NoteFtsEntity(noteId = note.id, title = note.title, plainText = ftsPlainText),
-                )
-            }
+            // The FTS row (title, body, tag names, folder name —
+            // with the Phase 2b seal discipline: a locked note's
+            // body is never indexed, its title is) is built by the
+            // one shared builder; see FtsSync.
+            db.refreshFtsEntry(note)
             relink(note)
             if (previousTitle != note.title) {
                 // Codex fix G5a: creating a note or renaming one changes
@@ -413,6 +405,10 @@ class NoteRepository(
                         .also { tagDao.upsert(it) }
                 tagDao.link(NoteTagCrossRef(noteId = noteId, tagId = tag.id))
             }
+            // Search Quality Pass: tag names live in the note's
+            // FTS row — a tag assignment is a search-index write
+            // too, or the new tag would not find its note.
+            noteDao.getById(noteId)?.let { db.refreshFtsEntry(it) }
         }
     }
 
@@ -444,10 +440,7 @@ class NoteRepository(
             dailyDate = date,
         )
         noteDao.upsert(note)
-        ftsDao.deleteForNote(note.id)
-        ftsDao.insert(
-            NoteFtsEntity(noteId = note.id, title = note.title, plainText = note.plainText),
-        )
+        db.refreshFtsEntry(note)
         note
     }
 
@@ -468,14 +461,99 @@ class NoteRepository(
     suspend fun deleteSavedSearch(search: SavedSearchEntity) = savedSearchDao.delete(search)
 
     // --- Search ---------------------------------------------------------------------
-    /** Keyword search at list-row weight (Phase 6.1): the search
-     *  screen renders title/snippet/date/flags only, so results are
-     *  [app.nota.data.db.NoteListRow]s — same FTS match, same order. */
-    suspend fun searchNotes(raw: String): List<app.nota.data.db.NoteListRow> {
+    /**
+     * Keyword search (Search Quality Pass, v0.27.0): 1.x's ranked
+     * local search over the FTS index.
+     *
+     * Pipeline: FTS4 proposes candidates by prefix, as before.
+     * When it returns fewer than [SUBSTRING_FALLBACK_THRESHOLD]
+     * rows the candidate set widens to the whole eligible corpus
+     * — 1.x matches raw substrings, so a mid-word fragment
+     * ("xam", "ook") must still find its note, and the prefix
+     * pass alone cannot see those. Either way, EVERY candidate
+     * is then scored by [NoteSearch.score] over its real
+     * haystacks (1.x's weights, AND across terms), sorted
+     * score-then-recency, and given a match-window snippet.
+     * A prefix match is always a substring match in the same
+     * field, so the FTS hits score in the same pass — one
+     * pipeline, no duplicate rows. Locked notes score with an
+     * empty body and show no snippet; archived notes stay out
+     * (Nota's standing rule, kept).
+     */
+    suspend fun searchNotes(raw: String): List<NoteSearchResult> {
+        val terms = NoteSearch.terms(raw)
+        if (terms.isEmpty()) return emptyList()
         val match = FtsQueryBuilder.build(raw) ?: return emptyList()
-        return noteDao.searchFtsRows(match)
+        val ftsRows = noteDao.searchFtsRows(match)
+
+        // Id-list queries run in chunks: SQLite's bound-variable
+        // ceiling on older Android is 999, and a big library's
+        // candidate set must never lean on it.
+        val texts = if (ftsRows.size < SUBSTRING_FALLBACK_THRESHOLD) {
+            noteDao.getSearchTexts()
+        } else {
+            ftsRows.map { it.id }.chunked(ID_QUERY_CHUNK)
+                .flatMap { noteDao.getSearchTexts(it) }
+        }
+        if (texts.isEmpty()) return emptyList()
+        val textById = texts.associateBy { it.id }
+
+        val tagNamesById = HashMap<String, List<String>>()
+        for (chunk in textById.keys.chunked(ID_QUERY_CHUNK)) {
+            for ((noteId, names) in tagDao.getTagNamesForNotes(chunk)
+                .groupBy({ it.noteId }, { it.tagName })) {
+                tagNamesById[noteId] = names
+            }
+        }
+        val folderNamesById = folderDao.getAll().associate { it.id to it.name }
+
+        val rowsById = HashMap<String, app.nota.data.db.NoteListRow>()
+        for (row in ftsRows) rowsById[row.id] = row
+        val missingRowIds = textById.keys.filter { it !in rowsById }
+        for (chunk in missingRowIds.chunked(ID_QUERY_CHUNK)) {
+            for (row in noteDao.getRowsByIds(chunk)) rowsById[row.id] = row
+        }
+
+        val results = ArrayList<NoteSearchResult>()
+        for ((id, text) in textById) {
+            val row = rowsById[id] ?: continue
+            val score = NoteSearch.score(
+                title = text.title,
+                body = if (text.locked) "" else text.plainText,
+                tagNames = tagNamesById[id] ?: emptyList(),
+                folderName = row.folderId?.let { folderNamesById[it] },
+                terms = terms,
+            ) ?: continue
+            results += NoteSearchResult(
+                row = row,
+                score = score.toDouble(),
+                snippet = if (text.locked) "" else NoteSearch.snippet(text.plainText, terms),
+            )
+        }
+        return results.sortedWith(
+            compareByDescending<NoteSearchResult> { it.score }
+                .thenByDescending { it.row.updatedAt }
+                .thenBy { it.id },
+        )
     }
 
     /** Phase 0 name, kept as a delegate. */
-    suspend fun search(query: String): List<app.nota.data.db.NoteListRow> = searchNotes(query)
+    suspend fun search(query: String): List<NoteSearchResult> = searchNotes(query)
+
+    private companion object {
+        /**
+         * How thin the FTS prefix pass may come back before the
+         * substring pass widens the candidate set to the whole
+         * corpus. 30 is 1.x's own render cap: a prefix pass that
+         * already fills it has saturated what the user can scan,
+         * and below it the corpus pass is one bounded scan over
+         * eligible notes.
+         */
+        const val SUBSTRING_FALLBACK_THRESHOLD = 30
+
+        /** Chunk size for id-list (IN) queries — comfortably
+         *  under SQLite's 999 bound-variable ceiling on the
+         *  oldest Android versions Nota still runs on. */
+        const val ID_QUERY_CHUNK = 500
+    }
 }
