@@ -928,11 +928,10 @@ fun RichNoteEditorScreen(
         if (active.segment !is TextSegment) return
         val state = textStates[active.id] ?: return
         val parts = paragraphPartsAtCaret(state) ?: return
-        val synced = syncSegments()
-        val activeIndex = synced.indexOfFirst { it.id == active.id }
+        val activeIndex = segments.indexOfFirst { it.id == active.id }
         if (activeIndex < 0) return
         val conversion = NoteDocument.paragraphToQuote(
-            synced.map { it.segment }, activeIndex,
+            syncSegments(), activeIndex,
             parts.beforeHtml, parts.paragraphHtml, parts.afterHtml,
         ) ?: return
         applyCaretBlockConversion(conversion, active, parts) { ensured ->
@@ -954,11 +953,10 @@ fun RichNoteEditorScreen(
         if (active.segment !is TextSegment) return
         val state = textStates[active.id] ?: return
         val parts = paragraphPartsAtCaret(state) ?: return
-        val synced = syncSegments()
-        val activeIndex = synced.indexOfFirst { it.id == active.id }
+        val activeIndex = segments.indexOfFirst { it.id == active.id }
         if (activeIndex < 0) return
         val conversion = NoteDocument.paragraphToCode(
-            synced.map { it.segment }, activeIndex,
+            syncSegments(), activeIndex,
             parts.beforeHtml, parts.paragraphHtml, parts.afterHtml,
         ) ?: return
         applyCaretBlockConversion(conversion, active, parts) { ensured ->
@@ -986,10 +984,9 @@ fun RichNoteEditorScreen(
     fun makeTextFromBlock(
         convert: (List<DocSegment>, Int) -> NoteDocument.ParagraphConversion?,
     ) {
-        val synced = syncSegments()
-        val activeIndex = synced.indexOfFirst { it.id == activeSegmentId }
+        val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
         if (activeIndex < 0) return
-        val conversion = convert(synced.map { it.segment }, activeIndex) ?: return
+        val conversion = convert(syncSegments(), activeIndex) ?: return
         val rebuilt = rewrapConversion(conversion)
         val textUi = rebuilt[conversion.convertedIndex]
         dropDeadTextStates(rebuilt)
