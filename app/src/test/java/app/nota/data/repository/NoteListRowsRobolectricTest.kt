@@ -125,7 +125,9 @@ class NoteListRowsRobolectricTest {
 
         val hits = repository.searchNotes("zebra")
         assertEquals(listOf(note.id), hits.map { it.id })
-        assertEquals("zebra apple", hits.single().excerpt)
+        // Search Quality Pass: results are NoteSearchResults now —
+        // the list-shape excerpt lives on the carried row.
+        assertEquals("zebra apple", hits.single().row.excerpt)
     }
 
     @Test
