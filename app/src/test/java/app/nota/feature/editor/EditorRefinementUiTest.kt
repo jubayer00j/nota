@@ -15,6 +15,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.attachments.PendingInsertStore
+import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
@@ -559,6 +560,77 @@ class EditorRefinementUiTest {
         composeRule.onNodeWithText("Quote").performClick()
         awaitTrue("stored as a quote") {
             storedHtml(note.id).contains("<blockquote>Head line</blockquote>")
+        }
+    }
+
+    @Test
+    fun audioBlock_rendersPlayerInReadMode_andRemovesInEditMode() {
+        // PR #51: a seeded audio block renders its player in READ
+        // mode — the name resolves from the attachments table, the
+        // duration label from the segment's recorded snapshot, and
+        // a Play control is offered (listening never requires edit
+        // mode) — and in edit mode it removes through the standard
+        // block shell, persisting like every other block removal.
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Voice memo",
+                contentHtml = "<p>Intro</p>" +
+                    "<div data-nota-audio=\"att-audio-1\" " +
+                    "data-nota-duration=\"65000\" " +
+                    "data-nota-name=\"Recording · test\"></div>",
+            )
+        }
+        runBlocking {
+            val context = ApplicationProvider.getApplicationContext<Context>()
+            val store = AttachmentStore(context, provider)
+            val entity = AttachmentEntity(
+                id = "att-audio-1", noteId = note.id,
+                fileName = "Recording · test", mimeType = "audio/mp4",
+                sizeBytes = 4,
+                localPath = "attachments/${note.id}/recording.m4a",
+                createdAt = 1_000,
+            )
+            provider.current.attachmentDao().upsert(entity)
+            val file = store.fileFor(entity)
+            file.parentFile?.mkdirs()
+            file.writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+        composeEditor(note.id)
+
+        awaitTrue("player renders in read mode") {
+            exists("play") {
+                composeRule.onNodeWithContentDescription("Play recording")
+                    .assertIsDisplayed()
+            }
+        }
+        awaitTrue("duration label from the segment snapshot") {
+            exists("duration") {
+                composeRule.onNodeWithText("1:05").assertIsDisplayed()
+            }
+        }
+        awaitTrue("recording name renders") {
+            exists("name") {
+                composeRule.onNodeWithText("Recording · test").assertIsDisplayed()
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing")
+                    .assertIsDisplayed()
+            }
+        }
+        awaitTrue("remove offered in edit mode") {
+            exists("remove") {
+                composeRule.onNodeWithContentDescription("Remove block")
+                    .assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Remove block").performClick()
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("audio div persisted away") {
+            !storedHtml(note.id).contains("data-nota-audio")
         }
     }
 

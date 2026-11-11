@@ -5,6 +5,7 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
@@ -106,6 +107,65 @@ class BlockOrderBackupRoundTripTest {
             "segment order changed across the backup round trip",
             segments,
             NoteDocument.parse(restored!!.contentHtml),
+        )
+    }
+
+    /**
+     * PR #51: an audio block rides the backup exactly as a file
+     * block does — no new format code. The segment (id, duration,
+     * display name) must survive in place between its paragraphs,
+     * and the recording's bytes must land in the restored library
+     * under the same attachment row.
+     */
+    @Test
+    fun audioBlock_survivesExportImportRoundTrip() = runBlocking {
+        val source = newStack()
+        val segments = listOf(
+            TextSegment("<p>Before the recording</p>"),
+            AudioSegment("att-audio-1", 65_000, "Recording · 11 Nov 2026, 9:41 PM"),
+            TextSegment("<p>After the recording</p>"),
+        )
+        val html = NoteDocument.serialize(segments)
+        source.db.noteDao().upsert(
+            NoteEntity(
+                id = "note-audio",
+                title = "Audio",
+                contentHtml = html,
+                plainText = NoteDocument.plainText(segments),
+                createdAt = 1_000,
+                updatedAt = 2_000,
+            ),
+        )
+        val attachment = AttachmentEntity(
+            id = "att-audio-1", noteId = "note-audio",
+            fileName = "Recording · 11 Nov 2026, 9:41 PM",
+            mimeType = "audio/mp4", sizeBytes = 4,
+            localPath = "attachments/note-audio/recording.m4a", createdAt = 1_000,
+        )
+        source.db.attachmentDao().upsert(attachment)
+        val sourceFile = source.store.fileFor(attachment)
+        sourceFile.parentFile?.mkdirs()
+        sourceFile.writeBytes(byteArrayOf(9, 8, 7, 6))
+
+        val exported = File.createTempFile("audio-block", ".zip")
+        source.backup.exportToFile(exported, null)
+
+        val target = newStack()
+        target.backup.restore(exported, null, RestoreMode.REPLACE)
+        val restored = target.db.noteDao().getById("note-audio")
+        assertEquals("note missing after restore", "note-audio", restored?.id)
+        assertEquals(
+            "audio segment changed across the backup round trip",
+            segments,
+            NoteDocument.parse(restored!!.contentHtml),
+        )
+        val restoredRow = target.db.attachmentDao().getById("att-audio-1")
+        assertEquals("attachment row missing after restore", "att-audio-1", restoredRow?.id)
+        val restoredFile = target.store.fileFor(restoredRow!!)
+        assertEquals(
+            "recording bytes changed across the backup round trip",
+            listOf(9.toByte(), 8.toByte(), 7.toByte(), 6.toByte()),
+            restoredFile.readBytes().toList(),
         )
     }
 }

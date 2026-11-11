@@ -1394,4 +1394,89 @@ class NoteDocumentTest {
         )
     }
 
+    // ------------------------------------------------------ PR #51: audio
+
+    private val audioDiv =
+        "<div data-nota-audio=\"att-a1\" data-nota-duration=\"65000\" " +
+            "data-nota-name=\"Recording · 11 Nov 2026, 9:41 PM\"></div>"
+
+    @Test
+    fun parse_recognisesAudioDiv() {
+        val segments = NoteDocument.parse("<p>Before</p>$audioDiv<p>After</p>")
+        assertEquals(3, segments.size)
+        assertEquals(TextSegment("<p>Before</p>"), segments[0])
+        assertEquals(
+            AudioSegment("att-a1", 65_000, "Recording · 11 Nov 2026, 9:41 PM"),
+            segments[1],
+        )
+        assertEquals(TextSegment("<p>After</p>"), segments[2])
+    }
+
+    @Test
+    fun audioSerialize_roundTripsByteForByte() {
+        val html = "<p>Before</p>$audioDiv<p>After</p>"
+        val segments = NoteDocument.parse(html)
+        assertEquals(html, NoteDocument.serialize(segments))
+        assertEquals(segments, NoteDocument.parse(NoteDocument.serialize(segments)))
+    }
+
+    @Test
+    fun audioParse_missingDurationAndName_defaultHonestly() {
+        // A div carrying only the id (hand-written, or written by
+        // something older) still parses as our block: duration 0,
+        // the generic name.
+        val segments = NoteDocument.parse("<div data-nota-audio=\"att-a2\"></div>")
+        assertEquals(listOf(AudioSegment("att-a2", 0, "Recording")), segments)
+        // An unparseable duration reads as 0, never a crash, and a
+        // blank name falls back the same way.
+        val odd = NoteDocument.parse(
+            "<div data-nota-audio=\"att-a3\" data-nota-duration=\"abc\" " +
+                "data-nota-name=\"\"></div>",
+        )
+        assertEquals(listOf(AudioSegment("att-a3", 0, "Recording")), odd)
+    }
+
+    @Test
+    fun audioDivWithBlankId_staysOpaque() {
+        val html = "<div data-nota-audio=\"\"><p>Hello</p></div>"
+        val segments = NoteDocument.parse(html)
+        assertEquals(1, segments.size)
+        assertTrue(segments[0] is OpaqueSegment)
+    }
+
+    @Test
+    fun audioEscaping_nameWithQuoteAndAmpersand_roundTrips() {
+        val segment = AudioSegment("att-a9", 1_500, "Tom & \"Jerry\" recording")
+        val html = NoteDocument.serialize(listOf(segment))
+        assertEquals(listOf(segment), NoteDocument.parse(html))
+    }
+
+    @Test
+    fun plainText_excludesAudioEntirely() {
+        // The recording's display name is player chrome (a
+        // timestamp), not note text: FTS / Ask / semantic build on
+        // this projection, so none of them may ever see it.
+        val text = NoteDocument.plainText(
+            listOf(
+                TextSegment("<p>See attached</p>"),
+                AudioSegment("att-a1", 65_000, "Recording · 11 Nov 2026, 9:41 PM"),
+            ),
+        )
+        assertEquals("See attached", text)
+    }
+
+    @Test
+    fun trailingCaret_audioBlockAtEnd_getsTrailingTextSegment() {
+        val working = NoteDocument.ensureTrailingTextSegment(
+            listOf(TextSegment("<p>Hi</p>"), AudioSegment("att-a1", 1_000)),
+        )
+        assertEquals(3, working.size)
+        assertTrue(working.last() is TextSegment)
+        val stored = NoteDocument.stripTrailingEmptyTextSegments(working)
+        assertEquals(
+            listOf(TextSegment("<p>Hi</p>"), AudioSegment("att-a1", 1_000)),
+            stored,
+        )
+    }
+
 }

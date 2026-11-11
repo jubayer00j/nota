@@ -43,8 +43,8 @@ android {
         applicationId = "app.nota.notes"
         minSdk = 26
         targetSdk = 36
-        versionCode = 42
-        versionName = "0.29.0"
+        versionCode = 43
+        versionName = "0.30.0"
     }
 
     buildTypes {

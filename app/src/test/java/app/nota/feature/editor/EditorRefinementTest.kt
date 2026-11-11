@@ -76,4 +76,61 @@ class EditorRefinementTest {
         assertNull(parseRemoteImageUrl("https://example.com/my pic.png"))
         assertNull(parseRemoteImageUrl("nota-attachment://abc123"))
     }
+
+    // ------------------------------------------------------ PR #51: audio
+
+    @Test
+    fun audioDurationFormat_isMinutesAndPaddedSeconds() {
+        assertEquals("0:00", formatAudioDuration(0))
+        assertEquals("0:00", formatAudioDuration(999))
+        assertEquals("0:09", formatAudioDuration(9_000))
+        assertEquals("1:05", formatAudioDuration(65_000))
+        assertEquals("10:00", formatAudioDuration(600_000))
+        // Minutes are unbounded (a long recording is 75:20, not 1:15:20).
+        assertEquals("75:20", formatAudioDuration(4_520_000))
+        // A negative input (a stale clock read) clamps to zero.
+        assertEquals("0:00", formatAudioDuration(-5_000))
+    }
+
+    @Test
+    fun recordingTimer_accruesOnlyWhileRecording() {
+        val timer = RecordingTimer()
+        assertEquals(RecordingTimer.State.IDLE, timer.state)
+        assertEquals(0L, timer.elapsedAt(1_000))
+
+        timer.start(1_000)
+        assertEquals(RecordingTimer.State.RECORDING, timer.state)
+        assertEquals(2_500L, timer.elapsedAt(3_500))
+
+        // Pausing banks the live segment; time stops accruing.
+        timer.pause(3_500)
+        assertEquals(RecordingTimer.State.PAUSED, timer.state)
+        assertEquals(2_500L, timer.elapsedAt(9_000))
+
+        // Resuming starts a new segment on top of the bank.
+        timer.resume(10_000)
+        assertEquals(4_000L, timer.elapsedAt(11_500))
+
+        // Stop reports the final elapsed — the duration the saved
+        // segment carries — and resets to IDLE.
+        assertEquals(4_500L, timer.stop(12_000))
+        assertEquals(RecordingTimer.State.IDLE, timer.state)
+        assertEquals(0L, timer.elapsedAt(20_000))
+    }
+
+    @Test
+    fun recordingTimer_ignoresOutOfPhaseTransitions() {
+        val timer = RecordingTimer()
+        timer.pause(1_000)
+        timer.resume(1_000)
+        assertEquals(RecordingTimer.State.IDLE, timer.state)
+        timer.start(2_000)
+        timer.start(3_000) // a second start must not reset the clock
+        assertEquals(1_500L, timer.elapsedAt(3_500))
+        timer.resume(3_600) // not paused: no-op
+        assertEquals(1_600L, timer.elapsedAt(3_600))
+        timer.cancel()
+        assertEquals(RecordingTimer.State.IDLE, timer.state)
+        assertEquals(0L, timer.elapsedAt(9_999))
+    }
 }
