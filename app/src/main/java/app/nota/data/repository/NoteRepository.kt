@@ -15,6 +15,8 @@ import app.nota.data.html.NoteDocument
 import app.nota.data.text.PlainTextCodec
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * Notes repository — the single write path for notes.
@@ -511,6 +513,10 @@ class NoteRepository(
 
         val results = ArrayList<NoteSearchResult>()
         for ((id, text) in textById) {
+            // A superseded scan (the user kept typing) aborts at
+            // the next note instead of scoring the whole corpus
+            // for a query nobody is waiting on (Codex PR #48 R2).
+            currentCoroutineContext().ensureActive()
             val row = rowsById[id] ?: continue
             val score = NoteSearch.score(
                 title = text.title,

@@ -11,6 +11,7 @@ import app.nota.data.db.SavedSearchEntity
 import app.nota.data.repository.NoteRepository
 import app.nota.data.repository.NoteSearch
 import app.nota.data.repository.NoteSearchResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Which "search by meaning is off" guidance Search shows, if
  *  any — see [SearchViewModel.semanticHint]. */
@@ -117,14 +119,22 @@ class SearchViewModel(
             _results.value = emptyList()
             return
         }
-        // Keyword pass (Search Quality Pass): NO debounce. The
-        // ranked FTS pass is a local indexed query and 1.x's
-        // keyword search answers per keystroke; the old flat
+        // Keyword pass (Search Quality Pass): NO debounce — 1.x's
+        // keyword search answers per keystroke, and the old flat
         // 200 ms delay was pure added latency in front of it.
-        // Cancellation above remains the ordering guard.
+        // The pass runs on Dispatchers.Default (Codex PR #48 R2):
+        // the substring widening scores the whole corpus, and
+        // that per-note work must never sit on the UI thread; a
+        // superseded scan also aborts at its next note (the
+        // repository checks for cancellation inside its scoring
+        // loop) instead of finishing for a stale query.
+        // Cancellation above remains the ordering guard, with
+        // the current-query check below as the second line.
         val keywordResults = kotlinx.coroutines.CompletableDeferred<List<NoteSearchResult>>()
         keywordJob = viewModelScope.launch {
-            val found = repository.searchNotes(value)
+            val found = withContext(Dispatchers.Default) {
+                repository.searchNotes(value)
+            }
             keywordResults.complete(found)
             if (_query.value == value) _results.value = found
         }

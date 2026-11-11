@@ -3,10 +3,12 @@ package app.nota.data.repository
 import androidx.room.Room
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -174,5 +176,23 @@ class NoteSearchRobolectricTest {
         // pass came back.
         assertEquals(31, results.size)
         assertTrue(results.any { it.id == midWord.id })
+    }
+
+    @Test
+    fun supersededSearchNeverReturnsResults() = runBlocking {
+        repository.createNote(title = "Exam plan", plainBody = "exam body")
+        // Cancelled before it can run: a superseded scan must
+        // surface as a cancellation, never as a result list the
+        // caller could publish for a stale query (Codex PR #48
+        // R2 — the ViewModel cancels the previous search job on
+        // every keystroke and relies on exactly this).
+        val scan = async { repository.searchNotes("exam") }
+        scan.cancel()
+        try {
+            scan.await()
+            fail("a cancelled search must not complete with results")
+        } catch (expected: kotlinx.coroutines.CancellationException) {
+            // Expected: the scan aborted.
+        }
     }
 }
