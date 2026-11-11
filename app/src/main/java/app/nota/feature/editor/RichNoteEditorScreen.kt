@@ -170,7 +170,7 @@ import app.nota.feature.reminders.ReminderDialog
 import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
 import app.nota.data.db.AttachmentEntity
-import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteLinkTarget
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.DividerSegment
@@ -3758,8 +3758,8 @@ private fun applyAutolink(state: RichTextState, previous: String, current: Strin
 private fun LinkSuggestionPopup(
     geometry: EditorFieldGeometry,
     caret: Int,
-    candidates: List<NoteEntity>,
-    onPick: (NoteEntity) -> Unit,
+    candidates: List<NoteLinkTarget>,
+    onPick: (NoteLinkTarget) -> Unit,
 ) {
     val density = LocalDensity.current
     val marginPx = with(density) { 16.dp.roundToPx() }

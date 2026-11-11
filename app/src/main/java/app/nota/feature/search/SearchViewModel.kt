@@ -5,7 +5,7 @@ import androidx.lifecycle.viewModelScope
 import app.nota.data.ai.AiProviderId
 import app.nota.data.ai.AiSettingsStore
 import app.nota.data.ai.SemanticIndexer
-import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteListRow
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.repository.NoteRepository
 import kotlinx.coroutines.Job
@@ -29,16 +29,16 @@ class SearchViewModel(
     private val _query = MutableStateFlow("")
     val query: StateFlow<String> = _query
 
-    private val _results = MutableStateFlow<List<NoteEntity>>(emptyList())
-    val results: StateFlow<List<NoteEntity>> = _results
+    private val _results = MutableStateFlow<List<NoteListRow>>(emptyList())
+    val results: StateFlow<List<NoteListRow>> = _results
 
     /** Phase 4.2: "Related by meaning" — semantic hits for the
      *  current query, best first, excluding anything the keyword
      *  results already show. Empty whenever semantic search can't
      *  run (no key, no index, offline, provider error): the
      *  keyword search is completely unaffected either way. */
-    private val _semanticResults = MutableStateFlow<List<NoteEntity>>(emptyList())
-    val semanticResults: StateFlow<List<NoteEntity>> = _semanticResults
+    private val _semanticResults = MutableStateFlow<List<NoteListRow>>(emptyList())
+    val semanticResults: StateFlow<List<NoteListRow>> = _semanticResults
 
     /** Beginner AI Setup #1 (F7), made config-aware in fix
      *  round 2 (Codex P2) and endpoint-aware in fix round 3:
@@ -131,10 +131,13 @@ class SearchViewModel(
             }
             if (_query.value != value) return@launch
             val keywordIds = found.mapTo(HashSet()) { it.id }
-            val related = ArrayList<NoteEntity>(hits.size)
+            val related = ArrayList<NoteListRow>(hits.size)
             for (hit in hits) {
                 if (hit.noteId in keywordIds) continue
-                val note = repository.getById(hit.noteId) ?: continue
+                // Phase 6.1: the row carries every flag this check
+                // reads (locked/trashed/archived) plus everything the
+                // result card renders — no full-entity fetch per hit.
+                val note = repository.getRowById(hit.noteId) ?: continue
                 // Archived notes stay out of search everywhere —
                 // keyword results above already exclude them via
                 // FTS; the semantic section must agree (Jules

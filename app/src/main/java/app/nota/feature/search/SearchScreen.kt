@@ -163,7 +163,7 @@ fun SearchScreen(
                         items(results, key = { it.id }) { note ->
                             NoteCard(
                                 title = note.title,
-                                snippet = if (note.locked) "" else note.plainText,
+                                snippet = if (note.locked) "" else note.excerpt,
                                 updatedLabel = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(note.updatedAt)),
                                 pinned = note.pinned,
                                 favourite = note.favourite,
@@ -184,7 +184,7 @@ fun SearchScreen(
                             items(semanticResults, key = { "semantic-" + it.id }) { note ->
                                 NoteCard(
                                     title = note.title,
-                                    snippet = if (note.locked) "" else note.plainText,
+                                    snippet = if (note.locked) "" else note.excerpt,
                                     updatedLabel = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(note.updatedAt)),
                                     pinned = note.pinned,
                                     favourite = note.favourite,

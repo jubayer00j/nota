@@ -1,6 +1,6 @@
 package app.nota.domain
 
-import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteListRow
 
 /** Smart-folder keys (Phase 1b, spec §12 note-list richness). */
 enum class SmartFolderKey(val label: String) {
@@ -21,7 +21,7 @@ object SmartFolders {
 
     fun matches(
         key: SmartFolderKey,
-        note: NoteEntity,
+        note: NoteListRow,
         tagIds: Set<String>,
         attachmentCount: Int,
         now: Long,

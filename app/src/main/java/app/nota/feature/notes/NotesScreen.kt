@@ -170,18 +170,76 @@ fun NotesScreen(
      * job (a newer swipe took the window over) never runs its
      * resolution block, so no batch can drop another's ids.
      */
-    fun swipeWithUndo(note: NoteEntity, message: String, exclude: Boolean = true, action: () -> Unit) {
-        action()
-        pendingUndo += note
+    // Phase 6.1: list rows are lightweight projections, so the undo
+    // snapshot no longer rides in from the composition — the ViewModel
+    // fetches the pre-op entity and hands it to the [action]'s snapshot
+    // sink before its write lands (see NotesViewModel.swipeOp). The
+    // batching contract above is unchanged: snapshots queue while the
+    // window is live and resolve in reverse order. [undoWindowOpen]
+    // closes the one new hole the async snapshot opens — a snapshot
+    // that somehow arrived after its window resolved must not leak
+    // into the NEXT batch and resurrect state there.
+    //
+    // Fix round (Codex, PR #32): the async fetch opened a second hole.
+    // The snackbar runs in parallel with the fetch, so Undo can
+    // resolve while the batch is still EMPTY — resolution closes the
+    // window and the late snapshot is dropped by the guard, but the
+    // write itself still landed: the note was archived/trashed AFTER
+    // Undo appeared to succeed. The sink now answers the ViewModel
+    // (see swipeOp): queue-and-write while THIS batch's window is
+    // live; write-without-queueing when the window closed WITHOUT
+    // Undo (a dismissed snackbar leaves the op standing, exactly as
+    // a queued snapshot's op stands); and VETO the write when Undo
+    // closed this batch first. [batchGeneration] identifies the
+    // batch each swipe belongs to (consecutive swipes share one
+    // generation — one batch — until a resolution closes it), and
+    // [undoVetoedGenerations] records the generations Undo closed,
+    // so a late snapshot learns its batch's fate even if a newer
+    // batch's window has opened since. A vetoed swipe hands its row
+    // back (the id leaves [dismissedIds]): the note never changed
+    // underneath it, so it simply reappears.
+    var undoWindowOpen by remember { mutableStateOf(false) }
+    var batchGeneration by remember { mutableStateOf(0) }
+    val undoVetoedGenerations = remember { mutableSetOf<Int>() }
+    fun swipeWithUndo(
+        note: app.nota.data.db.NoteListRow,
+        message: String,
+        exclude: Boolean = true,
+        action: (onSnapshot: (NoteEntity) -> Boolean) -> Unit,
+    ) {
         if (exclude) dismissedIds += note.id
+        undoWindowOpen = true
+        val generation = batchGeneration
+        action { snapshot ->
+            when {
+                undoWindowOpen && generation == batchGeneration -> {
+                    pendingUndo += snapshot
+                    true
+                }
+                generation in undoVetoedGenerations -> {
+                    if (exclude) dismissedIds.remove(note.id)
+                    false
+                }
+                else -> true
+            }
+        }
         undoJob?.cancel()
         undoJob = scope.launch {
             val result = snackbarHostState.showSnackbar(message = message, actionLabel = "Undo")
             val batchIds = pendingUndo.map { it.id }
             if (result == SnackbarResult.ActionPerformed) {
                 pendingUndo.asReversed().forEach { viewModel.upsert(it) }
+                // Fetches of this batch still in flight must find
+                // their writes vetoed when they land (sink, above).
+                undoVetoedGenerations += generation
             }
             pendingUndo.clear()
+            undoWindowOpen = false
+            batchGeneration++
+            // Only in-flight fetches consult the veto set, and a
+            // fetch outliving a handful of batch resolutions is out
+            // of scope — keep the set from growing without bound.
+            undoVetoedGenerations.removeAll { it < batchGeneration - 8 }
             dismissedIds.removeAll(batchIds)
         }
     }
@@ -191,7 +249,7 @@ fun NotesScreen(
     // stripped note and pretend the data came back. No Undo here
     // (re-review fix) — the message says plainly that it is permanent.
     // Phase 3.5: the row still leaves at commit via [dismissedIds].
-    fun swipeNoUndo(note: NoteEntity, message: String, action: () -> Unit) {
+    fun swipeNoUndo(note: app.nota.data.db.NoteListRow, message: String, action: () -> Unit) {
         action()
         dismissedIds += note.id
         scope.launch {
@@ -200,21 +258,21 @@ fun NotesScreen(
     }
 
     /** Performs a resolved swipe behaviour (Phase 3.5, D2/D3). */
-    fun performSwipe(kind: SwipeKind, note: NoteEntity) {
+    fun performSwipe(kind: SwipeKind, note: app.nota.data.db.NoteListRow) {
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         when (kind) {
             SwipeKind.ARCHIVE ->
-                swipeWithUndo(note, "Note archived") { viewModel.archive(note) }
+                swipeWithUndo(note, "Note archived") { sink -> viewModel.archive(note, sink) }
             SwipeKind.TRASH ->
-                swipeWithUndo(note, "Note moved to trash") { viewModel.trash(note) }
+                swipeWithUndo(note, "Note moved to trash") { sink -> viewModel.trash(note, sink) }
             SwipeKind.RESTORE ->
-                swipeWithUndo(note, "Note restored") { viewModel.restore(note) }
+                swipeWithUndo(note, "Note restored") { sink -> viewModel.restore(note, sink) }
             SwipeKind.PIN ->
                 swipeWithUndo(
                     note,
                     if (note.pinned) "Note unpinned" else "Note pinned",
                     exclude = false,
-                ) { viewModel.setPinned(note, !note.pinned) }
+                ) { sink -> viewModel.setPinned(note, !note.pinned, sink) }
             SwipeKind.DELETE_FOREVER ->
                 swipeNoUndo(note, "Note deleted permanently") { viewModel.deletePermanently(note) }
         }
@@ -452,7 +510,7 @@ fun NotesScreen(
                         ) {
                             NoteCard(
                                 title = note.title,
-                                snippet = if (note.locked) "" else note.plainText,
+                                snippet = if (note.locked) "" else note.excerpt,
                                 updatedLabel = formatUpdated(note.updatedAt),
                                 folderName = item.folderName,
                                 tagNames = item.tagNames,
