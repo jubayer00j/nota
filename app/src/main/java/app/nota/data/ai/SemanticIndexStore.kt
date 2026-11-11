@@ -8,11 +8,22 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 
+/** One stored chunk: the fingerprint of the exact chunk text
+ *  that produced [vector] (per-chunk change detection, G10) and
+ *  the vector itself. A stored chunk only ever answers for the
+ *  chunk text at its own position in the note whose fingerprint
+ *  still matches it. */
+data class StoredChunk(
+    val fingerprint: String,
+    val vector: FloatArray,
+)
+
 /** One note's stored vectors: the fingerprint of the exact text
- *  that was chunked (change detection) and one vector per chunk. */
+ *  that was chunked (whole-note change detection) and one
+ *  [StoredChunk] per chunk, in chunk order. */
 data class StoredNoteVectors(
     val fingerprint: String,
-    val chunks: List<FloatArray>,
+    val chunks: List<StoredChunk>,
 )
 
 /** A whole account index as persisted: the embedding-space
@@ -64,13 +75,14 @@ class SemanticIndexStore(private val rootDir: File) {
                     val fingerprint = input.readUTF()
                     val chunkCount = input.readInt()
                     if (chunkCount < 0 || chunkCount > MAX_CHUNKS_PER_NOTE) return null
-                    val chunks = ArrayList<FloatArray>(chunkCount)
+                    val chunks = ArrayList<StoredChunk>(chunkCount)
                     repeat(chunkCount) {
+                        val chunkFingerprint = input.readUTF()
                         val size = input.readInt()
                         if (size != dims) return null
                         val vector = FloatArray(size)
                         for (i in 0 until size) vector[i] = input.readFloat()
-                        chunks += vector
+                        chunks += StoredChunk(chunkFingerprint, vector)
                     }
                     notes[noteId] = StoredNoteVectors(fingerprint, chunks)
                 }
@@ -96,8 +108,9 @@ class SemanticIndexStore(private val rootDir: File) {
                 output.writeUTF(stored.fingerprint)
                 output.writeInt(stored.chunks.size)
                 for (chunk in stored.chunks) {
-                    output.writeInt(chunk.size)
-                    for (value in chunk) output.writeFloat(value)
+                    output.writeUTF(chunk.fingerprint)
+                    output.writeInt(chunk.vector.size)
+                    for (value in chunk.vector) output.writeFloat(value)
                 }
             }
         }
@@ -135,7 +148,13 @@ class SemanticIndexStore(private val rootDir: File) {
 
     private companion object {
         const val MAGIC = 0x4E494458 // "NIDX"
-        const val VERSION = 1
+
+        /** Format 2 (G10): every chunk carries its own text
+         *  fingerprint alongside its vector. A version-1 file
+         *  has no per-chunk fingerprints to validate against,
+         *  so it reads as "no index" under the store's standing
+         *  contract and the first reconcile rebuilds it. */
+        const val VERSION = 2
         const val MAX_NOTES = 100_000
         const val MAX_CHUNKS_PER_NOTE = 10_000
     }

@@ -65,7 +65,12 @@ class SemanticBackupExclusionTest {
                 notes = mapOf(
                     "ghost-note" to StoredNoteVectors(
                         "sentinel-fingerprint",
-                        listOf(FloatArray(4) { sentinel }),
+                        listOf(
+                            StoredChunk(
+                                "sentinel-chunk-fingerprint",
+                                FloatArray(4) { sentinel },
+                            ),
+                        ),
                     ),
                 ),
             ),

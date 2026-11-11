@@ -338,4 +338,85 @@ class AskViewModelRobolectricTest {
             answerOf(vm).citations,
         )
     }
+
+    /** Two ~370-char paragraphs: separate chunks under the
+     *  chunker's 500-char packing target (the title block
+     *  rides inside chunk 0, as the chunker packs it). */
+    private fun longParagraph(tail: String): String =
+        "apple ".repeat(58) + tail + " " + "filler ".repeat(2)
+
+    @Test
+    fun answerSurvivesAnEditToAnUncitedChunkOfTheCitedNote() = runBlocking {
+        // Codex PR #49 R1: G10 retrieval admits the unchanged
+        // chunks of a note edited since its embed — but the
+        // post-generation gate compared the WHOLE note
+        // against the stale stored fingerprint and stripped
+        // every citation anyway, degrading the answer to a
+        // refusal. The gate now validates per chunk against
+        // the retrieval-time excerpts.
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Orchard log",
+            "<p>${longParagraph("firstpatch")}</p>" +
+                "<p>${longParagraph("secondpatch")}</p>",
+        )
+        indexer.reconcile(account)
+        // Edit chunk 1 only; NO reconcile — the stored index
+        // still describes the pre-edit note.
+        notes.updateRichBody(
+            note, "Orchard log",
+            "<p>${longParagraph("firstpatch")}</p>" +
+                "<p>${longParagraph("secondpatchEDITED")}</p>",
+        )
+        http.chatReply = "The first patch is apple country [1]."
+
+        val vm = newViewModel()
+        settle()
+        vm.ask("apple")
+        awaitCondition("answer appended") {
+            !vm.busy.value && vm.entries.value.size == 2
+        }
+        val answer = answerOf(vm)
+        assertEquals(AskAnswerStatus.ANSWER, answer.status)
+        assertEquals(listOf(AskCitation(1, note.id, 0)), answer.citations)
+        assertTrue(answer.text.contains("[1]"))
+    }
+
+    @Test
+    fun citationDiesWhenTheCitedChunkIsEditedDuringGeneration() = runBlocking {
+        // The other half of the PR #25 P1 property, at chunk
+        // granularity: the cited passage itself changes while
+        // the model is answering — that citation must still
+        // die before anything renders.
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Orchard log",
+            "<p>${longParagraph("firstpatch")}</p>" +
+                "<p>${longParagraph("secondpatch")}</p>",
+        )
+        indexer.reconcile(account)
+        http.chatReply = "The first patch is apple country [1]."
+
+        val vm = newViewModel()
+        settle()
+        var editLanded = false
+        http.onCall = { url ->
+            if (!editLanded && url.contains(":generateContent")) {
+                editLanded = true
+                notes.updateRichBody(
+                    note, "Orchard log",
+                    "<p>${longParagraph("firstpatchEDITED")}</p>" +
+                        "<p>${longParagraph("secondpatch")}</p>",
+                )
+            }
+        }
+        vm.ask("apple")
+        awaitCondition("answer appended") {
+            !vm.busy.value && vm.entries.value.size == 2
+        }
+        assertTrue(editLanded)
+        val answer = answerOf(vm)
+        assertEquals(AskAnswerStatus.REFUSAL, answer.status)
+        assertTrue(answer.citations.isEmpty())
+    }
 }

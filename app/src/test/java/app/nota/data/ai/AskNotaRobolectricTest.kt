@@ -328,6 +328,41 @@ class AskNotaRobolectricTest {
     }
 
     @Test
+    fun editedNoteKeepsQuotingItsUnchangedChunks() = runBlocking {
+        // G10 (1.x's per-chunk granularity): a one-chunk edit
+        // retires only that chunk. The untouched chunks stay
+        // quotable under their ORIGINAL positions, and the
+        // changed chunk's stale vector — which scored high for
+        // "apple" before the edit — never surfaces, above all
+        // not dressed in the chunk's new text.
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Fruit bowl",
+            "<p>${paragraph(10)}</p><p>${paragraph(10)}</p><p>${paragraph(10)}</p>",
+        )
+        indexer.reconcile(account)
+        // Sanity: before the edit all three chunks score, and
+        // the per-note cap keeps the best two (equal scores —
+        // chunk order breaks the tie).
+        assertEquals(
+            listOf(0, 1),
+            indexer.retrieveAskExcerpts(account, "apple").map { it.chunkIndex },
+        )
+
+        // Edit ONLY the middle paragraph, and do not re-index.
+        notes.updateRichBody(
+            note, "Fruit bowl",
+            "<p>${paragraph(10)}</p><p>${"zebra ".repeat(55)}</p><p>${paragraph(10)}</p>",
+        )
+
+        val excerpts = indexer.retrieveAskExcerpts(account, "apple")
+        assertEquals(listOf(0, 2), excerpts.map { it.chunkIndex })
+        assertTrue(excerpts.all { it.noteId == note.id })
+        assertTrue(excerpts.all { it.text.contains("apple") })
+        assertTrue(excerpts.none { it.text.contains("zebra") })
+    }
+
+    @Test
     fun retrievalCapsAtSixExcerptsAndTwoPerNote() = runBlocking {
         saveGeminiKey()
         val created = (1..4).map { i ->

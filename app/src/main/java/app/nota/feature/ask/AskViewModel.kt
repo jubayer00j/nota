@@ -198,22 +198,23 @@ class AskViewModel(
                     is AskAnswerResult.Answer -> {
                         if (accountId != askedAccount) return@launch
                         // Post-generation revalidation (Jules
-                        // PR #25 P1): the cited notes were valid
-                        // when retrieved, but the generation call
+                        // PR #25 P1, per chunk since PR #49):
+                        // the cited passages were valid when
+                        // retrieved, but the generation call
                         // took seconds — a note locked, archived,
-                        // trashed, deleted or edited in that
-                        // window must not render as quoted.
-                        // Citations to now-invalid notes are
-                        // stripped (markers included, surviving
-                        // numbers unchanged); an answer left with
-                        // no valid citation at all degrades to
-                        // the refusal, the parser's own rule.
-                        val validNoteIds = indexer.revalidateAskNotes(
-                            askedAccount,
-                            result.citations.map { it.noteId }.toSet(),
+                        // trashed or deleted in that window, or
+                        // edited in a cited passage itself, must
+                        // not render as quoted. Citations that no
+                        // longer validate are stripped (markers
+                        // included, surviving numbers unchanged);
+                        // an answer left with no valid citation
+                        // at all degrades to the refusal, the
+                        // parser's own rule.
+                        val validNumbers = indexer.revalidateAskCitations(
+                            askedAccount, sent, result.citations,
                         )
                         if (accountId != askedAccount) return@launch
-                        val kept = result.citations.filter { it.noteId in validNoteIds }
+                        val kept = result.citations.filter { it.n in validNumbers }
                         when {
                             kept.isEmpty() -> appendAnswer(
                                 AskAnswerStatus.REFUSAL, "", emptyList(),

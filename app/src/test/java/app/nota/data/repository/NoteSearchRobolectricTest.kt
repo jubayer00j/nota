@@ -178,6 +178,87 @@ class NoteSearchRobolectricTest {
         assertTrue(results.any { it.id == midWord.id })
     }
 
+    // ---- Bengali probe (G9) -----------------------------------
+    // The same behaviours the English tests above pin, driven
+    // through the real FTS + corpus pipeline with Bengali text:
+    // the scored substring layer is what the user experiences,
+    // whichever pass proposed the candidate.
+
+    @Test
+    fun bengaliTitleHitRanksAboveTheBodyHit() = runBlocking {
+        val titleHit = repository.createNote(title = "ঢাকা ভ্রমণ", plainBody = "কিছু কথা")
+        val bodyHit = repository.createNote(title = "নোট", plainBody = "আমার প্রিয় শহর ঢাকা")
+        pinUpdatedAt(titleHit.id, 1_000)
+        pinUpdatedAt(bodyHit.id, 2_000)
+
+        val results = repository.searchNotes("ঢাকা")
+        assertEquals(listOf(titleHit.id, bodyHit.id), results.map { it.id })
+        assertEquals(6.0, results[0].score, 0.0)
+        assertEquals(3.0, results[1].score, 0.0)
+        assertTrue(results[1].snippet.contains("ঢাকা"))
+    }
+
+    @Test
+    fun bengaliMidWordFragmentFindsTheNote() = runBlocking {
+        val note = repository.createNote(
+            title = "ঠিকানা", plainBody = "আমি বাংলাদেশ থেকে এসেছি",
+        )
+        // "লাদে" is a mid-word fragment of "বাংলাদেশ" — the
+        // FTS prefix pass cannot see it; the substring corpus
+        // pass must, exactly as for English fragments.
+        val results = repository.searchNotes("লাদে")
+        assertEquals(listOf(note.id), results.map { it.id })
+        assertEquals(3.0, results.single().score, 0.0)
+        assertTrue(results.single().snippet.contains("বাংলাদেশ"))
+    }
+
+    @Test
+    fun bengaliTagAndFolderNamesAreSearchable() = runBlocking {
+        val folder = library.createFolder("ভ্রমণ ডায়েরি")
+        val note = repository.createNote(
+            title = "Notes", plainBody = "plain english words", folderId = folder.id,
+        )
+        repository.setNoteTags(note.id, listOf("বাংলা"))
+
+        val byTag = repository.searchNotes("বাংলা")
+        assertEquals(listOf(note.id), byTag.map { it.id })
+        assertEquals(2.0, byTag.single().score, 0.0)
+
+        val byFolder = repository.searchNotes("ভ্রমণ")
+        assertEquals(listOf(note.id), byFolder.map { it.id })
+        assertEquals(1.0, byFolder.single().score, 0.0)
+    }
+
+    @Test
+    fun bengaliTwoTermQueryRequiresBothTerms() = runBlocking {
+        val both = repository.createNote(title = "ঢাকা", plainBody = "ভ্রমণ পরিকল্পনা")
+        repository.createNote(title = "ঢাকা", plainBody = "অন্য কথা")
+
+        assertEquals(
+            listOf(both.id),
+            repository.searchNotes("ঢাকা ভ্রমণ").map { it.id },
+        )
+    }
+
+    @Test
+    fun bengaliLockedNoteKeepsTitleAndTagsButNotItsBody() = runBlocking {
+        val note = repository.createNote(
+            title = "গোপন নোট", plainBody = "গোপনকথা এখানে আছে",
+        )
+        repository.setNoteTags(note.id, listOf("তালা"))
+        val stored = db.noteDao().getById(note.id)!!
+        repository.upsert(stored.copy(locked = true, plainText = "", contentHtml = "sealed"))
+
+        // The sealed body's words match nothing…
+        assertTrue(repository.searchNotes("গোপনকথা").isEmpty())
+        // …the title still finds it, with no snippet…
+        val byTitle = repository.searchNotes("গোপন")
+        assertEquals(listOf(note.id), byTitle.map { it.id })
+        assertEquals("", byTitle.single().snippet)
+        // …and so does its tag, as in 1.x.
+        assertEquals(listOf(note.id), repository.searchNotes("তালা").map { it.id })
+    }
+
     @Test
     fun supersededSearchNeverReturnsResults() = runBlocking {
         repository.createNote(title = "Exam plan", plainBody = "exam body")

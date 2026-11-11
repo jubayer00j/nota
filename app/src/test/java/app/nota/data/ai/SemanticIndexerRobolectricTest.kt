@@ -139,6 +139,39 @@ class SemanticIndexerRobolectricTest {
         )
     }
 
+    /** A ~330–420-char paragraph carrying a unique marker
+     *  token — long enough that under a short title each
+     *  paragraph is its own chunk (the chunker packs blocks
+     *  to a 500-char target), so an edit to one paragraph is
+     *  an edit to exactly one chunk at a stable position. */
+    private fun markedParagraph(marker: String, fruit: String, count: Int): String =
+        "$fruit ".repeat(count) + marker + " " + "filler ".repeat(38)
+
+    /** Every chunk text an embed call carried, in order —
+     *  both wire shapes: :batchEmbedContents requests, and the
+     *  single :embedContent call Gemini's embedAll delegates
+     *  to when exactly one text is pending (the shape a
+     *  one-chunk reconcile produces). */
+    private fun embeddedDocumentTexts(
+        calls: List<KeywordEmbeddingHttpClient.Call>,
+    ): List<String> {
+        val texts = mutableListOf<String>()
+        for (call in calls) {
+            val body = JSONObject(call.body)
+            if (body.has("requests")) {
+                val requests = body.getJSONArray("requests")
+                for (i in 0 until requests.length()) {
+                    texts += requests.getJSONObject(i).getJSONObject("content")
+                        .getJSONArray("parts").getJSONObject(0).getString("text")
+                }
+            } else if (body.has("content")) {
+                texts += body.getJSONObject("content").getJSONArray("parts")
+                    .getJSONObject(0).getString("text")
+            }
+        }
+        return texts
+    }
+
     @Test
     fun reconcileEmbedsEligibleNotesAndSearchRanksByMeaning() = runBlocking {
         saveGeminiKey()
@@ -458,6 +491,82 @@ class SemanticIndexerRobolectricTest {
     }
 
     @Test
+    fun reconcileEmbedsOnlyTheChangedChunkOfAMultiChunkNote() = runBlocking {
+        // G10: chunking is deterministic, so a one-chunk edit
+        // leaves the other chunks' texts — and therefore their
+        // fingerprints — untouched. Reconcile must reuse those
+        // stored vectors and send ONLY the changed chunk's text
+        // to the provider.
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Fruit notes",
+            "<p>${markedParagraph("markone", "apple", 10)}</p>" +
+                "<p>${markedParagraph("marktwo", "apple", 10)}</p>" +
+                "<p>${markedParagraph("markthree", "apple", 10)}</p>",
+        )
+        indexer.reconcile(account)
+        val before = indexStore.load(account)!!.notes.getValue(note.id)
+        assertEquals(3, before.chunks.size)
+        http.calls.clear()
+
+        notes.updateRichBody(
+            note, "Fruit notes",
+            "<p>${markedParagraph("markone", "apple", 10)}</p>" +
+                "<p>${markedParagraph("marktwoCHANGED", "apple", 10)}</p>" +
+                "<p>${markedParagraph("markthree", "apple", 10)}</p>",
+        )
+        indexer.reconcile(account)
+
+        // Exactly one chunk text crossed the wire: the changed
+        // middle chunk's.
+        val embedded = embeddedDocumentTexts(http.calls)
+        assertEquals(1, embedded.size)
+        assertTrue(embedded.single().contains("marktwoCHANGED"))
+
+        val after = indexStore.load(account)!!.notes.getValue(note.id)
+        assertEquals(3, after.chunks.size)
+        // Untouched chunks kept their fingerprints AND vectors…
+        assertEquals(before.chunks[0].fingerprint, after.chunks[0].fingerprint)
+        assertEquals(before.chunks[2].fingerprint, after.chunks[2].fingerprint)
+        assertTrue(before.chunks[0].vector.contentEquals(after.chunks[0].vector))
+        assertTrue(before.chunks[2].vector.contentEquals(after.chunks[2].vector))
+        // …the changed chunk got a fresh fingerprint, and the
+        // note-level fingerprint moved as it always has.
+        assertNotEquals(before.chunks[1].fingerprint, after.chunks[1].fingerprint)
+        assertNotEquals(before.fingerprint, after.fingerprint)
+    }
+
+    @Test
+    fun searchServesANoteThroughAnUnchangedChunkAfterASiblingEdit() = runBlocking {
+        // G10: freshness is per chunk. The banana passage lives
+        // in chunk 0; editing chunk 1 (apple → zebra) without a
+        // reconcile must NOT silence the note for "banana" —
+        // chunk 0's stored vector still answers for chunk 0's
+        // current text — while the stale apple vector of the
+        // changed chunk must stop answering for "apple".
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Fruit notes",
+            "<p>${markedParagraph("bananapatch", "banana", 20)}</p>" +
+                "<p>${markedParagraph("applepatch", "apple", 10)}</p>",
+        )
+        indexer.reconcile(account)
+        assertEquals(listOf(note.id), indexer.search(account, "banana").map { it.noteId })
+        assertEquals(listOf(note.id), indexer.search(account, "apple").map { it.noteId })
+
+        notes.updateRichBody(
+            note, "Fruit notes",
+            "<p>${markedParagraph("bananapatch", "banana", 20)}</p>" +
+                "<p>${markedParagraph("zebrapatch", "zebra", 10)}</p>",
+        )
+
+        // No reconcile: the unchanged chunk still serves…
+        assertEquals(listOf(note.id), indexer.search(account, "banana").map { it.noteId })
+        // …and the changed chunk's stale vector serves nothing.
+        assertTrue(indexer.search(account, "apple").none { it.noteId == note.id })
+    }
+
+    @Test
     fun failedRebuildLeavesThePreviousIndexUntouched() = runBlocking {
         saveGeminiKey()
         val note = notes.createRichNote("Orchard", "<p>apple apple</p>")
@@ -487,6 +596,47 @@ class SemanticIndexerRobolectricTest {
         assertEquals(
             listOf(note.id),
             indexer.search(account, "apple").map { it.noteId },
+        )
+    }
+
+    @Test
+    fun revalidateAskCitationsValidatesPerChunkAgainstTheSentText() = runBlocking {
+        // PR #49 fix round (Codex R1): the post-generation
+        // gate validates each citation against the excerpt
+        // text retrieval actually sent — a sibling chunk's
+        // edit cannot kill it, and an edit to the cited
+        // chunk itself still does.
+        saveGeminiKey()
+        val note = notes.createRichNote(
+            "Fruit notes",
+            "<p>${markedParagraph("bananapatch", "banana", 20)}</p>" +
+                "<p>${markedParagraph("applepatch", "apple", 10)}</p>",
+        )
+        indexer.reconcile(account)
+        val chunks = NoteChunker.chunk(note.title, note.plainText)
+        assertEquals(2, chunks.size)
+        val sent = chunks.mapIndexed { index, text ->
+            AskExcerpt(note.id, index, note.title, text, 0.9)
+        }
+        val citations = listOf(
+            AskCitation(1, note.id, 0),
+            AskCitation(2, note.id, 1),
+        )
+        // Nothing edited: both citations validate.
+        assertEquals(
+            setOf(1, 2),
+            indexer.revalidateAskCitations(account, sent, citations),
+        )
+        // Edit chunk 1 only: citation 2 dies; citation 1 —
+        // to a different chunk of the same note — survives.
+        notes.updateRichBody(
+            note, "Fruit notes",
+            "<p>${markedParagraph("bananapatch", "banana", 20)}</p>" +
+                "<p>${markedParagraph("zebrapatch", "zebra", 10)}</p>",
+        )
+        assertEquals(
+            setOf(1),
+            indexer.revalidateAskCitations(account, sent, citations),
         )
     }
 }

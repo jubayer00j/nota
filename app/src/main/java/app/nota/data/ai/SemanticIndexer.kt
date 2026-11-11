@@ -120,8 +120,19 @@ class SemanticIndexer(
     /** The text fingerprint a note's stored vectors answer for:
      *  a hash of exactly the text that gets chunked, so any edit
      *  — however small — marks the note for re-embedding. */
-    fun fingerprint(title: String, plainText: String): String {
-        val text = NoteChunker.embeddedText(title, plainText)
+    fun fingerprint(title: String, plainText: String): String =
+        sha256Hex(NoteChunker.embeddedText(title, plainText))
+
+    /** The fingerprint ONE chunk's stored vector answers for
+     *  (G10): a hash of the chunk text alone. Chunk boundaries
+     *  are deterministic (see [NoteChunker]), so a stored chunk
+     *  at position i still answers for the note's current text
+     *  exactly when the live chunk at position i hashes to the
+     *  same value — an edit elsewhere in the note leaves it
+     *  valid, quotable and searchable. */
+    fun chunkFingerprint(chunkText: String): String = sha256Hex(chunkText)
+
+    private fun sha256Hex(text: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest(text.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
@@ -134,17 +145,38 @@ class SemanticIndexer(
     )
 
     /** A note that survived Ask's fresh-passage validation:
-     *  its live row, the chunks of its CURRENT text, the
-     *  stored vectors those chunks were embedded as, and the
-     *  stored fingerprint the vectors answer for (kept so the
-     *  post-embed revalidation can compare the live row
-     *  against exactly what retrieval validated). */
+     *  its live row, the CURRENT chunk texts that still have a
+     *  valid stored vector, those vectors, and each chunk's
+     *  position in the note's full chunk list (citations name
+     *  chunks by that position). Only fingerprint-matching
+     *  positions are present — see [validChunkPairs]. */
     private data class AskCandidate(
         val note: NoteEntity,
         val chunks: List<String>,
         val vectors: List<FloatArray>,
-        val fingerprint: String,
+        val chunkIndices: List<Int>,
     )
+
+    /** Pairs a note's CURRENT chunks with its stored vectors,
+     *  position by position (G10): a pair forms only where the
+     *  stored chunk's fingerprint still equals the live chunk's
+     *  — the stored vector provably describes the text it would
+     *  be quoted as. Positions whose text changed since the
+     *  embed (and positions the index never held) form no pair:
+     *  their stale vectors can neither be scored nor quoted. */
+    private fun validChunkPairs(
+        liveChunks: List<String>,
+        storedNote: StoredNoteVectors,
+    ): List<Triple<Int, String, FloatArray>> {
+        val pairs = ArrayList<Triple<Int, String, FloatArray>>()
+        for ((index, text) in liveChunks.withIndex()) {
+            val storedChunk = storedNote.chunks.getOrNull(index) ?: continue
+            if (storedChunk.fingerprint == chunkFingerprint(text)) {
+                pairs += Triple(index, text, storedChunk.vector)
+            }
+        }
+        return pairs
+    }
 
     /** The index's eligibility rule: a note that is locked,
      *  trashed or archived is never embedded and never surfaces.
@@ -236,10 +268,10 @@ class SemanticIndexer(
                     // provider.
                     val live = noteDao.getById(want.note.id)
                     if (live != null && isIndexEligible(live)) {
-                        val vectors = embedNote(config, want, dims)
-                        if (dims == 0) dims = vectors.first().size
+                        val chunks = embedChunks(config, want, existing = null, dims)
+                        if (dims == 0) dims = chunks.first().vector.size
                         working[want.note.id] =
-                            StoredNoteVectors(want.fingerprint, vectors)
+                            StoredNoteVectors(want.fingerprint, chunks)
                     }
                     _rebuildProgress.value =
                         SemanticRebuildProgress(accountId, ++done, desired.size)
@@ -349,8 +381,8 @@ class SemanticIndexer(
             }
             val existing = working[noteId]
             if (existing != null && existing.fingerprint == want.fingerprint) continue
-            val vectors = try {
-                embedNote(config, want, dims)
+            val chunks = try {
+                embedChunks(config, want, existing, dims)
             } catch (e: AiException) {
                 // Background passes stop quietly and keep what
                 // succeeded; a user-initiated build is owed the
@@ -358,8 +390,8 @@ class SemanticIndexer(
                 if (surfaceFailure) throw e
                 break
             }
-            if (dims == 0) dims = vectors.first().size
-            working[noteId] = StoredNoteVectors(want.fingerprint, vectors)
+            if (dims == 0) dims = chunks.first().vector.size
+            working[noteId] = StoredNoteVectors(want.fingerprint, chunks)
             changed = true
             if (++sinceSave >= SAVE_EVERY_NOTES) {
                 storeIndex(accountId, StoredSemanticIndex(config.spaceSignature(), dims, working))
@@ -403,30 +435,47 @@ class SemanticIndexer(
             return emptyList()
         }
         if (queryVector.size != stored.dims) return emptyList()
-        val chunksByNote = stored.notes.mapValues { it.value.chunks }
-        val raw = SemanticMath.relatedHits(
-            queryVector, chunksByNote,
+        // Defence in depth (1.x's merge rule), applied BEFORE
+        // scoring so stale entries never consume the hit limit:
+        // a note only ever surfaces when it is eligible RIGHT
+        // NOW — a stale vector can never resurrect a locked/
+        // trashed/archived/deleted note into the results.
+        //
+        // Freshness is PER CHUNK (G10): each note contributes a
+        // position-aligned vector list over its CURRENT chunks,
+        // where a position holds its stored vector only when
+        // that chunk's fingerprint still matches the live chunk
+        // text there ([validChunkPairs] is Ask's form of the
+        // same rule) and null otherwise. Between an edit and the
+        // next reconcile, the changed chunks go silent — neither
+        // a search boost nor a meaning-only row may ride on
+        // them — while the note's untouched chunks keep it
+        // findable by the meaning it still contains.
+        // ONE batch read for every live row (Codex PR #49 R1):
+        // the eligibility-filtered projection the status count
+        // already uses. The per-note getById loop this replaces
+        // cost a Room round trip per indexed note on every
+        // search; a stored note missing from the batch is gone
+        // or ineligible — exactly the rows that loop skipped.
+        val liveById = databaseProvider.current.noteDao()
+            .getIndexCandidates().associateBy { it.id }
+        val aligned = LinkedHashMap<String, List<FloatArray?>>()
+        for ((noteId, storedNote) in stored.notes) {
+            val live = liveById[noteId] ?: continue
+            val liveChunks = NoteChunker.chunk(live.title, live.plainText)
+            if (liveChunks.isEmpty()) continue
+            val pairs = validChunkPairs(liveChunks, storedNote)
+            if (pairs.isEmpty()) continue
+            val vectors = arrayOfNulls<FloatArray>(liveChunks.size)
+            for ((index, _, vector) in pairs) vectors[index] = vector
+            aligned[noteId] = vectors.asList()
+        }
+        if (aligned.isEmpty()) return emptyList()
+        return SemanticMath.relatedHits(
+            queryVector, aligned,
             SemanticMath.floorFor(config.resolvedEmbeddingModel()),
             limit = SEARCH_HIT_LIMIT,
         )
-        if (raw.isEmpty()) return raw
-        // Defence in depth (1.x's merge rule): a hit only ever
-        // surfaces a note that is eligible RIGHT NOW — a stale
-        // vector can never resurrect a locked/trashed/archived/
-        // deleted note into the results. The hit must also still
-        // answer for the note's CURRENT text — the same stored-
-        // fingerprint check Ask's retrieval runs: between an edit
-        // and the next reconcile, the stored vectors describe
-        // text the note may no longer contain, and neither a
-        // search boost nor a meaning-only row may ride on them.
-        val noteDao = databaseProvider.current.noteDao()
-        val storedById = stored.notes
-        return raw.filter { hit ->
-            val note = noteDao.getById(hit.noteId)
-            note != null && isIndexEligible(note) &&
-                storedById[hit.noteId]?.fingerprint ==
-                fingerprint(note.title, note.plainText)
-        }
     }
 
     /**
@@ -441,26 +490,24 @@ class SemanticIndexer(
      * [AiException]: offline must surface as an error, never
      * dress itself up as "nothing matched".
      *
-     * Fresh-passage validation: a stored vector row is only
-     * ever a claim about the text that produced it, so a note
+     * Fresh-passage validation: a stored vector is only ever
+     * a claim about the chunk text that produced it, so a note
      * contributes passages only when its LIVE row is eligible
      * right now ([isIndexEligible] — locked, trashed, archived
      * and deleted notes are out, however high they would
-     * score) AND its stored fingerprint still equals the
-     * fingerprint of its current text. Note the granularity:
-     * Nota's index fingerprints a note's whole text (Phase
-     * 4.2's design), where 1.x hashes per chunk and keeps an
-     * edited note's untouched chunks quotable. The native rule
-     * is stricter — an edited note contributes nothing until
-     * the next reconcile re-embeds it (the 15 s post-save
-     * debounce makes that window small) — and it can never
-     * leak: quoted text is re-chunked from the note's CURRENT
-     * text, and the fingerprint match is what licenses pairing
-     * that text with the stored vectors at all. The validation
-     * runs TWICE — before the question-embedding call and again
-     * after it returns — because the call takes seconds and a
-     * state change landing inside it must be honoured by the
-     * retrieval already in flight, not just the next one.
+     * score) AND at least one of its stored chunks still
+     * answers for the note's current text at the same position
+     * (per-chunk fingerprints, G10 — 1.x's granularity: an
+     * edited note keeps its untouched chunks quotable, while
+     * the changed chunk's stale vector can never surface,
+     * because quoted text is re-chunked from the note's
+     * CURRENT text and a fingerprint match is what licenses
+     * pairing that text with the stored vector at all). The
+     * validation runs TWICE — before the question-embedding
+     * call and again after it returns — because the call takes
+     * seconds and a state change landing inside it must be
+     * honoured by the retrieval already in flight, not just
+     * the next one.
      *
      * Ranking is 1.x's: similarity descending, note id then
      * chunk index breaking ties so citation numbering is
@@ -481,10 +528,16 @@ class SemanticIndexer(
         for ((noteId, storedNote) in stored.notes) {
             val live = noteDao.getById(noteId) ?: continue
             if (!isIndexEligible(live)) continue
-            if (fingerprint(live.title, live.plainText) != storedNote.fingerprint) continue
             val chunks = NoteChunker.chunk(live.title, live.plainText)
             if (chunks.isEmpty()) continue
-            candidates += AskCandidate(live, chunks, storedNote.chunks, storedNote.fingerprint)
+            val pairs = validChunkPairs(chunks, storedNote)
+            if (pairs.isEmpty()) continue
+            candidates += AskCandidate(
+                live,
+                pairs.map { it.second },
+                pairs.map { it.third },
+                pairs.map { it.first },
+            )
         }
         if (candidates.isEmpty()) return emptyList()
 
@@ -499,32 +552,44 @@ class SemanticIndexer(
         // locked, archived, trashed, deleted or edited while it
         // was in flight must not contribute passages from its
         // pre-request snapshot. Re-check every candidate
-        // against its LIVE row — eligibility AND the stored
-        // fingerprint — exactly as [search] re-checks its hits
-        // after its own embed. A fingerprint that still matches
-        // also proves the snapshot's chunks are still the
-        // note's current text, so scoring proceeds on them.
+        // against its LIVE row — eligibility AND, per chunk,
+        // the stored fingerprint — exactly as [search]
+        // validates its own scoring input. The candidate is
+        // REBUILT from the live row, so scoring proceeds on the
+        // note's current chunks and only the positions whose
+        // fingerprints still license them.
         val liveCandidates = ArrayList<AskCandidate>(candidates.size)
         for (candidate in candidates) {
             val live = noteDao.getById(candidate.note.id) ?: continue
             if (!isIndexEligible(live)) continue
-            if (fingerprint(live.title, live.plainText) != candidate.fingerprint) continue
-            liveCandidates += candidate
+            val storedNote = stored.notes[candidate.note.id] ?: continue
+            val chunks = NoteChunker.chunk(live.title, live.plainText)
+            if (chunks.isEmpty()) continue
+            val pairs = validChunkPairs(chunks, storedNote)
+            if (pairs.isEmpty()) continue
+            liveCandidates += AskCandidate(
+                live,
+                pairs.map { it.second },
+                pairs.map { it.third },
+                pairs.map { it.first },
+            )
         }
         if (liveCandidates.isEmpty()) return emptyList()
 
         val scored = ArrayList<AskExcerpt>()
         for (candidate in liveCandidates) {
-            // The fingerprint match makes chunk and vector
-            // counts equal by construction; the min is a
-            // defensive belt, never the expected path.
+            // Chunks and vectors are paired by construction;
+            // the min is a defensive belt, never the expected
+            // path. Citations name the chunk's position in the
+            // note's full chunk list, not its rank among the
+            // valid pairs.
             val count = minOf(candidate.chunks.size, candidate.vectors.size)
             for (i in 0 until count) {
                 val score = SemanticMath.cosine(queryVector, candidate.vectors[i])
                 if (score >= floor) {
                     scored += AskExcerpt(
                         noteId = candidate.note.id,
-                        chunkIndex = i,
+                        chunkIndex = candidate.chunkIndices[i],
                         title = candidate.note.title,
                         text = candidate.chunks[i],
                         similarity = score,
@@ -550,45 +615,67 @@ class SemanticIndexer(
     }
 
     /**
-     * Post-generation revalidation for Ask (Jules PR #25 P1):
-     * of [noteIds], the ones whose note is STILL quotable right
-     * now — live row eligible ([isIndexEligible]) AND its
-     * current text's fingerprint still equal to the stored one,
-     * exactly the validation [retrieveAskExcerpts] applies.
-     * Ask calls this AFTER the generation call returns and
-     * before the answer renders: a note locked, archived,
-     * trashed, deleted or edited while the model was answering
-     * loses its citations (and with them its source card) even
-     * though it was valid when retrieved. Local reads only —
-     * no provider, no config — and fail-closed: a note that
-     * cannot be re-read counts as no longer valid rather than
-     * letting an unverifiable citation render.
+     * Post-generation revalidation for Ask (Jules PR #25 P1,
+     * re-based on retrieval-time state in PR #49): of the
+     * answer's [citations], the numbers whose quoted passage
+     * is STILL the note's current text. A citation survives
+     * exactly when its note is live and eligible right now
+     * ([isIndexEligible] — locked, trashed, archived and
+     * deleted notes are out) AND the chunk at the citation's
+     * position in the note's CURRENT chunking still hashes
+     * to the fingerprint of the excerpt text that was
+     * actually sent to the model.
+     *
+     * Why retrieval-time state and not the stored index
+     * (Codex PR #49 R1): retrieval already validated every
+     * excerpt against the note's live text, pairing text
+     * with a stored vector per chunk (G10) — so an edit that
+     * landed BEFORE retrieval, in a different chunk, with
+     * the reconcile still pending, must not kill a citation
+     * to an untouched passage. The previous form compared
+     * the whole note against the stale stored fingerprint
+     * and did exactly that, degrading valid answers to
+     * refusals in precisely the window G10 opened. What this
+     * gate still guarantees, unchanged from PR #25: a change
+     * landing DURING generation in the cited chunk itself —
+     * or shifting chunk boundaries so the cited position
+     * now holds different text — retires that citation
+     * before anything renders. Sent excerpts carry whole
+     * chunks at the prompt's current caps, so the fingerprint
+     * comparison is exact. Local reads only — no provider,
+     * no config — and fail-closed: a note that cannot be
+     * re-read, or a citation naming an excerpt that was
+     * never sent, counts as no longer valid.
      */
-    suspend fun revalidateAskNotes(
+    suspend fun revalidateAskCitations(
         accountId: String,
-        noteIds: Collection<String>,
-    ): Set<String> {
-        if (noteIds.isEmpty()) return emptySet()
+        sentExcerpts: List<AskExcerpt>,
+        citations: List<AskCitation>,
+    ): Set<Int> {
+        if (citations.isEmpty()) return emptySet()
         if (accountId != databaseProvider.accountId.value) return emptySet()
-        val stored = try {
-            loadIndex(accountId)
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            return emptySet()
-        } ?: return emptySet()
+        val sentByChunk = HashMap<Pair<String, Int>, AskExcerpt>()
+        for (excerpt in sentExcerpts) {
+            sentByChunk[excerpt.noteId to excerpt.chunkIndex] = excerpt
+        }
         val noteDao = databaseProvider.current.noteDao()
-        val valid = HashSet<String>()
-        for (noteId in noteIds) {
-            val storedNote = stored.notes[noteId] ?: continue
+        val valid = HashSet<Int>()
+        for (citation in citations) {
+            val excerpt = sentByChunk[citation.noteId to citation.chunkIndex]
+                ?: continue
             val live = try {
-                noteDao.getById(noteId)
+                noteDao.getById(citation.noteId)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 null
             } ?: continue
             if (!isIndexEligible(live)) continue
-            if (fingerprint(live.title, live.plainText) != storedNote.fingerprint) continue
-            valid += noteId
+            val liveChunk = NoteChunker.chunk(live.title, live.plainText)
+                .getOrNull(citation.chunkIndex) ?: continue
+            if (chunkFingerprint(liveChunk) != chunkFingerprint(excerpt.text)) {
+                continue
+            }
+            valid += citation.n
         }
         return valid
     }
@@ -623,22 +710,58 @@ class SemanticIndexer(
     /** Embeds one note's chunks, enforcing a single dimension
      *  across the whole index (a provider that changes dims
      *  mid-run fails loudly rather than storing a mixed space —
-     *  the 1.x rule). [expectedDims] 0 = not yet established. */
-    private suspend fun embedNote(
+     *  the 1.x rule). [expectedDims] 0 = not yet established.
+     *
+     *  Per-chunk reuse (G10): a position whose stored chunk
+     *  fingerprint still matches the desired chunk text keeps
+     *  its stored vector — chunking is deterministic, so the
+     *  vector provably describes that exact text — and only the
+     *  changed or missing chunk texts go to the provider, in
+     *  ONE embedAll call per note, spliced back into position
+     *  order. A one-chunk edit to a long note therefore costs
+     *  one embedding, not a whole note's worth. [existing] is
+     *  null on a from-scratch build, where every chunk embeds. */
+    private suspend fun embedChunks(
         config: AiEmbeddingConfig,
         desired: DesiredNote,
+        existing: StoredNoteVectors?,
         expectedDims: Int,
-    ): List<FloatArray> {
-        val vectors = AiEmbeddings.create(config.providerId, http)
-            .embedAll(config, desired.chunks, EmbedKind.DOCUMENT)
-        if (vectors.size != desired.chunks.size) throw AiException(AiErrorKind.BAD_RESPONSE)
-        var dims = expectedDims
-        for (vector in vectors) {
-            if (vector.isEmpty()) throw AiException(AiErrorKind.BAD_RESPONSE)
-            if (dims == 0) dims = vector.size
-            if (vector.size != dims) throw AiException(AiErrorKind.BAD_RESPONSE)
+    ): List<StoredChunk> {
+        val out = arrayOfNulls<StoredChunk>(desired.chunks.size)
+        val pendingTexts = ArrayList<String>()
+        val pendingPositions = ArrayList<Int>()
+        for ((index, text) in desired.chunks.withIndex()) {
+            val storedChunk = existing?.chunks?.getOrNull(index)
+            if (storedChunk != null &&
+                storedChunk.fingerprint == chunkFingerprint(text)
+            ) {
+                out[index] = storedChunk
+            } else {
+                pendingTexts += text
+                pendingPositions += index
+            }
         }
-        return vectors
+        if (pendingTexts.isNotEmpty()) {
+            val vectors = AiEmbeddings.create(config.providerId, http)
+                .embedAll(config, pendingTexts, EmbedKind.DOCUMENT)
+            if (vectors.size != pendingTexts.size) {
+                throw AiException(AiErrorKind.BAD_RESPONSE)
+            }
+            // Reused vectors pin the space's dimension too: a
+            // fresh vector must agree with them exactly as it
+            // must agree with [expectedDims].
+            var dims = expectedDims
+            if (dims == 0) {
+                dims = out.firstOrNull { it != null }?.vector?.size ?: 0
+            }
+            for ((slot, vector) in pendingPositions.zip(vectors)) {
+                if (vector.isEmpty()) throw AiException(AiErrorKind.BAD_RESPONSE)
+                if (dims == 0) dims = vector.size
+                if (vector.size != dims) throw AiException(AiErrorKind.BAD_RESPONSE)
+                out[slot] = StoredChunk(chunkFingerprint(desired.chunks[slot]), vector)
+            }
+        }
+        return out.map { it!! }
     }
 
     private fun persist(
