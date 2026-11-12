@@ -909,8 +909,15 @@ object NoteDocument {
                     } else {
                         unorderedPrefix(level) + " "
                     }
+                    // The library's list paragraph indent is
+                    // (38 x level) on BOTH lines — its annotated
+                    // string carries TextIndent(38.sp, 38.sp) for
+                    // a level-1 item (pinned against the real
+                    // binary in NoteDocumentTest). The converter
+                    // reproduces that value exactly rather than
+                    // zeroing the first line.
                     indent = TextIndent(
-                        firstLine = 0.sp,
+                        firstLine = (LIST_INDENT_SP * level).sp,
                         restLine = (LIST_INDENT_SP * level).sp,
                     )
                     styleStack += cssSpanStyle(tag.attrs)
