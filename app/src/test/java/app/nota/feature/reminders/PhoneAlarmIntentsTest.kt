@@ -81,8 +81,11 @@ class PhoneAlarmIntentsTest {
         val daily = PhoneAlarmIntents.buildSetAlarmIntent(
             "Dentist", triggerAt, utc, repeatDaysIso = (1..7).toSet(),
         )
+        // The full week in Monday-first ISO order, mapped: Mon..Sat
+        // become 2..7 and Sunday wraps to 1 at the tail — the Clock
+        // app reads EXTRA_DAYS as a set, so the order is cosmetic.
         assertEquals(
-            arrayListOf(1, 2, 3, 4, 5, 6, 7),
+            arrayListOf(2, 3, 4, 5, 6, 7, 1),
             daily.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
         )
         // Tuesday ISO 2 -> Calendar 3.
