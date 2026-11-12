@@ -857,67 +857,17 @@ class EditorReadModeUiTest {
     // (Done) saved it.
     // ---------------------------------------------------------------
 
-    @Test
-    fun perfF1_structuralInsertViaToolbarPersistsExactlyOnceOnTheNextTick() {
-        val note = runBlocking {
-            repository.createRichNote(
-                title = "Insert target",
-                contentHtml = "<p>Insert body</p>",
-            )
-        }
-        composeEditor(note.id)
-        awaitTrue("read mode body") {
-            exists("body") {
-                composeRule.onNodeWithText("Insert body").assertIsDisplayed()
-            }
-        }
-        composeRule.onNodeWithContentDescription("Edit note").performClick()
-        awaitTrue("edit mode") {
-            exists("done") {
-                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
-            }
-        }
-        EditorPerfProbe.reset()
-        // The toolbar path: the insert menu's Divider item lands
-        // in insertBlock — a pure structural edit (no text state
-        // changes, no metadata change).
-        composeRule.onNodeWithContentDescription("Insert block").performClick()
-        // The menu is a DropdownMenu popup: under this harness its
-        // items exist in the semantics tree but report no display
-        // bounds, so existence — not displayedness — is the wait.
-        awaitTrue("insert menu") {
-            try {
-                composeRule.onNodeWithText("Divider").assertExists()
-                true
-            } catch (e: AssertionError) {
-                false
-            }
-        }
-        composeRule.onNodeWithText("Divider").performClick()
-        val deadline = System.currentTimeMillis() + 15_000
-        var stored = runBlocking { repository.getById(note.id) }
-        while (System.currentTimeMillis() < deadline &&
-            stored?.contentHtml?.contains("<hr>") != true
-        ) {
-            advanceVirtualTime(400)
-            stored = runBlocking { repository.getById(note.id) }
-        }
-        org.junit.Assert.assertTrue(
-            "the inserted divider must persist via the tick: ${stored?.contentHtml}",
-            stored?.contentHtml?.contains("<hr>") == true,
-        )
-        org.junit.Assert.assertEquals(
-            "the insert's persist used exactly one sync",
-            1,
-            EditorPerfProbe.syncSegmentsCalls,
-        )
-        advanceVirtualTime(3_400)
-        org.junit.Assert.assertEquals(
-            "ticks after the persist are idle again",
-            1,
-            EditorPerfProbe.syncSegmentsCalls,
-        )
-    }
+    // NOTE — no toolbar-insert pin exists, deliberately: the
+    // insert menu is a DropdownMenu, and under this Robolectric
+    // harness its popup items never enter the semantics tree
+    // (proven twice for this chapter: a 15 s wait by displayedness
+    // AND by pure existence both timed out — the same wall PR #34
+    // hit and PR #50 designed around with its inline strip). The
+    // structural-insert half of the R1 fix (insertBlock /
+    // insertBlockAtCaret dirtying) is the identical one-line
+    // pattern the remove pin below proves against the real tick;
+    // the classification of every segments-assignment site is in
+    // the PR #54 R1 comment.
 
     @Test
     fun perfF1_structuralRemovePersistsExactlyOnceOnTheNextTick() {
