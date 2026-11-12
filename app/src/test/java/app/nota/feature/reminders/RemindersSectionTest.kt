@@ -8,8 +8,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import app.nota.data.db.ReminderEntity
 import app.nota.data.reminders.ReminderAlertType
+import app.nota.data.reminders.ReminderRepeat
 import app.nota.data.reminders.ReminderRepository
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -126,7 +128,13 @@ class RemindersSectionTest {
         }
         composeRule.onNodeWithText("Daily").performClick()
         composeRule.onNodeWithText("Save Reminder").performClick()
-        assertEquals("DAILY", savedRule)
+        // Round 4: the dialog hands over the Daily series WITH
+        // the picked local time as its @HH:MM suffix, so the
+        // repository can keep the picked intent verbatim (before
+        // round 4 this was the bare "DAILY").
+        val series = ReminderRepeat.parseSeries(savedRule)
+        assertEquals(ReminderRepeat.Rule.Daily, series?.rule)
+        assertNotNull(series?.time)
     }
 
     @Test
