@@ -605,6 +605,40 @@ class DriveRepositoryTest {
     }
 
     @Test
+    fun passphraseRestore_adoptionSkippedWhileDriveOpInFlight() = runBlocking {
+        // Codex P2 (R3): adoption joins the class's inFlight
+        // protocol. This is the exact world in which
+        // passphraseRestore_withNoRecordAndNoArchive_adoptsRestoredPair
+        // adopts — no record, no canonical archive — except a manual
+        // backup is IN FLIGHT when the restore completes (its upload
+        // parked on the gateway gate, the seam
+        // scheduledBackupDefersWhileAnotherOpIsInFlight uses), so
+        // adoption must skip and leave the record completely
+        // untouched: letting it land here is how a backup that
+        // snapshotted "no key held" and the record could diverge.
+        seedNote("n-skip", "Adoption skipped")
+        val archive = File(context.cacheDir, "skip.enc")
+        backups.exportToFile(archive, "restore-pass")
+        deleteNote("n-skip")
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+        assertEquals(null, gateway.canonical)
+
+        gateway.uploadGate = kotlinx.coroutines.CompletableDeferred()
+        drive.startBackup() // sets inFlight synchronously; upload blocks on the gate
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "restore-pass")
+
+        // The restore itself landed…
+        assertEquals("Adoption skipped", provider.current.noteDao().getById("n-skip")?.title)
+        // …but adoption skipped: still no record at all.
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+
+        gateway.uploadGate?.complete(Unit)
+        awaitDriveDone()
+        Unit
+    }
+
+    @Test
     fun applyRefusesAnArchiveOwnedByAnotherAccount() = runBlocking {
         // Export while acting as uid-other (manifest owner = other).
         provider.switchTo("uid-other")

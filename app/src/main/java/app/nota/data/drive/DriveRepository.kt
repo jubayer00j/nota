@@ -532,10 +532,26 @@ class DriveRepository(
     suspend fun adoptRestoredEncryptionKey(
         header: BackupCrypto.Header,
         passphrase: String,
-    ): Boolean = try {
-        adoptRestoredEncryptionKeyChecked(header, passphrase)
-    } catch (e: Exception) {
-        false
+    ): Boolean {
+        // Serialize with the Drive operations (Codex P2, R3):
+        // adoption reads and writes the same encryption record —
+        // and, in the no-record branch, fetches the same canonical
+        // archive — the other ops race over, so it joins the class's
+        // inFlight protocol exactly like them. A busy guard means
+        // SKIP, not wait: adoption is best-effort, and skipping
+        // leaves the pre-adoption state (the calm Security unlock
+        // path), never an inconsistency — while a skipped-or-running
+        // adoption can no longer interleave with a backup that
+        // snapshotted a keyless record.
+        if (inFlight) return false
+        inFlight = true
+        try {
+            return adoptRestoredEncryptionKeyChecked(header, passphrase)
+        } catch (e: Exception) {
+            return false
+        } finally {
+            inFlight = false
+        }
     }
 
     /** The adopting half of [adoptRestoredEncryptionKey]; see its
