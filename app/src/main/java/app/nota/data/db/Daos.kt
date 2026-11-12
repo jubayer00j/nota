@@ -429,21 +429,28 @@ interface ReminderDao {
     @Delete
     suspend fun delete(reminder: ReminderEntity)
 
-    /** PR #53 (Codex R3, tightened R4): the fire path's conditional
-     *  advance — moves the trigger only while the row is still
-     *  enabled AND still at [expectedTriggerAt], the trigger the
-     *  caller read. A reminder the user completed (or removed)
-     *  after the caller's read is never resurrected by a stale
-     *  snapshot, and one they RESCHEDULED keeps the user's new
-     *  time instead of being overwritten by the stale-derived next
-     *  occurrence. Returns the number of rows written: 1 =
-     *  advanced, 0 = the row was completed, deleted, or
-     *  rescheduled in between. */
-    @Query("UPDATE reminders SET triggerAt = :triggerAt WHERE id = :id AND enabled = 1 AND triggerAt = :expectedTriggerAt")
+    /** PR #53 (Codex R3, tightened R4, rule-guarded R6): the fire
+     *  path's conditional advance — moves the trigger only while
+     *  the row is still enabled AND still at [expectedTriggerAt],
+     *  the trigger the caller read, AND still carrying
+     *  [expectedRepeatRule], the rule the caller read (the IS
+     *  comparison is null-safe). A reminder the user completed
+     *  (or removed) after the caller's read is never resurrected
+     *  by a stale snapshot, one they RESCHEDULED keeps the user's
+     *  new time instead of being overwritten by the stale-derived
+     *  next occurrence, and one whose RULE alone they edited
+     *  (daily → weekly at the same time) keeps the user's rule —
+     *  the stale-rule advance loses rather than landing an extra
+     *  occurrence the new rule would never have produced.
+     *  Returns the number of rows written: 1 = advanced, 0 = the
+     *  row was completed, deleted, rescheduled, or re-ruled in
+     *  between. */
+    @Query("UPDATE reminders SET triggerAt = :triggerAt WHERE id = :id AND enabled = 1 AND triggerAt = :expectedTriggerAt AND repeatRule IS :expectedRepeatRule")
     suspend fun advanceTriggerIfEnabled(
         id: String,
         triggerAt: Long,
         expectedTriggerAt: Long,
+        expectedRepeatRule: String?,
     ): Int
 
     /** PR #53 (Codex R3): the targeted spend — flips ONLY the

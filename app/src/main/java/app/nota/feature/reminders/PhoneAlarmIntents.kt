@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.AlarmClock
 import app.nota.data.reminders.ReminderNotificationText
 import java.time.Instant
+import java.time.LocalTime
 import java.time.ZoneId
 
 /**
@@ -32,7 +33,8 @@ object PhoneAlarmIntents {
         vibrate: Boolean = true,
         ringtoneUri: String? = null,
     ): Intent = buildSetAlarmIntent(
-        noteTitle, triggerAtMillis, zone, vibrate, ringtoneUri, repeatDaysIso = null,
+        noteTitle, triggerAtMillis, zone, vibrate, ringtoneUri,
+        repeatDaysIso = null, pickedTime = null,
     )
 
     /**
@@ -41,6 +43,16 @@ object PhoneAlarmIntents {
      * AlarmClock.EXTRA_DAYS so the Clock app rings the series, not
      * just the first occurrence. null = one-shot (no extra, exactly
      * the intent the 5-arg form has always built).
+     *
+     * Round 6: [pickedTime] is the local time the user actually
+     * picked, when the caller knows it. The hour/minutes extras
+     * come from it rather than from the trigger instant: a picked
+     * time inside a daylight-saving gap resolves to a different
+     * instant (02:30 picked becomes the 03:00 transition moment),
+     * and deriving the Clock series from the resolved instant
+     * would birth it at the shifted time even though Nota's row
+     * keeps the picked one. null = derive from the instant, as
+     * before.
      */
     fun buildSetAlarmIntent(
         noteTitle: String,
@@ -49,11 +61,12 @@ object PhoneAlarmIntents {
         vibrate: Boolean = true,
         ringtoneUri: String? = null,
         repeatDaysIso: Set<Int>?,
+        pickedTime: LocalTime? = null,
     ): Intent {
         val time = Instant.ofEpochMilli(triggerAtMillis).atZone(zone)
         return Intent(AlarmClock.ACTION_SET_ALARM).apply {
-            putExtra(AlarmClock.EXTRA_HOUR, time.hour)
-            putExtra(AlarmClock.EXTRA_MINUTES, time.minute)
+            putExtra(AlarmClock.EXTRA_HOUR, pickedTime?.hour ?: time.hour)
+            putExtra(AlarmClock.EXTRA_MINUTES, pickedTime?.minute ?: time.minute)
             // 1.x labels the alarm "Noma: <note title>".
             putExtra(
                 AlarmClock.EXTRA_MESSAGE,

@@ -2,6 +2,7 @@ package app.nota.feature.reminders
 
 import android.content.Intent
 import android.provider.AlarmClock
+import java.time.LocalTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -112,6 +113,32 @@ class PhoneAlarmIntentsTest {
             arrayListOf(1),
             sunday.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
         )
+    }
+
+    @Test
+    fun pickedTimeOverridesTheResolvedTriggerTime() {
+        // Sun 8 Mar 2026, 03:00 EDT: the spring-forward transition
+        // instant in New York. A picked 02:30 that morning never
+        // happens and resolves to this moment (PR #53, round 6).
+        val gapInstant = 1_772_953_200_000L
+        val newYork = ZoneId.of("America/New_York")
+        val picked = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", gapInstant, newYork,
+            repeatDaysIso = (1..7).toSet(),
+            pickedTime = LocalTime.of(2, 30),
+        )
+        // The Clock series is handed the PICKED time, not the
+        // resolved instant's 03:00.
+        assertEquals(2, picked.getIntExtra(AlarmClock.EXTRA_HOUR, -1))
+        assertEquals(30, picked.getIntExtra(AlarmClock.EXTRA_MINUTES, -1))
+        // With no picked time, the derivation from the instant is
+        // exactly as before: 03:00.
+        val derived = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", gapInstant, newYork,
+            repeatDaysIso = (1..7).toSet(),
+        )
+        assertEquals(3, derived.getIntExtra(AlarmClock.EXTRA_HOUR, -1))
+        assertEquals(0, derived.getIntExtra(AlarmClock.EXTRA_MINUTES, -1))
     }
 
     @Test

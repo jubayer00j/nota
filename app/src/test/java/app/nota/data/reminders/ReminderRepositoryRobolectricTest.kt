@@ -446,6 +446,51 @@ class ReminderRepositoryRobolectricTest {
     }
 
     @Test
+    fun markFiredConflictsOnARuleOnlyEdit() = runBlocking {
+        val note = notes.createNote(title = "Water the plants", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // Stored canonically: the series time is derived from the
+        // trigger (17:47 UTC).
+        assertEquals("DAILY@17:47", saved.repeatRule)
+        // The fire handler's snapshot: the enabled row it read
+        // before posting the notification.
+        val snapshot = reminders.getById(saved.id)!!
+        // While the fire was in flight, the user edited ONLY the
+        // rule: same row, same trigger, now weekly — the explicit
+        // series time is kept verbatim (round 4).
+        reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+            repeatRule = "WEEKLY@17:47", zone = ZoneId.of("UTC"),
+        )
+
+        // The conditional advance must now lose on the RULE match
+        // too (PR #53, Codex R6): id, enabled and trigger all still
+        // match the snapshot, but its next occurrence is tomorrow
+        // (daily) while the live series is weekly — landing the
+        // stale advance would fire an extra occurrence the new
+        // rule never produces. The live row is still enabled, so
+        // the outcome is Conflicted, and the row stays exactly as
+        // the user left it.
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Conflicted, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertTrue(row!!.enabled)
+        assertEquals(triggerAt, row.triggerAt)
+        assertEquals("WEEKLY@17:47", row.repeatRule)
+    }
+
+    @Test
     fun markFiredSpendKeepsConcurrentEdits() = runBlocking {
         val note = notes.createNote(title = "Call the bank", plainBody = "")
         // Minute-aligned, like every real picked trigger (see
@@ -548,8 +593,9 @@ class ReminderRepositoryRobolectricTest {
     fun advanceOverdueRepeatsLeavesJustDueRepeatsForTheFireHandler() = runBlocking {
         // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
         val base = 1_900_000_020_000L
-        val now = base + 600_000L
+        val now = base + 1_800_000L
         val justDueNote = notes.createNote(title = "Just due", plainBody = "")
+        val midDueNote = notes.createNote(title = "Mid due", plainBody = "")
         val longDueNote = notes.createNote(title = "Long due", plainBody = "")
         // Due 60 seconds before the pass runs: inside the grace
         // window (PR #53, round 5) — its alarm delivery may be in
@@ -561,10 +607,20 @@ class ReminderRepositoryRobolectricTest {
             alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
             repeatRule = "DAILY", zone = ZoneId.of("UTC"),
         )
-        // Due 10 minutes before the pass runs: a genuinely missed
+        // Due 10 minutes before the pass runs: still inside the
+        // window since round 6 widened it to 15 minutes — without
+        // exact-alarm access the gateway's setAndAllowWhileIdle
+        // delivery can legitimately arrive minutes late, so this
+        // occurrence too may still be in flight.
+        val midDue = reminders.setReminder(
+            midDueNote.id, triggerAt = now - 600_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // Due 30 minutes before the pass runs: a genuinely missed
         // occurrence, well past the grace window.
         val longDue = reminders.setReminder(
-            longDueNote.id, triggerAt = now - 600_000L,
+            longDueNote.id, triggerAt = now - 1_800_000L,
             alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
             repeatRule = "DAILY", zone = ZoneId.of("UTC"),
         )
@@ -573,11 +629,12 @@ class ReminderRepositoryRobolectricTest {
             nowMillis = now, zone = ZoneId.of("UTC"),
         )
         // Only the long-due row advanced (to its next day); the
-        // just-due row keeps its trigger, uncounted.
+        // just-due and mid-due rows keep their triggers, uncounted.
         assertEquals(1, advanced)
         assertEquals(now - 60_000L, db.reminderDao().getById(justDue.id)?.triggerAt)
+        assertEquals(now - 600_000L, db.reminderDao().getById(midDue.id)?.triggerAt)
         assertEquals(
-            now - 600_000L + 86_400_000L,
+            now - 1_800_000L + 86_400_000L,
             db.reminderDao().getById(longDue.id)?.triggerAt,
         )
     }

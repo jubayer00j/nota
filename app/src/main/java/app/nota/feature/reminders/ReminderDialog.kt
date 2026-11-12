@@ -351,6 +351,7 @@ fun ReminderDialog(
                 vibrate = tone.vibrate,
                 ringtoneUri = tone.uri,
                 repeatDaysIso = pickedRepeatDaysIso(triggerAt),
+                pickedTime = LocalTime.of(pickedHour, pickedMinute),
             )
             val opened = runCatching { context.startActivity(intent) }.isSuccess
             Toast.makeText(
@@ -413,6 +414,7 @@ fun ReminderDialog(
             val intent = PhoneAlarmIntents.buildSetAlarmIntent(
                 noteTitle, triggerAt, zone,
                 repeatDaysIso = pickedRepeatDaysIso(triggerAt),
+                pickedTime = LocalTime.of(pickedHour, pickedMinute),
             )
             if (PhoneAlarmIntents.canHandle(context, intent)) {
                 performSave(ReminderAlertType.PHONE_ALARM)

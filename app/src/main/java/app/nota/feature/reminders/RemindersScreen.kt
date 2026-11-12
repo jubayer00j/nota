@@ -218,6 +218,12 @@ private fun ReminderRowItem(
                                     reminder.repeatRule, reminder.triggerAt,
                                     ZoneId.systemDefault(),
                                 ),
+                                // PR #53 round 6: the row's stored
+                                // series time is the picked intent —
+                                // hand the Clock app that time, not
+                                // a possibly gap-resolved trigger's.
+                                pickedTime = ReminderRepeat
+                                    .parseSeries(reminder.repeatRule)?.time,
                             )
                             val opened = PhoneAlarmIntents.canHandle(context, intent) &&
                                 runCatching { context.startActivity(intent) }.isSuccess

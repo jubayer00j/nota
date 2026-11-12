@@ -237,12 +237,14 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * [reminder] is the handler's snapshot — it may be stale by the
      * time this runs — so the writes are field-targeted (PR #53,
      * Codex R3): the advance lands only while the LIVE row is still
-     * enabled AND still at the snapshot's trigger
-     * ([ReminderDao.advanceTriggerIfEnabled], tightened in round 4).
-     * When that write loses, the live row decides the outcome
-     * (round 5): gone or disabled — completed or deleted mid-fire
-     * — is [FireOutcome.Spent]; still enabled means the user
-     * rescheduled mid-fire, which is [FireOutcome.Conflicted] —
+     * enabled AND still at the snapshot's trigger AND still
+     * carrying the snapshot's rule
+     * ([ReminderDao.advanceTriggerIfEnabled], tightened in rounds
+     * 4 and 6). When that write loses, the live row decides the
+     * outcome (round 5): gone or disabled — completed or deleted
+     * mid-fire — is [FireOutcome.Spent]; still enabled means the
+     * user rescheduled or re-ruled mid-fire, which is
+     * [FireOutcome.Conflicted] —
      * the live row is left exactly as the user left it, never
      * resurrected, re-armed over, or overwritten. The spend flips
      * only the enabled flag ([ReminderDao.spendById]), preserving
@@ -261,16 +263,19 @@ class ReminderRepository(private val provider: DatabaseProvider) {
             zone = zone,
         )
         return if (next != null) {
-            if (dao().advanceTriggerIfEnabled(reminder.id, next, reminder.triggerAt) == 1) {
+            if (dao().advanceTriggerIfEnabled(
+                    reminder.id, next, reminder.triggerAt, reminder.repeatRule,
+                ) == 1) {
                 FireOutcome.Advanced(reminder.copy(triggerAt = next))
             } else {
                 // The conditional write lost: re-read the live
-                // row to tell a completion from a reschedule
+                // row to tell a completion from an edit
                 // (round 5). Gone or disabled — the series is
                 // over either way. Still enabled: its trigger
-                // necessarily differs from the snapshot's, so
-                // the user rescheduled mid-fire — a conflict,
-                // not a spend; the live row stays untouched.
+                // or its rule differs from the snapshot's, so
+                // the user rescheduled or re-ruled mid-fire —
+                // a conflict, not a spend; the live row stays
+                // untouched.
                 val live = dao().getById(reminder.id)
                 if (live == null || !live.enabled) {
                     FireOutcome.Spent
@@ -294,9 +299,9 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * [ReminderScheduler.rescheduleAll] BEFORE the arm plan is
      * computed, so the plan sees (and arms) the advanced times.
      * Each write is conditional ([ReminderDao.advanceTriggerIfEnabled]),
-     * so a row completed — or rescheduled — between this pass's
-     * read and its write is left exactly as the user left it, and
-     * only rows actually written are counted.
+     * so a row completed — or rescheduled, or re-ruled — between
+     * this pass's read and its write is left exactly as the user
+     * left it, and only rows actually written are counted.
      *
      * Rows that came due within the last [GRACE_MILLIS] are left
      * alone (round 5): their alarm delivery may be in flight RIGHT
@@ -305,9 +310,11 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * and advancing the row first would make the fire handler
      * read the already-advanced row, label its notification with
      * the NEXT occurrence's time, and advance a second time,
-     * silently swallowing an occurrence. Anything older is a
-     * genuinely missed occurrence and advances exactly as before.
-     * Returns how many rows advanced.
+     * silently swallowing an occurrence. The window is wide
+     * (round 6) because delivery itself can legitimately be
+     * minutes late in the inexact mode — see [GRACE_MILLIS].
+     * Anything older is a genuinely missed occurrence and
+     * advances exactly as before. Returns how many rows advanced.
      */
     suspend fun advanceOverdueRepeats(
         nowMillis: Long,
@@ -324,7 +331,9 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     zone = zone,
                 )
                 if (next != null && next != row.triggerAt) {
-                    advanced += dao().advanceTriggerIfEnabled(row.id, next, row.triggerAt)
+                    advanced += dao().advanceTriggerIfEnabled(
+                        row.id, next, row.triggerAt, row.repeatRule,
+                    )
                 }
             }
         return advanced
@@ -333,9 +342,20 @@ class ReminderRepository(private val provider: DatabaseProvider) {
     companion object {
         /** How long a due repeating reminder is left for its own
          *  alarm delivery before [advanceOverdueRepeats] treats
-         *  the occurrence as missed (PR #53, round 5): alarm
-         *  delivery plus a cold process start completes in
-         *  seconds, so two minutes is a wide margin. */
-        const val GRACE_MILLIS: Long = 120_000L
+         *  the occurrence as missed (PR #53, round 5; widened in
+         *  round 6). With exact-alarm access, delivery plus a
+         *  cold process start completes in seconds — but when
+         *  exact access is unavailable the alarm gateway falls
+         *  back to setAndAllowWhileIdle, whose delivery can
+         *  legitimately arrive minutes late under doze (the
+         *  reminder dialog itself warns those alarms "may
+         *  arrive a few minutes late"). The window must cover
+         *  that supported latency, or a late cold-start delivery
+         *  races the pass exactly as in round 5, so fifteen
+         *  minutes covers it with margin. The accepted
+         *  trade-off: an occurrence missed by less than the
+         *  window is advanced at a later reconcile rather than
+         *  immediately; older misses are unaffected. */
+        const val GRACE_MILLIS: Long = 900_000L
     }
 }
