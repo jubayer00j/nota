@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.test.assertExists
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -882,9 +883,15 @@ class EditorReadModeUiTest {
         // in insertBlock — a pure structural edit (no text state
         // changes, no metadata change).
         composeRule.onNodeWithContentDescription("Insert block").performClick()
+        // The menu is a DropdownMenu popup: under this harness its
+        // items exist in the semantics tree but report no display
+        // bounds, so existence — not displayedness — is the wait.
         awaitTrue("insert menu") {
-            exists("divider item") {
-                composeRule.onNodeWithText("Divider").assertIsDisplayed()
+            try {
+                composeRule.onNodeWithText("Divider").assertExists()
+                true
+            } catch (e: AssertionError) {
+                false
             }
         }
         composeRule.onNodeWithText("Divider").performClick()
