@@ -138,11 +138,21 @@ class SemanticIndexer(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    private data class DesiredNote(
-        val note: NoteEntity,
+    /** Performance chapter 2 (F3): the desired set is built from
+     *  the (id, title, plainText) projection — never full entities
+     *  (contentHtml is never read here) — and [chunks] are computed
+     *  LAZILY, only for a note that actually reaches the embedder.
+     *  A reconcile over an unchanged library therefore performs no
+     *  chunking at all: eligibility and change detection need only
+     *  the fingerprint, which hashes the embedded text directly. */
+    private class DesiredNote(
+        val id: String,
+        val title: String,
+        val plainText: String,
         val fingerprint: String,
-        val chunks: List<String>,
-    )
+    ) {
+        val chunks: List<String> by lazy { NoteChunker.chunk(title, plainText) }
+    }
 
     /** A note that survived Ask's fresh-passage validation:
      *  its live row, the CURRENT chunk texts that still have a
@@ -178,6 +188,45 @@ class SemanticIndexer(
         return pairs
     }
 
+    /** Performance chapter 2 (F8): does [storedNote] hold at
+     *  least one chunk that still answers for [live]'s current
+     *  text? An unchanged note (whole-note fingerprint match)
+     *  answers from its stored chunk count alone — no chunker
+     *  call; only a changed note pays the chunk + per-chunk
+     *  validation. */
+    private fun hasFreshChunks(live: NoteEntity, storedNote: StoredNoteVectors): Boolean {
+        if (fingerprint(live.title, live.plainText) == storedNote.fingerprint) {
+            return storedNote.chunks.isNotEmpty()
+        }
+        val chunks = NoteChunker.chunk(live.title, live.plainText)
+        if (chunks.isEmpty()) return false
+        return validChunkPairs(chunks, storedNote).isNotEmpty()
+    }
+
+    /** Performance chapter 2 (F8): the valid (index, text,
+     *  vector) pairs for [live] against [storedNote] —
+     *  [validChunkPairs] with the whole-note fast path in front.
+     *  An unchanged note chunks ONCE (the excerpt texts exist
+     *  nowhere else; they must be re-derived from the live text)
+     *  and hashes NOTHING: fingerprint equality already proves
+     *  every position, and the size guard falls back to the
+     *  per-chunk rule if the stored shape ever disagreed. */
+    private fun freshChunkPairs(
+        live: NoteEntity,
+        storedNote: StoredNoteVectors,
+    ): List<Triple<Int, String, FloatArray>> {
+        val chunks = NoteChunker.chunk(live.title, live.plainText)
+        if (chunks.isEmpty()) return emptyList()
+        if (fingerprint(live.title, live.plainText) == storedNote.fingerprint &&
+            storedNote.chunks.size == chunks.size
+        ) {
+            return chunks.mapIndexed { index, text ->
+                Triple(index, text, storedNote.chunks[index].vector)
+            }
+        }
+        return validChunkPairs(chunks, storedNote)
+    }
+
     /** The index's eligibility rule: a note that is locked,
      *  trashed or archived is never embedded and never surfaces.
      *  (Archived matches every other search surface in the app —
@@ -189,15 +238,22 @@ class SemanticIndexer(
         !note.locked && note.trashedAt == null && !note.archived
 
     /** The notes the index should hold vectors for right now
-     *  (active account's database only). */
+     *  (active account's database only). Performance chapter 2
+     *  (F3): the SQL projection already applies the eligibility
+     *  gate (locked / trashed / archived are filtered in the
+     *  query), and the blank rule rides [NoteChunker.embeddedText]
+     *  — chunk() is empty exactly when the embedded text is
+     *  blank, the same equivalence [status] documents — so no
+     *  note is chunked here. */
     private suspend fun desiredNotes(): Map<String, DesiredNote> {
-        val all = databaseProvider.current.noteDao().getAll()
+        val candidates = databaseProvider.current.noteDao().getIndexCandidates()
         val out = LinkedHashMap<String, DesiredNote>()
-        for (note in all) {
-            if (!isIndexEligible(note)) continue
-            val chunks = NoteChunker.chunk(note.title, note.plainText)
-            if (chunks.isEmpty()) continue
-            out[note.id] = DesiredNote(note, fingerprint(note.title, note.plainText), chunks)
+        for (row in candidates) {
+            if (NoteChunker.embeddedText(row.title, row.plainText).isBlank()) continue
+            out[row.id] = DesiredNote(
+                row.id, row.title, row.plainText,
+                fingerprint(row.title, row.plainText),
+            )
         }
         return out
     }
@@ -251,6 +307,7 @@ class SemanticIndexer(
             ?: throw AiException.noKey()
         if (accountId != databaseProvider.accountId.value) return
         mutex.withLock {
+            val stampAtStart = databaseProvider.current.noteDao().getLibraryStampRow()
             val desired = desiredNotes()
             _rebuildProgress.value =
                 SemanticRebuildProgress(accountId, done = 0, total = desired.size)
@@ -266,11 +323,11 @@ class SemanticIndexer(
                     // be embedded from its stale snapshot — above all
                     // a locked note's plaintext must never reach the
                     // provider.
-                    val live = noteDao.getById(want.note.id)
+                    val live = noteDao.getById(want.id)
                     if (live != null && isIndexEligible(live)) {
                         val chunks = embedChunks(config, want, existing = null, dims)
                         if (dims == 0) dims = chunks.first().vector.size
-                        working[want.note.id] =
+                        working[want.id] =
                             StoredNoteVectors(want.fingerprint, chunks)
                     }
                     _rebuildProgress.value =
@@ -287,6 +344,11 @@ class SemanticIndexer(
                         StoredSemanticIndex(config.spaceSignature(), dims, working),
                     )
                 }
+                // A completed rebuild leaves the index answering
+                // for exactly the library the stamp described at
+                // pass start (F3): record it so the next reconcile
+                // can gate on it.
+                store.saveStamp(accountId, stampAtStart)
             } finally {
                 _rebuildProgress.value = null
             }
@@ -336,6 +398,29 @@ class SemanticIndexer(
     private suspend fun reconcileLocked(accountId: String, surfaceFailure: Boolean = false) {
         val config = settings.activeEmbeddingConfig(accountId)
         val stored = loadIndex(accountId)
+        val noteDao = databaseProvider.current.noteDao()
+
+        // Performance chapter 2 (F3): the stamp gate. One
+        // aggregate query describes the whole notes table; when
+        // it equals the stamp the last COMPLETED pass recorded,
+        // and the stored index still belongs to the active
+        // embedding space, the library is exactly the one that
+        // pass already reconciled — purged, embedded, current —
+        // and this pass has nothing to do. It returns before
+        // loading a single note body, chunk or hash. The stamp
+        // is only ever written at the END of a pass that ran to
+        // completion (below and in [rebuild]); a pass cut short
+        // by a provider failure leaves the old stamp in place,
+        // so the next trigger re-runs the full pass.
+        val stampAtStart = noteDao.getLibraryStampRow()
+        val savedStamp = store.loadStamp(accountId)
+        if (savedStamp != null && savedStamp == stampAtStart &&
+            (config == null ||
+                (stored != null && stored.signature == config.spaceSignature()))
+        ) {
+            return
+        }
+
         val desired = desiredNotes()
 
         // Foreign-space vectors are dropped wholesale (1.x rule),
@@ -359,6 +444,7 @@ class SemanticIndexer(
         }
         if (config == null) {
             persist(accountId, stored?.signature, dims, working)
+            store.saveStamp(accountId, stampAtStart)
             return
         }
 
@@ -366,7 +452,15 @@ class SemanticIndexer(
         // stop and keep what succeeded (the rest stays stale).
         var changed = working.size != (stored?.notes?.size ?: 0)
         var sinceSave = 0
-        val noteDao = databaseProvider.current.noteDao()
+        var providerFailed = false
+        // Performance chapter 2 (F3): the snapshot-vs-live
+        // re-check below reads ONE batched eligibility projection
+        // instead of a getById round trip per note. The
+        // projection's SQL gate IS the eligibility rule (locked,
+        // trashed and archived are filtered in the query), so a
+        // note missing from the set is exactly a note the old
+        // per-note re-check would have rejected.
+        val liveEligibleIds = noteDao.getIndexCandidates().map { it.id }.toHashSet()
         for ((noteId, want) in desired) {
             // Snapshot-vs-live re-check (Jules PR #23 P1): the
             // snapshot predates any lock/trash/archive that landed
@@ -374,8 +468,7 @@ class SemanticIndexer(
             // note is not embedded from its stale snapshot, and
             // vectors it already had do not survive the pass
             // either — the purge above only saw the snapshot.
-            val live = noteDao.getById(noteId)
-            if (live == null || !isIndexEligible(live)) {
+            if (noteId !in liveEligibleIds) {
                 if (working.remove(noteId) != null) changed = true
                 continue
             }
@@ -388,6 +481,7 @@ class SemanticIndexer(
                 // succeeded; a user-initiated build is owed the
                 // failure itself (see [buildIndex]).
                 if (surfaceFailure) throw e
+                providerFailed = true
                 break
             }
             if (dims == 0) dims = chunks.first().vector.size
@@ -400,6 +494,13 @@ class SemanticIndexer(
         }
         if (changed) {
             persist(accountId, config.spaceSignature(), dims, working)
+        }
+        // The pass ran to completion: record the stamp it
+        // answered for, so the next trigger can gate on it. A
+        // provider failure leaves the previous stamp untouched —
+        // the unembedded remainder still needs a full pass.
+        if (!providerFailed) {
+            store.saveStamp(accountId, stampAtStart)
         }
     }
 
@@ -462,6 +563,22 @@ class SemanticIndexer(
         val aligned = LinkedHashMap<String, List<FloatArray?>>()
         for ((noteId, storedNote) in stored.notes) {
             val live = liveById[noteId] ?: continue
+            // Performance chapter 2 (F8): the whole-note
+            // fingerprint fast path. When it matches, the live
+            // text is identical to the text the stored vectors
+            // were embedded from, so re-chunking would
+            // deterministically reproduce the stored chunking
+            // and every per-chunk fingerprint check would pass:
+            // the stored vectors align by position with no
+            // chunker call and no per-chunk hashing. Fingerprint
+            // equality is strictly stronger than the per-chunk
+            // rule (it pins the WHOLE text, not one position),
+            // so the aligned result is unchanged.
+            if (fingerprint(live.title, live.plainText) == storedNote.fingerprint) {
+                if (storedNote.chunks.isEmpty()) continue
+                aligned[noteId] = storedNote.chunks.map { it.vector }
+                continue
+            }
             val liveChunks = NoteChunker.chunk(live.title, live.plainText)
             if (liveChunks.isEmpty()) continue
             val pairs = validChunkPairs(liveChunks, storedNote)
@@ -524,22 +641,21 @@ class SemanticIndexer(
         }
 
         val noteDao = databaseProvider.current.noteDao()
-        val candidates = ArrayList<AskCandidate>()
+        // Performance chapter 2 (F8): the pre-embed pass is a
+        // VALIDITY pass — it decides only whether anything
+        // retrievable exists, which is what gates the provider
+        // call below. Unchanged notes answer from the whole-note
+        // fingerprint with no chunker call at all; the excerpt
+        // texts themselves are derived once, after the embed, by
+        // the revalidation pass.
+        val preValid = ArrayList<Pair<NoteEntity, StoredNoteVectors>>()
         for ((noteId, storedNote) in stored.notes) {
             val live = noteDao.getById(noteId) ?: continue
             if (!isIndexEligible(live)) continue
-            val chunks = NoteChunker.chunk(live.title, live.plainText)
-            if (chunks.isEmpty()) continue
-            val pairs = validChunkPairs(chunks, storedNote)
-            if (pairs.isEmpty()) continue
-            candidates += AskCandidate(
-                live,
-                pairs.map { it.second },
-                pairs.map { it.third },
-                pairs.map { it.first },
-            )
+            if (!hasFreshChunks(live, storedNote)) continue
+            preValid += live to storedNote
         }
-        if (candidates.isEmpty()) return emptyList()
+        if (preValid.isEmpty()) return emptyList()
 
         val queryVector = AiEmbeddings.create(config.providerId, http)
             .embed(config, question, EmbedKind.QUERY)
@@ -558,14 +674,11 @@ class SemanticIndexer(
         // REBUILT from the live row, so scoring proceeds on the
         // note's current chunks and only the positions whose
         // fingerprints still license them.
-        val liveCandidates = ArrayList<AskCandidate>(candidates.size)
-        for (candidate in candidates) {
-            val live = noteDao.getById(candidate.note.id) ?: continue
+        val liveCandidates = ArrayList<AskCandidate>(preValid.size)
+        for ((snapshot, storedNote) in preValid) {
+            val live = noteDao.getById(snapshot.id) ?: continue
             if (!isIndexEligible(live)) continue
-            val storedNote = stored.notes[candidate.note.id] ?: continue
-            val chunks = NoteChunker.chunk(live.title, live.plainText)
-            if (chunks.isEmpty()) continue
-            val pairs = validChunkPairs(chunks, storedNote)
+            val pairs = freshChunkPairs(live, storedNote)
             if (pairs.isEmpty()) continue
             liveCandidates += AskCandidate(
                 live,
@@ -659,6 +772,7 @@ class SemanticIndexer(
             sentByChunk[excerpt.noteId to excerpt.chunkIndex] = excerpt
         }
         val noteDao = databaseProvider.current.noteDao()
+        val storedIndex = loadIndex(accountId)
         val valid = HashSet<Int>()
         for (citation in citations) {
             val excerpt = sentByChunk[citation.noteId to citation.chunkIndex]
@@ -670,6 +784,29 @@ class SemanticIndexer(
                 null
             } ?: continue
             if (!isIndexEligible(live)) continue
+            // Performance chapter 2 (F8): when the note is
+            // unchanged since its embed (whole-note fingerprint
+            // match), the current chunk at the cited position IS
+            // the stored chunk, so validity reduces to comparing
+            // the excerpt against the stored chunk fingerprint —
+            // no chunker call, no re-chunk of a possibly huge
+            // note per citation. The check is exact (the stored
+            // fingerprint hashes the very text the position
+            // holds), and any doubt — no index, no stored entry,
+            // a changed note — falls through to the chunked
+            // comparison below, unchanged.
+            val storedNote = storedIndex?.notes?.get(citation.noteId)
+            if (storedNote != null &&
+                fingerprint(live.title, live.plainText) == storedNote.fingerprint
+            ) {
+                val storedChunk = storedNote.chunks.getOrNull(citation.chunkIndex)
+                if (storedChunk != null &&
+                    storedChunk.fingerprint == chunkFingerprint(excerpt.text)
+                ) {
+                    valid += citation.n
+                }
+                continue
+            }
             val liveChunk = NoteChunker.chunk(live.title, live.plainText)
                 .getOrNull(citation.chunkIndex) ?: continue
             if (chunkFingerprint(liveChunk) != chunkFingerprint(excerpt.text)) {

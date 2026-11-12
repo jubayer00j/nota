@@ -4,6 +4,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import app.nota.data.db.LibraryStampRow
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -135,10 +136,61 @@ class SemanticIndexStore(private val rootDir: File) {
         }
     }
 
-    /** Drops the account's whole index (sign-out, full rebuild). */
+    /** Drops the account's whole index (sign-out, full rebuild).
+     *  The reconcile stamp goes with it: a stamp that outlived
+     *  its index would let the stamp gate skip a pass the index
+     *  still needs. */
     fun delete(accountId: String) {
         runCatching { fileFor(accountId).delete() }
         runCatching { File(rootDir, fileFor(accountId).name + ".tmp").delete() }
+        runCatching { stampFileFor(accountId).delete() }
+    }
+
+    /** Performance chapter 2 (F3): the library stamp the last
+     *  COMPLETED reconcile pass answered for, persisted next to
+     *  the index so the stamp gate survives process death. Any
+     *  unreadable or malformed file reads as "no stamp" — the
+     *  gate then simply does not fire and a full pass runs,
+     *  which is always the safe direction. */
+    fun loadStamp(accountId: String): LibraryStampRow? {
+        val file = stampFileFor(accountId)
+        if (!file.isFile) return null
+        return try {
+            val parts = file.readText().trim().split(',')
+            if (parts.size != 5) return null
+            LibraryStampRow(
+                noteCount = parts[0].toLong(),
+                maxUpdatedAt = parts[1].toLong(),
+                sumUpdatedAt = parts[2].toLong(),
+                sumTitleLength = parts[3].toLong(),
+                sumPlainTextLength = parts[4].toLong(),
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun saveStamp(accountId: String, stamp: LibraryStampRow) {
+        runCatching {
+            rootDir.mkdirs()
+            val target = stampFileFor(accountId)
+            val temp = File(rootDir, target.name + ".tmp")
+            temp.writeText(
+                listOf(
+                    stamp.noteCount, stamp.maxUpdatedAt, stamp.sumUpdatedAt,
+                    stamp.sumTitleLength, stamp.sumPlainTextLength,
+                ).joinToString(","),
+            )
+            if (!temp.renameTo(target)) {
+                temp.copyTo(target, overwrite = true)
+                runCatching { temp.delete() }
+            }
+        }
+    }
+
+    fun stampFileFor(accountId: String): File {
+        val safe = accountId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(rootDir, "semantic-$safe.stamp")
     }
 
     fun fileFor(accountId: String): File {

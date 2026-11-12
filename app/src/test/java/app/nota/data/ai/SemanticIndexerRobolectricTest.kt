@@ -639,4 +639,87 @@ class SemanticIndexerRobolectricTest {
             indexer.revalidateAskCitations(account, sent, citations),
         )
     }
+
+    // ---------------------------------------------------------------
+    // Performance chapter 2 (F3/F8): the stamp gate and the
+    // whole-note fingerprint fast paths. CI asserts COUNTS, never
+    // wall-clock: provider calls and NoteChunker invocations.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun unchangedLibrarySecondReconcileDoesNoChunkingAndNoProviderCalls() = runBlocking {
+        saveGeminiKey()
+        notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+
+        // The stamp gate fired: the pass returned before any
+        // chunking and before any provider call, index intact.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+        assertEquals(2, indexer.status(account).indexedNotes)
+    }
+
+    @Test
+    fun lockingOneNotePurgesExactlyItsVectorsAndEmbedsNothingElse() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        val banana = notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+
+        // Lock the banana note the way the lock flow leaves it in
+        // the table: sealed body, empty projection, locked flag.
+        val bananaRow = db.noteDao().getById(banana.id)!!
+        db.noteDao().upsert(bananaRow.copy(locked = true, contentHtml = "", plainText = ""))
+
+        http.calls.clear()
+        indexer.reconcile(account)
+
+        // The purge is exact and local: banana's vectors are gone,
+        // apple's remain, and nothing was embedded on the way.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(1, indexer.status(account).indexedNotes)
+        assertEquals(listOf(apple.id), indexer.search(account, "apple").map { it.noteId })
+        assertTrue(indexer.search(account, "banana").isEmpty())
+    }
+
+    @Test
+    fun searchAndAskOnUnchangedLibraryTakeTheFingerprintFastPath() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+
+        // Search: unchanged notes align their stored vectors by
+        // fingerprint — zero chunker invocations.
+        val chunksBefore = NoteChunker.chunkInvocations
+        val hits = indexer.search(account, "apple")
+        assertEquals(listOf(apple.id), hits.map { it.noteId })
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+
+        // Ask retrieval: the pre-embed validity pass chunks
+        // nothing for unchanged notes; the post-embed pass chunks
+        // exactly once per candidate note, solely to re-derive
+        // the excerpt texts (which are stored nowhere).
+        val excerpts = indexer.retrieveAskExcerpts(account, "apple picking")
+        assertTrue(excerpts.isNotEmpty())
+        assertEquals(chunksBefore + 2, NoteChunker.chunkInvocations)
+
+        // Citation revalidation on unchanged notes: zero chunker
+        // invocations, every citation still valid.
+        val citationChunks = NoteChunker.chunkInvocations
+        val valid = indexer.revalidateAskCitations(
+            account,
+            excerpts,
+            excerpts.mapIndexed { i, e -> AskCitation(i + 1, e.noteId, e.chunkIndex) },
+        )
+        assertEquals(excerpts.size, valid.size)
+        assertEquals(citationChunks, NoteChunker.chunkInvocations)
+    }
 }
