@@ -40,6 +40,23 @@ data class NoteTextRow(
     val plainText: String,
 )
 
+/** Performance chapter 2 (F3/F6): one aggregate row describing the
+ *  whole notes table, cheap enough to read on every search keystroke
+ *  and every semantic reconcile. Two libraries with equal stamp rows
+ *  have the same note count, the same newest edit, the same total
+ *  edit-time mass and the same total title/body lengths — any note
+ *  insert, delete, edit, lock or unlock moves at least one component
+ *  (locking empties plainText, unlocking restores it; every state op
+ *  bumps updatedAt). Used as the invalidation key for the corpus
+ *  cache and the semantic reconcile stamp gate. */
+data class LibraryStampRow(
+    val noteCount: Long,
+    val maxUpdatedAt: Long,
+    val sumUpdatedAt: Long,
+    val sumTitleLength: Long,
+    val sumPlainTextLength: Long,
+)
+
 /** Search Quality Pass: one note's scoring haystacks at text
  *  weight — the search layer scores (and windows snippets from)
  *  exactly these columns, fetched for candidate ids only, or for
@@ -255,6 +272,26 @@ interface NoteDao {
             "WHERE locked = 0 AND trashedAt IS NULL AND archived = 0",
     )
     suspend fun getIndexCandidates(): List<NoteTextRow>
+
+    /** Performance chapter 2 (F7): every note's link-scan input at
+     *  text weight — the [[ ]] backfill reads titles and plain text
+     *  only, and must not load full entities (contentHtml, lock
+     *  envelopes) for a whole library on a cold start. */
+    @Query("SELECT id, title, plainText FROM notes")
+    suspend fun getAllNoteTexts(): List<NoteTextRow>
+
+    /** Performance chapter 2 (F3/F6): the library stamp — see
+     *  [LibraryStampRow]. One aggregate query over the notes table;
+     *  COALESCEs keep an empty library at all-zeroes. */
+    @Query(
+        "SELECT COUNT(*) AS noteCount, " +
+            "COALESCE(MAX(updatedAt), 0) AS maxUpdatedAt, " +
+            "COALESCE(SUM(updatedAt), 0) AS sumUpdatedAt, " +
+            "COALESCE(SUM(LENGTH(title)), 0) AS sumTitleLength, " +
+            "COALESCE(SUM(LENGTH(plainText)), 0) AS sumPlainTextLength " +
+            "FROM notes",
+    )
+    suspend fun getLibraryStampRow(): LibraryStampRow
 
     /** Search Quality Pass: the scoring corpus for the substring
      *  fallback — every note keyword search may surface, with the

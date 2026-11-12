@@ -165,7 +165,15 @@ object NoteDocument {
 
     // ---------------------------------------------------------------- parse
 
+    /** Test seam (Performance chapter 2, F4): counts [parse]
+     *  invocations so tests can pin one parse per note open.
+     *  Production code never reads it. */
+    @Volatile
+    var parseInvocations: Int = 0
+        private set
+
     fun parse(html: String): List<DocSegment> {
+        parseInvocations++
         if (html.isBlank()) return listOf(TextSegment(""))
         val out = mutableListOf<DocSegment>()
         val text = StringBuilder()
