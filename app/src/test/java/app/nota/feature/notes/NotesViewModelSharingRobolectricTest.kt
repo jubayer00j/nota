@@ -8,6 +8,9 @@ import app.nota.data.db.NotaDatabase
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -56,6 +59,8 @@ class NotesViewModelSharingRobolectricTest {
         )
     }
 
+    private val collectScope = CoroutineScope(Dispatchers.Main + Job())
+
     @After
     fun tearDown() {
         db.close()
@@ -72,12 +77,14 @@ class NotesViewModelSharingRobolectricTest {
     }
 
     @Test
-    fun selectionToggleSharesTheItemsListInstance() = runBlocking {
-        val a = repository.createRichNote("Alpha", "<p>alpha body</p>")
-        repository.createRichNote("Beta", "<p>beta body</p>")
-        repository.createRichNote("Gamma", "<p>gamma body</p>")
+    fun selectionToggleSharesTheItemsListInstance() {
+        val a = runBlocking { repository.createRichNote("Alpha", "<p>alpha body</p>") }
+        runBlocking {
+            repository.createRichNote("Beta", "<p>beta body</p>")
+            repository.createRichNote("Gamma", "<p>gamma body</p>")
+        }
 
-        val collectJob = launch { viewModel.uiState.collect {} }
+        val collectJob = collectScope.launch { viewModel.uiState.collect {} }
         try {
             awaitTrue("three items listed") { viewModel.uiState.value.items.size == 3 }
             val before = viewModel.uiState.value
@@ -97,30 +104,36 @@ class NotesViewModelSharingRobolectricTest {
     }
 
     @Test
-    fun oneNoteUpdateRebuildsOnlyThatNotesItem() = runBlocking {
-        val a = repository.createRichNote("Alpha", "<p>alpha body</p>")
-        val b = repository.createRichNote("Beta", "<p>beta body</p>")
-        val c = repository.createRichNote("Gamma", "<p>gamma body</p>")
+    fun oneNoteUpdateRebuildsOnlyThatNotesItem() {
+        val ids = runBlocking {
+            val a = repository.createRichNote("Alpha", "<p>alpha body</p>")
+            val b = repository.createRichNote("Beta", "<p>beta body</p>")
+            val c = repository.createRichNote("Gamma", "<p>gamma body</p>")
+            Triple(a.id, b.id, c.id)
+        }
+        val (aId, bId, cId) = ids
 
-        val collectJob = launch { viewModel.uiState.collect {} }
+        val collectJob = collectScope.launch { viewModel.uiState.collect {} }
         try {
             awaitTrue("three items listed") { viewModel.uiState.value.items.size == 3 }
             val beforeById = viewModel.uiState.value.items.associateBy { it.note.id }
 
-            val storedB = db.noteDao().getById(b.id)!!
-            repository.updateRichBody(storedB, "Beta", "<p>beta body edited</p>")
+            val storedB = runBlocking { db.noteDao().getById(bId)!! }
+            runBlocking {
+                repository.updateRichBody(storedB, "Beta", "<p>beta body edited</p>")
+            }
             awaitTrue("edit visible in the list") {
                 viewModel.uiState.value.items
-                    .firstOrNull { it.note.id == b.id }
+                    .firstOrNull { it.note.id == bId }
                     ?.note?.excerpt?.contains("edited") == true
             }
             val afterById = viewModel.uiState.value.items.associateBy { it.note.id }
 
             // Neighbours: identical instances — no rebuild.
-            assertSame(beforeById[a.id], afterById[a.id])
-            assertSame(beforeById[c.id], afterById[c.id])
+            assertSame(beforeById[aId], afterById[aId])
+            assertSame(beforeById[cId], afterById[cId])
             // The edited note: a fresh item carrying the new row.
-            assertNotSame(beforeById[b.id], afterById[b.id])
+            assertNotSame(beforeById[bId], afterById[bId])
         } finally {
             collectJob.cancel()
         }

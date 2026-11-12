@@ -453,14 +453,6 @@ class SemanticIndexer(
         var changed = working.size != (stored?.notes?.size ?: 0)
         var sinceSave = 0
         var providerFailed = false
-        // Performance chapter 2 (F3): the snapshot-vs-live
-        // re-check below reads ONE batched eligibility projection
-        // instead of a getById round trip per note. The
-        // projection's SQL gate IS the eligibility rule (locked,
-        // trashed and archived are filtered in the query), so a
-        // note missing from the set is exactly a note the old
-        // per-note re-check would have rejected.
-        val liveEligibleIds = noteDao.getIndexCandidates().map { it.id }.toHashSet()
         for ((noteId, want) in desired) {
             // Snapshot-vs-live re-check (Jules PR #23 P1): the
             // snapshot predates any lock/trash/archive that landed
@@ -468,7 +460,13 @@ class SemanticIndexer(
             // note is not embedded from its stale snapshot, and
             // vectors it already had do not survive the pass
             // either — the purge above only saw the snapshot.
-            if (noteId !in liveEligibleIds) {
+            // (Performance chapter 2 kept this per-note check
+            // deliberately: a batched eligibility snapshot taken
+            // before the loop cannot see a lock that lands
+            // MID-PASS, and a locked note's plaintext must never
+            // reach the provider — the noteLockedMidPass pin.)
+            val live = noteDao.getById(noteId)
+            if (live == null || !isIndexEligible(live)) {
                 if (working.remove(noteId) != null) changed = true
                 continue
             }
