@@ -241,7 +241,7 @@ class NotesSwipeGhostUiTest {
         // pin-mapping test below).
         runBlocking { preferences.setSwipeConfirmDestructive(true) }
         try {
-            awaitTrue("confirm option live") { viewModel.swipeConfirmDestructive.value }
+            awaitTrue("confirm option live") { viewModel.swipeConfirmDestructive.value == true }
             composeRule.waitForIdle()
 
             composeRule.onNodeWithText("Ghost alpha").performTouchInput { swipeRight() }
