@@ -428,14 +428,17 @@ class ReminderRepositoryRobolectricTest {
         )
 
         // The conditional advance must now lose on the trigger
-        // match too (PR #53, Codex R4): the outcome is Spent
-        // (nothing is re-armed off this snapshot), the live row
-        // stays enabled, and the user's rescheduled time is never
-        // overwritten by the stale-derived next occurrence.
+        // match too (PR #53, Codex R4). Round 5: because the live
+        // row is still enabled, the outcome is Conflicted — not
+        // Spent — so the fire handler re-converges the armed set
+        // to the live row instead of dropping its bookkeeping.
+        // The live row stays enabled, and the user's rescheduled
+        // time is never overwritten by the stale-derived next
+        // occurrence.
         val outcome = reminders.markFired(
             snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
         )
-        assertEquals(ReminderRepository.FireOutcome.Spent, outcome)
+        assertEquals(ReminderRepository.FireOutcome.Conflicted, outcome)
         val row = db.reminderDao().getById(saved.id)
         assertNotNull(row)
         assertTrue(row!!.enabled)
@@ -539,6 +542,44 @@ class ReminderRepositoryRobolectricTest {
         )
         assertEquals(1, advanced)
         assertEquals(base + 86_400_000L, db.reminderDao().getById(alarm.id)?.triggerAt)
+    }
+
+    @Test
+    fun advanceOverdueRepeatsLeavesJustDueRepeatsForTheFireHandler() = runBlocking {
+        // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
+        val base = 1_900_000_020_000L
+        val now = base + 600_000L
+        val justDueNote = notes.createNote(title = "Just due", plainBody = "")
+        val longDueNote = notes.createNote(title = "Long due", plainBody = "")
+        // Due 60 seconds before the pass runs: inside the grace
+        // window (PR #53, round 5) — its alarm delivery may be in
+        // flight right now (a due alarm cold-starts the process
+        // while the app-start reconciliation runs this pass), so
+        // the pass must leave the row for the fire handler.
+        val justDue = reminders.setReminder(
+            justDueNote.id, triggerAt = now - 60_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // Due 10 minutes before the pass runs: a genuinely missed
+        // occurrence, well past the grace window.
+        val longDue = reminders.setReminder(
+            longDueNote.id, triggerAt = now - 600_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+
+        val advanced = reminders.advanceOverdueRepeats(
+            nowMillis = now, zone = ZoneId.of("UTC"),
+        )
+        // Only the long-due row advanced (to its next day); the
+        // just-due row keeps its trigger, uncounted.
+        assertEquals(1, advanced)
+        assertEquals(now - 60_000L, db.reminderDao().getById(justDue.id)?.triggerAt)
+        assertEquals(
+            now - 600_000L + 86_400_000L,
+            db.reminderDao().getById(longDue.id)?.triggerAt,
+        )
     }
 
     @Test

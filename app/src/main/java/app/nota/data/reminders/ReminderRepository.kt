@@ -204,6 +204,14 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         /** A repeating reminder advanced: still enabled, its
          *  triggerAt now the next occurrence — re-arm [reminder]. */
         data class Advanced(val reminder: ReminderEntity) : FireOutcome
+
+        /** The row changed under the handler's snapshot (PR #53,
+         *  round 5): still enabled, but at a different trigger —
+         *  the user rescheduled mid-fire. This call neither
+         *  advanced nor spent the series; the live row is exactly
+         *  as the user left it, and the handler re-converges the
+         *  armed set to it instead of dropping its bookkeeping. */
+        data object Conflicted : FireOutcome
     }
 
     /** Spends the reminder unconditionally (enabled = false): the
@@ -230,12 +238,15 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * time this runs — so the writes are field-targeted (PR #53,
      * Codex R3): the advance lands only while the LIVE row is still
      * enabled AND still at the snapshot's trigger
-     * ([ReminderDao.advanceTriggerIfEnabled], tightened in round 4);
-     * a row the user completed — or rescheduled — in between
-     * reports [FireOutcome.Spent] here and is never resurrected,
-     * re-armed, or overwritten. The spend flips only the enabled
-     * flag ([ReminderDao.spendById]), preserving any concurrent
-     * edit to the live row.
+     * ([ReminderDao.advanceTriggerIfEnabled], tightened in round 4).
+     * When that write loses, the live row decides the outcome
+     * (round 5): gone or disabled — completed or deleted mid-fire
+     * — is [FireOutcome.Spent]; still enabled means the user
+     * rescheduled mid-fire, which is [FireOutcome.Conflicted] —
+     * the live row is left exactly as the user left it, never
+     * resurrected, re-armed over, or overwritten. The spend flips
+     * only the enabled flag ([ReminderDao.spendById]), preserving
+     * any concurrent edit to the live row.
      */
     suspend fun markFired(
         reminder: ReminderEntity,
@@ -253,9 +264,19 @@ class ReminderRepository(private val provider: DatabaseProvider) {
             if (dao().advanceTriggerIfEnabled(reminder.id, next, reminder.triggerAt) == 1) {
                 FireOutcome.Advanced(reminder.copy(triggerAt = next))
             } else {
-                // Completed, deleted, or rescheduled after the
-                // snapshot: do not re-arm over the live row.
-                FireOutcome.Spent
+                // The conditional write lost: re-read the live
+                // row to tell a completion from a reschedule
+                // (round 5). Gone or disabled — the series is
+                // over either way. Still enabled: its trigger
+                // necessarily differs from the snapshot's, so
+                // the user rescheduled mid-fire — a conflict,
+                // not a spend; the live row stays untouched.
+                val live = dao().getById(reminder.id)
+                if (live == null || !live.enabled) {
+                    FireOutcome.Spent
+                } else {
+                    FireOutcome.Conflicted
+                }
             }
         } else {
             dao().spendById(reminder.id)
@@ -276,6 +297,16 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * so a row completed — or rescheduled — between this pass's
      * read and its write is left exactly as the user left it, and
      * only rows actually written are counted.
+     *
+     * Rows that came due within the last [GRACE_MILLIS] are left
+     * alone (round 5): their alarm delivery may be in flight RIGHT
+     * NOW — a due alarm cold-starts the process through its
+     * receiver while the app-start rescheduleAll runs this pass,
+     * and advancing the row first would make the fire handler
+     * read the already-advanced row, label its notification with
+     * the NEXT occurrence's time, and advance a second time,
+     * silently swallowing an occurrence. Anything older is a
+     * genuinely missed occurrence and advances exactly as before.
      * Returns how many rows advanced.
      */
     suspend fun advanceOverdueRepeats(
@@ -284,7 +315,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
     ): Int {
         var advanced = 0
         dao().getAll()
-            .filter { it.enabled && it.triggerAt <= nowMillis }
+            .filter { it.enabled && it.triggerAt <= nowMillis - GRACE_MILLIS }
             .forEach { row ->
                 val next = ReminderRepeat.nextOccurrence(
                     anchorTriggerAt = row.triggerAt,
@@ -297,5 +328,14 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                 }
             }
         return advanced
+    }
+
+    companion object {
+        /** How long a due repeating reminder is left for its own
+         *  alarm delivery before [advanceOverdueRepeats] treats
+         *  the occurrence as missed (PR #53, round 5): alarm
+         *  delivery plus a cold process start completes in
+         *  seconds, so two minutes is a wide margin. */
+        const val GRACE_MILLIS: Long = 120_000L
     }
 }

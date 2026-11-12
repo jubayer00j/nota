@@ -19,7 +19,12 @@ import app.nota.data.db.DatabaseProvider
  * Phase 7 (PR #53): a REPEATING reminder that fires still posts as
  * above, but instead of spending it advances to its next occurrence
  * and is re-armed under the same id; the spent path (missing/trashed
- * note) ends the series exactly as before.
+ * note) ends the series exactly as before. If the user rescheduled
+ * the reminder while this fire was in flight, markFired reports a
+ * conflict instead: the live row is left untouched and the armed
+ * set is re-converged to it — dropping the fired bookkeeping
+ * (onFired) would disarm the replacement alarm the reschedule
+ * just armed (round 5).
  */
 class ReminderFireHandler(
     context: Context,
@@ -72,6 +77,13 @@ class ReminderFireHandler(
                 scheduler.schedule(outcome.reminder)
             ReminderRepository.FireOutcome.Spent ->
                 scheduler.onFired(reminderId)
+            ReminderRepository.FireOutcome.Conflicted ->
+                // The series was neither advanced nor spent: the
+                // live row carries the user's rescheduled time.
+                // Converge the armed set to the table (which arms
+                // that time) rather than dropping the bookkeeping
+                // — onFired would disarm the replacement alarm.
+                scheduler.rescheduleAll()
         }
     }
 }
