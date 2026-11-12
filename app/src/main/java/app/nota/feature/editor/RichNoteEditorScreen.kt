@@ -295,7 +295,7 @@ internal object EditorPerfProbe {
 
 /** The footer stats line's text for a note's plain text. */
 internal fun docStatsText(plain: String): String {
-    val words = plain.split(Regex("\s+")).count { it.isNotEmpty() }
+    val words = plain.split(Regex("\\s+")).count { it.isNotEmpty() }
     val minutes = maxOf(1, (words + 199) / 200)
     return "$words words · $minutes min read"
 }
@@ -1337,7 +1337,7 @@ fun RichNoteEditorScreen(
      *  it so a later launch doesn't route back into a finished visit. */
     fun leaveNote() {
         retirePendingInsert()
-        persistNow(onBack)
+        persistNow(then = onBack)
     }
 
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
@@ -4099,8 +4099,6 @@ private fun evictCellRichStates(
  * in [applyAutolink] reads live state, so a second collector
  * always sees the first one's link and stands down.
  */
-@OptIn(ExperimentalRichTextApi::class)
-@Composable
 /**
  * Performance chapter 2 (F1): observes a rich-text state's
  * content and reports genuine changes. Emissions caused by
@@ -4124,6 +4122,8 @@ private fun SegmentDirtyEffect(state: RichTextState, onDirty: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalRichTextApi::class)
+@Composable
 private fun AutolinkEffect(state: RichTextState) {
     LaunchedEffect(state) {
         var previous = state.annotatedString.text
