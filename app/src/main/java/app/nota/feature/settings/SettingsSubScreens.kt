@@ -262,7 +262,7 @@ fun SettingsNotesScreen(
                 title = "Ask before archive or delete swipes",
                 subtitle = "Confirm first when a swipe would archive a note, " +
                     "move it to the trash, or delete it forever",
-                checked = swipeConfirm,
+                checked = swipeConfirm == true,
                 onCheckedChange = { value ->
                     scope.launch { preferencesRepository.setSwipeConfirmDestructive(value) }
                 },

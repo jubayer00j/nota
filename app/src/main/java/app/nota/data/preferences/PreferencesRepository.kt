@@ -342,15 +342,26 @@ class PreferencesRepository internal constructor(
     // swipes behave exactly as they always have until the user
     // turns this on in Settings → Notes list. Device-local like the
     // swipe actions above; never enters a backup.
-    val swipeConfirmDestructive: Flow<Boolean> = dataStore.safeData.map { prefs ->
-        prefs[KEY_SWIPE_CONFIRM_DESTRUCTIVE] ?: false
-    }
+    //
+    // Deliberately NOT safeData (the appLockSettings posture, PR #7):
+    // this setting guards destructive actions, so it FAILS CLOSED.
+    // safeData degrades an IOException to emptyPreferences, which
+    // the mapping below would read as "option off" — an unreadable
+    // store must instead emit null ("unknown"), which the notes
+    // gate treats as ON for destructive swipes (Codex R5). A
+    // successful read with the key absent still means genuinely
+    // off, and emits false.
+    val swipeConfirmDestructive: Flow<Boolean?> = dataStore.data
+        .map { prefs -> prefs[KEY_SWIPE_CONFIRM_DESTRUCTIVE] ?: false }
+        .catch { exception ->
+            if (exception is IOException) emit(null) else throw exception
+        }
 
     suspend fun setSwipeConfirmDestructive(enabled: Boolean) {
         safeEdit { this[KEY_SWIPE_CONFIRM_DESTRUCTIVE] = enabled }
     }
 
-    suspend fun swipeConfirmDestructiveNow(): Boolean = swipeConfirmDestructive.first()
+    suspend fun swipeConfirmDestructiveNow(): Boolean? = swipeConfirmDestructive.first()
 
     // ---- App Lock (Phase 2a) -------------------------------------------
     // Per-method salt+hash slots (like 1.x's separate password/pattern

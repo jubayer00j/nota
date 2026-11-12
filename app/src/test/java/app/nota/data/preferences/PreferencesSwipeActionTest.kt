@@ -1,10 +1,16 @@
 package app.nota.data.preferences
 
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import androidx.test.core.app.ApplicationProvider
+import java.io.IOException
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -70,6 +76,25 @@ class PreferencesSwipeActionTest {
         // Restore the default so no state leaks across tests sharing
         // the sandbox store.
         prefs.setSwipeConfirmDestructive(false)
+        Unit
+    }
+
+    /** PR #52 (Codex R5): an unreadable store reads as "unknown"
+     *  (null) — never as "option off" — so the notes gate stays
+     *  fail-closed for destructive swipes. */
+    @Test
+    fun swipeConfirmation_unreadableStore_readsUnknownNotOff() = runBlocking {
+        val failingStore = object : DataStore<Preferences> {
+            override val data: Flow<Preferences> =
+                flow { throw IOException("store unreadable") }
+
+            override suspend fun updateData(
+                transform: suspend (t: Preferences) -> Preferences,
+            ): Preferences = throw IOException("store unreadable")
+        }
+        val prefs = PreferencesRepository(failingStore)
+        assertNull(prefs.swipeConfirmDestructive.first())
+        assertNull(prefs.swipeConfirmDestructiveNow())
         Unit
     }
 }
