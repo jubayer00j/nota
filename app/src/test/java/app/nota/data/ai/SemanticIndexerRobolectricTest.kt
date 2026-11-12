@@ -290,7 +290,11 @@ class SemanticIndexerRobolectricTest {
         // the next pass (desiredNotes exclusion drives the purge).
         notes.setArchived(active, true)
         indexer.reconcile(account)
-        assertNull(indexStore.load(account))
+        // PR #54 R2: a completed pass that purges to empty now
+        // stores an EMPTY index instead of deleting the file —
+        // the purge contract itself is unchanged: the vectors
+        // are GONE, and nothing surfaces below.
+        assertTrue(indexStore.load(account)?.notes.isNullOrEmpty())
         assertTrue(indexer.search(account, "apple").isEmpty())
     }
 
@@ -345,7 +349,9 @@ class SemanticIndexerRobolectricTest {
         notes.delete(b)
         indexer.reconcile(account)
         assertEquals(0, indexer.status(account).indexedNotes)
-        assertNull(indexStore.load(account))
+        // PR #54 R2: emptied by a completed pass ⇒ an empty
+        // index is stored, not a deleted file (see above).
+        assertTrue(indexStore.load(account)?.notes.isNullOrEmpty())
     }
 
     @Test

@@ -506,7 +506,7 @@ class SemanticIndexer(
                 sinceSave = 0
             }
         }
-        if (working.isEmpty()) {
+        if (working.isEmpty() && !providerFailed) {
             // A completed configured pass that leaves nothing
             // indexed still stores an (empty) index under the
             // active signature (Codex PR #54 R2): persist() would
@@ -517,7 +517,11 @@ class SemanticIndexer(
             // the full candidate scan on every reconcile despite
             // the stamp saved below. An empty index reads exactly
             // like a missing one in search/Ask (both check
-            // notes.isEmpty()), so no answer changes.
+            // notes.isEmpty()), so no answer changes. A provider-
+            // failed pass is NOT completed: it falls through to
+            // the persist path below exactly as before, so a
+            // failure still leaves the previous state (or no
+            // index at all) untouched.
             storeIndex(
                 accountId,
                 StoredSemanticIndex(config.spaceSignature(), 0, emptyMap()),
