@@ -696,11 +696,7 @@ class EditorReadModeUiTest {
         var left = millis
         while (left > 0) {
             val step = minOf(left, 250L)
-            // This MainTestClock has no advanceBy(millis); frames
-            // are 16 ms, so step in whole frames (~256 ms each).
-            repeat((step / 16).toInt() + 1) {
-                composeRule.mainClock.advanceByFrame()
-            }
+            composeRule.mainClock.advanceTimeBy(step)
             shadow.idleFor(step, TimeUnit.MILLISECONDS)
             composeRule.waitForIdle()
             left -= step
