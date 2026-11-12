@@ -15,9 +15,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
-import org.robolectric.shadows.ShadowApplication
 
 /**
  * Phase 5.1: the Reminders screen's section split (1.x's reminders
@@ -111,7 +112,7 @@ class RemindersSectionTest {
     fun dialogDailyChipSavesTheDailyRule() {
         // Granted up front so Save goes straight to performSave
         // instead of the permission launcher.
-        ShadowApplication.getInstance()
+        Shadows.shadowOf(RuntimeEnvironment.getApplication())
             .grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
         var savedRule: String? = "unset"
         composeRule.setContent {

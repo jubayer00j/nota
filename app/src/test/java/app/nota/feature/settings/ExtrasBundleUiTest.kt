@@ -147,7 +147,7 @@ class ExtrasBundleUiTest {
                     noteTitle = "Wake up",
                     existing = phoneAlarm,
                     onDismiss = {},
-                    onSave = { _, _, _ -> },
+                    onSave = { _, _, _, _ -> },
                     onRemove = {},
                 )
             }
@@ -171,7 +171,7 @@ class ExtrasBundleUiTest {
                     noteTitle = "Wake up",
                     existing = notification,
                     onDismiss = {},
-                    onSave = { _, _, _ -> },
+                    onSave = { _, _, _, _ -> },
                     onRemove = {},
                 )
             }

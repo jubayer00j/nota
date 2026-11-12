@@ -230,7 +230,7 @@ class ReminderSchedulerTest {
     @Test
     fun nextOccurrenceOfNoRuleIsNull() {
         val anchor = millis("2026-11-02T09:00:00Z")
-        assertNull(ReminderRepeat.nextOccurrence(anchor, null, anchor - 1, utc))
+        assertNull(ReminderRepeat.nextOccurrence(anchor, null as String?, anchor - 1, utc))
         assertNull(ReminderRepeat.nextOccurrence(anchor, "GARBAGE", anchor - 1, utc))
     }
 
@@ -254,6 +254,6 @@ class ReminderSchedulerTest {
         assertEquals((1..7).toSet(), ReminderRepeat.daysIso("DAILY", tuesday, utc))
         assertEquals(setOf(2), ReminderRepeat.daysIso("WEEKLY", tuesday, utc))
         assertEquals(setOf(1, 3, 5), ReminderRepeat.daysIso("DAYS:1,3,5", tuesday, utc))
-        assertNull(ReminderRepeat.daysIso(null, tuesday, utc))
+        assertNull(ReminderRepeat.daysIso(null as String?, tuesday, utc))
     }
 }
