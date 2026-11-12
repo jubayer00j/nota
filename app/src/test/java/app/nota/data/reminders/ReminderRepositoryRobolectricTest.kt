@@ -311,11 +311,14 @@ class ReminderRepositoryRobolectricTest {
     @Test
     fun markFiredAdvancesARepeatingReminder() = runBlocking {
         val note = notes.createNote(title = "Daily pill", plainBody = "")
-        val triggerAt = 1_900_000_000_000L
+        // Minute-aligned, like every real picked trigger: the
+        // stored rule's @HH:MM series time (round 2) then carries
+        // the trigger exactly, with no seconds to lose.
+        val triggerAt = 1_900_000_020_000L
         val saved = reminders.setReminder(
             note.id, triggerAt = triggerAt,
             alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
-            repeatRule = "DAILY",
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
         )
         val outcome = reminders.markFired(
             saved, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
@@ -331,7 +334,8 @@ class ReminderRepositoryRobolectricTest {
 
     @Test
     fun advanceOverdueRepeatsMovesOnlyEnabledRepeats() = runBlocking {
-        val base = 1_900_000_000_000L
+        // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
+        val base = 1_900_000_020_000L
         val dailyNote = notes.createNote(title = "Daily", plainBody = "")
         val onceNote = notes.createNote(title = "Once", plainBody = "")
         val futureNote = notes.createNote(title = "Future", plainBody = "")
@@ -339,7 +343,7 @@ class ReminderRepositoryRobolectricTest {
         val daily = reminders.setReminder(
             dailyNote.id, triggerAt = base,
             alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
-            repeatRule = "DAILY",
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
         )
         val oneShot = reminders.setReminder(
             onceNote.id, triggerAt = base,
@@ -348,7 +352,7 @@ class ReminderRepositoryRobolectricTest {
         val future = reminders.setReminder(
             futureNote.id, triggerAt = base + 7_200_000L,
             alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
-            repeatRule = "DAILY",
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
         )
         val spent = reminders.setReminder(
             spentNote.id, triggerAt = base,
@@ -373,12 +377,13 @@ class ReminderRepositoryRobolectricTest {
 
     @Test
     fun advanceOverdueRepeatsMovesPhoneAlarmRowsToo() = runBlocking {
-        val base = 1_900_000_000_000L
+        // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
+        val base = 1_900_000_020_000L
         val note = notes.createNote(title = "Wake up", plainBody = "")
         val alarm = reminders.setReminder(
             note.id, triggerAt = base,
             alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
-            repeatRule = "DAILY",
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
         )
 
         // The Clock app gives Nota no fire signal, so a phone-alarm
