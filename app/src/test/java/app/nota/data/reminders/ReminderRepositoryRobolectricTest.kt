@@ -332,6 +332,27 @@ class ReminderRepositoryRobolectricTest {
     }
 
     @Test
+    fun advanceOverdueRepeatsMovesPhoneAlarmRowsToo() = runBlocking {
+        val base = 1_900_000_000_000L
+        val note = notes.createNote(title = "Wake up", plainBody = "")
+        val alarm = reminders.setReminder(
+            note.id, triggerAt = base,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+
+        // The Clock app gives Nota no fire signal, so a phone-alarm
+        // repeat's row is advanced only by this reconciliation pass:
+        // one hour past the base time it moves to the next day, the
+        // same as a notification repeat.
+        val advanced = reminders.advanceOverdueRepeats(
+            nowMillis = base + 3_600_000L, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(1, advanced)
+        assertEquals(base + 86_400_000L, db.reminderDao().getById(alarm.id)?.triggerAt)
+    }
+
+    @Test
     fun observeRowsJoinsTitlesAndHidesTrashedNotes() = runBlocking {
         val kept = notes.createNote(title = "Kept note", plainBody = "")
         val trashed = notes.createNote(title = "Trashed note", plainBody = "")
