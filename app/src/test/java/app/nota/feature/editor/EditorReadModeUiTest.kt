@@ -684,10 +684,11 @@ class EditorReadModeUiTest {
     }
 
     // ------------------------------------------------------------------
-    // Performance chapter 2 pins (F1/F2/F4). The autosave tick runs
-    // on Handler delays, so virtual time is advanced explicitly
-    // through the shadow main looper in small steps, settling
-    // composition between steps.
+    // Performance chapter 2 pins (F1/F2/F4). The autosave tick's
+    // delay is governed by the compose test clock in this harness
+    // (LaunchedEffect delays do not follow the shadow looper), so
+    // virtual time is advanced on BOTH clocks in small steps,
+    // settling composition between steps.
     // ------------------------------------------------------------------
 
     private fun advanceVirtualTime(millis: Long) {
@@ -695,6 +696,7 @@ class EditorReadModeUiTest {
         var left = millis
         while (left > 0) {
             val step = minOf(left, 250L)
+            composeRule.mainClock.advanceBy(step)
             shadow.idleFor(step, TimeUnit.MILLISECONDS)
             composeRule.waitForIdle()
             left -= step
