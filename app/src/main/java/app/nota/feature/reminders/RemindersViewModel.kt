@@ -18,6 +18,9 @@ import kotlinx.coroutines.launch
  * Completed-Dismissed), each sorted by time ascending. Rows come
  * from ReminderRepository.observeRows (locked notes show their
  * titles here — the list is in-app behind App Lock, as in 1.x).
+ * Creating this ViewModel runs one scheduler reconciliation, so a
+ * phone-alarm repeat whose Clock occurrence has already passed is
+ * advanced before its row can be shown as overdue.
  */
 class RemindersViewModel(
     private val repository: ReminderRepository,
@@ -36,6 +39,19 @@ class RemindersViewModel(
     val uiState: StateFlow<UiState> = repository.observeRows()
         .map { rows -> section(rows, System.currentTimeMillis()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+
+    init {
+        // Opening this screen is the moment a stale repeating row
+        // would be seen: the Clock app gives Nota no fire signal for
+        // phone-alarm reminders, so a phone-alarm repeat's row is
+        // advanced only by the scheduler's reconciliation funnel.
+        // Run it once here so the row heals before it can be filed
+        // under Overdue (notification repeats are advanced by the
+        // fire handler instead and are unaffected).
+        viewModelScope.launch {
+            runCatching { scheduler.rescheduleAll() }
+        }
+    }
 
     /** Marks a pending reminder completed (1.x): it leaves the
      *  pending state and its alarm is cancelled. For phone-alarm

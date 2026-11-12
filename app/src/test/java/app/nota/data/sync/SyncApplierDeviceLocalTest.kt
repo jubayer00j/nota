@@ -132,4 +132,48 @@ class SyncApplierDeviceLocalTest {
         assertEquals("alarm.mp3", row?.alarmToneName)
         assertFalse(row?.alarmVibrate ?: true)
     }
+
+    /**
+     * PR #53: the repeat rule is device-local on the same terms — a
+     * merge updates the wire fields (the trigger moves) but must not
+     * strip the series this device is running.
+     */
+    @Test
+    fun syncApplyPreservesTheRepeatRule() = runBlocking {
+        val note = NoteRepository(provider).createNote(
+            title = "Dentist", plainBody = "teeth",
+        )
+        db.reminderDao().upsert(
+            ReminderEntity(
+                id = "r1", noteId = note.id, triggerAt = 1_000L,
+                enabled = true, createdAt = 10L,
+                alertType = ReminderAlertType.NOTIFICATION,
+                repeatRule = "DAILY",
+            ),
+        )
+        val merged = exportData(
+            note.id,
+            BxReminder(
+                id = "r1", noteId = note.id, scheduledAt = 2_000L,
+                status = "pending", createdAt = 10L, updatedAt = 100L,
+            ),
+        )
+        applier.apply(
+            merged = merged,
+            remoteHandle = null,
+            conflictAttachmentSources = emptyMap(),
+            knownEntityIds = mapOf(
+                EntityHash.ENTITY_NOTE to setOf(note.id),
+                EntityHash.ENTITY_FOLDER to emptySet(),
+                EntityHash.ENTITY_TAG to emptySet(),
+                EntityHash.ENTITY_REMINDER to setOf("r1"),
+                EntityHash.ENTITY_ATTACHMENT to emptySet(),
+            ),
+            mergedAttachmentContent = emptyMap(),
+            localAttachmentContent = emptyMap(),
+        )
+        val row = db.reminderDao().getById("r1")
+        assertEquals(2_000L, row?.triggerAt)
+        assertEquals("DAILY", row?.repeatRule)
+    }
 }

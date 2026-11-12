@@ -163,6 +163,7 @@ import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.reminders.ReminderNotificationText
+import app.nota.data.reminders.ReminderRepeat
 import app.nota.feature.capture.NotePinShortcut
 import app.nota.feature.chart.CHART_BLOCK_EDIT_TAG
 import app.nota.feature.chart.ChartEditorDialog
@@ -209,6 +210,7 @@ import com.mohamedrejeb.richeditor.model.RichSpanStyle
 import com.mohamedrejeb.richeditor.model.RichTextState
 import com.mohamedrejeb.richeditor.ui.BasicRichTextEditor
 import java.text.SimpleDateFormat
+import java.time.ZoneId
 import java.util.Base64
 import java.util.Date
 import kotlin.math.roundToInt
@@ -1925,8 +1927,16 @@ fun RichNoteEditorScreen(
                                 text = {
                                     Text(
                                         if (reminder != null) {
+                                            // PR #53: the repeat label
+                                            // rides along when the
+                                            // reminder repeats.
                                             "Reminder · " + ReminderNotificationText
-                                                .formatReminderTime(reminder!!.triggerAt)
+                                                .formatReminderTime(reminder!!.triggerAt) +
+                                                (ReminderRepeat.repeatLabel(
+                                                    reminder!!.repeatRule,
+                                                    reminder!!.triggerAt,
+                                                    ZoneId.systemDefault(),
+                                                )?.let { " · $it" } ?: "")
                                         } else {
                                             "Set reminder"
                                         },
@@ -3120,8 +3130,8 @@ fun RichNoteEditorScreen(
                 noteTitle = noteForReminder.title,
                 existing = reminder,
                 onDismiss = { showReminderDialog = false },
-                onSave = { triggerAt, alertType, tone ->
-                    viewModel.setReminder(triggerAt, alertType, tone)
+                onSave = { triggerAt, alertType, tone, repeatRule ->
+                    viewModel.setReminder(triggerAt, alertType, tone, repeatRule)
                 },
                 onRemove = if (reminder != null) {
                     { viewModel.removeReminder() }

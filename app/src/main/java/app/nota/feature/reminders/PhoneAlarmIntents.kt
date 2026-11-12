@@ -7,6 +7,7 @@ import android.net.Uri
 import android.provider.AlarmClock
 import app.nota.data.reminders.ReminderNotificationText
 import java.time.Instant
+import java.time.LocalTime
 import java.time.ZoneId
 
 /**
@@ -31,11 +32,41 @@ object PhoneAlarmIntents {
         zone: ZoneId = ZoneId.systemDefault(),
         vibrate: Boolean = true,
         ringtoneUri: String? = null,
+    ): Intent = buildSetAlarmIntent(
+        noteTitle, triggerAtMillis, zone, vibrate, ringtoneUri,
+        repeatDaysIso = null, pickedTime = null,
+    )
+
+    /**
+     * PR #53: the repeating form. [repeatDaysIso] is the rule's ISO
+     * day set (Mon=1..Sun=7, via ReminderRepeat.daysIso) and maps to
+     * AlarmClock.EXTRA_DAYS so the Clock app rings the series, not
+     * just the first occurrence. null = one-shot (no extra, exactly
+     * the intent the 5-arg form has always built).
+     *
+     * Round 6: [pickedTime] is the local time the user actually
+     * picked, when the caller knows it. The hour/minutes extras
+     * come from it rather than from the trigger instant: a picked
+     * time inside a daylight-saving gap resolves to a different
+     * instant (02:30 picked becomes the 03:00 transition moment),
+     * and deriving the Clock series from the resolved instant
+     * would birth it at the shifted time even though Nota's row
+     * keeps the picked one. null = derive from the instant, as
+     * before.
+     */
+    fun buildSetAlarmIntent(
+        noteTitle: String,
+        triggerAtMillis: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+        vibrate: Boolean = true,
+        ringtoneUri: String? = null,
+        repeatDaysIso: Set<Int>?,
+        pickedTime: LocalTime? = null,
     ): Intent {
         val time = Instant.ofEpochMilli(triggerAtMillis).atZone(zone)
         return Intent(AlarmClock.ACTION_SET_ALARM).apply {
-            putExtra(AlarmClock.EXTRA_HOUR, time.hour)
-            putExtra(AlarmClock.EXTRA_MINUTES, time.minute)
+            putExtra(AlarmClock.EXTRA_HOUR, pickedTime?.hour ?: time.hour)
+            putExtra(AlarmClock.EXTRA_MINUTES, pickedTime?.minute ?: time.minute)
             // 1.x labels the alarm "Noma: <note title>".
             putExtra(
                 AlarmClock.EXTRA_MESSAGE,
@@ -53,9 +84,26 @@ object PhoneAlarmIntents {
                 clipData = ClipData.newRawUri("Alarm tone", Uri.parse(ringtoneUri))
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
+            // PR #53: a repeating reminder hands the Clock app its
+            // day set, or the alarm would ring once and stop while
+            // Nota's row keeps repeating.
+            if (repeatDaysIso != null) {
+                putIntegerArrayListExtra(
+                    AlarmClock.EXTRA_DAYS,
+                    ArrayList(calendarDaysFor(repeatDaysIso)),
+                )
+            }
             putExtra(AlarmClock.EXTRA_SKIP_UI, false)
         }
     }
+
+    /**
+     * ISO day numbers (Mon=1..Sun=7) → Calendar day constants
+     * (Sun=1..Sat=7), Monday-first order preserved:
+     * iso % 7 + 1 (Mon 1→2, Tue 2→3, …, Sat 6→7, Sun 7→1).
+     */
+    fun calendarDaysFor(daysIso: Set<Int>): List<Int> =
+        daysIso.filter { it in 1..7 }.sorted().map { it % 7 + 1 }
 
     /** Whether any app can take the hand-off. Callers must check
      *  BEFORE saving a phone-alarm reminder: with no Clock app the

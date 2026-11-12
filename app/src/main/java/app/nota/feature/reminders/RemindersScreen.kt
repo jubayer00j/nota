@@ -35,8 +35,10 @@ import androidx.compose.ui.unit.dp
 import app.nota.data.reminders.AlarmToneSettings
 import app.nota.data.reminders.ReminderAlertType
 import app.nota.data.reminders.ReminderNotificationText
+import app.nota.data.reminders.ReminderRepeat
 import app.nota.data.reminders.ReminderRepository
 import app.nota.ui.theme.NotaSpacing
+import java.time.ZoneId
 import org.koin.androidx.compose.koinViewModel
 
 /**
@@ -173,6 +175,18 @@ private fun ReminderRowItem(
                 MaterialTheme.colorScheme.onSurfaceVariant
             },
         )
+        // PR #53: the series label ("Daily", "Weekly · Tue", …);
+        // absent for one-shots.
+        val repeatLabel = ReminderRepeat.repeatLabel(
+            reminder.repeatRule, reminder.triggerAt, ZoneId.systemDefault(),
+        )
+        if (repeatLabel != null) {
+            Text(
+                repeatLabel,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (isPhoneAlarm) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -200,6 +214,16 @@ private fun ReminderRowItem(
                                 vibrate = reminder.alarmVibrate,
                                 ringtoneUri = AlarmToneSettings
                                     .fromEntity(reminder).uri,
+                                repeatDaysIso = ReminderRepeat.daysIso(
+                                    reminder.repeatRule, reminder.triggerAt,
+                                    ZoneId.systemDefault(),
+                                ),
+                                // PR #53 round 6: the row's stored
+                                // series time is the picked intent —
+                                // hand the Clock app that time, not
+                                // a possibly gap-resolved trigger's.
+                                pickedTime = ReminderRepeat
+                                    .parseSeries(reminder.repeatRule)?.time,
                             )
                             val opened = PhoneAlarmIntents.canHandle(context, intent) &&
                                 runCatching { context.startActivity(intent) }.isSuccess

@@ -109,6 +109,53 @@ class ClockAlarmDatesTest {
         assertFalse(ClockAlarmDates.isRepresentable(atNine, atNine, utc))
     }
 
+    // --- PR #53: repeating hand-offs -------------------------------
+    // With EXTRA_DAYS set, the Clock app rings the series; the only
+    // promise left is that the FIRST ring lands on the picked date.
+
+    @Test
+    fun repeatingNextOccurrenceSkipsToAMatchingDay() {
+        // Tuesdays only, asked on Friday: the next ring is Tue 10 Nov.
+        assertEquals(
+            millis("2026-11-10T09:00:00Z"),
+            ClockAlarmDates.nextOccurrenceMillis(LocalTime.of(9, 0), now, utc, setOf(2)),
+        )
+    }
+
+    @Test
+    fun repeatingPickedMatchingDayIsRepresentableOnlyAsTheFirstRing() {
+        // Fridays 14:30: today IS a matching day and the first ring.
+        assertTrue(
+            ClockAlarmDates.isRepresentable(
+                millis("2026-11-06T14:30:00Z"), now, utc, setOf(5),
+            ),
+        )
+        // Next Friday matches the series but is not its first ring —
+        // picking it would still ring today first.
+        assertFalse(
+            ClockAlarmDates.isRepresentable(
+                millis("2026-11-13T14:30:00Z"), now, utc, setOf(5),
+            ),
+        )
+    }
+
+    @Test
+    fun repeatingPickedFirstRingAcrossDaysIsRepresentable() {
+        // Mon/Wed/Fri at 09:00: today's 09:00 has passed (now 10:00),
+        // so the first ring is Mon 9 Nov; Wed 11 Nov is in the series
+        // but not first.
+        assertTrue(
+            ClockAlarmDates.isRepresentable(
+                millis("2026-11-09T09:00:00Z"), now, utc, setOf(1, 3, 5),
+            ),
+        )
+        assertFalse(
+            ClockAlarmDates.isRepresentable(
+                millis("2026-11-11T09:00:00Z"), now, utc, setOf(1, 3, 5),
+            ),
+        )
+    }
+
     @Test
     fun worksInDhakaTimeToo() {
         val dhaka: ZoneId = ZoneId.of("Asia/Dhaka")

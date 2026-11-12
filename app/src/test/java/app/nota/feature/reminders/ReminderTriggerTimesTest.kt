@@ -1,5 +1,6 @@
 package app.nota.feature.reminders
 
+import app.nota.data.reminders.ReminderTriggerTimes
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime

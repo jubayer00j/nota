@@ -2,6 +2,7 @@ package app.nota.feature.reminders
 
 import android.content.Intent
 import android.provider.AlarmClock
+import java.time.LocalTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -70,6 +71,80 @@ class PhoneAlarmIntentsTest {
         assertEquals(30, intent.getIntExtra(AlarmClock.EXTRA_MINUTES, -1))
         assertEquals("Nota: Dentist", intent.getStringExtra(AlarmClock.EXTRA_MESSAGE))
         assertFalse(intent.getBooleanExtra(AlarmClock.EXTRA_SKIP_UI, true))
+    }
+
+    // --- PR #53: EXTRA_DAYS for repeats ----------------------------
+    // ISO day numbers (Mon=1..Sun=7) map to Calendar constants
+    // (Sun=1..Sat=7) via iso % 7 + 1.
+
+    @Test
+    fun repeatingIntentCarriesCalendarDays() {
+        val daily = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = (1..7).toSet(),
+        )
+        // The full week in Monday-first ISO order, mapped: Mon..Sat
+        // become 2..7 and Sunday wraps to 1 at the tail — the Clock
+        // app reads EXTRA_DAYS as a set, so the order is cosmetic.
+        assertEquals(
+            arrayListOf(2, 3, 4, 5, 6, 7, 1),
+            daily.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+        // Tuesday ISO 2 -> Calendar 3.
+        val tuesday = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = setOf(2),
+        )
+        assertEquals(
+            arrayListOf(3),
+            tuesday.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+        // Mon/Wed/Fri -> 2/4/6.
+        val custom = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = setOf(1, 3, 5),
+        )
+        assertEquals(
+            arrayListOf(2, 4, 6),
+            custom.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+        // Sunday ISO 7 wraps to Calendar 1.
+        val sunday = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = setOf(7),
+        )
+        assertEquals(
+            arrayListOf(1),
+            sunday.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+    }
+
+    @Test
+    fun pickedTimeOverridesTheResolvedTriggerTime() {
+        // Sun 8 Mar 2026, 03:00 EDT: the spring-forward transition
+        // instant in New York. A picked 02:30 that morning never
+        // happens and resolves to this moment (PR #53, round 6).
+        val gapInstant = 1_772_953_200_000L
+        val newYork = ZoneId.of("America/New_York")
+        val picked = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", gapInstant, newYork,
+            repeatDaysIso = (1..7).toSet(),
+            pickedTime = LocalTime.of(2, 30),
+        )
+        // The Clock series is handed the PICKED time, not the
+        // resolved instant's 03:00.
+        assertEquals(2, picked.getIntExtra(AlarmClock.EXTRA_HOUR, -1))
+        assertEquals(30, picked.getIntExtra(AlarmClock.EXTRA_MINUTES, -1))
+        // With no picked time, the derivation from the instant is
+        // exactly as before: 03:00.
+        val derived = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", gapInstant, newYork,
+            repeatDaysIso = (1..7).toSet(),
+        )
+        assertEquals(3, derived.getIntExtra(AlarmClock.EXTRA_HOUR, -1))
+        assertEquals(0, derived.getIntExtra(AlarmClock.EXTRA_MINUTES, -1))
+    }
+
+    @Test
+    fun oneShotIntentHasNoDaysExtra() {
+        val intent = PhoneAlarmIntents.buildSetAlarmIntent("Dentist", triggerAt, utc)
+        assertNull(intent.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS))
     }
 
     @Test

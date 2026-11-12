@@ -2,9 +2,12 @@ package app.nota.data.reminders
 
 import androidx.room.withTransaction
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.ReminderDao
 import app.nota.data.db.ReminderEntity
 import app.nota.data.sync.EntityHash
 import app.nota.data.sync.SyncStore
+import java.time.Instant
+import java.time.ZoneId
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -27,8 +30,13 @@ import kotlinx.coroutines.flow.map
  * 1.x's "pending"; `enabled = false` is the spent state — a fired
  * one-shot, a completed reminder, a dismissed one — which the export
  * maps to BxReminder "dismissed" and which clears reminderAt.
- * repeatRule is always written null: 1.x backups carry no repeat, so
- * repeats stay dormant in 5.1.
+ *
+ * Phase 7 (PR #53): repeatRule is live — [setReminder] stores the
+ * encoded rule ([ReminderRepeat]); a fired REPEATING reminder
+ * advances to its next occurrence instead of spending (see
+ * [markFired]). The rule stays device-local like alertType and the
+ * tone fields: backups carry no repeat (1.x has none), so a restored
+ * reminder comes back one-shot.
  */
 class ReminderRepository(private val provider: DatabaseProvider) {
 
@@ -86,6 +94,8 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         alertType: String,
         nowMillis: Long = System.currentTimeMillis(),
         tone: AlarmToneSettings = AlarmToneSettings(),
+        repeatRule: String? = null,
+        zone: ZoneId = ZoneId.systemDefault(),
     ): ReminderEntity {
         require(alertType == ReminderAlertType.NOTIFICATION || alertType == ReminderAlertType.PHONE_ALARM) {
             "Unknown reminder alertType: $alertType"
@@ -96,6 +106,26 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         // tone fields, so a restored reminder comes back with the
         // entity defaults — system tone, vibrate on).
         val storedTone = tone.normalised()
+        // PR #53: the repeat rule is stored canonically — parsed and
+        // re-encoded, so a foreign or corrupt value degrades to null
+        // (one-shot) instead of being persisted verbatim. The stored
+        // form carries the series' intended local time as the @HH:MM
+        // suffix. An incoming series time WINS (round 4): the dialog
+        // passes the time the user actually picked, which a DST gap
+        // may have moved in the resolved trigger — deriving from
+        // that trigger would birth the series already re-based onto
+        // the resolved time. Derivation from the trigger being
+        // saved — its local time in [zone] — is the fallback for
+        // suffix-less inputs (programmatic callers, the legacy
+        // stored form), on the create and update-in-place paths
+        // alike.
+        val storedRepeat = ReminderRepeat.parseSeries(repeatRule)?.let { series ->
+            ReminderRepeat.encode(
+                series.rule,
+                series.time
+                    ?: Instant.ofEpochMilli(triggerAt).atZone(zone).toLocalTime(),
+            )
+        }
         return db.withTransaction {
             val existing = dao().getForNote(noteId)
             val primary = existing.firstOrNull()
@@ -107,7 +137,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
             val saved = if (primary != null) {
                 primary.copy(
                     triggerAt = triggerAt,
-                    repeatRule = null,
+                    repeatRule = storedRepeat,
                     enabled = true,
                     alertType = alertType,
                     alarmToneMode = storedTone.mode,
@@ -120,7 +150,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     id = UUID.randomUUID().toString(),
                     noteId = noteId,
                     triggerAt = triggerAt,
-                    repeatRule = null,
+                    repeatRule = storedRepeat,
                     enabled = true,
                     createdAt = nowMillis,
                     alertType = alertType,
@@ -166,12 +196,166 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         }
     }
 
-    /** A fired one-shot leaves the pending state (the alarm receiver's
-     *  state transition): enabled = false, so it stops showing as
-     *  pending and the note's reminderAt clears. */
-    suspend fun markFired(reminder: ReminderEntity) {
-        if (reminder.enabled) {
-            dao().upsert(reminder.copy(enabled = false))
+    /** The fire-time transition's outcome (PR #53). */
+    sealed interface FireOutcome {
+        /** The series is over: the row is spent (enabled = false). */
+        data object Spent : FireOutcome
+
+        /** A repeating reminder advanced: still enabled, its
+         *  triggerAt now the next occurrence — re-arm [reminder]. */
+        data class Advanced(val reminder: ReminderEntity) : FireOutcome
+
+        /** The row changed under the handler's snapshot (PR #53,
+         *  round 5): still enabled, but at a different trigger —
+         *  the user rescheduled mid-fire. This call neither
+         *  advanced nor spent the series; the live row is exactly
+         *  as the user left it, and the handler re-converges the
+         *  armed set to it instead of dropping its bookkeeping. */
+        data object Conflicted : FireOutcome
+    }
+
+    /** Spends the reminder unconditionally (enabled = false): the
+     *  series ends without a next occurrence. The fire path uses
+     *  this when the note is gone or trashed at fire time — a repeat
+     *  never advances past a dead note. The write is targeted
+     *  ([ReminderDao.spendById]): only the enabled flag flips on the
+     *  live row, so it is safe even when [reminder] is a snapshot
+     *  taken before a concurrent edit. */
+    suspend fun markSpent(reminder: ReminderEntity) {
+        dao().spendById(reminder.id)
+    }
+
+    /**
+     * The fire-time transition after a notification posted (the
+     * alarm receiver's state change). A one-shot leaves the pending
+     * state: enabled = false, so it stops showing as pending and the
+     * note's reminderAt clears. A REPEATING reminder (PR #53) stays
+     * enabled and its triggerAt advances to the next occurrence
+     * strictly after [nowMillis]; a rule that no longer parses
+     * degrades to the one-shot spend.
+     *
+     * [reminder] is the handler's snapshot — it may be stale by the
+     * time this runs — so the writes are field-targeted (PR #53,
+     * Codex R3): the advance lands only while the LIVE row is still
+     * enabled AND still at the snapshot's trigger AND still
+     * carrying the snapshot's rule
+     * ([ReminderDao.advanceTriggerIfEnabled], tightened in rounds
+     * 4 and 6). When that write loses, the live row decides the
+     * outcome (round 5): gone or disabled — completed or deleted
+     * mid-fire — is [FireOutcome.Spent]; still enabled means the
+     * user rescheduled or re-ruled mid-fire, which is
+     * [FireOutcome.Conflicted] —
+     * the live row is left exactly as the user left it, never
+     * resurrected, re-armed over, or overwritten. The spend flips
+     * only the enabled flag ([ReminderDao.spendById]), preserving
+     * any concurrent edit to the live row.
+     */
+    suspend fun markFired(
+        reminder: ReminderEntity,
+        nowMillis: Long = System.currentTimeMillis(),
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): FireOutcome {
+        if (!reminder.enabled) return FireOutcome.Spent
+        val next = ReminderRepeat.nextOccurrence(
+            anchorTriggerAt = reminder.triggerAt,
+            encoded = reminder.repeatRule,
+            afterMillis = nowMillis,
+            zone = zone,
+        )
+        return if (next != null) {
+            if (dao().advanceTriggerIfEnabled(
+                    reminder.id, next, reminder.triggerAt, reminder.repeatRule,
+                ) == 1) {
+                FireOutcome.Advanced(reminder.copy(triggerAt = next))
+            } else {
+                // The conditional write lost: re-read the live
+                // row to tell a completion from an edit
+                // (round 5). Gone or disabled — the series is
+                // over either way. Still enabled: its trigger
+                // or its rule differs from the snapshot's, so
+                // the user rescheduled or re-ruled mid-fire —
+                // a conflict, not a spend; the live row stays
+                // untouched.
+                val live = dao().getById(reminder.id)
+                if (live == null || !live.enabled) {
+                    FireOutcome.Spent
+                } else {
+                    FireOutcome.Conflicted
+                }
+            }
+        } else {
+            dao().spendById(reminder.id)
+            FireOutcome.Spent
         }
+    }
+
+    /**
+     * PR #53: the reconciliation advance pass — an enabled REPEATING
+     * reminder found overdue (device off, app killed, a restore that
+     * landed it in the past) is moved to its next future occurrence
+     * and persisted, so it never sits in Overdue and never fires a
+     * stale notification. One-shots are never touched: their overdue
+     * state is the 1.x Overdue section's whole point. Runs inside
+     * [ReminderScheduler.rescheduleAll] BEFORE the arm plan is
+     * computed, so the plan sees (and arms) the advanced times.
+     * Each write is conditional ([ReminderDao.advanceTriggerIfEnabled]),
+     * so a row completed — or rescheduled, or re-ruled — between
+     * this pass's read and its write is left exactly as the user
+     * left it, and only rows actually written are counted.
+     *
+     * Rows that came due within the last [GRACE_MILLIS] are left
+     * alone (round 5): their alarm delivery may be in flight RIGHT
+     * NOW — a due alarm cold-starts the process through its
+     * receiver while the app-start rescheduleAll runs this pass,
+     * and advancing the row first would make the fire handler
+     * read the already-advanced row, label its notification with
+     * the NEXT occurrence's time, and advance a second time,
+     * silently swallowing an occurrence. The window is wide
+     * (round 6) because delivery itself can legitimately be
+     * minutes late in the inexact mode — see [GRACE_MILLIS].
+     * Anything older is a genuinely missed occurrence and
+     * advances exactly as before. Returns how many rows advanced.
+     */
+    suspend fun advanceOverdueRepeats(
+        nowMillis: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): Int {
+        var advanced = 0
+        dao().getAll()
+            .filter { it.enabled && it.triggerAt <= nowMillis - GRACE_MILLIS }
+            .forEach { row ->
+                val next = ReminderRepeat.nextOccurrence(
+                    anchorTriggerAt = row.triggerAt,
+                    encoded = row.repeatRule,
+                    afterMillis = nowMillis,
+                    zone = zone,
+                )
+                if (next != null && next != row.triggerAt) {
+                    advanced += dao().advanceTriggerIfEnabled(
+                        row.id, next, row.triggerAt, row.repeatRule,
+                    )
+                }
+            }
+        return advanced
+    }
+
+    companion object {
+        /** How long a due repeating reminder is left for its own
+         *  alarm delivery before [advanceOverdueRepeats] treats
+         *  the occurrence as missed (PR #53, round 5; widened in
+         *  round 6). With exact-alarm access, delivery plus a
+         *  cold process start completes in seconds — but when
+         *  exact access is unavailable the alarm gateway falls
+         *  back to setAndAllowWhileIdle, whose delivery can
+         *  legitimately arrive minutes late under doze (the
+         *  reminder dialog itself warns those alarms "may
+         *  arrive a few minutes late"). The window must cover
+         *  that supported latency, or a late cold-start delivery
+         *  races the pass exactly as in round 5, so fifteen
+         *  minutes covers it with margin. The accepted
+         *  trade-off: an occurrence missed by less than the
+         *  window is advanced at a later reconcile rather than
+         *  immediately; older misses are unaffected. */
+        const val GRACE_MILLIS: Long = 900_000L
     }
 }

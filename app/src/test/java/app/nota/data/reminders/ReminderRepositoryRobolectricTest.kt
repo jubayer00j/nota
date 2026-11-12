@@ -5,6 +5,8 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.repository.NoteRepository
 import app.nota.data.sync.EntityHash
+import java.time.Instant
+import java.time.ZoneId
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -228,6 +230,413 @@ class ReminderRepositoryRobolectricTest {
         assertNull(saved.alarmToneUri)
         assertNull(saved.alarmToneName)
         assertFalse(saved.alarmVibrate)
+    }
+
+    // --- PR #53: repeats are stored, advanced, reconciled --------
+
+    @Test
+    fun setReminderStoresTheRepeatRuleCanonically() = runBlocking {
+        val note = notes.createNote(title = "Standup", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "days:5,1,5", zone = ZoneId.of("UTC"),
+        )
+        // Parsed and re-encoded: lowercase + duplicates + disorder
+        // never reach the row. Round 2: the stored form also
+        // carries the series time derived from the saved trigger
+        // (1_900_000_000_000 is 17:46 UTC).
+        assertEquals("DAYS:1,5@17:46", saved.repeatRule)
+        assertEquals(
+            "DAYS:1,5@17:46",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
+
+        // The update-in-place path stores the rule too — and an edit
+        // back to no rule clears it to a one-shot.
+        val cleared = reminders.setReminder(
+            note.id, triggerAt = 1_900_003_600_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+        )
+        assertEquals(saved.id, cleared.id)
+        assertNull(cleared.repeatRule)
+        assertNull(db.reminderDao().getById(saved.id)?.repeatRule)
+    }
+
+    @Test
+    fun setReminderStoresTheSeriesTimeFromTheSavedTrigger() = runBlocking {
+        val note = notes.createNote(title = "Early bird", plainBody = "")
+        // 02:30 UTC on the nose: the stored rule carries the saved
+        // trigger's local time as its @HH:MM series time (PR #53
+        // round 2), so the series can never drift off it.
+        val saved = reminders.setReminder(
+            note.id,
+            triggerAt = Instant.parse("2030-03-17T02:30:00Z").toEpochMilli(),
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        assertEquals("DAILY@02:30", saved.repeatRule)
+        assertEquals(
+            "DAILY@02:30",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
+
+        // The update-in-place path re-derives the suffix from the
+        // NEW trigger being saved — same row, new series time.
+        val updated = reminders.setReminder(
+            note.id,
+            triggerAt = Instant.parse("2030-03-18T09:15:00Z").toEpochMilli(),
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        assertEquals(saved.id, updated.id)
+        assertEquals("DAILY@09:15", updated.repeatRule)
+        assertEquals(
+            "DAILY@09:15",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
+    }
+
+    @Test
+    fun setReminderKeepsAnExplicitSeriesTime() = runBlocking {
+        val newYork = ZoneId.of("America/New_York")
+        // The 2026 spring-forward gap instant: 02:30 never happens
+        // on Sun 8 Mar 2026 in New York, and the picked time
+        // resolves to the moment the clocks land — 03:00 EDT.
+        val gapInstant = 1_772_953_200_000L
+        // An incoming series time is the picked intent and is kept
+        // verbatim (PR #53, Codex R4): deriving it from the
+        // resolved trigger would store @03:00 and birth the series
+        // already re-based onto the resolved time.
+        val note = notes.createNote(title = "Gap day", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = gapInstant,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY@02:30", zone = newYork,
+        )
+        assertEquals("DAILY@02:30", saved.repeatRule)
+        assertEquals(
+            "DAILY@02:30",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
+
+        // The suffix-less legacy form still derives from the
+        // trigger being saved (the documented fallback): the same
+        // gap instant stores the resolved local time, 03:00.
+        val legacyNote = notes.createNote(title = "Gap day legacy", plainBody = "")
+        val derived = reminders.setReminder(
+            legacyNote.id, triggerAt = gapInstant,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = newYork,
+        )
+        assertEquals("DAILY@03:00", derived.repeatRule)
+        assertEquals(
+            "DAILY@03:00",
+            db.reminderDao().getById(derived.id)?.repeatRule,
+        )
+    }
+
+    @Test
+    fun setReminderDegradesAGarbageRuleToOneShot() = runBlocking {
+        val note = notes.createNote(title = "Garbage rule", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "FORTNIGHTLY",
+        )
+        assertNull(saved.repeatRule)
+    }
+
+    @Test
+    fun markFiredAdvancesARepeatingReminder() = runBlocking {
+        val note = notes.createNote(title = "Daily pill", plainBody = "")
+        // Minute-aligned, like every real picked trigger: the
+        // stored rule's @HH:MM series time (round 2) then carries
+        // the trigger exactly, with no seconds to lose.
+        val triggerAt = 1_900_000_020_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        val outcome = reminders.markFired(
+            saved, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertTrue(outcome is ReminderRepository.FireOutcome.Advanced)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertTrue(row!!.enabled)
+        // UTC has no DST: the next daily occurrence is +24h sharp.
+        assertEquals(triggerAt + 86_400_000L, row.triggerAt)
+        assertEquals(row, reminders.pendingForNote(note.id))
+    }
+
+    @Test
+    fun markFiredDoesNotResurrectACompletedReminder() = runBlocking {
+        val note = notes.createNote(title = "Water plants", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // The fire handler's snapshot: the enabled row it read
+        // before posting the notification.
+        val snapshot = reminders.getById(saved.id)!!
+        // While the fire was in flight, the user completed the
+        // reminder (Reminders screen → setEnabled(false)).
+        val live = reminders.getById(saved.id)!!
+        reminders.setEnabled(live, enabled = false)
+
+        // The conditional advance must lose against the completion:
+        // the outcome is Spent (nothing is re-armed), the live row
+        // stays disabled, and its triggerAt never moves.
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Spent, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertFalse(row!!.enabled)
+        assertEquals(triggerAt, row.triggerAt)
+    }
+
+    @Test
+    fun markFiredDoesNotOverwriteAConcurrentReschedule() = runBlocking {
+        val note = notes.createNote(title = "Stretch", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val rescheduledAt = triggerAt + 7_200_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // The fire handler's snapshot: the enabled row it read
+        // before posting the notification.
+        val snapshot = reminders.getById(saved.id)!!
+        // While the fire was in flight, the user rescheduled the
+        // reminder: the in-place update keeps the id, stays
+        // enabled, and stores the new triggerAt.
+        reminders.setReminder(
+            note.id, triggerAt = rescheduledAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+
+        // The conditional advance must now lose on the trigger
+        // match too (PR #53, Codex R4). Round 5: because the live
+        // row is still enabled, the outcome is Conflicted — not
+        // Spent — so the fire handler re-converges the armed set
+        // to the live row instead of dropping its bookkeeping.
+        // The live row stays enabled, and the user's rescheduled
+        // time is never overwritten by the stale-derived next
+        // occurrence.
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Conflicted, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertTrue(row!!.enabled)
+        assertEquals(rescheduledAt, row.triggerAt)
+    }
+
+    @Test
+    fun markFiredConflictsOnARuleOnlyEdit() = runBlocking {
+        val note = notes.createNote(title = "Water the plants", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // Stored canonically: the series time is derived from the
+        // trigger (17:47 UTC).
+        assertEquals("DAILY@17:47", saved.repeatRule)
+        // The fire handler's snapshot: the enabled row it read
+        // before posting the notification.
+        val snapshot = reminders.getById(saved.id)!!
+        // While the fire was in flight, the user edited ONLY the
+        // rule: same row, same trigger, now weekly — the explicit
+        // series time is kept verbatim (round 4).
+        reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+            repeatRule = "WEEKLY@17:47", zone = ZoneId.of("UTC"),
+        )
+
+        // The conditional advance must now lose on the RULE match
+        // too (PR #53, Codex R6): id, enabled and trigger all still
+        // match the snapshot, but its next occurrence is tomorrow
+        // (daily) while the live series is weekly — landing the
+        // stale advance would fire an extra occurrence the new
+        // rule never produces. The live row is still enabled, so
+        // the outcome is Conflicted, and the row stays exactly as
+        // the user left it.
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Conflicted, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertTrue(row!!.enabled)
+        assertEquals(triggerAt, row.triggerAt)
+        assertEquals("WEEKLY@17:47", row.repeatRule)
+    }
+
+    @Test
+    fun markFiredSpendKeepsConcurrentEdits() = runBlocking {
+        val note = notes.createNote(title = "Call the bank", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val editedTriggerAt = triggerAt + 3_600_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+        )
+        // The fire handler's snapshot, taken before the edit.
+        val snapshot = reminders.getById(saved.id)!!
+        // Mid-fire, the user edits the reminder to a new time; the
+        // in-place update keeps the id and stores the new triggerAt.
+        reminders.setReminder(
+            note.id, triggerAt = editedTriggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+        )
+
+        // When the in-flight fire lands, the targeted spend flips
+        // ONLY the enabled flag: the edited triggerAt survives (a
+        // whole-entity upsert of the stale snapshot would roll it
+        // back to the pre-edit time).
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Spent, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertFalse(row!!.enabled)
+        assertEquals(editedTriggerAt, row.triggerAt)
+    }
+
+    @Test
+    fun advanceOverdueRepeatsMovesOnlyEnabledRepeats() = runBlocking {
+        // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
+        val base = 1_900_000_020_000L
+        val dailyNote = notes.createNote(title = "Daily", plainBody = "")
+        val onceNote = notes.createNote(title = "Once", plainBody = "")
+        val futureNote = notes.createNote(title = "Future", plainBody = "")
+        val spentNote = notes.createNote(title = "Spent", plainBody = "")
+        val daily = reminders.setReminder(
+            dailyNote.id, triggerAt = base,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        val oneShot = reminders.setReminder(
+            onceNote.id, triggerAt = base,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+        )
+        val future = reminders.setReminder(
+            futureNote.id, triggerAt = base + 7_200_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        val spent = reminders.setReminder(
+            spentNote.id, triggerAt = base,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+        reminders.markSpent(spent)
+
+        // One hour past the base time: only the enabled, overdue
+        // DAILY row advances (to the next day); the overdue one-shot
+        // keeps its Overdue semantics, the future repeat is not due,
+        // and the spent row stays spent where it was.
+        val advanced = reminders.advanceOverdueRepeats(
+            nowMillis = base + 3_600_000L, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(1, advanced)
+        assertEquals(base + 86_400_000L, db.reminderDao().getById(daily.id)?.triggerAt)
+        assertEquals(base, db.reminderDao().getById(oneShot.id)?.triggerAt)
+        assertEquals(base + 7_200_000L, db.reminderDao().getById(future.id)?.triggerAt)
+        assertEquals(base, db.reminderDao().getById(spent.id)?.triggerAt)
+    }
+
+    @Test
+    fun advanceOverdueRepeatsMovesPhoneAlarmRowsToo() = runBlocking {
+        // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
+        val base = 1_900_000_020_000L
+        val note = notes.createNote(title = "Wake up", plainBody = "")
+        val alarm = reminders.setReminder(
+            note.id, triggerAt = base,
+            alertType = ReminderAlertType.PHONE_ALARM, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+
+        // The Clock app gives Nota no fire signal, so a phone-alarm
+        // repeat's row is advanced only by this reconciliation pass:
+        // one hour past the base time it moves to the next day, the
+        // same as a notification repeat.
+        val advanced = reminders.advanceOverdueRepeats(
+            nowMillis = base + 3_600_000L, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(1, advanced)
+        assertEquals(base + 86_400_000L, db.reminderDao().getById(alarm.id)?.triggerAt)
+    }
+
+    @Test
+    fun advanceOverdueRepeatsLeavesJustDueRepeatsForTheFireHandler() = runBlocking {
+        // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
+        val base = 1_900_000_020_000L
+        val now = base + 1_800_000L
+        val justDueNote = notes.createNote(title = "Just due", plainBody = "")
+        val midDueNote = notes.createNote(title = "Mid due", plainBody = "")
+        val longDueNote = notes.createNote(title = "Long due", plainBody = "")
+        // Due 60 seconds before the pass runs: inside the grace
+        // window (PR #53, round 5) — its alarm delivery may be in
+        // flight right now (a due alarm cold-starts the process
+        // while the app-start reconciliation runs this pass), so
+        // the pass must leave the row for the fire handler.
+        val justDue = reminders.setReminder(
+            justDueNote.id, triggerAt = now - 60_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // Due 10 minutes before the pass runs: still inside the
+        // window since round 6 widened it to 15 minutes — without
+        // exact-alarm access the gateway's setAndAllowWhileIdle
+        // delivery can legitimately arrive minutes late, so this
+        // occurrence too may still be in flight.
+        val midDue = reminders.setReminder(
+            midDueNote.id, triggerAt = now - 600_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // Due 30 minutes before the pass runs: a genuinely missed
+        // occurrence, well past the grace window.
+        val longDue = reminders.setReminder(
+            longDueNote.id, triggerAt = now - 1_800_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+
+        val advanced = reminders.advanceOverdueRepeats(
+            nowMillis = now, zone = ZoneId.of("UTC"),
+        )
+        // Only the long-due row advanced (to its next day); the
+        // just-due and mid-due rows keep their triggers, uncounted.
+        assertEquals(1, advanced)
+        assertEquals(now - 60_000L, db.reminderDao().getById(justDue.id)?.triggerAt)
+        assertEquals(now - 600_000L, db.reminderDao().getById(midDue.id)?.triggerAt)
+        assertEquals(
+            now - 1_800_000L + 86_400_000L,
+            db.reminderDao().getById(longDue.id)?.triggerAt,
+        )
     }
 
     @Test
