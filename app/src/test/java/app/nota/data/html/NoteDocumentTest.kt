@@ -1,6 +1,5 @@
 package app.nota.data.html
 
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.ParagraphStyle
@@ -1503,13 +1502,11 @@ class NoteDocumentTest {
     private fun libraryAnnotated(html: String): AnnotatedString =
         RichTextState().apply { setHtml(html) }.annotatedString
 
-    /** Unspecified colour is the library's "no colour" (its Code
-     *  span is SpanStyle(color = Unspecified)); normalise it to
-     *  null so it compares equal to an unset field. */
-    private fun norm(style: SpanStyle): SpanStyle = style.copy(
-        color = if (style.color == Color.Unspecified) null else style.color,
-        background = if (style.background == Color.Unspecified) null else style.background,
-    )
+    // No style normalisation is needed: SpanStyle's colour fields
+    // are non-null with Color.Unspecified as the unset sentinel on
+    // BOTH sides (the library's Code span is SpanStyle(color =
+    // Unspecified); the converter's plain span is SpanStyle()).
+    private fun norm(style: SpanStyle): SpanStyle = style
 
     private fun coalesceSpans(
         spans: List<AnnotatedString.Range<SpanStyle>>,
