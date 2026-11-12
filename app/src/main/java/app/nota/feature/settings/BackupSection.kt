@@ -333,6 +333,12 @@ fun BackupSection(
             confirmButton = {
                 TextButton(onClick = {
                     val file = File(passphraseStage.tempFilePath)
+                    // PR #52: stage the passphrase with the store so
+                    // a successful restore can hand this device the
+                    // archive's key (DriveRepository's adoption hook)
+                    // — the value must outlive this composition for
+                    // exactly the lock-cycle reasons the stage does.
+                    pendingRestoreStore.stageRestorePassphrase(pass)
                     pendingRestoreStore.performRead {
                         backupRepository.readBackup(file, pass)
                     }

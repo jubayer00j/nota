@@ -307,6 +307,161 @@ class DriveRepositoryTest {
         Unit
     }
 
+    // ---- PR #52: a passphrase restore hands the device the key
+
+    /** Drives [store] through the exact sequence BackupSection
+     *  performs for a passphrase restore: stage a copy, read with no
+     *  passphrase (→ prompt), stage the passphrase, read again with
+     *  it, then apply (Merge). Ends at the store's Completed state,
+     *  which the store only reaches AFTER the applied hook ran. */
+    private suspend fun drivePassphraseRestoreThroughStore(
+        store: PendingRestoreStore,
+        archive: File,
+        passphrase: String,
+    ) {
+        store.stageCopy {
+            val copy = File(context.cacheDir, "restore-copy-${System.nanoTime()}.bin")
+            archive.copyTo(copy)
+            copy
+        }
+        val needsRead = withTimeout(30_000) {
+            store.state.first { it is PendingRestoreState.NeedsRead }
+        } as PendingRestoreState.NeedsRead
+        store.performRead { backups.readBackup(File(needsRead.tempFilePath), null) }
+        val needsPassphrase = withTimeout(30_000) {
+            store.state.first { it is PendingRestoreState.NeedsPassphrase }
+        } as PendingRestoreState.NeedsPassphrase
+        store.stageRestorePassphrase(passphrase)
+        store.performRead { backups.readBackup(File(needsPassphrase.tempFilePath), passphrase) }
+        withTimeout(30_000) {
+            store.state.first { it is PendingRestoreState.SummaryReady }
+        }
+        store.performApply { handle ->
+            val counts = backups.applyBackup(handle, RestoreMode.MERGE)
+            "Restored (merge): ${counts.added} added."
+        }
+        withTimeout(30_000) {
+            store.state.first { it is PendingRestoreState.Completed }
+        }
+    }
+
+    @Test
+    fun passphraseRestore_adoptsKeyOnKeylessDevice() = runBlocking {
+        seedNote("n-adopt", "Adopt me")
+        val archive = File(context.cacheDir, "adopt.enc")
+        backups.exportToFile(archive, "restore-pass")
+        deleteNote("n-adopt")
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "restore-pass")
+
+        // The restore itself landed…
+        assertEquals("Adopt me", provider.current.noteDao().getById("n-adopt")?.title)
+        // …and the device now HOLDS the archive's key: the record
+        // carries the archive's own header, and its device key opens
+        // the very same archive (the sync held-key read path).
+        val record = prefs.getDriveEncryptionRecord(uid)
+        assertNotNull(record)
+        assertNotNull(record!!.deviceKeyBase64)
+        val adoptedBmk = Base64.getDecoder().decode(record.deviceKeyBase64)
+        val reopened = backups.readBackupWithBmk(archive, adoptedBmk)
+        assertEquals(listOf("n-adopt"), reopened.notes.map { it.id })
+        assertEquals(record.salt, reopened.header!!.salt)
+        assertEquals(record.iterations, reopened.header!!.iterations)
+        assertEquals(record.wrappedKey, reopened.header!!.wrappedKey)
+        reopened.close()
+        adoptedBmk.fill(0)
+        Unit
+    }
+
+    @Test
+    fun passphraseRestore_keepsExistingHeldKeyUntouched() = runBlocking {
+        drive.setupEncryption("passphrase-1")
+        val recordBefore = prefs.getDriveEncryptionRecord(uid)!!
+
+        seedNote("n-foreign", "Foreign key archive")
+        val archive = File(context.cacheDir, "foreign.enc")
+        backups.exportToFile(archive, "other-pass")
+        deleteNote("n-foreign")
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "other-pass")
+
+        // The restore landed, but the held key is byte-identical:
+        // adoption never disturbs a device that already holds one.
+        assertEquals(
+            "Foreign key archive",
+            provider.current.noteDao().getById("n-foreign")?.title,
+        )
+        assertEquals(recordBefore, prefs.getDriveEncryptionRecord(uid))
+        Unit
+    }
+
+    @Test
+    fun plaintextRestore_createsNoEncryptionRecord() = runBlocking {
+        seedNote("n-plain", "Plain archive")
+        val archive = File(context.cacheDir, "plain.zip")
+        backups.exportToFile(archive, null)
+        deleteNote("n-plain")
+
+        pendingRestore.stageCopy {
+            val copy = File(context.cacheDir, "plain-copy-${System.nanoTime()}.bin")
+            archive.copyTo(copy)
+            copy
+        }
+        val needsRead = withTimeout(30_000) {
+            pendingRestore.state.first { it is PendingRestoreState.NeedsRead }
+        } as PendingRestoreState.NeedsRead
+        pendingRestore.performRead { backups.readBackup(File(needsRead.tempFilePath), null) }
+        withTimeout(30_000) {
+            pendingRestore.state.first { it is PendingRestoreState.SummaryReady }
+        }
+        pendingRestore.performApply { handle ->
+            backups.applyBackup(handle, RestoreMode.MERGE)
+            "Restored."
+        }
+        withTimeout(30_000) {
+            pendingRestore.state.first { it is PendingRestoreState.Completed }
+        }
+        assertEquals("Plain archive", provider.current.noteDao().getById("n-plain")?.title)
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+        Unit
+    }
+
+    @Test
+    fun guestPassphraseRestore_completesAndAdoptsNothing() = runBlocking {
+        // A second DriveRepository acting as a guest (no account):
+        // records are per-account, so its adoption hook must adopt
+        // nothing — while the restore itself completes normally.
+        val guestStore = PendingRestoreStore()
+        DriveRepository(
+            context = context,
+            sessionProvider = { Session.Guest },
+            driveAuth = FakeAuth(context),
+            gateway = gateway,
+            backups = backups,
+            prefs = prefs,
+            pendingRestore = guestStore,
+            syncApplier = app.nota.data.sync.SyncApplier(
+                context,
+                provider,
+                AttachmentStore(context, provider),
+                TemplateRepository(context),
+            ),
+            provider = provider,
+        )
+
+        seedNote("n-guest", "Guest restore")
+        val archive = File(context.cacheDir, "guest.enc")
+        backups.exportToFile(archive, "guest-pass")
+        deleteNote("n-guest")
+
+        drivePassphraseRestoreThroughStore(guestStore, archive, "guest-pass")
+
+        assertEquals("Guest restore", provider.current.noteDao().getById("n-guest")?.title)
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+        Unit
+    }
+
     @Test
     fun applyRefusesAnArchiveOwnedByAnotherAccount() = runBlocking {
         // Export while acting as uid-other (manifest owner = other).

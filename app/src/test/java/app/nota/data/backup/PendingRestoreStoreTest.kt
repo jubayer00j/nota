@@ -177,6 +177,56 @@ class PendingRestoreStoreTest {
         assertTrue(store.state.value is PendingRestoreState.Completed)
     }
 
+    /**
+     * PR #52 plumbing: the store carries the passphrase from the
+     * prompt to the post-apply hook (Drive key adoption), and ONLY
+     * across a successful apply — never for a plaintext/device-key
+     * read (nothing staged) and never when the apply fails.
+     */
+    @Test
+    fun appliedHookReceivesStagedPassphraseAfterSuccessfulApplyOnly() {
+        val store = newStore()
+        val calls = mutableListOf<Pair<BackupReader.Handle, String?>>()
+        store.restoreAppliedHook = { handle, passphrase -> calls += handle to passphrase }
+
+        // Restore 1: passphrase staged at the prompt → the hook
+        // receives it, with the very handle that was applied.
+        val temp1 = File.createTempFile("pending-restore-hook1", ".bin")
+        val staging1 = File.createTempFile("pending-staging-hook1", "").apply { delete(); mkdirs() }
+        store.stageCopy { temp1 }
+        store.performRead { throw BackupKeyNeededError("Backup is encrypted") }
+        store.stageRestorePassphrase("open-sesame")
+        var handle1: BackupReader.Handle? = null
+        store.performRead { fakeHandle(staging1).also { handle1 = it } }
+        store.performApply { "done" }
+        assertTrue(store.state.value is PendingRestoreState.Completed)
+        assertEquals(1, calls.size)
+        assertTrue(calls[0].first === handle1)
+        assertEquals("open-sesame", calls[0].second)
+
+        // Restore 2: nothing staged (plaintext / device-key read) →
+        // the hook still fires, with a null passphrase.
+        val temp2 = File.createTempFile("pending-restore-hook2", ".bin")
+        val staging2 = File.createTempFile("pending-staging-hook2", "").apply { delete(); mkdirs() }
+        store.stageCopy { temp2 }
+        store.performRead { fakeHandle(staging2) }
+        store.performApply { "done" }
+        assertTrue(store.state.value is PendingRestoreState.Completed)
+        assertEquals(2, calls.size)
+        assertEquals(null, calls[1].second)
+
+        // Restore 3: staged, but the apply FAILS → the hook never
+        // fires (adoption rides a successful restore only).
+        val temp3 = File.createTempFile("pending-restore-hook3", ".bin")
+        val staging3 = File.createTempFile("pending-staging-hook3", "").apply { delete(); mkdirs() }
+        store.stageCopy { temp3 }
+        store.stageRestorePassphrase("open-sesame")
+        store.performRead { fakeHandle(staging3) }
+        store.performApply { throw IllegalStateException("Restore failed.") }
+        assertTrue(store.state.value is PendingRestoreState.Failed)
+        assertEquals(2, calls.size)
+    }
+
     @Test
     fun cancelAtPassphrasePromptDeletesTempAndIdles() {
         val store = newStore()

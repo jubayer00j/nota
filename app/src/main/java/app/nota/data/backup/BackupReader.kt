@@ -41,6 +41,14 @@ class BackupReader(private val workDir: File) {
         val tombstones: List<BxTombstone>,
         val deviceId: String?,
         val encrypted: Boolean,
+        /** The parsed NOMAENC1 header when the archive was encrypted
+         *  (either read path); null for a plaintext archive. The
+         *  header is NOT secret — salt / iterations / wrappedKey are
+         *  exactly what the Drive encryption record stores — and
+         *  carrying it lets a passphrase restore hand the archive's
+         *  key to this device afterwards (PR #52). No BMK is ever
+         *  retained on the handle. */
+        val header: BackupCrypto.Header? = null,
         private val stagingDir: File,
         private val decryptedZip: File?,
     ) : AutoCloseable {
@@ -87,6 +95,7 @@ class BackupReader(private val workDir: File) {
         try {
             val encrypted: Boolean
             val zipFile: File
+            var header: BackupCrypto.Header? = null
             source.inputStream().buffered().use { probe ->
                 val prefix = ByteArray(8)
                 var read = 0
@@ -114,6 +123,7 @@ class BackupReader(private val workDir: File) {
                             skipped += n
                         }
                         val opened = open(input)
+                        header = opened.envelope.header
                         try {
                             tmp.outputStream().buffered().use { out ->
                                 BackupCrypto.decryptTo(opened.envelope, opened.bmk, out)
@@ -131,7 +141,7 @@ class BackupReader(private val workDir: File) {
             } else {
                 zipFile = source
             }
-            return parseZip(zipFile, stagingDir, encrypted, decryptedZip).also {
+            return parseZip(zipFile, stagingDir, encrypted, decryptedZip, header).also {
                 decryptedZip = null // ownership moved to the handle
             }
         } catch (e: Exception) {
@@ -148,6 +158,7 @@ class BackupReader(private val workDir: File) {
         stagingDir: File,
         encrypted: Boolean,
         decryptedZip: File?,
+        header: BackupCrypto.Header?,
     ): Handle {
         var manifest: BackupManifest? = null
         var folders: List<BxFolder> = emptyList()
@@ -253,6 +264,7 @@ class BackupReader(private val workDir: File) {
             tombstones = tombstones,
             deviceId = deviceId,
             encrypted = encrypted,
+            header = header,
             stagingDir = stagingDir,
             decryptedZip = decryptedZip,
         )

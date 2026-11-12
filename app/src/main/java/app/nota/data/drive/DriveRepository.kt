@@ -72,6 +72,22 @@ class DriveRepository(
     @Volatile
     private var pendingOp: Op? = null
 
+    init {
+        // PR #52: a restore that was opened with its passphrase
+        // hands this device the archive's key (see
+        // [adoptRestoredEncryptionKey]). The pending-restore store
+        // calls back after a successful apply with the handle and
+        // the passphrase the read used — null for plaintext archives
+        // and for the device-key fast path, which by definition
+        // already hold (or never needed) the key.
+        pendingRestore.restoreAppliedHook = { handle, passphrase ->
+            val header = handle.header
+            if (passphrase != null && header != null) {
+                adoptRestoredEncryptionKey(header, passphrase)
+            }
+        }
+    }
+
     private fun signedInUid(): String? =
         (sessionProvider() as? Session.SignedIn)?.uid
 
@@ -460,6 +476,48 @@ class DriveRepository(
         prefs.setDriveEncryptionRecord(
             uid,
             record.copy(deviceKeyBase64 = Base64.getEncoder().encodeToString(bmk)),
+        )
+        bmk.fill(0)
+        refreshEncryptionRecord()
+        return true
+    }
+
+    /**
+     * Restore adoption (PR #52): a backup that was just restored
+     * after being opened with its passphrase hands this device the
+     * archive's key, so enabling sync afterwards just works instead
+     * of refusing with "this device doesn't hold the key" until the
+     * user re-enters the passphrase under Security. Mirrors
+     * [setupEncryption]'s adoption: the stored record takes the
+     * restored archive's own header + the BMK unwrapped from it —
+     * the passphrase has already proved itself by opening the
+     * archive, so the extra unwrap cannot fail in practice (and
+     * changes nothing if it somehow does).
+     *
+     * Deliberately conservative: a device that ALREADY holds a key
+     * keeps it — the record is left untouched, so a live Drive
+     * archive can never be orphaned by a restore. A keyless record
+     * (or none at all) takes the restored pair wholesale, the same
+     * repair posture as setup. A signed-out restore adopts nothing:
+     * records are per-account, and Drive needs an account anyway.
+     * Returns whether a key was adopted.
+     */
+    suspend fun adoptRestoredEncryptionKey(
+        header: BackupCrypto.Header,
+        passphrase: String,
+    ): Boolean {
+        val uid = signedInUid() ?: return false
+        val existing = prefs.getDriveEncryptionRecord(uid)
+        if (existing?.deviceKeyBase64 != null) return false
+        val bmk = BackupCrypto.unwrapBmk(header, passphrase) ?: return false
+        prefs.setDriveEncryptionRecord(
+            uid,
+            PreferencesRepository.DriveEncryptionRecord(
+                salt = header.salt,
+                iterations = header.iterations,
+                wrappedKey = header.wrappedKey,
+                deviceKeyBase64 = Base64.getEncoder().encodeToString(bmk),
+            ),
         )
         bmk.fill(0)
         refreshEncryptionRecord()
