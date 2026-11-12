@@ -2,6 +2,7 @@ package app.nota.data.reminders
 
 import androidx.room.withTransaction
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.ReminderDao
 import app.nota.data.db.ReminderEntity
 import app.nota.data.sync.EntityHash
 import app.nota.data.sync.SyncStore
@@ -203,11 +204,12 @@ class ReminderRepository(private val provider: DatabaseProvider) {
     /** Spends the reminder unconditionally (enabled = false): the
      *  series ends without a next occurrence. The fire path uses
      *  this when the note is gone or trashed at fire time — a repeat
-     *  never advances past a dead note. */
+     *  never advances past a dead note. The write is targeted
+     *  ([ReminderDao.spendById]): only the enabled flag flips on the
+     *  live row, so it is safe even when [reminder] is a snapshot
+     *  taken before a concurrent edit. */
     suspend fun markSpent(reminder: ReminderEntity) {
-        if (reminder.enabled) {
-            dao().upsert(reminder.copy(enabled = false))
-        }
+        dao().spendById(reminder.id)
     }
 
     /**
@@ -218,6 +220,15 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * enabled and its triggerAt advances to the next occurrence
      * strictly after [nowMillis]; a rule that no longer parses
      * degrades to the one-shot spend.
+     *
+     * [reminder] is the handler's snapshot — it may be stale by the
+     * time this runs — so the writes are field-targeted (PR #53,
+     * Codex R3): the advance lands only while the LIVE row is still
+     * enabled ([ReminderDao.advanceTriggerIfEnabled]); a row the
+     * user completed in between reports [FireOutcome.Spent] here and
+     * is never resurrected or re-armed. The spend flips only the
+     * enabled flag ([ReminderDao.spendById]), preserving any
+     * concurrent edit to the live row.
      */
     suspend fun markFired(
         reminder: ReminderEntity,
@@ -232,11 +243,15 @@ class ReminderRepository(private val provider: DatabaseProvider) {
             zone = zone,
         )
         return if (next != null) {
-            val advanced = reminder.copy(triggerAt = next)
-            dao().upsert(advanced)
-            FireOutcome.Advanced(advanced)
+            if (dao().advanceTriggerIfEnabled(reminder.id, next) == 1) {
+                FireOutcome.Advanced(reminder.copy(triggerAt = next))
+            } else {
+                // Completed or deleted after the snapshot: the
+                // series is over — do not re-arm it.
+                FireOutcome.Spent
+            }
         } else {
-            dao().upsert(reminder.copy(enabled = false))
+            dao().spendById(reminder.id)
             FireOutcome.Spent
         }
     }
@@ -250,6 +265,9 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * state is the 1.x Overdue section's whole point. Runs inside
      * [ReminderScheduler.rescheduleAll] BEFORE the arm plan is
      * computed, so the plan sees (and arms) the advanced times.
+     * Each write is conditional ([ReminderDao.advanceTriggerIfEnabled]),
+     * so a row completed between this pass's read and its write
+     * stays completed — and only rows actually written are counted.
      * Returns how many rows advanced.
      */
     suspend fun advanceOverdueRepeats(
@@ -267,8 +285,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     zone = zone,
                 )
                 if (next != null && next != row.triggerAt) {
-                    dao().upsert(row.copy(triggerAt = next))
-                    advanced++
+                    advanced += dao().advanceTriggerIfEnabled(row.id, next)
                 }
             }
         return advanced

@@ -333,6 +333,72 @@ class ReminderRepositoryRobolectricTest {
     }
 
     @Test
+    fun markFiredDoesNotResurrectACompletedReminder() = runBlocking {
+        val note = notes.createNote(title = "Water plants", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // The fire handler's snapshot: the enabled row it read
+        // before posting the notification.
+        val snapshot = reminders.getById(saved.id)!!
+        // While the fire was in flight, the user completed the
+        // reminder (Reminders screen → setEnabled(false)).
+        val live = reminders.getById(saved.id)!!
+        reminders.setEnabled(live, enabled = false)
+
+        // The conditional advance must lose against the completion:
+        // the outcome is Spent (nothing is re-armed), the live row
+        // stays disabled, and its triggerAt never moves.
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Spent, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertFalse(row!!.enabled)
+        assertEquals(triggerAt, row.triggerAt)
+    }
+
+    @Test
+    fun markFiredSpendKeepsConcurrentEdits() = runBlocking {
+        val note = notes.createNote(title = "Call the bank", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val editedTriggerAt = triggerAt + 3_600_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+        )
+        // The fire handler's snapshot, taken before the edit.
+        val snapshot = reminders.getById(saved.id)!!
+        // Mid-fire, the user edits the reminder to a new time; the
+        // in-place update keeps the id and stores the new triggerAt.
+        reminders.setReminder(
+            note.id, triggerAt = editedTriggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+        )
+
+        // When the in-flight fire lands, the targeted spend flips
+        // ONLY the enabled flag: the edited triggerAt survives (a
+        // whole-entity upsert of the stale snapshot would roll it
+        // back to the pre-edit time).
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Spent, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertFalse(row!!.enabled)
+        assertEquals(editedTriggerAt, row.triggerAt)
+    }
+
+    @Test
     fun advanceOverdueRepeatsMovesOnlyEnabledRepeats() = runBlocking {
         // Minute-aligned base (see markFiredAdvancesARepeatingReminder).
         val base = 1_900_000_020_000L

@@ -428,6 +428,21 @@ interface ReminderDao {
 
     @Delete
     suspend fun delete(reminder: ReminderEntity)
+
+    /** PR #53 (Codex R3): the fire path's conditional advance —
+     *  moves the trigger only while the row is still enabled, so a
+     *  reminder the user completed (or removed) after the fire
+     *  handler's read is never resurrected by a stale snapshot.
+     *  Returns the number of rows written: 1 = advanced, 0 = the
+     *  row was completed or deleted in between. */
+    @Query("UPDATE reminders SET triggerAt = :triggerAt WHERE id = :id AND enabled = 1")
+    suspend fun advanceTriggerIfEnabled(id: String, triggerAt: Long): Int
+
+    /** PR #53 (Codex R3): the targeted spend — flips ONLY the
+     *  enabled flag on the live row, so fields a concurrent edit
+     *  changed after a caller's read survive the spend. */
+    @Query("UPDATE reminders SET enabled = 0 WHERE id = :id")
+    suspend fun spendById(id: String): Int
 }
 
 @Dao
