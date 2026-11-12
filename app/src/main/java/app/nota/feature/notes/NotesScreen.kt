@@ -83,8 +83,15 @@ import org.koin.androidx.compose.koinViewModel
 
 private val FAB_CLEARANCE = 88.dp
 
+// Performance chapter 2 (F5): one shared formatter instead of a
+// fresh SimpleDateFormat + Date per row composition. The class
+// is not thread-safe, but every call site is a composable — main
+// thread only — so sharing is safe here. The locale is captured
+// once, like the rest of the screen's language.
+private val UPDATED_FORMAT = SimpleDateFormat("d MMM, h:mm a", Locale.getDefault())
+
 private fun formatUpdated(updatedAt: Long): String =
-    SimpleDateFormat("d MMM, h:mm a", Locale.getDefault()).format(Date(updatedAt))
+    UPDATED_FORMAT.format(Date(updatedAt))
 
 private fun emptyText(filter: NotesFilter): String = when (filter) {
     NotesFilter.All -> "No notes yet. Tap + to write your first note."

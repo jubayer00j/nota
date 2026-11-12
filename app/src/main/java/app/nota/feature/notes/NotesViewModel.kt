@@ -93,6 +93,20 @@ class NotesViewModel(
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState: StateFlow<NotesUiState> = provider.accountId
         .flatMapLatest { libraryState() }
+        .combine(selectionFlow) { state, selection ->
+            // Performance chapter 2 (F5): selection is applied
+            // OUTSIDE the library pipeline. It used to be a
+            // combine input of libraryState(), so every toggle
+            // re-ran the whole enrichment — a fresh NoteListItem
+            // for every note in the library, plus grouping and a
+            // full re-sort — to change a set the rows only read.
+            // Now a toggle copies the state shell and intersects
+            // against the SAME items list instance; no row item
+            // is rebuilt.
+            state.copy(
+                selection = selection.intersect(state.items.map { it.note.id }.toSet()),
+            )
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NotesUiState())
 
     /** Phase 3.5 (D3): the user's swipe actions for the main list. */
@@ -111,30 +125,35 @@ class NotesViewModel(
     val swipeConfirmDestructive: StateFlow<Boolean?> = preferences.swipeConfirmDestructive
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    private fun libraryState(): Flow<NotesUiState> = combine(
-        repository.observeActiveRows(),
-        repository.observeArchivedRows(),
-        repository.observeTrashedRows(),
-        repository.observeFolders(),
-        repository.observeTags(),
-    ) { active, archived, trashed, folders, tags -> LibrarySnapshot(active, archived, trashed, folders, tags) }
-        .combine(repository.observeAllCrossRefs()) { snap, crossRefs -> snap.copy(crossRefs = crossRefs) }
-        .combine(repository.observeAttachments()) { snap, attachments -> snap.copy(attachments = attachments) }
-        .combine(filterFlow) { snap, filter -> snap.copy(filter = filter) }
-        .combine(sortFlow) { snap, sort -> snap.copy(sort = sort) }
-        .combine(selectionFlow) { snap, selection ->
-            snap.toUiState(selection) { attachment ->
-                // Attachment localPaths are relative to filesDir
-                // (attachments/<noteId>/<file>); Coil cannot load a bare
-                // relative string, so resolve through the store (Codex
-                // fix G2). Paths already absolute pass through unchanged.
-                if (attachment.localPath.startsWith("/")) {
-                    attachment.localPath
-                } else {
-                    attachmentStore.fileFor(attachment).absolutePath
+    private fun libraryState(): Flow<NotesUiState> {
+        // One item cache per library chain (i.e. per account):
+        // enrichment results are shared across emissions for as
+        // long as the chain lives — see NoteListItemCache (F5).
+        val itemCache = NoteListItemCache()
+        return combine(
+            repository.observeActiveRows(),
+            repository.observeArchivedRows(),
+            repository.observeTrashedRows(),
+            repository.observeFolders(),
+            repository.observeTags(),
+        ) { active, archived, trashed, folders, tags -> LibrarySnapshot(active, archived, trashed, folders, tags) }
+            .combine(repository.observeAllCrossRefs()) { snap, crossRefs -> snap.copy(crossRefs = crossRefs) }
+            .combine(repository.observeAttachments()) { snap, attachments -> snap.copy(attachments = attachments) }
+            .combine(filterFlow) { snap, filter -> snap.copy(filter = filter) }
+            .combine(sortFlow) { snap, sort ->
+                snap.copy(sort = sort).toUiState(itemCache) { attachment ->
+                    // Attachment localPaths are relative to filesDir
+                    // (attachments/<noteId>/<file>); Coil cannot load a bare
+                    // relative string, so resolve through the store (Codex
+                    // fix G2). Paths already absolute pass through unchanged.
+                    if (attachment.localPath.startsWith("/")) {
+                        attachment.localPath
+                    } else {
+                        attachmentStore.fileFor(attachment).absolutePath
+                    }
                 }
             }
-        }
+    }
 
     private data class LibrarySnapshot(
         val active: List<app.nota.data.db.NoteListRow>,
@@ -147,7 +166,10 @@ class NotesViewModel(
         val filter: NotesFilter = NotesFilter.All,
         val sort: SortOrder = SortOrder.UpdatedDesc,
     ) {
-        fun toUiState(selection: Set<String>, coverPath: (AttachmentEntity) -> String): NotesUiState {
+        fun toUiState(
+            itemCache: NoteListItemCache,
+            coverPath: (AttachmentEntity) -> String,
+        ): NotesUiState {
             val tagsById = tags.associateBy { it.id }
             val foldersById = folders.associateBy { it.id }
             val tagIdsByNote = crossRefs.groupBy({ it.noteId }, { it.tagId })
@@ -155,21 +177,26 @@ class NotesViewModel(
             fun enrich(note: app.nota.data.db.NoteListRow): NoteListItem {
                 val noteTagIds = tagIdsByNote[note.id].orEmpty().toSet()
                 val noteAttachments = attachmentsByNote[note.id].orEmpty()
-                return NoteListItem(
+                // Phase 2b: a locked note never shows a cover — its
+                // attachment files hold envelopes, not images.
+                val coverImagePath = if (note.locked) {
+                    null
+                } else {
+                    noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }
+                        ?.let(coverPath)
+                }
+                // F5: share the item instance across emissions
+                // whenever every enrichment input is unchanged —
+                // the row composable then sees the identical item
+                // and skips work for notes nothing happened to.
+                return itemCache.item(
                     note = note,
                     folderName = note.folderId?.let { foldersById[it]?.name },
                     folderColorArgb = note.folderId?.let { foldersById[it]?.colorArgb },
                     tagNames = noteTagIds.mapNotNull { tagsById[it]?.name }.sorted(),
                     tagIds = noteTagIds,
                     attachmentCount = noteAttachments.size,
-                    // Phase 2b: a locked note never shows a cover — its
-                    // attachment files hold envelopes, not images.
-                    coverImagePath = if (note.locked) {
-                        null
-                    } else {
-                        noteAttachments.firstOrNull { it.mimeType.startsWith("image/") }
-                            ?.let(coverPath)
-                    },
+                    coverImagePath = coverImagePath,
                 )
             }
             val now = System.currentTimeMillis()
@@ -183,10 +210,25 @@ class NotesViewModel(
                 NotesFilter.Archived -> archived.map(::enrich)
                 NotesFilter.Trash -> trashed.map(::enrich)
             }
-            val sorted = when (sort) {
-                SortOrder.UpdatedDesc -> source.sortedWith(compareByDescending<NoteListItem> { it.note.pinned }.thenByDescending { it.note.updatedAt })
-                SortOrder.CreatedDesc -> source.sortedWith(compareByDescending<NoteListItem> { it.note.pinned }.thenByDescending { it.note.createdAt })
-                SortOrder.TitleAsc -> source.sortedWith(compareByDescending<NoteListItem> { it.note.pinned }.thenBy { it.note.title.lowercase() })
+            // F5: under UpdatedDesc the ACTIVE-derived lists need
+            // no re-sort at all — the DAO already emitted them in
+            // exactly the comparator's order (pinned DESC,
+            // updatedAt DESC) and filtering preserves order. The
+            // archived query has no pinned term and the trash
+            // query orders by trashedAt, so those two (and the
+            // other sort orders everywhere) keep the in-memory
+            // sort.
+            val sorted = if (
+                sort == SortOrder.UpdatedDesc &&
+                filter != NotesFilter.Archived && filter != NotesFilter.Trash
+            ) {
+                source
+            } else {
+                when (sort) {
+                    SortOrder.UpdatedDesc -> source.sortedWith(compareByDescending<NoteListItem> { it.note.pinned }.thenByDescending { it.note.updatedAt })
+                    SortOrder.CreatedDesc -> source.sortedWith(compareByDescending<NoteListItem> { it.note.pinned }.thenByDescending { it.note.createdAt })
+                    SortOrder.TitleAsc -> source.sortedWith(compareByDescending<NoteListItem> { it.note.pinned }.thenBy { it.note.title.lowercase() })
+                }
             }
             return NotesUiState(
                 items = sorted,
@@ -194,8 +236,59 @@ class NotesViewModel(
                 tags = tags,
                 filter = filter,
                 sort = sort,
-                selection = selection.intersect(sorted.map { it.note.id }.toSet()),
             )
+        }
+    }
+
+    /** Performance chapter 2 (F5): structural sharing for row
+     *  items. Enrichment (folder/tag/attachment lookups + the
+     *  [NoteListItem] itself) is a pure function of the inputs
+     *  below; when every input for a note is unchanged since the
+     *  last emission, the SAME instance is handed back, so a
+     *  one-note change rebuilds exactly one row's item and a
+     *  selection toggle rebuilds none. Keyed by note id with the
+     *  full input tuple as the validity check — note ids are
+     *  UUIDs, so entries can never collide across accounts, and
+     *  the cache lives as long as its library chain. */
+    private class NoteListItemCache {
+        private data class Inputs(
+            val row: app.nota.data.db.NoteListRow,
+            val folderName: String?,
+            val folderColorArgb: Int?,
+            val tagNames: List<String>,
+            val tagIds: Set<String>,
+            val attachmentCount: Int,
+            val coverImagePath: String?,
+        )
+
+        private val cache = HashMap<String, Pair<Inputs, NoteListItem>>()
+
+        fun item(
+            note: app.nota.data.db.NoteListRow,
+            folderName: String?,
+            folderColorArgb: Int?,
+            tagNames: List<String>,
+            tagIds: Set<String>,
+            attachmentCount: Int,
+            coverImagePath: String?,
+        ): NoteListItem {
+            val inputs = Inputs(
+                note, folderName, folderColorArgb, tagNames, tagIds,
+                attachmentCount, coverImagePath,
+            )
+            val hit = cache[note.id]
+            if (hit != null && hit.first == inputs) return hit.second
+            val item = NoteListItem(
+                note = note,
+                folderName = folderName,
+                folderColorArgb = folderColorArgb,
+                tagNames = tagNames,
+                tagIds = tagIds,
+                attachmentCount = attachmentCount,
+                coverImagePath = coverImagePath,
+            )
+            cache[note.id] = inputs to item
+            return item
         }
     }
 
