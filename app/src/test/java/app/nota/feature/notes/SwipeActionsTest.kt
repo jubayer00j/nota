@@ -2,7 +2,9 @@ package app.nota.feature.notes
 
 import app.nota.data.preferences.SwipeAction
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -70,6 +72,31 @@ class SwipeActionsTest {
         assertEquals(SwipeKind.TRASH, kind(SwipeAction.TRASH, SwipeDirection.LEFT))
         assertEquals(SwipeKind.PIN, kind(SwipeAction.PIN, SwipeDirection.LEFT))
         assertNull(kind(SwipeAction.OFF, SwipeDirection.LEFT))
+    }
+
+    /** PR #52: the confirmation gate covers exactly the destructive
+     *  kinds, and only when the user turned the option on. */
+    @Test
+    fun confirmationGate_coversExactlyTheDestructiveKinds() {
+        // Option on: archive / trash / delete-forever ask first.
+        assertTrue(requiresSwipeConfirmation(SwipeKind.ARCHIVE, confirmEnabled = true))
+        assertTrue(requiresSwipeConfirmation(SwipeKind.TRASH, confirmEnabled = true))
+        assertTrue(requiresSwipeConfirmation(SwipeKind.DELETE_FOREVER, confirmEnabled = true))
+        // Pin and restore are never gated.
+        assertFalse(requiresSwipeConfirmation(SwipeKind.PIN, confirmEnabled = true))
+        assertFalse(requiresSwipeConfirmation(SwipeKind.RESTORE, confirmEnabled = true))
+        // Option off: nothing is gated — swipes behave as before.
+        for (kind in SwipeKind.entries) {
+            assertFalse(requiresSwipeConfirmation(kind, confirmEnabled = false))
+        }
+        // Not yet loaded (null, Codex R1): the destructive kinds are
+        // gated conservatively until the saved value arrives; pin and
+        // restore still are not.
+        assertTrue(requiresSwipeConfirmation(SwipeKind.ARCHIVE, confirmEnabled = null))
+        assertTrue(requiresSwipeConfirmation(SwipeKind.TRASH, confirmEnabled = null))
+        assertTrue(requiresSwipeConfirmation(SwipeKind.DELETE_FOREVER, confirmEnabled = null))
+        assertFalse(requiresSwipeConfirmation(SwipeKind.PIN, confirmEnabled = null))
+        assertFalse(requiresSwipeConfirmation(SwipeKind.RESTORE, confirmEnabled = null))
     }
 
     @Test

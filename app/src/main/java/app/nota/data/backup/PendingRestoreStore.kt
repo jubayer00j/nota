@@ -88,6 +88,39 @@ class PendingRestoreStore(
     @Volatile
     private var handle: BackupReader.Handle? = null
 
+    /**
+     * The passphrase the in-flight restore's archive was opened with
+     * (PR #52), staged by the settings UI at the passphrase prompt —
+     * process-scoped like the stage itself, so it survives the same
+     * lock cycles. It is consumed by [performApply] and handed to
+     * [restoreAppliedHook]; it is never persisted, and it is cleared
+     * whenever a new restore is staged, the current one is
+     * cancelled, or its apply finishes. A restore read with the
+     * device key (or a plaintext archive) never stages one.
+     */
+    @Volatile
+    private var stagedPassphrase: String? = null
+
+    /**
+     * Post-apply callback (PR #52): invoked on the store scope after
+     * a SUCCESSFUL apply, with the applied handle and the passphrase
+     * the archive was read with (null for plaintext and device-key
+     * reads). DriveRepository registers its restore key adoption
+     * here — the store itself stays free of Drive/preferences
+     * concerns. A failure inside the hook never fails the restore:
+     * the apply already succeeded.
+     */
+    @Volatile
+    var restoreAppliedHook: (suspend (BackupReader.Handle, String?) -> Unit)? = null
+
+    /** Stages the passphrase a pending encrypted read is about to
+     *  use (PR #52). Called by the settings UI when the user submits
+     *  the passphrase prompt; a wrong passphrase is simply overwritten
+     *  by the next submit or cleared with the restore. */
+    fun stageRestorePassphrase(passphrase: String) {
+        stagedPassphrase = passphrase
+    }
+
     /** The read handle for the [PendingRestoreState.SummaryReady] /
      *  [PendingRestoreState.Applying] stages (manifest rendering +
      *  apply). Owned and closed by the store. */
@@ -105,7 +138,10 @@ class PendingRestoreStore(
                 is PendingRestoreState.Idle,
                 is PendingRestoreState.Completed,
                 is PendingRestoreState.Failed,
-                -> _state.value = PendingRestoreState.Copying
+                -> {
+                    stagedPassphrase = null
+                    _state.value = PendingRestoreState.Copying
+                }
                 else -> return
             }
         }
@@ -209,6 +245,28 @@ class PendingRestoreStore(
         scope.launch {
             try {
                 val message = apply(liveHandle)
+                // PR #52: the apply succeeded — hand the handle and
+                // the passphrase the read used (if any) to the
+                // registered hook (Drive key adoption) BEFORE the
+                // terminal transition, so a Completed observer can
+                // rely on the adoption having run. The hook's own
+                // failure never fails a restore that already landed.
+                val hook = restoreAppliedHook
+                val usedPassphrase = synchronized(lock) {
+                    val staged = stagedPassphrase
+                    stagedPassphrase = null
+                    staged
+                }
+                if (hook != null) {
+                    try {
+                        hook(liveHandle, usedPassphrase)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Adoption is a convenience layered on a
+                        // successful restore — never its failure.
+                    }
+                }
                 synchronized(lock) {
                     if (_state.value is PendingRestoreState.Applying) {
                         _state.value = PendingRestoreState.Completed(message)
@@ -225,7 +283,10 @@ class PendingRestoreStore(
                     }
                 }
             } finally {
-                synchronized(lock) { if (handle === liveHandle) handle = null }
+                synchronized(lock) {
+                    if (handle === liveHandle) handle = null
+                    stagedPassphrase = null
+                }
                 liveHandle.close()
                 File(path).delete()
             }
@@ -249,6 +310,7 @@ class PendingRestoreStore(
             }
             handle?.close()
             handle = null
+            stagedPassphrase = null
             if (path != null) File(path).delete()
             _state.value = PendingRestoreState.Idle
         }

@@ -338,6 +338,33 @@ class PreferencesRepository internal constructor(
 
     suspend fun swipeLeftActionNow(): SwipeAction = swipeLeftAction.first()
 
+    // PR #52: ask before a swipe archives or deletes. Default OFF —
+    // swipes behave exactly as they always have until the user
+    // turns this on in Settings → Notes list. Device-local like the
+    // swipe actions above; never enters a backup.
+    //
+    // Deliberately NOT safeData (the appLockSettings posture, PR #7):
+    // this setting guards destructive actions, so it FAILS CLOSED.
+    // safeData degrades an IOException to emptyPreferences, which
+    // the mapping below would read as "option off" — an unreadable
+    // store must instead emit null ("unknown"), which the notes
+    // gate treats as ON for destructive swipes (Codex R5). A
+    // successful read with the key absent still means genuinely
+    // off, and emits false.
+    val swipeConfirmDestructive: Flow<Boolean?> = dataStore.data
+        .map<Preferences, Boolean?> { prefs ->
+            prefs[KEY_SWIPE_CONFIRM_DESTRUCTIVE] ?: false
+        }
+        .catch { exception ->
+            if (exception is IOException) emit(null) else throw exception
+        }
+
+    suspend fun setSwipeConfirmDestructive(enabled: Boolean) {
+        safeEdit { this[KEY_SWIPE_CONFIRM_DESTRUCTIVE] = enabled }
+    }
+
+    suspend fun swipeConfirmDestructiveNow(): Boolean? = swipeConfirmDestructive.first()
+
     // ---- App Lock (Phase 2a) -------------------------------------------
     // Per-method salt+hash slots (like 1.x's separate password/pattern
     // fields), a biometric convenience flag, the failed-attempt counter
@@ -715,6 +742,7 @@ class PreferencesRepository internal constructor(
         val KEY_DRIVE_BACKUP_INTERVAL_HOURS = intPreferencesKey("drive_backup_interval_hours")
         val KEY_SWIPE_RIGHT_ACTION = stringPreferencesKey("swipe_right_action")
         val KEY_SWIPE_LEFT_ACTION = stringPreferencesKey("swipe_left_action")
+        val KEY_SWIPE_CONFIRM_DESTRUCTIVE = booleanPreferencesKey("swipe_confirm_destructive")
         val KEY_WRITING_FONT_SIZE = intPreferencesKey("writing_font_size")
         val KEY_WRITING_LINE_HEIGHT = floatPreferencesKey("writing_line_height")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")

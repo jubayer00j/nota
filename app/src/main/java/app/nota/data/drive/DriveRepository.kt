@@ -11,6 +11,7 @@ import app.nota.data.backup.PendingRestoreStore
 import app.nota.data.preferences.PreferencesRepository
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,11 +67,26 @@ class DriveRepository(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
-    @Volatile
-    private var inFlight = false
+    private val inFlight = AtomicBoolean(false)
 
     @Volatile
     private var pendingOp: Op? = null
+
+    init {
+        // PR #52: a restore that was opened with its passphrase
+        // hands this device the archive's key (see
+        // [adoptRestoredEncryptionKey]). The pending-restore store
+        // calls back after a successful apply with the handle and
+        // the passphrase the read used — null for plaintext archives
+        // and for the device-key fast path, which by definition
+        // already hold (or never needed) the key.
+        pendingRestore.restoreAppliedHook = { handle, passphrase ->
+            val header = handle.header
+            if (passphrase != null && header != null) {
+                adoptRestoredEncryptionKey(header, passphrase)
+            }
+        }
+    }
 
     private fun signedInUid(): String? =
         (sessionProvider() as? Session.SignedIn)?.uid
@@ -86,8 +102,7 @@ class DriveRepository(
     /** Connect button: proves/establishes the grant (consent prompt
      *  when GMS asks), so the UI can flip to the connected state. */
     fun startConnect() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 _state.value = State.Working("Connecting to Google Drive…")
@@ -99,7 +114,7 @@ class DriveRepository(
             } catch (e: Exception) {
                 _state.value = State.Failed(friendly(e, "Couldn't connect to Google Drive."))
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
@@ -143,13 +158,12 @@ class DriveRepository(
     // ------------------------------------------------------------ backup
 
     fun startBackup() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 runBackup()
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
@@ -231,8 +245,7 @@ class DriveRepository(
         // scheduled run that finds a manual backup/restore in flight
         // defers to a WorkManager retry instead of racing it to the
         // canonical file (an older export finishing last would win).
-        if (inFlight) return false
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return false
         try {
             val uid = signedInUid() ?: return true
             if (prefs.driveBackupModeNow() != PreferencesRepository.DRIVE_MODE_SCHEDULED) return true
@@ -242,20 +255,19 @@ class DriveRepository(
             runBackup()
             return _state.value !is State.Failed
         } finally {
-            inFlight = false
+            inFlight.set(false)
         }
     }
 
     // ------------------------------------------------------------ restore
 
     fun startRestore() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 runRestore()
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
@@ -466,6 +478,167 @@ class DriveRepository(
         return true
     }
 
+    /**
+     * Restore adoption (PR #52, corrected in the Codex R2 fix
+     * round): a backup that was just restored after being opened
+     * with its passphrase hands this device the archive's key, so
+     * enabling sync afterwards just works instead of refusing with
+     * "this device doesn't hold the key" until the passphrase is
+     * re-entered under Security.
+     *
+     * Adoption is allowed ONLY when the restored key is known to
+     * be the Drive archive's key. A local encrypted export seals
+     * under a FRESH BMK every time (the passphrase form of
+     * [BackupCrypto.seal]), unrelated to the archive's key, so "no
+     * key held" alone proves nothing: adopting an unrelated local
+     * key would replace a keyless record whose header is this
+     * device's only pointer to the archive's key, and would leave
+     * sync failing against the archive instead of pausing calmly
+     * for its passphrase.
+     *
+     * The trusted candidate header is the existing record's header
+     * when a record exists (Drive is not consulted then); otherwise
+     * the canonical Drive archive's header, fetched exactly the way
+     * [setupEncryption] fetches it. Adoption fires iff the
+     * passphrase unwraps BOTH headers to the same BMK — header-string
+     * equality would be too strict (the same key re-wrapped later
+     * has a different salt), and BMK equality after a successful
+     * unwrap is exactly setupEncryption's proof. On a match, a
+     * keyless record keeps its own header and only gains the device
+     * key; with no record, the new record takes the ARCHIVE's
+     * header, never the restored file's.
+     *
+     * Two boundary cases:
+     * - No record AND no canonical archive at all: nothing exists
+     *   the restored key could conflict with, so the restored pair
+     *   becomes this device's encryption identity (the fresh-device
+     *   case).
+     * - No record AND a PLAINTEXT canonical archive: never adopt —
+     *   that would silently switch the account's backups to
+     *   encrypted under the restored key.
+     *
+     * Best-effort throughout: any failure (offline, consent needed,
+     * a damaged archive header, a mismatch) changes nothing and
+     * never fails the restore — the calm Security unlock path
+     * remains. A device that ALREADY holds a key keeps it, and a
+     * signed-out restore adopts nothing (records are per-account,
+     * and Drive needs an account anyway). Returns whether a key was
+     * adopted.
+     */
+    suspend fun adoptRestoredEncryptionKey(
+        header: BackupCrypto.Header,
+        passphrase: String,
+    ): Boolean {
+        // Serialize with the Drive operations (Codex P2, R3):
+        // adoption reads and writes the same encryption record —
+        // and, in the no-record branch, fetches the same canonical
+        // archive — the other ops race over, so it joins the class's
+        // inFlight protocol exactly like them. A busy guard means
+        // SKIP, not wait: adoption is best-effort, and skipping
+        // leaves the pre-adoption state (the calm Security unlock
+        // path), never an inconsistency — while a skipped-or-running
+        // adoption can no longer interleave with a backup that
+        // snapshotted a keyless record.
+        if (!inFlight.compareAndSet(false, true)) return false
+        try {
+            return adoptRestoredEncryptionKeyChecked(header, passphrase)
+        } catch (e: Exception) {
+            return false
+        } finally {
+            inFlight.set(false)
+        }
+    }
+
+    /** The adopting half of [adoptRestoredEncryptionKey]; see its
+     *  KDoc for the rule. Any failure is the caller's to swallow. */
+    private suspend fun adoptRestoredEncryptionKeyChecked(
+        restoredHeader: BackupCrypto.Header,
+        passphrase: String,
+    ): Boolean {
+        val uid = signedInUid() ?: return false
+        val existing = prefs.getDriveEncryptionRecord(uid)
+        if (existing?.deviceKeyBase64 != null) return false
+
+        val candidateHeader: BackupCrypto.Header?
+        if (existing != null) {
+            // The record's header is this device's pointer to the
+            // archive's key — it is the candidate; Drive is not
+            // consulted at all.
+            candidateHeader =
+                BackupCrypto.Header(existing.salt, existing.iterations, existing.wrappedKey)
+        } else {
+            val token = ensureAccess()
+            val folderId = gateway.findOrCreateFolder(token)
+            val canonical = gateway.findCanonicalBackup(token, folderId)
+            if (canonical == null) {
+                // No archive exists to conflict with: the restored
+                // pair becomes this device's encryption identity.
+                val restoredBmk =
+                    BackupCrypto.unwrapBmk(restoredHeader, passphrase) ?: return false
+                try {
+                    prefs.setDriveEncryptionRecord(
+                        uid,
+                        PreferencesRepository.DriveEncryptionRecord(
+                            salt = restoredHeader.salt,
+                            iterations = restoredHeader.iterations,
+                            wrappedKey = restoredHeader.wrappedKey,
+                            deviceKeyBase64 = Base64.getEncoder().encodeToString(restoredBmk),
+                        ),
+                    )
+                } finally {
+                    restoredBmk.fill(0)
+                }
+                refreshEncryptionRecord()
+                return true
+            }
+            val prefix = gateway.downloadPrefix(token, canonical.id, ARCHIVE_PREFIX_BYTES)
+            if (!BackupCrypto.isEncryptedPrefix(prefix)) {
+                // A plaintext archive: adopting would silently
+                // switch the account's backups to encrypted under
+                // the restored key.
+                return false
+            }
+            // An unparseable header aborts adoption — never mint
+            // over a damaged archive (setupEncryption's posture).
+            candidateHeader = BackupCrypto.parseHeader(prefix) ?: return false
+        }
+        val candidate = candidateHeader ?: return false
+
+        val restoredBmk = BackupCrypto.unwrapBmk(restoredHeader, passphrase)
+        val candidateBmk = BackupCrypto.unwrapBmk(candidate, passphrase)
+        try {
+            if (restoredBmk == null || candidateBmk == null ||
+                !java.security.MessageDigest.isEqual(restoredBmk, candidateBmk)
+            ) {
+                return false
+            }
+            val deviceKeyBase64 = Base64.getEncoder().encodeToString(candidateBmk)
+            if (existing != null) {
+                // Keyless record: keep ITS header — it is the pointer
+                // to the archive's key — and only fill the device key.
+                prefs.setDriveEncryptionRecord(
+                    uid,
+                    existing.copy(deviceKeyBase64 = deviceKeyBase64),
+                )
+            } else {
+                prefs.setDriveEncryptionRecord(
+                    uid,
+                    PreferencesRepository.DriveEncryptionRecord(
+                        salt = candidate.salt,
+                        iterations = candidate.iterations,
+                        wrappedKey = candidate.wrappedKey,
+                        deviceKeyBase64 = deviceKeyBase64,
+                    ),
+                )
+            }
+        } finally {
+            restoredBmk?.fill(0)
+            candidateBmk?.fill(0)
+        }
+        refreshEncryptionRecord()
+        return true
+    }
+
     /** Re-wrap the SAME BMK under a new passphrase (1.x D3 — existing
      *  archives stay openable; nothing is re-uploaded). */
     suspend fun changePassphrase(current: String, new: String): Boolean {
@@ -538,23 +711,21 @@ class DriveRepository(
     /** Worker entry for sync mode: the same in-flight serialization
      *  as scheduled backups (Codex P2) — busy means retry later. */
     suspend fun runScheduledSync(): Boolean {
-        if (inFlight) return false
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return false
         try {
             return runSyncCycle()
         } finally {
-            inFlight = false
+            inFlight.set(false)
         }
     }
 
     fun startSync() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 runSyncCycle()
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }

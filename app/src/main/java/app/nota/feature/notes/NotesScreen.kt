@@ -109,10 +109,16 @@ fun NotesScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val swipePrefs by viewModel.swipePreferences.collectAsState()
+    val swipeConfirmEnabled by viewModel.swipeConfirmDestructive.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     var showFoldersDialog by remember { mutableStateOf(false) }
+    // PR #52: a committed destructive swipe waiting on its
+    // confirmation dialog (only ever set when the user turned the
+    // confirm option on). Confirm runs performSwipe exactly as an
+    // ungated swipe would; dismissing clears this and nothing runs.
+    var pendingSwipeConfirmation by remember { mutableStateOf<PendingSwipeConfirmation?>(null) }
 
     // Phase 3.5 (D1): a swiped note's row leaves the composition at
     // COMMIT time, not whenever the database round-trip lands. The
@@ -483,19 +489,30 @@ fun NotesScreen(
                                     SwipeToDismissBoxValue.Settled -> null
                                 }
                                 if (kind != null) {
-                                    performSwipe(kind, note)
-                                    if (kind == SwipeKind.PIN) {
-                                        // The note STAYS in the list, so
-                                        // its dismiss state must swing
-                                        // back to Settled. Left
-                                        // dismissed, the row would sit
-                                        // parked at the dismissed offset
-                                        // with gestures disabled (the
-                                        // box only enables them while
-                                        // Settled) — a ghost of the D1
-                                        // family on the pin path.
-                                        // (Codex, PR #18.)
+                                    if (requiresSwipeConfirmation(kind, swipeConfirmEnabled)) {
+                                        // PR #52 gate: the action does
+                                        // NOT run yet. The row swings
+                                        // back to Settled (the PIN
+                                        // path's reset, below) and the
+                                        // confirmation dialog decides.
+                                        pendingSwipeConfirmation =
+                                            PendingSwipeConfirmation(kind, note)
                                         scope.launch { dismissState.reset() }
+                                    } else {
+                                        performSwipe(kind, note)
+                                        if (kind == SwipeKind.PIN) {
+                                            // The note STAYS in the list, so
+                                            // its dismiss state must swing
+                                            // back to Settled. Left
+                                            // dismissed, the row would sit
+                                            // parked at the dismissed offset
+                                            // with gestures disabled (the
+                                            // box only enables them while
+                                            // Settled) — a ghost of the D1
+                                            // family on the pin path.
+                                            // (Codex, PR #18.)
+                                            scope.launch { dismissState.reset() }
+                                        }
                                     }
                                 }
                             },
@@ -541,6 +558,61 @@ fun NotesScreen(
             onDismiss = { showFoldersDialog = false },
         )
     }
+    // PR #52: the swipe confirmation. The row has already settled
+    // back; confirming runs the swipe exactly as an ungated one
+    // (undo snackbar included, where the kind has one), and
+    // cancelling — button, scrim, or back — runs nothing at all.
+    pendingSwipeConfirmation?.let { pendingConfirm ->
+        val kind = pendingConfirm.kind
+        val note = pendingConfirm.note
+        AlertDialog(
+            onDismissRequest = { pendingSwipeConfirmation = null },
+            title = { Text(swipeConfirmationTitle(kind)) },
+            text = { Text(swipeConfirmationBody(kind, note.title)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingSwipeConfirmation = null
+                    performSwipe(kind, note)
+                }) { Text(swipeConfirmationAction(kind)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSwipeConfirmation = null }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+/** A committed destructive swipe awaiting its confirmation (PR #52). */
+private data class PendingSwipeConfirmation(
+    val kind: SwipeKind,
+    val note: app.nota.data.db.NoteListRow,
+)
+
+/** Dialog copy for the gated kinds. RESTORE and PIN never reach the
+ *  dialog ([requiresSwipeConfirmation] excludes them); their
+ *  branches exist only to keep the `when`s exhaustive. */
+private fun swipeConfirmationTitle(kind: SwipeKind): String = when (kind) {
+    SwipeKind.ARCHIVE -> "Archive this note?"
+    SwipeKind.TRASH -> "Move this note to trash?"
+    SwipeKind.DELETE_FOREVER -> "Delete this note forever?"
+    SwipeKind.RESTORE, SwipeKind.PIN -> "Are you sure?"
+}
+
+private fun swipeConfirmationBody(kind: SwipeKind, noteTitle: String): String {
+    val name = "“${noteTitle.ifBlank { "Untitled note" }}”"
+    return when (kind) {
+        SwipeKind.ARCHIVE -> "$name will be moved to Archived."
+        SwipeKind.TRASH -> "$name will be moved to the trash."
+        SwipeKind.DELETE_FOREVER -> "$name will be deleted permanently. This can't be undone."
+        SwipeKind.RESTORE, SwipeKind.PIN -> name
+    }
+}
+
+private fun swipeConfirmationAction(kind: SwipeKind): String = when (kind) {
+    SwipeKind.ARCHIVE -> "Archive"
+    SwipeKind.TRASH -> "Move to trash"
+    SwipeKind.DELETE_FOREVER -> "Delete forever"
+    SwipeKind.RESTORE, SwipeKind.PIN -> "OK"
 }
 
 /**
