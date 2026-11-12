@@ -387,9 +387,15 @@ fun RichNoteEditorScreen(
     // they land in the hoisted RichTextStates and are only read
     // back at sync time — so dirtiness is OBSERVED: a snapshot
     // flow per composed text state (SegmentDirtyEffect) flips
-    // [contentDirty], block-level changes go through updateBlock
-    // which flips it too, and the cheap metadata fields (title,
-    // folder, tags) are compared against last-synced mirrors.
+    // [contentDirty], block content changes go through
+    // updateBlock which flips it too, structural mutations
+    // (insertBlock / removeBlock / insertBlockAtCaret and the
+    // attachment-panel block drop) flip it directly at the
+    // mutation site (Codex PR #54 R1: they assign segments
+    // without passing through either channel), and the cheap
+    // metadata fields (title, folder, tags) are compared
+    // against last-synced mirrors. Conversions and the drag
+    // commit skip the flag: they persistNow() on the spot.
     // persistNow clears the flag and refreshes the mirrors at
     // call time (snapshot semantics: a later edit re-marks).
     var contentDirty by remember { mutableStateOf(false) }
@@ -734,10 +740,17 @@ fun RichNoteEditorScreen(
         if (focusedTaskItem?.first == id) focusedTaskItem = null
         evictCellTextStates(cellTextStates, id)
         evictCellRichStates(cellRichStates, id)
+        // Codex PR #54 R1: a structural removal bypasses
+        // updateBlock and the dirty effect — flip the flag or
+        // the F1 tick never autosaves it.
+        contentDirty = true
         segments = ensureTrailing(segments.filterNot { it.id == id })
     }
 
     fun insertBlock(segment: DocSegment) {
+        // Codex PR #54 R1: same structural-dirty rule as
+        // removeBlock — the tick must see a pure insert.
+        contentDirty = true
         val ui = UiSegment(newUiId(), segment)
         val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
         segments = ensureTrailing(
@@ -773,6 +786,12 @@ fun RichNoteEditorScreen(
             insertBlock(block)
             return
         }
+        // Codex PR #54 R1: the split path below assigns segments
+        // directly (twice, when a caret segment is minted) —
+        // dirty once here so both assignments are covered. (The
+        // fallback above delegates to insertBlock, which dirties
+        // itself.)
+        contentDirty = true
         val isQuote = activeSegment is QuoteSegment
         val split = splitHtmlAtCaret(state)
         fun sideKept(html: String): Boolean = if (isQuote) {
@@ -2452,6 +2471,11 @@ fun RichNoteEditorScreen(
                             // the VM strips it from the stored document.
                             val targetSrc =
                                 NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
+                            // Codex PR #54 R1: this structural drop
+                            // assigns segments directly — dirty it
+                            // so the F1 tick persists the working
+                            // copy too, not just the VM's strip.
+                            contentDirty = true
                             segments = ensureTrailing(
                                 segments.filterNot {
                                     (it.segment as? ImageSegment)?.src == targetSrc ||

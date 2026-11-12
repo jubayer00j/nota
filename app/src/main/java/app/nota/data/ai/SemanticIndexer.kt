@@ -443,8 +443,13 @@ class SemanticIndexer(
             if (iterator.next().key !in desired) iterator.remove()
         }
         if (config == null) {
+            // The purge/retain half persists exactly as always —
+            // but the stamp is NOT advanced (Codex PR #54 R1): it
+            // records the last COMPLETED pass, and this path
+            // embedded nothing. Stamping here would gate out the
+            // next configured reconcile and leave everything that
+            // changed while unconfigured unindexed.
             persist(accountId, stored?.signature, dims, working)
-            store.saveStamp(accountId, stampAtStart)
             return
         }
 

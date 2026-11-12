@@ -17,6 +17,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -721,5 +722,58 @@ class SemanticIndexerRobolectricTest {
         )
         assertEquals(excerpts.size, valid.size)
         assertEquals(citationChunks, NoteChunker.chunkInvocations)
+    }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R1: the no-config reconcile path persists its
+    // purge but must NOT advance the library stamp — the stamp
+    // records the last COMPLETED (embedding) pass. A library that
+    // changed while unconfigured must still be embedded by the
+    // next configured reconcile, not gated out as "unchanged".
+    // ---------------------------------------------------------------
+
+    @Test
+    fun unconfiguredReconcilePurgesWithoutStamping_thenConfiguredReconcileEmbedsTheChanges() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        val banana = notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+        val stampAfterIndexing = indexStore.loadStamp(account)
+        assertNotNull(stampAfterIndexing)
+
+        // The key goes away; while unconfigured the library
+        // changes twice: apple's body is edited, banana is locked
+        // (the lock flow's table shape: sealed body, empty
+        // projection, locked flag — as in the purge pin above).
+        settings.clearAccount(account)
+        notes.updateRichBody(apple, "Apple harvest", "<p>banana banana orchard edit</p>")
+        val bananaRow = db.noteDao().getById(banana.id)!!
+        db.noteDao().upsert(bananaRow.copy(locked = true, contentHtml = "", plainText = ""))
+
+        http.calls.clear()
+        indexer.reconcile(account)
+
+        // The purge half still ran, locally: banana's vectors are
+        // gone, nothing was embedded — and the stamp did NOT move,
+        // so this pass is not recorded as a completed one.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(setOf(apple.id), indexStore.load(account)?.notes?.keys)
+        assertEquals(stampAfterIndexing, indexStore.loadStamp(account))
+
+        // The key returns: the gate must not skip — apple's edit,
+        // made while unconfigured, is embedded now, and banana
+        // stays purged.
+        saveGeminiKey()
+        indexer.reconcile(account)
+        assertTrue(http.calls.isNotEmpty())
+        assertTrue(
+            embeddedDocumentTexts(http.calls).any { it.contains("orchard edit") },
+        )
+        assertEquals(setOf(apple.id), indexStore.load(account)?.notes?.keys)
+        assertEquals(
+            listOf(apple.id),
+            indexer.search(account, "banana").map { it.noteId },
+        )
     }
 }

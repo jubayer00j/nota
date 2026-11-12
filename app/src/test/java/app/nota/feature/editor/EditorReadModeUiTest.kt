@@ -848,4 +848,123 @@ class EditorReadModeUiTest {
             runBlocking { repository.getById(note.id) },
         )
     }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R1 pins: structural edits (insert / remove)
+    // assign segments directly — they must mark the note dirty so
+    // the F1 tick autosaves them. Before the fix a pure insert or
+    // remove never reached the tick and only an explicit flush
+    // (Done) saved it.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun perfF1_structuralInsertViaToolbarPersistsExactlyOnceOnTheNextTick() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Insert target",
+                contentHtml = "<p>Insert body</p>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Insert body").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        EditorPerfProbe.reset()
+        // The toolbar path: the insert menu's Divider item lands
+        // in insertBlock — a pure structural edit (no text state
+        // changes, no metadata change).
+        composeRule.onNodeWithContentDescription("Insert block").performClick()
+        awaitTrue("insert menu") {
+            exists("divider item") {
+                composeRule.onNodeWithText("Divider").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithText("Divider").performClick()
+        val deadline = System.currentTimeMillis() + 15_000
+        var stored = runBlocking { repository.getById(note.id) }
+        while (System.currentTimeMillis() < deadline &&
+            stored?.contentHtml?.contains("<hr>") != true
+        ) {
+            advanceVirtualTime(400)
+            stored = runBlocking { repository.getById(note.id) }
+        }
+        org.junit.Assert.assertTrue(
+            "the inserted divider must persist via the tick: ${stored?.contentHtml}",
+            stored?.contentHtml?.contains("<hr>") == true,
+        )
+        org.junit.Assert.assertEquals(
+            "the insert's persist used exactly one sync",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "ticks after the persist are idle again",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+    }
+
+    @Test
+    fun perfF1_structuralRemovePersistsExactlyOnceOnTheNextTick() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Remove target",
+                contentHtml = "<p>Remove body</p>" +
+                    "<blockquote><p>Remove quoted line</p></blockquote>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Remove quoted line").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        EditorPerfProbe.reset()
+        // The quote row's ✕ flows through removeBlock — a pure
+        // structural edit the pre-fix tick never saved.
+        awaitTrue("remove affordance") {
+            exists("remove quote") {
+                composeRule.onNodeWithContentDescription("Remove quote").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Remove quote").performClick()
+        val deadline = System.currentTimeMillis() + 15_000
+        var stored = runBlocking { repository.getById(note.id) }
+        while (System.currentTimeMillis() < deadline &&
+            stored?.contentHtml?.contains("Remove quoted line") == true
+        ) {
+            advanceVirtualTime(400)
+            stored = runBlocking { repository.getById(note.id) }
+        }
+        org.junit.Assert.assertTrue(
+            "the removal must persist via the tick: ${stored?.contentHtml}",
+            stored?.contentHtml?.contains("Remove quoted line") == false,
+        )
+        org.junit.Assert.assertEquals(
+            "the removal's persist used exactly one sync",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "ticks after the persist are idle again",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+    }
 }
