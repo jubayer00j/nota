@@ -16,10 +16,12 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import android.os.Looper
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
+import app.nota.data.html.NoteDocument
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
@@ -36,6 +38,7 @@ import app.nota.feature.chart.CHART_SAVE_TAG
 import app.nota.feature.chart.CHART_TAB_CHART_TAG
 import app.nota.feature.chart.CHART_TITLE_FIELD_TAG
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -47,6 +50,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
@@ -677,5 +681,169 @@ class EditorReadModeUiTest {
             }
         }
         composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).assertDoesNotExist()
+    }
+
+    // ------------------------------------------------------------------
+    // Performance chapter 2 pins (F1/F2/F4). The autosave tick runs
+    // on Handler delays, so virtual time is advanced explicitly
+    // through the shadow main looper in small steps, settling
+    // composition between steps.
+    // ------------------------------------------------------------------
+
+    private fun advanceVirtualTime(millis: Long) {
+        val shadow = shadowOf(Looper.getMainLooper())
+        var left = millis
+        while (left > 0) {
+            val step = minOf(left, 250L)
+            shadow.idleFor(step, TimeUnit.MILLISECONDS)
+            composeRule.waitForIdle()
+            left -= step
+        }
+    }
+
+    @Test
+    fun perfF2F4_readModeBuildsNoRichTextStates_andParsesOnce() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Perf shapes",
+                contentHtml = "<p>Perf body text</p>" +
+                    "<blockquote><p>Perf quoted line</p></blockquote>" +
+                    "<table><tbody><tr><th>Head</th></tr>" +
+                    "<tr><td>Perf cell</td></tr></tbody></table>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Perf task</p></li></ul>",
+            )
+        }
+        EditorPerfProbe.reset()
+        NoteDocument.parseInvocations = 0
+        composeEditor(note.id)
+        awaitTrue("read mode shows every shape") {
+            exists("shapes") {
+                composeRule.onNodeWithText("Perf body text").assertIsDisplayed()
+                composeRule.onNodeWithText("Perf quoted line").assertIsDisplayed()
+                composeRule.onNodeWithText("Perf cell").assertIsDisplayed()
+                composeRule.onNodeWithText("Perf task").assertIsDisplayed()
+            }
+        }
+        // F2: text, quote, table cells and task rows all rendered
+        // WITHOUT constructing a single RichTextState.
+        org.junit.Assert.assertEquals(
+            "read mode must construct zero RichTextStates",
+            0,
+            EditorPerfProbe.richStateConstructions,
+        )
+        // F4: the whole open cost exactly ONE NoteDocument.parse
+        // (the ViewModel's load); the screen seeds from it.
+        org.junit.Assert.assertEquals(
+            "one parse per note open",
+            1,
+            NoteDocument.parseInvocations,
+        )
+    }
+
+    @Test
+    fun perfF1_idleReadModeDoesNothing_togglePersistsWithExactlyOneSync() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Idle note",
+                contentHtml = "<p>Idle body</p>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Idle task</p></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Idle body").assertIsDisplayed()
+            }
+        }
+        val before = runBlocking { repository.getById(note.id) }
+        EditorPerfProbe.reset()
+
+        // Two full tick windows pass with NO interaction: the
+        // tick must do literally nothing — zero syncSegments
+        // calls, and the stored row is byte-identical.
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "an idle tick must not sync",
+            0,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        org.junit.Assert.assertEquals(
+            "an idle note must not be rewritten",
+            before,
+            runBlocking { repository.getById(note.id) },
+        )
+
+        // A read-mode task toggle marks the document dirty via
+        // updateBlock; the next tick persists it with exactly ONE
+        // sync, and later ticks go back to doing nothing.
+        composeRule.onNode(isToggleable()).performClick()
+        val deadline = System.currentTimeMillis() + 15_000
+        var stored = runBlocking { repository.getById(note.id) }
+        while (System.currentTimeMillis() < deadline &&
+            stored?.contentHtml?.contains("data-checked=\"true\"") != true
+        ) {
+            advanceVirtualTime(400)
+            stored = runBlocking { repository.getById(note.id) }
+        }
+        org.junit.Assert.assertTrue(
+            "the toggle must persist via the tick: ${stored?.contentHtml}",
+            stored?.contentHtml?.contains("data-checked=\"true\"") == true,
+        )
+        org.junit.Assert.assertEquals(
+            "the toggle's persist used exactly one sync",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "ticks after the persist are idle again",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+    }
+
+    @Test
+    fun perfF4_noteEndingInABlockWritesNothingOnOpenAndDone() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Trailing block",
+                contentHtml = "<p>Lead paragraph</p>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Trailing task</p></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Lead paragraph").assertIsDisplayed()
+            }
+        }
+        val before = runBlocking { repository.getById(note.id) }
+        // Open -> pencil -> Done with NO edits: the screen's added
+        // trailing text segment must be stripped by the persist
+        // comparison, so nothing is written (updatedAt included).
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        advanceVirtualTime(2_000)
+        org.junit.Assert.assertEquals(
+            "opening and closing an unchanged note writes nothing",
+            before,
+            runBlocking { repository.getById(note.id) },
+        )
     }
 }
