@@ -1,5 +1,11 @@
 package app.nota.data.html
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.ParagraphStyle
+import androidx.compose.ui.text.SpanStyle
+import com.mohamedrejeb.richeditor.model.RichTextState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -1479,4 +1485,130 @@ class NoteDocumentTest {
         )
     }
 
+
+    // ------------------------------------------------------------------
+    // Performance chapter 2 (F2): the static read-mode converter.
+    // NoteDocument.annotatedText must reproduce the annotated string
+    // the rich-editor library builds for the same segment HTML —
+    // same text, same span styles, same paragraph styles — or read
+    // mode would render differently from edit mode. Adjacent ranges
+    // with equal styles are coalesced on BOTH sides first (the
+    // library splits runs at DOM text-node boundaries; the converter
+    // coalesces by construction). The library attaches NO link
+    // annotation (its clicks are state-handled), so link annotations
+    // are asserted separately — the converter's LinkAnnotation.Url
+    // is a deliberate display-only addition.
+    // ------------------------------------------------------------------
+
+    private fun libraryAnnotated(html: String): AnnotatedString =
+        RichTextState().apply { setHtml(html) }.annotatedString
+
+    /** Unspecified colour is the library's "no colour" (its Code
+     *  span is SpanStyle(color = Unspecified)); normalise it to
+     *  null so it compares equal to an unset field. */
+    private fun norm(style: SpanStyle): SpanStyle = style.copy(
+        color = if (style.color == Color.Unspecified) null else style.color,
+        background = if (style.background == Color.Unspecified) null else style.background,
+    )
+
+    private fun coalesceSpans(
+        spans: List<AnnotatedString.Range<SpanStyle>>,
+    ): List<Triple<Int, Int, SpanStyle>> {
+        val out = mutableListOf<Triple<Int, Int, SpanStyle>>()
+        for (range in spans.sortedBy { it.start }) {
+            val style = norm(range.item)
+            val last = out.lastOrNull()
+            if (last != null && last.second == range.start && last.third == style) {
+                out[out.lastIndex] = Triple(last.first, range.end, style)
+            } else {
+                out += Triple(range.start, range.end, style)
+            }
+        }
+        return out
+    }
+
+    private fun coalesceParagraphs(
+        spans: List<AnnotatedString.Range<ParagraphStyle>>,
+    ): List<Triple<Int, Int, ParagraphStyle>> {
+        val out = mutableListOf<Triple<Int, Int, ParagraphStyle>>()
+        for (range in spans.sortedBy { it.start }) {
+            val last = out.lastOrNull()
+            if (last != null && last.second == range.start && last.third == range.item) {
+                out[out.lastIndex] = Triple(last.first, range.end, range.item)
+            } else {
+                out += Triple(range.start, range.end, range.item)
+            }
+        }
+        return out
+    }
+
+    private fun assertConverterMatches(html: String) {
+        val expected = libraryAnnotated(html)
+        val actual = NoteDocument.annotatedText(html)
+        assertEquals("text for $html", expected.text, actual.text)
+        assertEquals(
+            "span styles for $html",
+            coalesceSpans(expected.spanStyles),
+            coalesceSpans(actual.spanStyles),
+        )
+        assertEquals(
+            "paragraph styles for $html",
+            coalesceParagraphs(expected.paragraphStyles),
+            coalesceParagraphs(actual.paragraphStyles),
+        )
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForPlainAndMultiParagraph() {
+        assertConverterMatches("<p>Hello world</p>")
+        assertConverterMatches("<p>First</p><p>Second</p>")
+        assertConverterMatches("<p>Marks &amp; more &lt;here&gt;</p>")
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForInlineStyles() {
+        assertConverterMatches(
+            "<p>Marks in <strong>bold</strong> and <em>italic</em> and " +
+                "<u>under</u> and <s>strike</s></p>",
+        )
+        assertConverterMatches("<p>nested <strong>bold <em>both</em></strong> plain</p>")
+        assertConverterMatches("<p>code <code>val x</code> end</p>")
+        assertConverterMatches("<p>a <mark>highlight</mark> here</p>")
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForCssSpans() {
+        assertConverterMatches(
+            "<p><span style=\"color: rgb(179, 38, 30);\">red</span> and " +
+                "<span style=\"background-color: rgb(253, 214, 51);\">hl</span></p>",
+        )
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForHeadings() {
+        assertConverterMatches("<h1>Title</h1><h2>Sub</h2><h3>SubSub</h3><p>body</p>")
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForLists() {
+        assertConverterMatches("<ul><li>one</li><li>two</li></ul>")
+        assertConverterMatches("<ol><li>first</li><li>second</li></ol>")
+        assertConverterMatches("<ul><li>outer<ul><li>inner</li></ul></li></ul>")
+        assertConverterMatches("<p>line one<br>line two</p>")
+    }
+
+    @Test
+    fun annotatedTextCarriesLinkAnnotations() {
+        val html = "<p>a <a href=\"https://example.com\">link</a> here</p>"
+        assertConverterMatches(html)
+        val actual = NoteDocument.annotatedText(html)
+        val links = actual.getLinkAnnotations(0, actual.length)
+        assertEquals(1, links.size)
+        val link = links.single()
+        assertEquals("link", actual.text.substring(link.start, link.end))
+        assertEquals(
+            "https://example.com",
+            (link.item as LinkAnnotation.Url).url,
+        )
+    }
 }
