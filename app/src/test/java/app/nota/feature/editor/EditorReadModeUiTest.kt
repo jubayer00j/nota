@@ -716,7 +716,7 @@ class EditorReadModeUiTest {
             )
         }
         EditorPerfProbe.reset()
-        NoteDocument.parseInvocations = 0
+        val parsesBefore = NoteDocument.parseInvocations
         composeEditor(note.id)
         awaitTrue("read mode shows every shape") {
             exists("shapes") {
@@ -738,7 +738,7 @@ class EditorReadModeUiTest {
         org.junit.Assert.assertEquals(
             "one parse per note open",
             1,
-            NoteDocument.parseInvocations,
+            NoteDocument.parseInvocations - parsesBefore,
         )
     }
 
