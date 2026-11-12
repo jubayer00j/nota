@@ -89,6 +89,14 @@ class SwipeActionsTest {
         for (kind in SwipeKind.entries) {
             assertFalse(requiresSwipeConfirmation(kind, confirmEnabled = false))
         }
+        // Not yet loaded (null, Codex R1): the destructive kinds are
+        // gated conservatively until the saved value arrives; pin and
+        // restore still are not.
+        assertTrue(requiresSwipeConfirmation(SwipeKind.ARCHIVE, confirmEnabled = null))
+        assertTrue(requiresSwipeConfirmation(SwipeKind.TRASH, confirmEnabled = null))
+        assertTrue(requiresSwipeConfirmation(SwipeKind.DELETE_FOREVER, confirmEnabled = null))
+        assertFalse(requiresSwipeConfirmation(SwipeKind.PIN, confirmEnabled = null))
+        assertFalse(requiresSwipeConfirmation(SwipeKind.RESTORE, confirmEnabled = null))
     }
 
     @Test

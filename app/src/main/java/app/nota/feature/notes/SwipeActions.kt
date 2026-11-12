@@ -21,9 +21,14 @@ enum class SwipeKind { ARCHIVE, TRASH, RESTORE, PIN, DELETE_FOREVER }
  * when the user has turned the Settings → Notes list option on.
  * PIN and RESTORE are never gated; with the option off, nothing
  * is gated and swipes behave exactly as before.
+ *
+ * [confirmEnabled] is null while the saved value is still loading
+ * (the ViewModel's state starts unloaded): unloaded counts as ON
+ * for the destructive kinds, so a swipe in the startup window can
+ * never bypass a confirmation the user asked for (Codex R1).
  */
-fun requiresSwipeConfirmation(kind: SwipeKind, confirmEnabled: Boolean): Boolean =
-    confirmEnabled && when (kind) {
+fun requiresSwipeConfirmation(kind: SwipeKind, confirmEnabled: Boolean?): Boolean =
+    confirmEnabled != false && when (kind) {
         SwipeKind.ARCHIVE, SwipeKind.TRASH, SwipeKind.DELETE_FOREVER -> true
         SwipeKind.RESTORE, SwipeKind.PIN -> false
     }

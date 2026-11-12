@@ -104,9 +104,12 @@ class NotesViewModel(
 
     /** PR #52: ask before a swipe archives or deletes (Settings →
      *  Notes list). Default off — swipes behave exactly as before
-     *  until the user turns it on. */
-    val swipeConfirmDestructive: StateFlow<Boolean> = preferences.swipeConfirmDestructive
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+     *  until the user turns it on. Null until DataStore delivers the
+     *  saved value: the gate treats "not loaded yet" as ON for the
+     *  destructive kinds, so a swipe in the startup window can never
+     *  slip past a confirmation the user asked for (Codex R1). */
+    val swipeConfirmDestructive: StateFlow<Boolean?> = preferences.swipeConfirmDestructive
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private fun libraryState(): Flow<NotesUiState> = combine(
         repository.observeActiveRows(),
