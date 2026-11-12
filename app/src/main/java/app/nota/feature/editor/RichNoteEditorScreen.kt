@@ -144,6 +144,9 @@ import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.platform.LocalView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.nota.data.ai.AiErrorKind
 import app.nota.data.ai.AiException
 import app.nota.data.ai.AiService
@@ -178,6 +181,7 @@ import app.nota.data.html.CodeSegment
 import app.nota.data.html.ChartSegment
 import app.nota.data.html.DividerSegment
 import app.nota.data.html.DocSegment
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.FileSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.NoteDocument
@@ -374,6 +378,18 @@ fun RichNoteEditorScreen(
     // Charts PR-B: the insert-chart dialog (the chart editor,
     // seeded with the default chart; edit opens from the block).
     var showChartInsertDialog by remember { mutableStateOf(false) }
+    // PR #51: the one-active-playback controller every audio row
+    // in this note shares, in read and edit mode alike; released
+    // with the screen so a player can never outlive the note. The
+    // recorder sheet's visibility is NOT a remember here (Codex
+    // R2 fix): it lives in the ViewModel's recording session, so
+    // a configuration change that recreates this screen reopens
+    // the sheet on the still-live take.
+    val showAudioRecorder = viewModel.recordingSession.sheetVisible
+    val audioPlayback = remember { AudioPlaybackController() }
+    DisposableEffect(Unit) {
+        onDispose { audioPlayback.release() }
+    }
     var showImageUrlDialog by remember { mutableStateOf(false) }
     var imageUrl by remember { mutableStateOf("") }
     var imageUrlError by remember { mutableStateOf(false) }
@@ -2074,6 +2090,7 @@ fun RichNoteEditorScreen(
                 onRemove = { removeBlock(ui.id) },
                 attachments = attachments,
                 fileFor = { viewModel.attachmentFile(it) },
+                audioPlayback = audioPlayback,
                 bringIntoView = bringIntoView,
                 onPinchingChange = { imagePinchActive = it },
                 bodyStyle = editorBodyStyle,
@@ -2200,6 +2217,7 @@ fun RichNoteEditorScreen(
                                 onChange = { updateBlock(ui.id, it) },
                                 attachments = attachments,
                                 fileFor = { viewModel.attachmentFile(it) },
+                                audioPlayback = audioPlayback,
                                 bodyStyle = editorBodyStyle,
                             )
                         }
@@ -2343,7 +2361,8 @@ fun RichNoteEditorScreen(
                             segments = ensureTrailing(
                                 segments.filterNot {
                                     (it.segment as? ImageSegment)?.src == targetSrc ||
-                                        (it.segment as? FileSegment)?.attachmentId == attachment.id
+                                        (it.segment as? FileSegment)?.attachmentId == attachment.id ||
+                                        (it.segment as? AudioSegment)?.attachmentId == attachment.id
                                 },
                             )
                             viewModel.deleteAttachment(attachment)
@@ -2679,6 +2698,21 @@ fun RichNoteEditorScreen(
                             filePicker.launch(arrayOf("*/*"))
                         }
                     },
+                    onRecordAudioRequest = {
+                        // PR #51 fix (Codex R3): dictation and the
+                        // recorder must never fight over the
+                        // microphone — simultaneous capture clients
+                        // can silence each other. Stop an active
+                        // dictation session first, with the same
+                        // stop the toolbar mic button performs,
+                        // before the recorder sheet opens.
+                        if (speechSnapshot.state ==
+                            app.nota.feature.voice.SpeechSessionState.LISTENING
+                        ) {
+                            speechController.stop()
+                        }
+                        viewModel.showAudioRecorder()
+                    },
                     onInsertBlock = { insertBlock(it) },
                 )
                 if (turnIntoExpanded && turnIntoTargets.isNotEmpty()) {
@@ -2793,6 +2827,88 @@ fun RichNoteEditorScreen(
                         rawHtml = ChartSerializer.serialize(data),
                     ),
                 )
+            },
+        )
+    }
+
+    // PR #51 fix (Codex R3): backgrounding the app mid-take
+    // pauses the recording session (the ViewModel intent no-ops
+    // unless a take is RECORDING). Since Android 9 a backgrounded
+    // app with no foreground service is denied real microphone
+    // input, so a take left running across a Home press or a
+    // screen lock would capture silence — and Stop would save
+    // that silence as a good recording. The observer lives HERE,
+    // in the screen's unconditional composition, not in the
+    // recorder sheet: a dismissed sheet leaves a live take
+    // recording in the session, and that take must pause on
+    // backgrounding too. It keys on the lifecycle's ON_PAUSE —
+    // never on composition disposal, which a rotation also causes
+    // and which the R2 fix proved must not touch the take.
+    // Resuming stays manual, from the sheet's Resume control.
+    val audioLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(audioLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                viewModel.pauseAudioRecordingIfRecording()
+            }
+        }
+        audioLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { audioLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // PR #51 fix (Codex R4): deliver a finished import's outcome
+    // from ViewModel state. The import runs in the ViewModel and
+    // can complete while THIS composition is dead (a rotation
+    // right after Stop): its outcome waits in the ViewModel's
+    // pendingAudioInsert / audioImportError, and whichever
+    // composition is live — including the recreated screen, whose
+    // segments were seeded from the saved note — delivers it
+    // here, through its own insertBlockAtCaret, exactly once:
+    // delivery consumes the state, so a recomposition sees null
+    // and inserts nothing. A failed import's message toasts from
+    // the live composition the same way. After a mid-import
+    // recreation the block lands at this screen's caret rather
+    // than the original one — accepted residue: the recording is
+    // never lost, only its position may shift.
+    val pendingAudioInsert by viewModel.pendingAudioInsert.collectAsState()
+    LaunchedEffect(pendingAudioInsert) {
+        val insert = viewModel.consumePendingAudioInsert()
+            ?: return@LaunchedEffect
+        insertBlockAtCaret(
+            AudioSegment(
+                attachmentId = insert.attachmentId,
+                durationMillis = insert.durationMillis,
+                displayName = insert.displayName,
+            ),
+        )
+    }
+    val audioImportError by viewModel.audioImportError.collectAsState()
+    LaunchedEffect(audioImportError) {
+        val message = viewModel.consumeAudioImportError()
+            ?: return@LaunchedEffect
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+    }
+
+    if (showAudioRecorder) {
+        // PR #51: record a voice note. The take lives in the
+        // ViewModel's recording session — the sheet only renders
+        // it — so a rotation mid-recording loses nothing: the
+        // sheet reopens on the live take and Stop still finalises
+        // it. Stop hands the finished take to the ViewModel's
+        // import; the outcome (the audio block at the caret, or
+        // the honest failure toast) is delivered from ViewModel
+        // state by the effects above — never through a callback
+        // captured by this composition (Codex R4) — and the
+        // session closes out in the ViewModel. Cancel inside the
+        // sheet discards the take through the session's explicit
+        // cancel; a dismissal only hides the sheet and leaves a
+        // live take recording (reopen it from the insert menu).
+        AudioRecorderSheet(
+            session = viewModel.recordingSession,
+            onDismiss = { viewModel.dismissAudioRecorderSheet() },
+            onCancel = { viewModel.cancelAudioRecording() },
+            onSave = { file, displayName, durationMs ->
+                viewModel.importAudioFile(file, displayName, durationMs)
             },
         )
     }
@@ -3117,6 +3233,8 @@ private fun SegmentEditor(
     onRemove: () -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
+    // PR #51: the note's shared one-active-playback controller.
+    audioPlayback: AudioPlaybackController,
     bringIntoView: BringIntoViewRequester,
     // Phase 3.6 (G4): lets the screen suspend list scrolling while an
     // image pinch is live.
@@ -3269,6 +3387,9 @@ private fun SegmentEditor(
                             segment, attachments, fileFor, onChange, onRemove, onPinchingChange,
                         )
                         is FileSegment -> FileBlock(segment, attachments, onRemove)
+                        is AudioSegment -> AudioBlock(
+                            segment, attachments, fileFor, audioPlayback, onRemove,
+                        )
                         is ChartSegment -> BlockShell(onRemove) {
                             // Charts PR-A/PR-B: the chart RENDERS
                             // from a parse of its stored div. In
@@ -3401,6 +3522,9 @@ internal fun SegmentReadView(
     onChange: (DocSegment) -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
+    // PR #51: the surface's shared one-active-playback controller
+    // (the note screen's, or the version preview's own).
+    audioPlayback: AudioPlaybackController,
     // Phase 6 (PR #43): the Writing-preference body style, threaded
     // from the screen (the read-mode title of truth for body size).
     bodyStyle: TextStyle,
@@ -3568,6 +3692,12 @@ internal fun SegmentReadView(
                     }
                 }
             }
+        }
+        is AudioSegment -> {
+            // PR #51: playback lives in read mode too — listening
+            // never requires entering edit mode. No remove here:
+            // removal stays edit-mode-only per the block rules.
+            AudioBlock(segment, attachments, fileFor, audioPlayback)
         }
         is CodeSegment -> {
             Box(
@@ -3780,7 +3910,7 @@ private fun FileBlock(
 }
 
 @Composable
-private fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
+internal fun BlockShell(onRemove: () -> Unit, content: @Composable () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -5097,6 +5227,8 @@ private fun EditorToolbar(
     onInsertImage: () -> Unit,
     onInsertImageUrl: () -> Unit,
     onInsertFile: () -> Unit,
+    // PR #51: opens the audio recorder sheet.
+    onRecordAudioRequest: () -> Unit = {},
     onInsertTableRequest: () -> Unit,
     onInsertChartRequest: () -> Unit = {},
     onInsertBlock: (DocSegment) -> Unit,
@@ -5342,6 +5474,11 @@ private fun EditorToolbar(
                     text = { Text("File attachment…") },
                     leadingIcon = { Icon(Icons.Filled.AttachFile, contentDescription = null) },
                     onClick = { onInsertMenuChange(false); onInsertFile() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Record audio…") },
+                    leadingIcon = { Icon(Icons.Filled.Mic, contentDescription = null) },
+                    onClick = { onInsertMenuChange(false); onRecordAudioRequest() },
                 )
                 DropdownMenuItem(
                     text = { Text("Table…") },

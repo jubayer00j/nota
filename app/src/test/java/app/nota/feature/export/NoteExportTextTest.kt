@@ -1,5 +1,6 @@
 package app.nota.feature.export
 
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.TextSegment
 import app.nota.data.html.TaskItem
 import app.nota.data.html.TaskListSegment
@@ -250,5 +251,24 @@ class NoteExportTextTest {
             ),
         )
         assertTrue(out.contains("- [ ] Before\n  - [ ] Child\n      After"))
+    }
+
+
+    @Test
+    fun audioPlaceholderInPlainTextExport() {
+        // PR #51: plain text takes the raw readable placeholder,
+        // the file block's treatment — no escaping exists to do
+        // in a .txt, and the audio bytes never embed.
+        val out = NoteExport.noteToPlainText(
+            "T",
+            listOf(
+                AudioSegment(
+                    attachmentId = "a1",
+                    durationMillis = 65_000,
+                    displayName = "Recording · 11 Nov 2026, 9:41 PM",
+                ),
+            ),
+        )
+        assertTrue(out.contains("[Audio: Recording · 11 Nov 2026, 9:41 PM]"))
     }
 }

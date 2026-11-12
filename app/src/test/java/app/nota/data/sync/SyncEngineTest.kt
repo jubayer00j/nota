@@ -260,6 +260,53 @@ class SyncEngineTest {
     }
 
     @Test
+    fun conflictCopySegmentReferencesAreRewrittenToClones() {
+        // Codex PR #51 R1 (P2): the rewrite chain knew only the
+        // attachments/<id> and nota-attachment:// forms, so a
+        // FILE or AUDIO segment in a conflict copy kept its
+        // data-nota-* attribute pointing at the winner's
+        // attachment row while the copy's own clone went
+        // unreferenced (deleting the winner would dangle it).
+        val att = BxAttachmentMeta(
+            id = "a1", noteId = "n1", name = "rec.m4a", mimeType = "audio/mp4",
+            size = 3L, createdAt = 10L, updatedAt = 100L, encrypted = false,
+        )
+        val baseSnap = snapshot(
+            notes = listOf(note("n1", "Original", 100L, content = "<p>base</p>")),
+            attachments = listOf(att),
+        )
+        val base = SyncEngine.snapshotHashes(baseSnap, mapOf("a1" to "basehash"))
+        val loserBody = "<p>remote</p>" +
+            "<div data-nota-audio=\"a1\" data-nota-duration=\"65000\" data-nota-name=\"Recording\"></div>" +
+            "<div data-nota-file=\"a1\"></div>"
+        val local = snapshot(
+            notes = listOf(note("n1", "Local", 300L, content = "<p>local</p>")),
+            attachments = listOf(att),
+        )
+        val remote = snapshot(
+            notes = listOf(note("n1", "Remote", 200L, content = loserBody)),
+            attachments = listOf(att),
+        )
+        val outcome = merge(
+            local, remote, base,
+            localContent = mapOf("a1" to "localhash"),
+            remoteContent = mapOf("a1" to "remotehash"),
+        )
+        val copy = outcome.merged.notes.first { it.id != "n1" }
+        val clone = outcome.merged.attachments.first { it.noteId == copy.id }
+        assertTrue(
+            "copy audio must point at the clone, was: ${copy.content}",
+            copy.content.contains("data-nota-audio=\"${clone.id}\""),
+        )
+        assertTrue(
+            "copy file must point at the clone, was: ${copy.content}",
+            copy.content.contains("data-nota-file=\"${clone.id}\""),
+        )
+        assertTrue(!copy.content.contains("data-nota-audio=\"a1\""))
+        assertTrue(!copy.content.contains("data-nota-file=\"a1\""))
+    }
+
+    @Test
     fun conflictCopyClonesSharedAttachmentEvenWithIdenticalBytes() {
         // Codex P2 (re-review): with identical bytes on both sides
         // the old code made NO clone for the copy — its body kept

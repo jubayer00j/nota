@@ -1,5 +1,6 @@
 package app.nota.feature.export
 
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.CodeSegment
 import app.nota.data.html.TaskItem
 import app.nota.data.html.TaskListSegment
@@ -388,6 +389,29 @@ class NoteExportMarkdownTest {
             out.contains("[File: a\\](https://example.test) b.pdf]"),
         )
         assertFalse(out.contains("[File: a](https://example.test)"))
+    }
+
+    @Test
+    fun audioNamesAreEscapedInMarkdownPlaceholders() {
+        // PR #51: a recording exports as the file block's
+        // bracketed placeholder treatment with its own noun — the
+        // audio bytes never embed — and the display name gets the
+        // same escaping discipline (it is user-shaped data: a
+        // crafted name must not re-parse as a link).
+        val out = NoteExport.noteToMarkdown(
+            "T",
+            listOf(
+                AudioSegment(
+                    attachmentId = "a1",
+                    durationMillis = 65_000,
+                    displayName = "a](https://example.test) take",
+                ),
+            ),
+        )
+        assertTrue(
+            out.contains("[Audio: a\\](https://example.test) take]"),
+        )
+        assertFalse(out.contains("[Audio: a](https://example.test)"))
     }
 
     @Test

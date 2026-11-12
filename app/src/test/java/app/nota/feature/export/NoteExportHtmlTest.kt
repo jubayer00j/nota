@@ -1,5 +1,6 @@
 package app.nota.feature.export
 
+import app.nota.data.html.AudioSegment
 import app.nota.data.html.ImageSegment
 import app.nota.data.html.OpaqueSegment
 import app.nota.data.html.QuoteSegment
@@ -863,5 +864,24 @@ class NoteExportHtmlTest {
                     "<div><p>Child</p></div></li></ul><p>After</p></div>",
             ),
         )
+    }
+
+
+    @Test
+    fun audioNamesAreEscapedInHtmlPlaceholders() {
+        // PR #51: the HTML twin of the file block's placeholder —
+        // the display name is escaped as text, never live markup.
+        val out = NoteExport.noteToHtml(
+            "T",
+            listOf(
+                AudioSegment(
+                    attachmentId = "a1",
+                    durationMillis = 65_000,
+                    displayName = "Rec <b>bold</b>",
+                ),
+            ),
+        )
+        assertTrue(out.contains("<p>[Audio: Rec &lt;b&gt;bold&lt;/b&gt;]</p>"))
+        assertFalse(out.contains("[Audio: Rec <b>bold</b>]"))
     }
 }

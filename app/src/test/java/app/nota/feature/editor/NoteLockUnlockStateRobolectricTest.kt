@@ -17,6 +17,7 @@ import app.nota.data.security.StepResult
 import app.nota.data.security.NoteLockMethod
 import app.nota.data.security.NoteLockRecord
 import app.nota.data.templates.TemplateRepository
+import java.io.File
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -332,4 +333,180 @@ override fun sealCipherResult(): StepResult<Cipher> =
             assertEquals(0, afterOpen.failedAttempts)
             assertNull(afterOpen.lockoutUntil)
         }
+
+    /**
+     * PR #51 fix (Codex R2): rotation during recording silently
+     * lost the take — the recorder sheet held the recorder, temp
+     * file, timer and phase in `remember` and discarded on ANY
+     * dispose, and a configuration change disposes everything.
+     * The session now lives in the ViewModel. These pins drive the
+     * real ViewModel (this class is the existing one that
+     * constructs it; there is no dedicated VM test class) and pin
+     * the discard decision: a dismissal — the state a rotation
+     * leaves behind, sheet disposed and recomposed on the same
+     * ViewModel — touches nothing, a re-begin on the recomposed
+     * sheet is a no-op on the live take, and ONLY the explicit
+     * cancel throws the take away.
+     */
+    @Test
+    fun audioRecordingTake_survivesDismissalAndReopen_discardedOnlyByCancel() {
+        val context = RuntimeEnvironment.getApplication()
+        val vm = newViewModel()
+        val session = vm.recordingSession
+
+        // Open the recorder; the sheet's auto-start begins the take.
+        vm.showAudioRecorder()
+        assertTrue(session.sheetVisible)
+        session.begin(context)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(RecordingTimer.State.RECORDING, session.timer.state)
+        val takeFile = session.tempFile
+        assertNotNull(takeFile)
+        assertTrue("the take's temp file exists while recording", takeFile!!.exists())
+
+        // Dismissal hides the sheet and touches NOTHING else: the
+        // same take keeps recording in the ViewModel.
+        vm.dismissAudioRecorderSheet()
+        assertTrue(!session.sheetVisible)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(RecordingTimer.State.RECORDING, session.timer.state)
+        assertTrue("dismissal must not delete the take", takeFile.exists())
+
+        // The recomposed sheet (post-rotation) re-runs its
+        // auto-start: on a live session that is a no-op — same
+        // take, same file, still recording.
+        vm.showAudioRecorder()
+        session.begin(context)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(takeFile, session.tempFile)
+        assertTrue(takeFile.exists())
+
+        // Explicit Cancel is the one user path that discards.
+        vm.cancelAudioRecording()
+        assertEquals(RecordingTimer.State.IDLE, session.phase)
+        assertEquals(RecordingTimer.State.IDLE, session.timer.state)
+        assertNull(session.tempFile)
+        assertTrue("cancel deletes the take's temp file", !takeFile.exists())
+        assertTrue(!session.sheetVisible)
+    }
+
+    /**
+     * PR #51 fix (Codex R3): backgrounding the app mid-take must
+     * not let the take keep "recording" — since Android 9 a
+     * backgrounded app with no foreground service is fed silence,
+     * and Stop would save that silence as a good recording. The
+     * editor screen forwards the lifecycle's ON_PAUSE to
+     * [RichNoteEditorViewModel.pauseAudioRecordingIfRecording];
+     * these pins drive that intent on the real ViewModel: a live
+     * take pauses, its timer stops accruing, the intent is a
+     * no-op when nothing is recording or the take is already
+     * paused, and the take returns to RECORDING only through the
+     * sheet's own resume (the session's resume — nothing
+     * auto-resumes).
+     */
+    @Test
+    fun audioRecording_backgroundingPausesTheTake_resumeStaysManual() {
+        val context = RuntimeEnvironment.getApplication()
+        val vm = newViewModel()
+        val session = vm.recordingSession
+
+        // The intent on an idle session is a no-op.
+        vm.pauseAudioRecordingIfRecording()
+        assertEquals(RecordingTimer.State.IDLE, session.phase)
+        assertEquals(RecordingTimer.State.IDLE, session.timer.state)
+
+        // Begin a take, then background the app (ON_PAUSE).
+        vm.showAudioRecorder()
+        session.begin(context)
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        val takeFile = session.tempFile
+        assertNotNull(takeFile)
+
+        vm.pauseAudioRecordingIfRecording()
+        assertEquals(RecordingTimer.State.PAUSED, session.phase)
+        assertEquals(RecordingTimer.State.PAUSED, session.timer.state)
+        assertTrue("pausing keeps the take's temp file", takeFile!!.exists())
+
+        // While paused the timer does not accrue: the elapsed is
+        // the banked amount at any later clock reading.
+        val banked = session.timer.elapsedAt(1_000_000L)
+        assertEquals(banked, session.timer.elapsedAt(1_060_000L))
+        assertEquals(banked, session.timer.elapsedAt(9_999_999L))
+
+        // A second backgrounding while already paused is a no-op.
+        vm.pauseAudioRecordingIfRecording()
+        assertEquals(RecordingTimer.State.PAUSED, session.phase)
+        assertEquals(banked, session.timer.elapsedAt(9_999_999L))
+
+        // Resume is the sheet's own control (the session's
+        // resume): the take returns to RECORDING, same file.
+        session.resume()
+        assertEquals(RecordingTimer.State.RECORDING, session.phase)
+        assertEquals(RecordingTimer.State.RECORDING, session.timer.state)
+        assertEquals(takeFile, session.tempFile)
+        assertTrue(takeFile.exists())
+
+        // Clean up through the explicit discard.
+        vm.cancelAudioRecording()
+        assertEquals(RecordingTimer.State.IDLE, session.phase)
+        assertTrue(!takeFile.exists())
+    }
+
+    /**
+     * PR #51 fix (Codex R4): a recreation during the post-Stop
+     * import orphaned the recording. The import ran in the
+     * ViewModel, but its completion lambda was created in the
+     * screen composition and inserted into THAT composition's
+     * segment list: rotate right after Stop and the callback
+     * mutated the dead composition, the recreated screen had
+     * already seeded from the saved note, the session was
+     * cleared, and the imported attachment was left unreferenced.
+     * The outcome now lands in ViewModel state for the live
+     * screen to deliver. These pins drive the real import path
+     * with NO screen consuming — the recreation window — and pin
+     * that exactly one pending insert waits in the ViewModel,
+     * that it names the attachment the import really created,
+     * that consuming it hands the segment data out once, and
+     * that a second consume finds nothing.
+     */
+    @Test
+    fun audioImport_outcomeWaitsInViewModelState_consumedExactlyOnce() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val note = notes.createRichNote(title = "Voice", contentHtml = "<p>body</p>")
+        val vm = newViewModel()
+        vm.load(note.id)
+        awaitCondition("note loaded") { vm.note.value?.id == note.id }
+
+        // A finished take's temp file, as the session's stop()
+        // hands one over: a real file with real bytes.
+        val takeFile = File(context.cacheDir, "r4-take.m4a")
+        takeFile.writeBytes(byteArrayOf(1, 2, 3, 4, 5))
+        assertTrue(takeFile.exists())
+
+        // The import runs with no live consumer at all.
+        vm.importAudioFile(takeFile, "Voice note.m4a", 12_345L)
+        awaitCondition("pending audio insert published") {
+            vm.pendingAudioInsert.value != null
+        }
+        awaitCondition("imported attachment published") {
+            vm.attachments.value.size == 1
+        }
+
+        // Exactly one pending insert, carrying the data the
+        // screen needs to build the audio block — and its id is
+        // the attachment the import really created for this note.
+        val pending = vm.pendingAudioInsert.value!!
+        assertEquals("Voice note.m4a", pending.displayName)
+        assertEquals(12_345L, pending.durationMillis)
+        assertEquals(vm.attachments.value.single().id, pending.attachmentId)
+        // The temp-file semantics are the session's contract: the
+        // importer copied it and the import path deleted it.
+        assertTrue("the import consumed the take's temp file", !takeFile.exists())
+
+        // Consuming hands the segment data out exactly once.
+        val first = vm.consumePendingAudioInsert()
+        assertEquals(pending, first)
+        assertNull(vm.pendingAudioInsert.value)
+        assertNull("a second consume delivers nothing", vm.consumePendingAudioInsert())
+    }
 }

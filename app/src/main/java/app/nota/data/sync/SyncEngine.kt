@@ -265,9 +265,15 @@ object SyncEngine {
         val finalReminders = mergedReminders.filter { it.noteId !in killedNoteIds }
 
         // ---- Conflict copies: point their inline attachment
-        // references at the clones (both the archive dialect
-        // "attachments/<id>" and the editor dialect
-        // "nota-attachment://<id>").
+        // references at the clones: the archive dialect
+        // "attachments/<id>", the editor dialect
+        // "nota-attachment://<id>", and the segment attribute
+        // forms data-nota-file="<id>" / data-nota-audio="<id>"
+        // (quoted, so no partial-id collisions). The attribute
+        // forms were the PR #51 Codex P2: an audio (or file)
+        // block in a conflict copy kept pointing at the winner
+        // note's attachment row while its own clone went
+        // unreferenced, so deleting the winner dangled it.
         if (copyRewrites.isNotEmpty()) {
             for (index in mergedNotes.indices) {
                 val note = mergedNotes[index]
@@ -277,6 +283,8 @@ object SyncEngine {
                     content = content
                         .replace("attachments/$oldId", "attachments/$cloneId")
                         .replace("nota-attachment://$oldId", "nota-attachment://$cloneId")
+                        .replace("data-nota-file=\"$oldId\"", "data-nota-file=\"$cloneId\"")
+                        .replace("data-nota-audio=\"$oldId\"", "data-nota-audio=\"$cloneId\"")
                 }
                 if (content != note.content) {
                     mergedNotes[index] = note.copy(content = content)
