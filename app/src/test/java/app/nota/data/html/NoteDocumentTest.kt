@@ -1487,53 +1487,78 @@ class NoteDocumentTest {
 
     // ------------------------------------------------------------------
     // Performance chapter 2 (F2): the static read-mode converter.
-    // NoteDocument.annotatedText must reproduce the annotated string
-    // the rich-editor library builds for the same segment HTML —
-    // same text, same span styles, same paragraph styles — or read
-    // mode would render differently from edit mode. Adjacent ranges
-    // with equal styles are coalesced on BOTH sides first (the
-    // library splits runs at DOM text-node boundaries; the converter
-    // coalesces by construction). The library attaches NO link
-    // annotation (its clicks are state-handled), so link annotations
-    // are asserted separately — the converter's LinkAnnotation.Url
-    // is a deliberate display-only addition.
+    // NoteDocument.annotatedText must render the same segment HTML
+    // the rich-editor library renders — same text, same EFFECTIVE
+    // span and paragraph styles (see effectiveSpanStyles) — or read
+    // mode would look different from edit mode. The library
+    // attaches NO link annotation (its clicks are state-handled),
+    // so link annotations are asserted separately — the converter's
+    // LinkAnnotation.Url is a deliberate display-only addition.
     // ------------------------------------------------------------------
 
     private fun libraryAnnotated(html: String): AnnotatedString =
         RichTextState().apply { setHtml(html) }.annotatedString
 
-    // No style normalisation is needed: SpanStyle's colour fields
-    // are non-null with Color.Unspecified as the unset sentinel on
-    // BOTH sides (the library's Code span is SpanStyle(color =
-    // Unspecified); the converter's plain span is SpanStyle()).
-    private fun norm(style: SpanStyle): SpanStyle = style
-
-    private fun coalesceSpans(
-        spans: List<AnnotatedString.Range<SpanStyle>>,
+    // The comparison is over EFFECTIVE styles: for every elementary
+    // interval between span boundaries, the style a reader actually
+    // gets is the fold (SpanStyle.merge, inner ranges winning) of
+    // every range covering it. The library's annotated string
+    // carries nested, duplicated and even zero-length ranges (its
+    // span tree pushed per DOM node); the converter emits one
+    // merged range per run. Both describe the same rendering iff
+    // the effective style of every interval matches — which is
+    // exactly what read mode needs to be faithful.
+    private fun effectiveSpanStyles(
+        annotated: AnnotatedString,
     ): List<Triple<Int, Int, SpanStyle>> {
+        if (annotated.text.isEmpty()) return emptyList()
+        val bounds = sortedSetOf(0, annotated.text.length)
+        annotated.spanStyles.forEach { bounds += it.start; bounds += it.end }
+        val points = bounds.toList()
         val out = mutableListOf<Triple<Int, Int, SpanStyle>>()
-        for (range in spans.sortedBy { it.start }) {
-            val style = norm(range.item)
+        for (i in 0 until points.lastIndex) {
+            val start = points[i]
+            val end = points[i + 1]
+            if (start == end) continue
+            var effective = SpanStyle()
+            for (range in annotated.spanStyles) {
+                if (range.start <= start && range.end >= end) {
+                    effective = effective.merge(range.item)
+                }
+            }
             val last = out.lastOrNull()
-            if (last != null && last.second == range.start && last.third == style) {
-                out[out.lastIndex] = Triple(last.first, range.end, style)
+            if (last != null && last.second == start && last.third == effective) {
+                out[out.lastIndex] = Triple(last.first, end, effective)
             } else {
-                out += Triple(range.start, range.end, style)
+                out += Triple(start, end, effective)
             }
         }
         return out
     }
 
-    private fun coalesceParagraphs(
-        spans: List<AnnotatedString.Range<ParagraphStyle>>,
+    private fun effectiveParagraphStyles(
+        annotated: AnnotatedString,
     ): List<Triple<Int, Int, ParagraphStyle>> {
+        if (annotated.text.isEmpty()) return emptyList()
+        val bounds = sortedSetOf(0, annotated.text.length)
+        annotated.paragraphStyles.forEach { bounds += it.start; bounds += it.end }
+        val points = bounds.toList()
         val out = mutableListOf<Triple<Int, Int, ParagraphStyle>>()
-        for (range in spans.sortedBy { it.start }) {
+        for (i in 0 until points.lastIndex) {
+            val start = points[i]
+            val end = points[i + 1]
+            if (start == end) continue
+            var effective = ParagraphStyle()
+            for (range in annotated.paragraphStyles) {
+                if (range.start <= start && range.end >= end) {
+                    effective = effective.merge(range.item)
+                }
+            }
             val last = out.lastOrNull()
-            if (last != null && last.second == range.start && last.third == range.item) {
-                out[out.lastIndex] = Triple(last.first, range.end, range.item)
+            if (last != null && last.second == start && last.third == effective) {
+                out[out.lastIndex] = Triple(last.first, end, effective)
             } else {
-                out += Triple(range.start, range.end, range.item)
+                out += Triple(start, end, effective)
             }
         }
         return out
@@ -1542,16 +1567,28 @@ class NoteDocumentTest {
     private fun assertConverterMatches(html: String) {
         val expected = libraryAnnotated(html)
         val actual = NoteDocument.annotatedText(html)
-        assertEquals("text for $html", expected.text, actual.text)
+        // Paragraph separators: the library's string model joins
+        // paragraphs with a single SPACE (its own renderer breaks
+        // lines from the paragraph spans, not from the text). The
+        // converter joins with '\n' because a plain Compose Text
+        // needs the newline to draw the same line breaks. Both
+        // separators are exactly one character, so every span
+        // offset is directly comparable; the text comparison
+        // normalises the separator only.
+        assertEquals(
+            "text for $html",
+            expected.text,
+            actual.text.replace('\n', ' '),
+        )
         assertEquals(
             "span styles for $html",
-            coalesceSpans(expected.spanStyles),
-            coalesceSpans(actual.spanStyles),
+            effectiveSpanStyles(expected),
+            effectiveSpanStyles(actual),
         )
         assertEquals(
             "paragraph styles for $html",
-            coalesceParagraphs(expected.paragraphStyles),
-            coalesceParagraphs(actual.paragraphStyles),
+            effectiveParagraphStyles(expected),
+            effectiveParagraphStyles(actual),
         )
     }
 
