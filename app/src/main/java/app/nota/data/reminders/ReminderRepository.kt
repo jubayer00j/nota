@@ -108,17 +108,22 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         val storedTone = tone.normalised()
         // PR #53: the repeat rule is stored canonically — parsed and
         // re-encoded, so a foreign or corrupt value degrades to null
-        // (one-shot) instead of being persisted verbatim. Round 2:
-        // the stored form always carries the series' intended local
-        // time as the @HH:MM suffix, derived from the trigger being
-        // saved — its local time in [zone] IS the picked intent —
-        // on the create and update-in-place paths alike, so a
-        // DST-gap-resolved occurrence can never re-base the series
-        // onto the resolved time.
+        // (one-shot) instead of being persisted verbatim. The stored
+        // form carries the series' intended local time as the @HH:MM
+        // suffix. An incoming series time WINS (round 4): the dialog
+        // passes the time the user actually picked, which a DST gap
+        // may have moved in the resolved trigger — deriving from
+        // that trigger would birth the series already re-based onto
+        // the resolved time. Derivation from the trigger being
+        // saved — its local time in [zone] — is the fallback for
+        // suffix-less inputs (programmatic callers, the legacy
+        // stored form), on the create and update-in-place paths
+        // alike.
         val storedRepeat = ReminderRepeat.parseSeries(repeatRule)?.let { series ->
             ReminderRepeat.encode(
                 series.rule,
-                Instant.ofEpochMilli(triggerAt).atZone(zone).toLocalTime(),
+                series.time
+                    ?: Instant.ofEpochMilli(triggerAt).atZone(zone).toLocalTime(),
             )
         }
         return db.withTransaction {
@@ -224,11 +229,13 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * [reminder] is the handler's snapshot — it may be stale by the
      * time this runs — so the writes are field-targeted (PR #53,
      * Codex R3): the advance lands only while the LIVE row is still
-     * enabled ([ReminderDao.advanceTriggerIfEnabled]); a row the
-     * user completed in between reports [FireOutcome.Spent] here and
-     * is never resurrected or re-armed. The spend flips only the
-     * enabled flag ([ReminderDao.spendById]), preserving any
-     * concurrent edit to the live row.
+     * enabled AND still at the snapshot's trigger
+     * ([ReminderDao.advanceTriggerIfEnabled], tightened in round 4);
+     * a row the user completed — or rescheduled — in between
+     * reports [FireOutcome.Spent] here and is never resurrected,
+     * re-armed, or overwritten. The spend flips only the enabled
+     * flag ([ReminderDao.spendById]), preserving any concurrent
+     * edit to the live row.
      */
     suspend fun markFired(
         reminder: ReminderEntity,
@@ -243,11 +250,11 @@ class ReminderRepository(private val provider: DatabaseProvider) {
             zone = zone,
         )
         return if (next != null) {
-            if (dao().advanceTriggerIfEnabled(reminder.id, next) == 1) {
+            if (dao().advanceTriggerIfEnabled(reminder.id, next, reminder.triggerAt) == 1) {
                 FireOutcome.Advanced(reminder.copy(triggerAt = next))
             } else {
-                // Completed or deleted after the snapshot: the
-                // series is over — do not re-arm it.
+                // Completed, deleted, or rescheduled after the
+                // snapshot: do not re-arm over the live row.
                 FireOutcome.Spent
             }
         } else {
@@ -266,8 +273,9 @@ class ReminderRepository(private val provider: DatabaseProvider) {
      * [ReminderScheduler.rescheduleAll] BEFORE the arm plan is
      * computed, so the plan sees (and arms) the advanced times.
      * Each write is conditional ([ReminderDao.advanceTriggerIfEnabled]),
-     * so a row completed between this pass's read and its write
-     * stays completed — and only rows actually written are counted.
+     * so a row completed — or rescheduled — between this pass's
+     * read and its write is left exactly as the user left it, and
+     * only rows actually written are counted.
      * Returns how many rows advanced.
      */
     suspend fun advanceOverdueRepeats(
@@ -285,7 +293,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     zone = zone,
                 )
                 if (next != null && next != row.triggerAt) {
-                    advanced += dao().advanceTriggerIfEnabled(row.id, next)
+                    advanced += dao().advanceTriggerIfEnabled(row.id, next, row.triggerAt)
                 }
             }
         return advanced

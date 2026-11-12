@@ -344,7 +344,7 @@ fun ReminderDialog(
             }
             onSave(
                 triggerAt, ReminderAlertType.PHONE_ALARM, tone,
-                ReminderRepeat.encode(pickedRule()),
+                ReminderRepeat.encode(pickedRule(), LocalTime.of(pickedHour, pickedMinute)),
             )
             val intent = PhoneAlarmIntents.buildSetAlarmIntent(
                 noteTitle, triggerAt, zone,
@@ -365,7 +365,7 @@ fun ReminderDialog(
         } else {
             onSave(
                 triggerAt, ReminderAlertType.NOTIFICATION, pickedTone(),
-                ReminderRepeat.encode(pickedRule()),
+                ReminderRepeat.encode(pickedRule(), LocalTime.of(pickedHour, pickedMinute)),
             )
         }
         onDismiss()

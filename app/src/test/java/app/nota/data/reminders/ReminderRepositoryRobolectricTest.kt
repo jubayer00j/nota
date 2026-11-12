@@ -298,6 +298,45 @@ class ReminderRepositoryRobolectricTest {
     }
 
     @Test
+    fun setReminderKeepsAnExplicitSeriesTime() = runBlocking {
+        val newYork = ZoneId.of("America/New_York")
+        // The 2026 spring-forward gap instant: 02:30 never happens
+        // on Sun 8 Mar 2026 in New York, and the picked time
+        // resolves to the moment the clocks land — 03:00 EDT.
+        val gapInstant = 1_772_953_200_000L
+        // An incoming series time is the picked intent and is kept
+        // verbatim (PR #53, Codex R4): deriving it from the
+        // resolved trigger would store @03:00 and birth the series
+        // already re-based onto the resolved time.
+        val note = notes.createNote(title = "Gap day", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = gapInstant,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY@02:30", zone = newYork,
+        )
+        assertEquals("DAILY@02:30", saved.repeatRule)
+        assertEquals(
+            "DAILY@02:30",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
+
+        // The suffix-less legacy form still derives from the
+        // trigger being saved (the documented fallback): the same
+        // gap instant stores the resolved local time, 03:00.
+        val legacyNote = notes.createNote(title = "Gap day legacy", plainBody = "")
+        val derived = reminders.setReminder(
+            legacyNote.id, triggerAt = gapInstant,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = newYork,
+        )
+        assertEquals("DAILY@03:00", derived.repeatRule)
+        assertEquals(
+            "DAILY@03:00",
+            db.reminderDao().getById(derived.id)?.repeatRule,
+        )
+    }
+
+    @Test
     fun setReminderDegradesAGarbageRuleToOneShot() = runBlocking {
         val note = notes.createNote(title = "Garbage rule", plainBody = "")
         val saved = reminders.setReminder(
@@ -362,6 +401,45 @@ class ReminderRepositoryRobolectricTest {
         assertNotNull(row)
         assertFalse(row!!.enabled)
         assertEquals(triggerAt, row.triggerAt)
+    }
+
+    @Test
+    fun markFiredDoesNotOverwriteAConcurrentReschedule() = runBlocking {
+        val note = notes.createNote(title = "Stretch", plainBody = "")
+        // Minute-aligned, like every real picked trigger (see
+        // markFiredAdvancesARepeatingReminder).
+        val triggerAt = 1_900_000_020_000L
+        val rescheduledAt = triggerAt + 7_200_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        // The fire handler's snapshot: the enabled row it read
+        // before posting the notification.
+        val snapshot = reminders.getById(saved.id)!!
+        // While the fire was in flight, the user rescheduled the
+        // reminder: the in-place update keeps the id, stays
+        // enabled, and stores the new triggerAt.
+        reminders.setReminder(
+            note.id, triggerAt = rescheduledAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+
+        // The conditional advance must now lose on the trigger
+        // match too (PR #53, Codex R4): the outcome is Spent
+        // (nothing is re-armed off this snapshot), the live row
+        // stays enabled, and the user's rescheduled time is never
+        // overwritten by the stale-derived next occurrence.
+        val outcome = reminders.markFired(
+            snapshot, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(ReminderRepository.FireOutcome.Spent, outcome)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertTrue(row!!.enabled)
+        assertEquals(rescheduledAt, row.triggerAt)
     }
 
     @Test
