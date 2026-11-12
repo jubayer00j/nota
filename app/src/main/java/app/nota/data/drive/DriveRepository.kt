@@ -11,6 +11,7 @@ import app.nota.data.backup.PendingRestoreStore
 import app.nota.data.preferences.PreferencesRepository
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,8 +67,7 @@ class DriveRepository(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
-    @Volatile
-    private var inFlight = false
+    private val inFlight = AtomicBoolean(false)
 
     @Volatile
     private var pendingOp: Op? = null
@@ -102,8 +102,7 @@ class DriveRepository(
     /** Connect button: proves/establishes the grant (consent prompt
      *  when GMS asks), so the UI can flip to the connected state. */
     fun startConnect() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 _state.value = State.Working("Connecting to Google Drive…")
@@ -115,7 +114,7 @@ class DriveRepository(
             } catch (e: Exception) {
                 _state.value = State.Failed(friendly(e, "Couldn't connect to Google Drive."))
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
@@ -159,13 +158,12 @@ class DriveRepository(
     // ------------------------------------------------------------ backup
 
     fun startBackup() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 runBackup()
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
@@ -247,8 +245,7 @@ class DriveRepository(
         // scheduled run that finds a manual backup/restore in flight
         // defers to a WorkManager retry instead of racing it to the
         // canonical file (an older export finishing last would win).
-        if (inFlight) return false
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return false
         try {
             val uid = signedInUid() ?: return true
             if (prefs.driveBackupModeNow() != PreferencesRepository.DRIVE_MODE_SCHEDULED) return true
@@ -258,20 +255,19 @@ class DriveRepository(
             runBackup()
             return _state.value !is State.Failed
         } finally {
-            inFlight = false
+            inFlight.set(false)
         }
     }
 
     // ------------------------------------------------------------ restore
 
     fun startRestore() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 runRestore()
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
@@ -543,14 +539,13 @@ class DriveRepository(
         // path), never an inconsistency — while a skipped-or-running
         // adoption can no longer interleave with a backup that
         // snapshotted a keyless record.
-        if (inFlight) return false
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return false
         try {
             return adoptRestoredEncryptionKeyChecked(header, passphrase)
         } catch (e: Exception) {
             return false
         } finally {
-            inFlight = false
+            inFlight.set(false)
         }
     }
 
@@ -716,23 +711,21 @@ class DriveRepository(
     /** Worker entry for sync mode: the same in-flight serialization
      *  as scheduled backups (Codex P2) — busy means retry later. */
     suspend fun runScheduledSync(): Boolean {
-        if (inFlight) return false
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return false
         try {
             return runSyncCycle()
         } finally {
-            inFlight = false
+            inFlight.set(false)
         }
     }
 
     fun startSync() {
-        if (inFlight) return
-        inFlight = true
+        if (!inFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 runSyncCycle()
             } finally {
-                inFlight = false
+                inFlight.set(false)
             }
         }
     }
