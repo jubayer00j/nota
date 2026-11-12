@@ -776,4 +776,114 @@ class SemanticIndexerRobolectricTest {
             indexer.search(account, "banana").map { it.noteId },
         )
     }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R2: a completed CONFIGURED pass that leaves
+    // nothing indexed stores an EMPTY index (active signature,
+    // zero notes) instead of deleting the file. persist() deletes
+    // on an empty working set, and a missing index can never
+    // satisfy the stamp gate's stored-index check — so an empty
+    // library (or one purged to empty) re-ran the full candidate
+    // scan on every reconcile despite an unchanged stamp. Search
+    // and Ask treat an empty index exactly like a missing one
+    // (both check notes.isEmpty()), so no answer changes.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun emptyLibraryReconcileStampsAndGates() = runBlocking {
+        saveGeminiKey()
+        // A library with zero indexable notes: its only note is
+        // blank (blank title, empty body — the chunker's blank
+        // rule keeps it out of the desired set).
+        notes.createRichNote("", "<p></p>")
+        indexer.reconcile(account)
+
+        // The completed pass left an empty index behind. This
+        // load reads the on-disk file directly (not the indexer
+        // cache), so it also proves the store's format round-
+        // trips a zero-note index: non-null, the active space's
+        // signature intact, zero notes. The stamp landed too.
+        val stored = indexStore.load(account)
+        assertNotNull(stored)
+        assertTrue(stored!!.notes.isEmpty())
+        assertTrue(stored.signature.contains("gemini-embedding-001"))
+        assertNotNull(indexStore.loadStamp(account))
+        assertEquals(0, indexer.status(account).indexedNotes)
+
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+
+        // The gate hit on the unchanged library: the pass
+        // returned before any chunking and any provider call.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+    }
+
+    @Test
+    fun purgeToEmptyStillGates() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        indexer.reconcile(account)
+        assertEquals(1, indexer.status(account).indexedNotes)
+
+        // Lock the only indexed note (the lock flow's table
+        // shape, as in the purge pins above): the next reconcile
+        // purges it and the working set empties.
+        val row = db.noteDao().getById(apple.id)!!
+        db.noteDao().upsert(row.copy(locked = true, contentHtml = "", plainText = ""))
+        indexer.reconcile(account)
+
+        // The purge left an empty index stored — not a deleted
+        // file — so the gate survives the purge.
+        assertEquals(0, indexer.status(account).indexedNotes)
+        val stored = indexStore.load(account)
+        assertNotNull(stored)
+        assertTrue(stored!!.notes.isEmpty())
+        assertTrue(indexer.search(account, "apple").isEmpty())
+
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+
+        // Still gates: zero chunker invocations, zero provider
+        // calls on the unchanged, now-empty library.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+    }
+
+    @Test
+    fun emptyIndexDoesNotGateAForeignSpace() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+
+        // Arrange the state a completed pass over an empty
+        // library leaves under space A — an empty index signed
+        // with A's signature — together with the stamp of the
+        // CURRENT library, so the only thing that can keep the
+        // gate from firing after the space switch is the
+        // signature check itself.
+        val configA = settings.activeEmbeddingConfig(account)!!
+        indexStore.save(
+            account,
+            StoredSemanticIndex(configA.spaceSignature(), 0, emptyMap()),
+        )
+        indexStore.saveStamp(account, db.noteDao().getLibraryStampRow())
+
+        // Control: under space A the gate hits — nothing runs.
+        indexer.reconcile(account)
+        assertTrue(http.calls.isEmpty())
+
+        // Switch the embedding space; the library and its stamp
+        // are untouched, but the stored empty index belongs to A.
+        saveGeminiKey(embeddingModel = "custom-emb-9")
+        indexer.reconcile(account)
+
+        // No gate hit: the full pass ran under B and embedded
+        // the note through the provider.
+        assertTrue(http.calls.any { it.url.contains("custom-emb-9") })
+        val stored = indexStore.load(account)
+        assertEquals(setOf(note.id), stored?.notes?.keys)
+        assertTrue(stored!!.signature.contains("custom-emb-9"))
+    }
 }

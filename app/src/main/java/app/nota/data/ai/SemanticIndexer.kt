@@ -334,10 +334,21 @@ class SemanticIndexer(
                         SemanticRebuildProgress(accountId, ++done, desired.size)
                 }
                 // The swap: the store's temp-then-rename write
-                // replaces the old index atomically — or the file
-                // goes, when nothing is eligible any more.
+                // replaces the old index atomically. When nothing
+                // is eligible any more the swap still leaves an
+                // (empty) index behind, signed with the active
+                // space: a completed pass must leave the store in
+                // a state the reconcile stamp gate can hit, and a
+                // deleted index can never satisfy the gate's
+                // stored-index check (Codex PR #54 R2). Readers
+                // treat an empty index exactly like a missing one
+                // (search and Ask both check notes.isEmpty()), so
+                // no answer changes — only the gate can now hit.
                 if (working.isEmpty()) {
-                    storeIndex(accountId, null)
+                    storeIndex(
+                        accountId,
+                        StoredSemanticIndex(config.spaceSignature(), 0, emptyMap()),
+                    )
                 } else {
                     storeIndex(
                         accountId,
@@ -495,7 +506,23 @@ class SemanticIndexer(
                 sinceSave = 0
             }
         }
-        if (changed) {
+        if (working.isEmpty()) {
+            // A completed configured pass that leaves nothing
+            // indexed still stores an (empty) index under the
+            // active signature (Codex PR #54 R2): persist() would
+            // DELETE the file for an empty working set, and a
+            // missing index can never satisfy the stamp gate's
+            // stored-index check — a library with zero indexable
+            // notes, or one purged to empty above, would re-run
+            // the full candidate scan on every reconcile despite
+            // the stamp saved below. An empty index reads exactly
+            // like a missing one in search/Ask (both check
+            // notes.isEmpty()), so no answer changes.
+            storeIndex(
+                accountId,
+                StoredSemanticIndex(config.spaceSignature(), 0, emptyMap()),
+            )
+        } else if (changed) {
             persist(accountId, config.spaceSignature(), dims, working)
         }
         // The pass ran to completion: record the stamp it
