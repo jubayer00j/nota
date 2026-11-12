@@ -352,7 +352,9 @@ class PreferencesRepository internal constructor(
     // successful read with the key absent still means genuinely
     // off, and emits false.
     val swipeConfirmDestructive: Flow<Boolean?> = dataStore.data
-        .map { prefs -> prefs[KEY_SWIPE_CONFIRM_DESTRUCTIVE] ?: false }
+        .map<Preferences, Boolean?> { prefs ->
+            prefs[KEY_SWIPE_CONFIRM_DESTRUCTIVE] ?: false
+        }
         .catch { exception ->
             if (exception is IOException) emit(null) else throw exception
         }
