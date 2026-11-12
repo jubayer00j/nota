@@ -2,6 +2,7 @@ package app.nota.data.reminders
 
 import app.nota.data.db.ReminderEntity
 import java.time.Instant
+import java.time.LocalTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -146,6 +147,69 @@ class ReminderSchedulerTest {
     }
 
     @Test
+    fun repeatParseEncodeRoundTripsWithSeriesTime() {
+        val time = LocalTime.of(2, 30)
+        // The suffixed encodings for all three rule kinds
+        // (zero-padded 24-hour).
+        assertEquals(
+            "DAILY@02:30",
+            ReminderRepeat.encode(ReminderRepeat.Rule.Daily, time),
+        )
+        assertEquals(
+            "WEEKLY@02:30",
+            ReminderRepeat.encode(ReminderRepeat.Rule.Weekly, time),
+        )
+        assertEquals(
+            "DAYS:1,3,5@02:30",
+            ReminderRepeat.encode(
+                ReminderRepeat.Rule.CustomDays(setOf(5, 1, 3)), time,
+            ),
+        )
+        assertEquals(
+            "DAILY@09:05",
+            ReminderRepeat.encode(ReminderRepeat.Rule.Daily, LocalTime.of(9, 5)),
+        )
+        // …and back: rule + carried time both survive the trip.
+        assertEquals(
+            ReminderRepeat.Series(ReminderRepeat.Rule.Daily, time),
+            ReminderRepeat.parseSeries("DAILY@02:30"),
+        )
+        assertEquals(
+            ReminderRepeat.Series(ReminderRepeat.Rule.Weekly, time),
+            ReminderRepeat.parseSeries("WEEKLY@02:30"),
+        )
+        assertEquals(
+            ReminderRepeat.Series(
+                ReminderRepeat.Rule.CustomDays(setOf(1, 3, 5)), time,
+            ),
+            ReminderRepeat.parseSeries("DAYS:1,3,5@02:30"),
+        )
+        // parse() still answers the rule alone for a suffixed form.
+        assertEquals(
+            ReminderRepeat.Rule.Daily,
+            ReminderRepeat.parse("DAILY@02:30"),
+        )
+        // No suffix = the legacy form: a rule with no carried time.
+        assertEquals(
+            ReminderRepeat.Series(ReminderRepeat.Rule.Daily, null),
+            ReminderRepeat.parseSeries("DAILY"),
+        )
+        // A malformed suffix is ignored, not fatal: the rule
+        // survives as its legacy form…
+        assertEquals(
+            ReminderRepeat.Series(ReminderRepeat.Rule.Daily, null),
+            ReminderRepeat.parseSeries("DAILY@25:99"),
+        )
+        assertEquals(
+            ReminderRepeat.Series(ReminderRepeat.Rule.Daily, null),
+            ReminderRepeat.parseSeries("DAILY@"),
+        )
+        // …but an unparseable body stays unparseable, suffix or not.
+        assertNull(ReminderRepeat.parseSeries("MONTHLY@02:30"))
+        assertNull(ReminderRepeat.parseSeries("@02:30"))
+    }
+
+    @Test
     fun repeatParseDegradesUnknownValuesToOneShot() {
         assertNull(ReminderRepeat.parse(null))
         assertNull(ReminderRepeat.parse(""))
@@ -224,6 +288,51 @@ class ReminderSchedulerTest {
         assertEquals(
             millis("2026-03-08T07:00:00Z"),
             ReminderRepeat.nextOccurrence(anchor, ReminderRepeat.Rule.Daily, anchor, newYork),
+        )
+    }
+
+    @Test
+    fun suffixedDailySeriesReturnsToItsTimeAfterADstGap() {
+        val newYork = ZoneId.of("America/New_York")
+        // Sat 7 Mar 2026, 02:30 EST (07:30Z). Sunday's 02:30 falls
+        // in the spring-forward gap and resolves to 03:00 EDT —
+        // the gap rule, same as a picked trigger.
+        val anchor = millis("2026-03-07T07:30:00Z")
+        val gapOccurrence = ReminderRepeat.nextOccurrence(
+            anchor, "DAILY@02:30", anchor, newYork,
+        )
+        assertEquals(1_772_953_200_000L, gapOccurrence)
+        // The gap-resolved instant is what the fire path persists
+        // as the new anchor. The carried time must stop it from
+        // re-basing the series: Monday rings at 02:30 EDT again,
+        // NOT at the resolved 03:00.
+        assertEquals(
+            1_773_037_800_000L,
+            ReminderRepeat.nextOccurrence(
+                gapOccurrence!!, "DAILY@02:30", gapOccurrence, newYork,
+            ),
+        )
+    }
+
+    @Test
+    fun legacyDailySeriesDriftsAcrossADstGap() {
+        val newYork = ZoneId.of("America/New_York")
+        // The legacy suffix-less form derives each occurrence's
+        // time of day from the stored anchor, so the same chain
+        // drifts: once the gap resolution (03:00 EDT) is persisted
+        // as the anchor, Monday rings at 03:00. Pinned so the
+        // legacy behaviour is explicit, not accidental — it is
+        // what encodings without a series time have always done.
+        val anchor = millis("2026-03-07T07:30:00Z")
+        val gapOccurrence = ReminderRepeat.nextOccurrence(
+            anchor, "DAILY", anchor, newYork,
+        )
+        assertEquals(1_772_953_200_000L, gapOccurrence)
+        assertEquals(
+            1_773_039_600_000L,
+            ReminderRepeat.nextOccurrence(
+                gapOccurrence!!, "DAILY", gapOccurrence, newYork,
+            ),
         )
     }
 

@@ -5,6 +5,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.ReminderEntity
 import app.nota.data.sync.EntityHash
 import app.nota.data.sync.SyncStore
+import java.time.Instant
 import java.time.ZoneId
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
@@ -93,6 +94,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         nowMillis: Long = System.currentTimeMillis(),
         tone: AlarmToneSettings = AlarmToneSettings(),
         repeatRule: String? = null,
+        zone: ZoneId = ZoneId.systemDefault(),
     ): ReminderEntity {
         require(alertType == ReminderAlertType.NOTIFICATION || alertType == ReminderAlertType.PHONE_ALARM) {
             "Unknown reminder alertType: $alertType"
@@ -105,8 +107,19 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         val storedTone = tone.normalised()
         // PR #53: the repeat rule is stored canonically — parsed and
         // re-encoded, so a foreign or corrupt value degrades to null
-        // (one-shot) instead of being persisted verbatim.
-        val storedRepeat = ReminderRepeat.encode(ReminderRepeat.parse(repeatRule))
+        // (one-shot) instead of being persisted verbatim. Round 2:
+        // the stored form always carries the series' intended local
+        // time as the @HH:MM suffix, derived from the trigger being
+        // saved — its local time in [zone] IS the picked intent —
+        // on the create and update-in-place paths alike, so a
+        // DST-gap-resolved occurrence can never re-base the series
+        // onto the resolved time.
+        val storedRepeat = ReminderRepeat.parseSeries(repeatRule)?.let { series ->
+            ReminderRepeat.encode(
+                series.rule,
+                Instant.ofEpochMilli(triggerAt).atZone(zone).toLocalTime(),
+            )
+        }
         return db.withTransaction {
             val existing = dao().getForNote(noteId)
             val primary = existing.firstOrNull()

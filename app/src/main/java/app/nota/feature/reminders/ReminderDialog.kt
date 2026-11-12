@@ -126,7 +126,8 @@ fun ReminderDialog(
     // Repeat state (PR #53): pre-selected from the stored rule when
     // editing. Custom with no days chosen saves as None — a series
     // with no days could never ring.
-    val initialRule = remember { ReminderRepeat.parse(existing?.repeatRule) }
+    val initialSeries = remember { ReminderRepeat.parseSeries(existing?.repeatRule) }
+    val initialRule = initialSeries?.rule
     var repeatChoice by remember {
         mutableStateOf(
             when (initialRule) {
@@ -164,11 +165,18 @@ fun ReminderDialog(
         initialSelectedDateMillis = initialZoned.toLocalDate()
             .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
     )
-    var pickedHour by remember { mutableIntStateOf(initialZoned.hour) }
-    var pickedMinute by remember { mutableIntStateOf(initialZoned.minute) }
+    // PR #53 round 2: the picker's starting time is the series'
+    // intended local time when the stored rule carries one — the
+    // stored trigger itself may be a DST-gap resolution (03:00 for
+    // a 02:30 series), which must not become the series' new
+    // chosen time on a no-touch edit. The date still comes from
+    // the stored trigger.
+    val initialTime = initialSeries?.time ?: initialZoned.toLocalTime()
+    var pickedHour by remember { mutableIntStateOf(initialTime.hour) }
+    var pickedMinute by remember { mutableIntStateOf(initialTime.minute) }
     val timePickerState = rememberTimePickerState(
-        initialHour = initialZoned.hour,
-        initialMinute = initialZoned.minute,
+        initialHour = initialTime.hour,
+        initialMinute = initialTime.minute,
         is24Hour = android.text.format.DateFormat.is24HourFormat(context),
     )
 

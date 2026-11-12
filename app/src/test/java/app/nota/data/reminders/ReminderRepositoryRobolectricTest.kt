@@ -5,6 +5,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.repository.NoteRepository
 import app.nota.data.sync.EntityHash
+import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -239,12 +240,17 @@ class ReminderRepositoryRobolectricTest {
         val saved = reminders.setReminder(
             note.id, triggerAt = 1_900_000_000_000L,
             alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
-            repeatRule = "days:5,1,5",
+            repeatRule = "days:5,1,5", zone = ZoneId.of("UTC"),
         )
         // Parsed and re-encoded: lowercase + duplicates + disorder
-        // never reach the row.
-        assertEquals("DAYS:1,5", saved.repeatRule)
-        assertEquals("DAYS:1,5", db.reminderDao().getById(saved.id)?.repeatRule)
+        // never reach the row. Round 2: the stored form also
+        // carries the series time derived from the saved trigger
+        // (1_900_000_000_000 is 17:46 UTC).
+        assertEquals("DAYS:1,5@17:46", saved.repeatRule)
+        assertEquals(
+            "DAYS:1,5@17:46",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
 
         // The update-in-place path stores the rule too — and an edit
         // back to no rule clears it to a one-shot.
@@ -255,6 +261,40 @@ class ReminderRepositoryRobolectricTest {
         assertEquals(saved.id, cleared.id)
         assertNull(cleared.repeatRule)
         assertNull(db.reminderDao().getById(saved.id)?.repeatRule)
+    }
+
+    @Test
+    fun setReminderStoresTheSeriesTimeFromTheSavedTrigger() = runBlocking {
+        val note = notes.createNote(title = "Early bird", plainBody = "")
+        // 02:30 UTC on the nose: the stored rule carries the saved
+        // trigger's local time as its @HH:MM series time (PR #53
+        // round 2), so the series can never drift off it.
+        val saved = reminders.setReminder(
+            note.id,
+            triggerAt = Instant.parse("2030-03-17T02:30:00Z").toEpochMilli(),
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        assertEquals("DAILY@02:30", saved.repeatRule)
+        assertEquals(
+            "DAILY@02:30",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
+
+        // The update-in-place path re-derives the suffix from the
+        // NEW trigger being saved — same row, new series time.
+        val updated = reminders.setReminder(
+            note.id,
+            triggerAt = Instant.parse("2030-03-18T09:15:00Z").toEpochMilli(),
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+            repeatRule = "DAILY", zone = ZoneId.of("UTC"),
+        )
+        assertEquals(saved.id, updated.id)
+        assertEquals("DAILY@09:15", updated.repeatRule)
+        assertEquals(
+            "DAILY@09:15",
+            db.reminderDao().getById(saved.id)?.repeatRule,
+        )
     }
 
     @Test
