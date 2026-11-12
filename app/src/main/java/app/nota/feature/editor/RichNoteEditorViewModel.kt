@@ -232,10 +232,13 @@ class RichNoteEditorViewModel(
         triggerAt: Long,
         alertType: String,
         tone: AlarmToneSettings = AlarmToneSettings(),
+        repeatRule: String? = null,
     ) {
         val noteId = _note.value?.id ?: return
         viewModelScope.launch {
-            val saved = reminderRepository.setReminder(noteId, triggerAt, alertType, tone = tone)
+            val saved = reminderRepository.setReminder(
+                noteId, triggerAt, alertType, tone = tone, repeatRule = repeatRule,
+            )
             reminderScheduler.schedule(saved)
         }
     }

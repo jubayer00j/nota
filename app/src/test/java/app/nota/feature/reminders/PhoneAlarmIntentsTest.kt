@@ -72,6 +72,51 @@ class PhoneAlarmIntentsTest {
         assertFalse(intent.getBooleanExtra(AlarmClock.EXTRA_SKIP_UI, true))
     }
 
+    // --- PR #53: EXTRA_DAYS for repeats ----------------------------
+    // ISO day numbers (Mon=1..Sun=7) map to Calendar constants
+    // (Sun=1..Sat=7) via iso % 7 + 1.
+
+    @Test
+    fun repeatingIntentCarriesCalendarDays() {
+        val daily = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = (1..7).toSet(),
+        )
+        assertEquals(
+            arrayListOf(1, 2, 3, 4, 5, 6, 7),
+            daily.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+        // Tuesday ISO 2 -> Calendar 3.
+        val tuesday = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = setOf(2),
+        )
+        assertEquals(
+            arrayListOf(3),
+            tuesday.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+        // Mon/Wed/Fri -> 2/4/6.
+        val custom = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = setOf(1, 3, 5),
+        )
+        assertEquals(
+            arrayListOf(2, 4, 6),
+            custom.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+        // Sunday ISO 7 wraps to Calendar 1.
+        val sunday = PhoneAlarmIntents.buildSetAlarmIntent(
+            "Dentist", triggerAt, utc, repeatDaysIso = setOf(7),
+        )
+        assertEquals(
+            arrayListOf(1),
+            sunday.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS),
+        )
+    }
+
+    @Test
+    fun oneShotIntentHasNoDaysExtra() {
+        val intent = PhoneAlarmIntents.buildSetAlarmIntent("Dentist", triggerAt, utc)
+        assertNull(intent.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS))
+    }
+
     @Test
     fun storedToneCarriesAReadGrantForTheClockApp() {
         // Codex PR #45 round 1: a picked custom tone is a document

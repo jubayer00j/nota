@@ -33,11 +33,14 @@ class ReminderFireHandlerRobolectricTest {
 
     private class FakeGateway : ReminderAlarmGateway {
         val armed = mutableSetOf<String>()
+        val armTimes = mutableMapOf<String, Long>()
         override fun arm(reminderId: String, triggerAtMillis: Long) {
             armed += reminderId
+            armTimes[reminderId] = triggerAtMillis
         }
         override fun disarm(reminderId: String) {
             armed -= reminderId
+            armTimes -= reminderId
         }
         override fun armedReminderIds(): Set<String> = armed.toSet()
         override fun noteArmedReminderIds(ids: Set<String>) {
@@ -146,6 +149,54 @@ class ReminderFireHandlerRobolectricTest {
 
         assertTrue(shadowNotifications.allNotifications.isEmpty())
         assertFalse(db.reminderDao().getById(saved.id)!!.enabled)
+    }
+
+    // --- PR #53: a fired repeat advances instead of spending -----
+
+    @Test
+    fun repeatingReminderFiresAdvancesAndRearms() = runBlocking {
+        val note = notes.createNote(title = "Water the plants", plainBody = "")
+        val anchor = System.currentTimeMillis() + 60_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = anchor,
+            alertType = ReminderAlertType.NOTIFICATION,
+            repeatRule = "DAILY",
+        )
+        gateway.arm(saved.id, saved.triggerAt)
+
+        handler.onAlarmFired(saved.id, nowMillis = anchor)
+
+        // Posted exactly like a one-shot fire…
+        assertEquals(1, shadowNotifications.allNotifications.size)
+        // …but the row is NOT spent: still enabled, trigger moved to
+        // the next occurrence, and the gateway holds the same id
+        // armed at the new time.
+        val row = db.reminderDao().getById(saved.id)!!
+        assertTrue(row.enabled)
+        assertTrue(row.triggerAt > anchor)
+        assertEquals(setOf(saved.id), gateway.armed)
+        assertEquals(row.triggerAt, gateway.armTimes[saved.id])
+    }
+
+    @Test
+    fun repeatingReminderOnTrashedNoteSpendsAndDoesNotAdvance() = runBlocking {
+        val note = notes.createNote(title = "Old series", plainBody = "")
+        val anchor = System.currentTimeMillis() + 60_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = anchor,
+            alertType = ReminderAlertType.NOTIFICATION,
+            repeatRule = "DAILY",
+        )
+        notes.trash(note)
+
+        handler.onAlarmFired(saved.id, nowMillis = anchor)
+
+        // The series ends with the note: nothing posted, row spent,
+        // trigger untouched (no advance past a dead note).
+        assertTrue(shadowNotifications.allNotifications.isEmpty())
+        val row = db.reminderDao().getById(saved.id)!!
+        assertFalse(row.enabled)
+        assertEquals(anchor, row.triggerAt)
     }
 
     @Test

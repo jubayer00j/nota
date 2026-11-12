@@ -130,6 +130,50 @@ class ReminderBackupConsistencyRobolectricTest {
         }
     }
 
+    /**
+     * PR #53: the repeat rule is device-local like the tone fields —
+     * a backup round-trip brings the reminder back as a ONE-SHOT
+     * (1.x backups carry no repeat; the BxReminder crossover has no
+     * rule field), same trigger, still pending.
+     */
+    @Test
+    fun repeatRuleDoesNotSurviveABackupRoundTrip() = runBlocking {
+        val note = notes.createNote(title = "Repeat trip", plainBody = "body")
+        val triggerAt = 1_900_000_000_000L
+        reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+        val zip = File.createTempFile("nota-repeat-roundtrip", ".zip")
+        try {
+            backup.exportToFile(zip, null)
+
+            val context = RuntimeEnvironment.getApplication()
+            val db2 = Room.inMemoryDatabaseBuilder(context, NotaDatabase::class.java)
+                .allowMainThreadQueries()
+                .build()
+            try {
+                val provider2 = DatabaseProvider.forDatabase(context, db2)
+                val backup2 = BackupRepository(
+                    context,
+                    provider2,
+                    TemplateRepository(context),
+                    AttachmentStore(context, provider2),
+                )
+                backup2.restore(zip, null, RestoreMode.REPLACE)
+                val restored = db2.reminderDao().getForNote(note.id).single()
+                assertNull(restored.repeatRule)
+                assertEquals(triggerAt, restored.triggerAt)
+                assertTrue(restored.enabled)
+            } finally {
+                db2.close()
+            }
+        } finally {
+            zip.delete()
+        }
+    }
+
     @Test
     fun uiPathRemoveClearsExportAndFiredReminderExportsDismissed() = runBlocking {
         val note = notes.createNote(title = "Export me too", plainBody = "body")

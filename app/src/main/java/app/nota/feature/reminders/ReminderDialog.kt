@@ -21,6 +21,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
@@ -47,13 +48,21 @@ import app.nota.data.reminders.AlarmToneMode
 import app.nota.data.reminders.AlarmToneSettings
 import app.nota.data.reminders.ReminderAlertType
 import app.nota.data.reminders.ReminderNotificationText
+import app.nota.data.reminders.ReminderRepeat
+import app.nota.data.reminders.ReminderTriggerTimes
 import app.nota.ui.theme.NotaSpacing
+import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
 import java.util.Locale
+
+/** PR #53: the dialog's repeat selection (the stored form is
+ *  [ReminderRepeat]'s encoding). */
+private enum class RepeatChoice { NONE, DAILY, WEEKLY, CUSTOM }
 
 /** 1.x's default for a new reminder: today, one hour from now,
  *  rounded to the hour. */
@@ -85,6 +94,12 @@ private fun defaultTriggerAt(nowMillis: Long): Long {
  * per-reminder and device-local ([AlarmToneSettings]); a stored tone
  * that can no longer be read is reset to the system default with a
  * notice, on open and again at save time, exactly like 1.x.
+ *
+ * Phase 7 (PR #53): a Repeat row (None / Daily / Weekly / Custom
+ * day chips — chips, not a menu, so the choice stays testable)
+ * writes [ReminderRepeat]'s encoding through onSave; for Clock
+ * alarms the hand-off carries EXTRA_DAYS and the representability
+ * check follows the series' first ring.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,7 +107,12 @@ fun ReminderDialog(
     noteTitle: String,
     existing: ReminderEntity?,
     onDismiss: () -> Unit,
-    onSave: (triggerAtMillis: Long, alertType: String, tone: AlarmToneSettings) -> Unit,
+    onSave: (
+        triggerAtMillis: Long,
+        alertType: String,
+        tone: AlarmToneSettings,
+        repeatRule: String?,
+    ) -> Unit,
     onRemove: (() -> Unit)?,
 ) {
     val context = LocalContext.current
@@ -102,6 +122,25 @@ fun ReminderDialog(
 
     var alertType by remember {
         mutableStateOf(existing?.alertType ?: ReminderAlertType.NOTIFICATION)
+    }
+    // Repeat state (PR #53): pre-selected from the stored rule when
+    // editing. Custom with no days chosen saves as None — a series
+    // with no days could never ring.
+    val initialRule = remember { ReminderRepeat.parse(existing?.repeatRule) }
+    var repeatChoice by remember {
+        mutableStateOf(
+            when (initialRule) {
+                null -> RepeatChoice.NONE
+                ReminderRepeat.Rule.Daily -> RepeatChoice.DAILY
+                ReminderRepeat.Rule.Weekly -> RepeatChoice.WEEKLY
+                is ReminderRepeat.Rule.CustomDays -> RepeatChoice.CUSTOM
+            },
+        )
+    }
+    var customDays by remember {
+        mutableStateOf(
+            (initialRule as? ReminderRepeat.Rule.CustomDays)?.days ?: emptySet(),
+        )
     }
     // Tone state (phone-alarm only; kept on the row either way so
     // switching alert styles back and forth loses nothing).
@@ -227,6 +266,37 @@ fun ReminderDialog(
         mode = toneMode, uri = toneUri, name = toneName, vibrate = toneVibrate,
     )
 
+    /** The repeat rule as currently picked (null = one-shot). */
+    fun pickedRule(): ReminderRepeat.Rule? = when (repeatChoice) {
+        RepeatChoice.NONE -> null
+        RepeatChoice.DAILY -> ReminderRepeat.Rule.Daily
+        RepeatChoice.WEEKLY -> ReminderRepeat.Rule.Weekly
+        RepeatChoice.CUSTOM ->
+            if (customDays.isEmpty()) null
+            else ReminderRepeat.Rule.CustomDays(customDays)
+    }
+
+    /** The picked rule's ISO day set, resolved against a trigger —
+     *  the Clock-alarm checks and the EXTRA_DAYS hand-off use it.
+     *  Null for a one-shot. */
+    fun pickedRepeatDaysIso(triggerAt: Long): Set<Int>? =
+        ReminderRepeat.daysIso(pickedRule(), triggerAt, zone)
+
+    fun selectRepeatChoice(choice: RepeatChoice) {
+        if (choice == RepeatChoice.CUSTOM && customDays.isEmpty()) {
+            // Entering Custom pre-checks the picked date's weekday.
+            val pickedDateMillis = datePickerState.selectedDateMillis
+            val weekday = if (pickedDateMillis != null) {
+                Instant.ofEpochMilli(pickedDateMillis)
+                    .atZone(ZoneOffset.UTC).dayOfWeek
+            } else {
+                initialZoned.dayOfWeek
+            }
+            customDays = setOf(weekday.value)
+        }
+        repeatChoice = choice
+    }
+
     fun computeTriggerAt(): Long {
         val dateMillis = datePickerState.selectedDateMillis ?: return initialTrigger
         val date = Instant.ofEpochMilli(dateMillis).atZone(ZoneOffset.UTC).toLocalDate()
@@ -264,11 +334,15 @@ fun ReminderDialog(
                 toneUri = null
                 toneName = null
             }
-            onSave(triggerAt, ReminderAlertType.PHONE_ALARM, tone)
+            onSave(
+                triggerAt, ReminderAlertType.PHONE_ALARM, tone,
+                ReminderRepeat.encode(pickedRule()),
+            )
             val intent = PhoneAlarmIntents.buildSetAlarmIntent(
                 noteTitle, triggerAt, zone,
                 vibrate = tone.vibrate,
                 ringtoneUri = tone.uri,
+                repeatDaysIso = pickedRepeatDaysIso(triggerAt),
             )
             val opened = runCatching { context.startActivity(intent) }.isSuccess
             Toast.makeText(
@@ -281,7 +355,10 @@ fun ReminderDialog(
                 Toast.LENGTH_LONG,
             ).show()
         } else {
-            onSave(triggerAt, ReminderAlertType.NOTIFICATION, pickedTone())
+            onSave(
+                triggerAt, ReminderAlertType.NOTIFICATION, pickedTone(),
+                ReminderRepeat.encode(pickedRule()),
+            )
         }
         onDismiss()
     }
@@ -312,6 +389,7 @@ fun ReminderDialog(
         if (alertType == ReminderAlertType.PHONE_ALARM &&
             !ClockAlarmDates.isRepresentable(
                 triggerAt, System.currentTimeMillis(), zone,
+                pickedRepeatDaysIso(triggerAt),
             )
         ) {
             // Fix round (Codex P2): the Clock app would ring at the
@@ -324,7 +402,10 @@ fun ReminderDialog(
             return
         }
         if (alertType == ReminderAlertType.PHONE_ALARM) {
-            val intent = PhoneAlarmIntents.buildSetAlarmIntent(noteTitle, triggerAt, zone)
+            val intent = PhoneAlarmIntents.buildSetAlarmIntent(
+                noteTitle, triggerAt, zone,
+                repeatDaysIso = pickedRepeatDaysIso(triggerAt),
+            )
             if (PhoneAlarmIntents.canHandle(context, intent)) {
                 performSave(ReminderAlertType.PHONE_ALARM)
             } else {
@@ -358,14 +439,26 @@ fun ReminderDialog(
     // block the phone-alarm save in onSaveClicked.
     val nowForClockCheck = System.currentTimeMillis()
     val pickedTriggerAt = computeTriggerAt()
+    // PR #53: with a repeat picked, representability is about the
+    // series' first ring landing on the picked date.
+    val pickedRepeatDays = pickedRepeatDaysIso(pickedTriggerAt)
     val clockAlarmMisdated = alertType == ReminderAlertType.PHONE_ALARM &&
         pickedTriggerAt > nowForClockCheck &&
-        !ClockAlarmDates.isRepresentable(pickedTriggerAt, nowForClockCheck, zone)
+        !ClockAlarmDates.isRepresentable(
+            pickedTriggerAt, nowForClockCheck, zone, pickedRepeatDays,
+        )
     val clockAlarmNextLabel = if (clockAlarmMisdated) {
         Instant.ofEpochMilli(
-            ClockAlarmDates.nextOccurrenceMillis(
-                LocalTime.of(pickedHour, pickedMinute), nowForClockCheck, zone,
-            ),
+            if (pickedRepeatDays != null) {
+                ClockAlarmDates.nextOccurrenceMillis(
+                    LocalTime.of(pickedHour, pickedMinute), nowForClockCheck,
+                    zone, pickedRepeatDays,
+                )
+            } else {
+                ClockAlarmDates.nextOccurrenceMillis(
+                    LocalTime.of(pickedHour, pickedMinute), nowForClockCheck, zone,
+                )
+            },
         ).atZone(zone).format(
             DateTimeFormatter.ofPattern("EEE, d MMM 'at' h:mm a", Locale.getDefault()),
         )
@@ -422,6 +515,92 @@ fun ReminderDialog(
                         onClick = { alertType = ReminderAlertType.PHONE_ALARM },
                     )
                     Text("Clock alarm")
+                }
+                Spacer(Modifier.height(NotaSpacing.md))
+                Text("Repeat", style = MaterialTheme.typography.titleSmall)
+                Row {
+                    FilterChip(
+                        selected = repeatChoice == RepeatChoice.NONE,
+                        onClick = { selectRepeatChoice(RepeatChoice.NONE) },
+                        label = { Text("None") },
+                    )
+                    Spacer(Modifier.padding(horizontal = NotaSpacing.sm))
+                    FilterChip(
+                        selected = repeatChoice == RepeatChoice.DAILY,
+                        onClick = { selectRepeatChoice(RepeatChoice.DAILY) },
+                        label = { Text("Daily") },
+                    )
+                    Spacer(Modifier.padding(horizontal = NotaSpacing.sm))
+                    FilterChip(
+                        selected = repeatChoice == RepeatChoice.WEEKLY,
+                        onClick = { selectRepeatChoice(RepeatChoice.WEEKLY) },
+                        label = { Text("Weekly") },
+                    )
+                    Spacer(Modifier.padding(horizontal = NotaSpacing.sm))
+                    FilterChip(
+                        selected = repeatChoice == RepeatChoice.CUSTOM,
+                        onClick = { selectRepeatChoice(RepeatChoice.CUSTOM) },
+                        label = { Text("Custom") },
+                    )
+                }
+                if (repeatChoice == RepeatChoice.CUSTOM) {
+                    val weekDays = listOf(
+                        DayOfWeek.MONDAY, DayOfWeek.TUESDAY, DayOfWeek.WEDNESDAY,
+                        DayOfWeek.THURSDAY, DayOfWeek.FRIDAY, DayOfWeek.SATURDAY,
+                        DayOfWeek.SUNDAY,
+                    )
+                    Row {
+                        weekDays.take(4).forEach { day ->
+                            FilterChip(
+                                selected = day.value in customDays,
+                                onClick = {
+                                    customDays = if (day.value in customDays) {
+                                        customDays - day.value
+                                    } else {
+                                        customDays + day.value
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        day.getDisplayName(
+                                            TextStyle.SHORT, Locale.US,
+                                        ),
+                                    )
+                                },
+                            )
+                            Spacer(Modifier.padding(horizontal = NotaSpacing.sm))
+                        }
+                    }
+                    Row {
+                        weekDays.drop(4).forEach { day ->
+                            FilterChip(
+                                selected = day.value in customDays,
+                                onClick = {
+                                    customDays = if (day.value in customDays) {
+                                        customDays - day.value
+                                    } else {
+                                        customDays + day.value
+                                    }
+                                },
+                                label = {
+                                    Text(
+                                        day.getDisplayName(
+                                            TextStyle.SHORT, Locale.US,
+                                        ),
+                                    )
+                                },
+                            )
+                            Spacer(Modifier.padding(horizontal = NotaSpacing.sm))
+                        }
+                    }
+                    if (customDays.isEmpty()) {
+                        Text(
+                            "Pick at least one day — with none chosen, " +
+                                "this saves as no repeat.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 if (alertType == ReminderAlertType.PHONE_ALARM) {
                     Spacer(Modifier.height(NotaSpacing.sm))

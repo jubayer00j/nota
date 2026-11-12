@@ -1,7 +1,10 @@
 package app.nota.data.reminders
 
 import app.nota.data.db.ReminderEntity
+import java.time.Instant
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -112,5 +115,145 @@ class ReminderSchedulerTest {
         // AlarmManager call replaces the old trigger time.
         assertEquals(listOf(edited), plan.arm)
         assertTrue(plan.disarm.isEmpty())
+    }
+
+    // --- PR #53: ReminderRepeat -----------------------------------
+    // The pure repeat math: encoding, occurrence resolution (the
+    // anchor carries the series' local time of day; results are
+    // strictly after the ask), and the compact labels.
+
+    private val utc: ZoneId = ZoneId.of("UTC")
+
+    private fun millis(iso: String): Long = Instant.parse(iso).toEpochMilli()
+
+    @Test
+    fun repeatParseEncodeRoundTrips() {
+        assertEquals(ReminderRepeat.Rule.Daily, ReminderRepeat.parse("DAILY"))
+        assertEquals("DAILY", ReminderRepeat.encode(ReminderRepeat.Rule.Daily))
+        assertEquals(ReminderRepeat.Rule.Weekly, ReminderRepeat.parse(" weekly "))
+        assertEquals("WEEKLY", ReminderRepeat.encode(ReminderRepeat.Rule.Weekly))
+        // Stored custom days are canonicalised: sorted, de-duplicated.
+        assertEquals(
+            ReminderRepeat.Rule.CustomDays(setOf(1, 3, 5)),
+            ReminderRepeat.parse("DAYS:5,1,3,5"),
+        )
+        assertEquals(
+            "DAYS:1,3,5",
+            ReminderRepeat.encode(ReminderRepeat.Rule.CustomDays(setOf(5, 1, 3))),
+        )
+        assertNull(ReminderRepeat.encode(null))
+        assertNull(ReminderRepeat.encode(ReminderRepeat.Rule.CustomDays(emptySet())))
+    }
+
+    @Test
+    fun repeatParseDegradesUnknownValuesToOneShot() {
+        assertNull(ReminderRepeat.parse(null))
+        assertNull(ReminderRepeat.parse(""))
+        assertNull(ReminderRepeat.parse("MONTHLY"))
+        assertNull(ReminderRepeat.parse("DAYS:"))
+        assertNull(ReminderRepeat.parse("DAYS:0,9,x"))
+    }
+
+    @Test
+    fun dailyNextOccurrenceIsStrictlyAfter() {
+        // Anchor: Mon 2 Nov 2026, 09:00 UTC.
+        val anchor = millis("2026-11-02T09:00:00Z")
+        val daily = ReminderRepeat.Rule.Daily
+        // The anchor itself while it is still ahead.
+        assertEquals(
+            anchor,
+            ReminderRepeat.nextOccurrence(anchor, daily, anchor - 3_600_000, utc),
+        )
+        // At the anchor exactly, the series moves on a day.
+        assertEquals(
+            millis("2026-11-03T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, daily, anchor, utc),
+        )
+        // An hour late still lands on the next day, same local time.
+        assertEquals(
+            millis("2026-11-03T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, daily, anchor + 3_600_000, utc),
+        )
+    }
+
+    @Test
+    fun weeklyNextOccurrenceIsSevenDaysOut() {
+        val anchor = millis("2026-11-02T09:00:00Z") // a Monday
+        val weekly = ReminderRepeat.Rule.Weekly
+        assertEquals(
+            millis("2026-11-09T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, weekly, anchor, utc),
+        )
+        // A midweek ask lands on the coming Monday — the series is
+        // anchored on the trigger, not on the ask.
+        assertEquals(
+            millis("2026-11-09T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, weekly, millis("2026-11-04T12:00:00Z"), utc),
+        )
+    }
+
+    @Test
+    fun customDaysNextOccurrenceWrapsTheWeek() {
+        val anchor = millis("2026-11-02T09:00:00Z") // a Monday
+        val rule = ReminderRepeat.Rule.CustomDays(setOf(1, 3, 5))
+        // Mon at the anchor -> Wed.
+        assertEquals(
+            millis("2026-11-04T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, rule, anchor, utc),
+        )
+        // Fri after the time -> next Mon.
+        assertEquals(
+            millis("2026-11-09T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, rule, millis("2026-11-06T10:00:00Z"), utc),
+        )
+        // Sun -> Mon.
+        assertEquals(
+            millis("2026-11-09T09:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, rule, millis("2026-11-08T08:00:00Z"), utc),
+        )
+    }
+
+    @Test
+    fun nextOccurrenceKeepsLocalTimeAcrossDst() {
+        val newYork = ZoneId.of("America/New_York")
+        // Sat 7 Mar 2026, 02:30 EST (07:30Z). Clocks spring forward
+        // Sun 8 Mar at 02:00, so Sunday's 02:30 never happens — the
+        // occurrence is the transition instant (07:00Z), exactly the
+        // ReminderTriggerTimes gap rule a picked trigger gets.
+        val anchor = millis("2026-03-07T07:30:00Z")
+        assertEquals(
+            millis("2026-03-08T07:00:00Z"),
+            ReminderRepeat.nextOccurrence(anchor, ReminderRepeat.Rule.Daily, anchor, newYork),
+        )
+    }
+
+    @Test
+    fun nextOccurrenceOfNoRuleIsNull() {
+        val anchor = millis("2026-11-02T09:00:00Z")
+        assertNull(ReminderRepeat.nextOccurrence(anchor, null, anchor - 1, utc))
+        assertNull(ReminderRepeat.nextOccurrence(anchor, "GARBAGE", anchor - 1, utc))
+    }
+
+    @Test
+    fun repeatLabelsAreCompact() {
+        val monday = millis("2026-11-02T09:00:00Z")
+        val tuesday = millis("2026-11-03T09:00:00Z")
+        assertEquals("Daily", ReminderRepeat.repeatLabel("DAILY", monday, utc))
+        assertEquals("Weekly · Tue", ReminderRepeat.repeatLabel("WEEKLY", tuesday, utc))
+        assertEquals(
+            "Mon · Wed · Fri",
+            ReminderRepeat.repeatLabel("DAYS:5,1,3", monday, utc),
+        )
+        assertNull(ReminderRepeat.repeatLabel(null, monday, utc))
+        assertNull(ReminderRepeat.repeatLabel("GARBAGE", monday, utc))
+    }
+
+    @Test
+    fun repeatDaysIsoResolvesAgainstTheAnchor() {
+        val tuesday = millis("2026-11-03T09:00:00Z")
+        assertEquals((1..7).toSet(), ReminderRepeat.daysIso("DAILY", tuesday, utc))
+        assertEquals(setOf(2), ReminderRepeat.daysIso("WEEKLY", tuesday, utc))
+        assertEquals(setOf(1, 3, 5), ReminderRepeat.daysIso("DAYS:1,3,5", tuesday, utc))
+        assertNull(ReminderRepeat.daysIso(null, tuesday, utc))
     }
 }

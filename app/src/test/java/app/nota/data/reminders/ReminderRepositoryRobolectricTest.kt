@@ -5,6 +5,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.repository.NoteRepository
 import app.nota.data.sync.EntityHash
+import java.time.ZoneId
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -228,6 +229,106 @@ class ReminderRepositoryRobolectricTest {
         assertNull(saved.alarmToneUri)
         assertNull(saved.alarmToneName)
         assertFalse(saved.alarmVibrate)
+    }
+
+    // --- PR #53: repeats are stored, advanced, reconciled --------
+
+    @Test
+    fun setReminderStoresTheRepeatRuleCanonically() = runBlocking {
+        val note = notes.createNote(title = "Standup", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "days:5,1,5",
+        )
+        // Parsed and re-encoded: lowercase + duplicates + disorder
+        // never reach the row.
+        assertEquals("DAYS:1,5", saved.repeatRule)
+        assertEquals("DAYS:1,5", db.reminderDao().getById(saved.id)?.repeatRule)
+
+        // The update-in-place path stores the rule too — and an edit
+        // back to no rule clears it to a one-shot.
+        val cleared = reminders.setReminder(
+            note.id, triggerAt = 1_900_003_600_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 2_000L,
+        )
+        assertEquals(saved.id, cleared.id)
+        assertNull(cleared.repeatRule)
+        assertNull(db.reminderDao().getById(saved.id)?.repeatRule)
+    }
+
+    @Test
+    fun setReminderDegradesAGarbageRuleToOneShot() = runBlocking {
+        val note = notes.createNote(title = "Garbage rule", plainBody = "")
+        val saved = reminders.setReminder(
+            note.id, triggerAt = 1_900_000_000_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "FORTNIGHTLY",
+        )
+        assertNull(saved.repeatRule)
+    }
+
+    @Test
+    fun markFiredAdvancesARepeatingReminder() = runBlocking {
+        val note = notes.createNote(title = "Daily pill", plainBody = "")
+        val triggerAt = 1_900_000_000_000L
+        val saved = reminders.setReminder(
+            note.id, triggerAt = triggerAt,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+        val outcome = reminders.markFired(
+            saved, nowMillis = triggerAt, zone = ZoneId.of("UTC"),
+        )
+        assertTrue(outcome is ReminderRepository.FireOutcome.Advanced)
+        val row = db.reminderDao().getById(saved.id)
+        assertNotNull(row)
+        assertTrue(row!!.enabled)
+        // UTC has no DST: the next daily occurrence is +24h sharp.
+        assertEquals(triggerAt + 86_400_000L, row.triggerAt)
+        assertEquals(row, reminders.pendingForNote(note.id))
+    }
+
+    @Test
+    fun advanceOverdueRepeatsMovesOnlyEnabledRepeats() = runBlocking {
+        val base = 1_900_000_000_000L
+        val dailyNote = notes.createNote(title = "Daily", plainBody = "")
+        val onceNote = notes.createNote(title = "Once", plainBody = "")
+        val futureNote = notes.createNote(title = "Future", plainBody = "")
+        val spentNote = notes.createNote(title = "Spent", plainBody = "")
+        val daily = reminders.setReminder(
+            dailyNote.id, triggerAt = base,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+        val oneShot = reminders.setReminder(
+            onceNote.id, triggerAt = base,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+        )
+        val future = reminders.setReminder(
+            futureNote.id, triggerAt = base + 7_200_000L,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+        val spent = reminders.setReminder(
+            spentNote.id, triggerAt = base,
+            alertType = ReminderAlertType.NOTIFICATION, nowMillis = 1_000L,
+            repeatRule = "DAILY",
+        )
+        reminders.markSpent(spent)
+
+        // One hour past the base time: only the enabled, overdue
+        // DAILY row advances (to the next day); the overdue one-shot
+        // keeps its Overdue semantics, the future repeat is not due,
+        // and the spent row stays spent where it was.
+        val advanced = reminders.advanceOverdueRepeats(
+            nowMillis = base + 3_600_000L, zone = ZoneId.of("UTC"),
+        )
+        assertEquals(1, advanced)
+        assertEquals(base + 86_400_000L, db.reminderDao().getById(daily.id)?.triggerAt)
+        assertEquals(base, db.reminderDao().getById(oneShot.id)?.triggerAt)
+        assertEquals(base + 7_200_000L, db.reminderDao().getById(future.id)?.triggerAt)
+        assertEquals(base, db.reminderDao().getById(spent.id)?.triggerAt)
     }
 
     @Test
