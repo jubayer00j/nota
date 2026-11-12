@@ -121,6 +121,12 @@ class ReminderScheduler(
      * arms the desired set, and persists the result.
      */
     suspend fun rescheduleAll(nowMillis: Long = System.currentTimeMillis()) {
+        // PR #53: BEFORE the plan is computed, overdue REPEATING
+        // reminders advance to their next future occurrence (they
+        // are never armed late and never sit in Overdue — missed
+        // occurrences are skipped). One-shots are untouched, so
+        // their overdue behaviour below is unchanged.
+        ReminderRepository(provider).advanceOverdueRepeats(nowMillis)
         val db = provider.current
         val noteDao = db.noteDao()
         val candidates = db.reminderDao().getAll().map { reminder ->

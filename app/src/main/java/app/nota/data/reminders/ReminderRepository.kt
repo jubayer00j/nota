@@ -5,6 +5,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.ReminderEntity
 import app.nota.data.sync.EntityHash
 import app.nota.data.sync.SyncStore
+import java.time.ZoneId
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -27,8 +28,13 @@ import kotlinx.coroutines.flow.map
  * 1.x's "pending"; `enabled = false` is the spent state — a fired
  * one-shot, a completed reminder, a dismissed one — which the export
  * maps to BxReminder "dismissed" and which clears reminderAt.
- * repeatRule is always written null: 1.x backups carry no repeat, so
- * repeats stay dormant in 5.1.
+ *
+ * Phase 7 (PR #53): repeatRule is live — [setReminder] stores the
+ * encoded rule ([ReminderRepeat]); a fired REPEATING reminder
+ * advances to its next occurrence instead of spending (see
+ * [markFired]). The rule stays device-local like alertType and the
+ * tone fields: backups carry no repeat (1.x has none), so a restored
+ * reminder comes back one-shot.
  */
 class ReminderRepository(private val provider: DatabaseProvider) {
 
@@ -86,6 +92,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         alertType: String,
         nowMillis: Long = System.currentTimeMillis(),
         tone: AlarmToneSettings = AlarmToneSettings(),
+        repeatRule: String? = null,
     ): ReminderEntity {
         require(alertType == ReminderAlertType.NOTIFICATION || alertType == ReminderAlertType.PHONE_ALARM) {
             "Unknown reminder alertType: $alertType"
@@ -96,6 +103,10 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         // tone fields, so a restored reminder comes back with the
         // entity defaults — system tone, vibrate on).
         val storedTone = tone.normalised()
+        // PR #53: the repeat rule is stored canonically — parsed and
+        // re-encoded, so a foreign or corrupt value degrades to null
+        // (one-shot) instead of being persisted verbatim.
+        val storedRepeat = ReminderRepeat.encode(ReminderRepeat.parse(repeatRule))
         return db.withTransaction {
             val existing = dao().getForNote(noteId)
             val primary = existing.firstOrNull()
@@ -107,7 +118,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
             val saved = if (primary != null) {
                 primary.copy(
                     triggerAt = triggerAt,
-                    repeatRule = null,
+                    repeatRule = storedRepeat,
                     enabled = true,
                     alertType = alertType,
                     alarmToneMode = storedTone.mode,
@@ -120,7 +131,7 @@ class ReminderRepository(private val provider: DatabaseProvider) {
                     id = UUID.randomUUID().toString(),
                     noteId = noteId,
                     triggerAt = triggerAt,
-                    repeatRule = null,
+                    repeatRule = storedRepeat,
                     enabled = true,
                     createdAt = nowMillis,
                     alertType = alertType,
@@ -166,12 +177,87 @@ class ReminderRepository(private val provider: DatabaseProvider) {
         }
     }
 
-    /** A fired one-shot leaves the pending state (the alarm receiver's
-     *  state transition): enabled = false, so it stops showing as
-     *  pending and the note's reminderAt clears. */
-    suspend fun markFired(reminder: ReminderEntity) {
+    /** The fire-time transition's outcome (PR #53). */
+    sealed interface FireOutcome {
+        /** The series is over: the row is spent (enabled = false). */
+        data object Spent : FireOutcome
+
+        /** A repeating reminder advanced: still enabled, its
+         *  triggerAt now the next occurrence — re-arm [reminder]. */
+        data class Advanced(val reminder: ReminderEntity) : FireOutcome
+    }
+
+    /** Spends the reminder unconditionally (enabled = false): the
+     *  series ends without a next occurrence. The fire path uses
+     *  this when the note is gone or trashed at fire time — a repeat
+     *  never advances past a dead note. */
+    suspend fun markSpent(reminder: ReminderEntity) {
         if (reminder.enabled) {
             dao().upsert(reminder.copy(enabled = false))
         }
+    }
+
+    /**
+     * The fire-time transition after a notification posted (the
+     * alarm receiver's state change). A one-shot leaves the pending
+     * state: enabled = false, so it stops showing as pending and the
+     * note's reminderAt clears. A REPEATING reminder (PR #53) stays
+     * enabled and its triggerAt advances to the next occurrence
+     * strictly after [nowMillis]; a rule that no longer parses
+     * degrades to the one-shot spend.
+     */
+    suspend fun markFired(
+        reminder: ReminderEntity,
+        nowMillis: Long = System.currentTimeMillis(),
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): FireOutcome {
+        if (!reminder.enabled) return FireOutcome.Spent
+        val next = ReminderRepeat.nextOccurrence(
+            anchorTriggerAt = reminder.triggerAt,
+            encoded = reminder.repeatRule,
+            afterMillis = nowMillis,
+            zone = zone,
+        )
+        return if (next != null) {
+            val advanced = reminder.copy(triggerAt = next)
+            dao().upsert(advanced)
+            FireOutcome.Advanced(advanced)
+        } else {
+            dao().upsert(reminder.copy(enabled = false))
+            FireOutcome.Spent
+        }
+    }
+
+    /**
+     * PR #53: the reconciliation advance pass — an enabled REPEATING
+     * reminder found overdue (device off, app killed, a restore that
+     * landed it in the past) is moved to its next future occurrence
+     * and persisted, so it never sits in Overdue and never fires a
+     * stale notification. One-shots are never touched: their overdue
+     * state is the 1.x Overdue section's whole point. Runs inside
+     * [ReminderScheduler.rescheduleAll] BEFORE the arm plan is
+     * computed, so the plan sees (and arms) the advanced times.
+     * Returns how many rows advanced.
+     */
+    suspend fun advanceOverdueRepeats(
+        nowMillis: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): Int {
+        var advanced = 0
+        dao().getAll()
+            .filter { it.enabled && it.triggerAt <= nowMillis }
+            .forEach { row ->
+                val next = ReminderRepeat.nextOccurrence(
+                    anchorTriggerAt = row.triggerAt,
+                    encoded = row.repeatRule,
+                    afterMillis = nowMillis,
+                    zone = zone,
+                )
+                if (next != null && next != row.triggerAt) {
+                    dao().upsert(row.copy(triggerAt = next))
+                    advanced++
+                }
+            }
+        return advanced
     }
 }

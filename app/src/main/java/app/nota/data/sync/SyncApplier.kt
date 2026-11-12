@@ -194,6 +194,11 @@ class SyncApplier(
                                 alarmToneUri = existing.alarmToneUri,
                                 alarmToneName = existing.alarmToneName,
                                 alarmVibrate = existing.alarmVibrate,
+                                // PR #53: the repeat rule is
+                                // device-local on the same terms — a
+                                // merge never strips a series this
+                                // device is running.
+                                repeatRule = existing.repeatRule,
                             )
                         },
                     )

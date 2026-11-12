@@ -1,4 +1,4 @@
-package app.nota.feature.reminders
+package app.nota.data.reminders
 
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -21,6 +21,11 @@ import java.time.ZoneId
  *
  * Pure and zone-injectable so the rules are unit-testable against
  * real DST zones.
+ *
+ * Phase 7 (PR #53): moved from feature/reminders to data/reminders
+ * (content unchanged) — the repeat occurrence math in
+ * [ReminderRepeat] lives in the data layer and needs these rules,
+ * and the layering runs feature → data, never the reverse.
  */
 object ReminderTriggerTimes {
 
