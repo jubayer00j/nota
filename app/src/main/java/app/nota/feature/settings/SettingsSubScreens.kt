@@ -168,6 +168,9 @@ fun SettingsNotesScreen(
         .collectAsState(initial = SwipeAction.ARCHIVE)
     val swipeLeft by preferencesRepository.swipeLeftAction
         .collectAsState(initial = SwipeAction.TRASH)
+    // PR #52: ask before a swipe archives or deletes.
+    val swipeConfirm by preferencesRepository.swipeConfirmDestructive
+        .collectAsState(initial = false)
     // Phase 6 (PR #43): the Writing pair (1.x parity).
     val writingFontSize by preferencesRepository.writingFontSize
         .collectAsState(initial = PreferencesRepository.WRITING_FONT_SIZE_DEFAULT)
@@ -254,6 +257,15 @@ fun SettingsNotesScreen(
                 title = "Swipe left",
                 action = swipeLeft,
                 onSelect = { scope.launch { preferencesRepository.setSwipeLeftAction(it) } },
+            )
+            SettingsSwitchRow(
+                title = "Ask before archive or delete swipes",
+                subtitle = "Confirm first when a swipe would archive a note, " +
+                    "move it to the trash, or delete it forever",
+                checked = swipeConfirm,
+                onCheckedChange = { value ->
+                    scope.launch { preferencesRepository.setSwipeConfirmDestructive(value) }
+                },
             )
             Text(
                 "Swipes in the notes list. Delete archives the note and shows " +

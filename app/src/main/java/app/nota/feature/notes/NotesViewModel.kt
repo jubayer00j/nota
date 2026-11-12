@@ -102,6 +102,12 @@ class NotesViewModel(
     ) { right, left -> SwipePreferences(right = right, left = left) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SwipePreferences())
 
+    /** PR #52: ask before a swipe archives or deletes (Settings →
+     *  Notes list). Default off — swipes behave exactly as before
+     *  until the user turns it on. */
+    val swipeConfirmDestructive: StateFlow<Boolean> = preferences.swipeConfirmDestructive
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     private fun libraryState(): Flow<NotesUiState> = combine(
         repository.observeActiveRows(),
         repository.observeArchivedRows(),

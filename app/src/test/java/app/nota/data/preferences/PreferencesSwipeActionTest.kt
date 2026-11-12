@@ -51,4 +51,25 @@ class PreferencesSwipeActionTest {
         prefs.setSwipeLeftAction(SwipeAction.TRASH)
         Unit
     }
+
+    /** PR #52: the swipe-confirmation option defaults OFF (current
+     *  behaviour unchanged) and round-trips through the store. */
+    @Test
+    fun swipeConfirmation_defaultsOff_andRoundTrips() = runBlocking {
+        val prefs = PreferencesRepository(context)
+        assertEquals(false, prefs.swipeConfirmDestructiveNow())
+        assertEquals(false, prefs.swipeConfirmDestructive.first())
+
+        prefs.setSwipeConfirmDestructive(true)
+        assertEquals(true, prefs.swipeConfirmDestructiveNow())
+
+        // A fresh repository over the same store sees the same value.
+        val fresh = PreferencesRepository(context)
+        assertEquals(true, fresh.swipeConfirmDestructive.first())
+
+        // Restore the default so no state leaks across tests sharing
+        // the sandbox store.
+        prefs.setSwipeConfirmDestructive(false)
+        Unit
+    }
 }

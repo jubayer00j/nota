@@ -230,6 +230,71 @@ class NotesSwipeGhostUiTest {
         assertEquals(listOf("alpha"), openedIds)
     }
 
+    /** PR #52: with the confirm option on, a destructive swipe asks
+     *  first — the action does NOT run while the dialog is up.
+     *  Cancelling leaves the note untouched and visible at rest;
+     *  confirming runs the archive exactly as an ungated swipe. */
+    @Test
+    fun swipeArchive_withConfirmationOn_asksFirst_cancelKeeps_confirmApplies() {
+        // Flip the option live, after composition (same idiom as the
+        // pin-mapping test below).
+        runBlocking { preferences.setSwipeConfirmDestructive(true) }
+        try {
+            awaitTrue("confirm option live") { viewModel.swipeConfirmDestructive.value }
+            composeRule.waitForIdle()
+
+            composeRule.onNodeWithText("Ghost alpha").performTouchInput { swipeRight() }
+            awaitTrue("confirmation dialog shown") {
+                try {
+                    composeRule.onNodeWithText("Archive this note?").assertIsDisplayed()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+            // Nothing has run yet: the note is NOT archived.
+            assertTrue(runBlocking { repository.getById("alpha")?.archived == false })
+
+            // Cancel: the dialog goes away, the note stays put.
+            composeRule.onNodeWithText("Cancel").performClick()
+            awaitTrue("dialog dismissed after cancel") {
+                try {
+                    composeRule.onNodeWithText("Archive this note?").assertDoesNotExist()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+            composeRule.onNodeWithText("Ghost alpha").assertIsDisplayed()
+            assertTrue(runBlocking { repository.getById("alpha")?.archived == false })
+
+            // Swipe again and confirm: the archive lands as usual.
+            composeRule.onNodeWithText("Ghost alpha").performTouchInput { swipeRight() }
+            awaitTrue("confirmation dialog shown again") {
+                try {
+                    composeRule.onNodeWithText("Archive this note?").assertIsDisplayed()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+            // The only "Archive" node at rest is the dialog's button
+            // (the swipe reveal labels only mid-swipe).
+            awaitTrue("dialog Archive button is the only Archive node") {
+                composeRule.onAllNodesWithText("Archive").fetchSemanticsNodes().size == 1
+            }
+            composeRule.onNodeWithText("Archive").performClick()
+            awaitTrue("alpha archived after confirm") {
+                runBlocking { repository.getById("alpha")?.archived == true }
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText("Ghost alpha").assertDoesNotExist()
+            composeRule.onNodeWithText("Ghost beta").assertIsDisplayed()
+        } finally {
+            runBlocking { preferences.setSwipeConfirmDestructive(false) }
+        }
+    }
+
     /** Codex round (PR #18): a PIN swipe keeps the note in the list,
      *  so its dismiss state must swing back to Settled — left
      *  dismissed, the row stays parked at the dismissed offset with
