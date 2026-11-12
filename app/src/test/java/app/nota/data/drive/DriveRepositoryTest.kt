@@ -346,20 +346,26 @@ class DriveRepositoryTest {
     }
 
     @Test
-    fun passphraseRestore_adoptsKeyOnKeylessDevice() = runBlocking {
+    fun passphraseRestore_withNoRecordAndNoArchive_adoptsRestoredPair() = runBlocking {
+        // No encryption record AND no canonical archive in Drive:
+        // nothing exists the restored key could conflict with, so
+        // the restored pair becomes this device's encryption
+        // identity (the fresh-device case).
         seedNote("n-adopt", "Adopt me")
         val archive = File(context.cacheDir, "adopt.enc")
         backups.exportToFile(archive, "restore-pass")
         deleteNote("n-adopt")
         assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+        assertEquals(null, gateway.canonical)
 
         drivePassphraseRestoreThroughStore(pendingRestore, archive, "restore-pass")
 
         // The restore itself landed…
         assertEquals("Adopt me", provider.current.noteDao().getById("n-adopt")?.title)
-        // …and the device now HOLDS the archive's key: the record
-        // carries the archive's own header, and its device key opens
-        // the very same archive (the sync held-key read path).
+        // …and the device now HOLDS the restored key: the record
+        // carries the restored archive's own header, and its device
+        // key opens the very same archive (the sync held-key read
+        // path).
         val record = prefs.getDriveEncryptionRecord(uid)
         assertNotNull(record)
         assertNotNull(record!!.deviceKeyBase64)
@@ -371,6 +377,142 @@ class DriveRepositoryTest {
         assertEquals(record.wrappedKey, reopened.header!!.wrappedKey)
         reopened.close()
         adoptedBmk.fill(0)
+        Unit
+    }
+
+    @Test
+    fun passphraseRestore_keylessRecordAndMatchingKey_fillsKeyKeepsHeader() = runBlocking {
+        // The device has a KEYLESS record (set up, then the device
+        // key removed): its header is this device's pointer to the
+        // Drive archive's key. The restored backup carries the SAME
+        // BMK under a fresh wrap (a re-wrapped header \u2014 different
+        // salt), so adoption fills the key and keeps the record's
+        // own header byte-identical.
+        drive.setupEncryption("restore-pass")
+        val setupRecord = prefs.getDriveEncryptionRecord(uid)!!
+        val recordBmk = Base64.getDecoder().decode(setupRecord.deviceKeyBase64!!)
+
+        seedNote("n-match", "Same key backup")
+        val rewrapped = app.nota.data.backup.BackupCrypto.createHeader("restore-pass", recordBmk)
+        val archive = File(context.cacheDir, "match.enc")
+        backups.exportToFileKeyed(archive, recordBmk, rewrapped)
+        deleteNote("n-match")
+
+        drive.removeDeviceKey()
+        val keyless = prefs.getDriveEncryptionRecord(uid)!!
+        assertEquals(null, keyless.deviceKeyBase64)
+        // The backup's wrap is genuinely a different header string.
+        assertTrue(rewrapped.wrappedKey != keyless.wrappedKey)
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "restore-pass")
+
+        assertEquals("Same key backup", provider.current.noteDao().getById("n-match")?.title)
+        val record = prefs.getDriveEncryptionRecord(uid)!!
+        // Header preserved exactly; only the device key was filled,
+        // and it is the record's own BMK.
+        assertEquals(keyless.salt, record.salt)
+        assertEquals(keyless.iterations, record.iterations)
+        assertEquals(keyless.wrappedKey, record.wrappedKey)
+        assertNotNull(record.deviceKeyBase64)
+        val heldBmk = Base64.getDecoder().decode(record.deviceKeyBase64!!)
+        assertTrue(heldBmk.contentEquals(recordBmk))
+        heldBmk.fill(0)
+        recordBmk.fill(0)
+        Unit
+    }
+
+    @Test
+    fun passphraseRestore_keylessRecordAndForeignKey_leavesRecordUntouched() = runBlocking {
+        // The Codex R2 case: a LOCAL encrypted export seals under a
+        // FRESH BMK every time, so this backup \u2014 sealed with the
+        // very same passphrase \u2014 carries a different key than the
+        // keyless record's header points to. Adoption must not
+        // replace the record: its header is the only pointer to the
+        // Drive archive's key, and holding the foreign key would
+        // make sync fail against the archive instead of pausing
+        // calmly for its passphrase.
+        drive.setupEncryption("restore-pass")
+        drive.removeDeviceKey()
+        val keyless = prefs.getDriveEncryptionRecord(uid)!!
+        assertEquals(null, keyless.deviceKeyBase64)
+
+        seedNote("n-local", "Local export")
+        val archive = File(context.cacheDir, "local.enc")
+        backups.exportToFile(archive, "restore-pass")
+        deleteNote("n-local")
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "restore-pass")
+
+        // The restore landed; the record is completely untouched
+        // \u2014 header preserved, still keyless.
+        assertEquals("Local export", provider.current.noteDao().getById("n-local")?.title)
+        assertEquals(keyless, prefs.getDriveEncryptionRecord(uid))
+        Unit
+    }
+
+    @Test
+    fun passphraseRestore_archiveUnderDifferentKey_createsNoRecord() = runBlocking {
+        // No record, but Drive already holds an archive encrypted
+        // under a DIFFERENT key: the restored key is not the
+        // archive's, so no record is created (the Security unlock
+        // path remains the way in).
+        seedNote("n-remote2", "Drive archive note")
+        val archiveBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        stageEncryptedArchive("drive-pass", archiveBmk)
+
+        seedNote("n-local2", "Local backup")
+        val archive = File(context.cacheDir, "local2.enc")
+        backups.exportToFile(archive, "restore-pass")
+        deleteNote("n-local2")
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "restore-pass")
+
+        assertEquals("Local backup", provider.current.noteDao().getById("n-local2")?.title)
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+        archiveBmk.fill(0)
+        Unit
+    }
+
+    @Test
+    fun passphraseRestore_archiveUnderSameKey_adoptsArchiveHeader() = runBlocking {
+        // No record; the Drive archive and the restored backup
+        // carry the SAME BMK (the backup's header is a fresh wrap of
+        // it). Adoption creates the record from the ARCHIVE's
+        // header \u2014 not the restored file's \u2014 and the held key
+        // opens both.
+        seedNote("n-shared", "Shared key note")
+        val sharedBmk = app.nota.data.backup.BackupCrypto.generateBmk()
+        val archiveHeader = stageEncryptedArchive("shared-pass", sharedBmk)
+
+        val rewrapped = app.nota.data.backup.BackupCrypto.createHeader("shared-pass", sharedBmk)
+        val archive = File(context.cacheDir, "shared.enc")
+        backups.exportToFileKeyed(archive, sharedBmk, rewrapped)
+        deleteNote("n-shared")
+        assertEquals(null, prefs.getDriveEncryptionRecord(uid))
+
+        drivePassphraseRestoreThroughStore(pendingRestore, archive, "shared-pass")
+
+        assertEquals("Shared key note", provider.current.noteDao().getById("n-shared")?.title)
+        val record = prefs.getDriveEncryptionRecord(uid)!!
+        assertEquals(archiveHeader.salt, record.salt)
+        assertEquals(archiveHeader.iterations, record.iterations)
+        assertEquals(archiveHeader.wrappedKey, record.wrappedKey)
+        assertNotNull(record.deviceKeyBase64)
+        val heldBmk = Base64.getDecoder().decode(record.deviceKeyBase64!!)
+        assertTrue(heldBmk.contentEquals(sharedBmk))
+        // The held key opens the Drive archive itself…
+        val sealed = File(context.cacheDir, "shared-drive-open.enc")
+        sealed.writeBytes(gateway.downloadBytes!!)
+        val driveHandle = backups.readBackupWithBmk(sealed, heldBmk)
+        assertEquals(listOf("n-shared"), driveHandle.notes.map { it.id })
+        driveHandle.close()
+        // …and the restored backup.
+        val localHandle = backups.readBackupWithBmk(archive, heldBmk)
+        assertEquals(listOf("n-shared"), localHandle.notes.map { it.id })
+        localHandle.close()
+        heldBmk.fill(0)
+        sharedBmk.fill(0)
         Unit
     }
 

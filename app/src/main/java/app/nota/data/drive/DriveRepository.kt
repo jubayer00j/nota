@@ -483,43 +483,147 @@ class DriveRepository(
     }
 
     /**
-     * Restore adoption (PR #52): a backup that was just restored
-     * after being opened with its passphrase hands this device the
-     * archive's key, so enabling sync afterwards just works instead
-     * of refusing with "this device doesn't hold the key" until the
-     * user re-enters the passphrase under Security. Mirrors
-     * [setupEncryption]'s adoption: the stored record takes the
-     * restored archive's own header + the BMK unwrapped from it —
-     * the passphrase has already proved itself by opening the
-     * archive, so the extra unwrap cannot fail in practice (and
-     * changes nothing if it somehow does).
+     * Restore adoption (PR #52, corrected in the Codex R2 fix
+     * round): a backup that was just restored after being opened
+     * with its passphrase hands this device the archive's key, so
+     * enabling sync afterwards just works instead of refusing with
+     * "this device doesn't hold the key" until the passphrase is
+     * re-entered under Security.
      *
-     * Deliberately conservative: a device that ALREADY holds a key
-     * keeps it — the record is left untouched, so a live Drive
-     * archive can never be orphaned by a restore. A keyless record
-     * (or none at all) takes the restored pair wholesale, the same
-     * repair posture as setup. A signed-out restore adopts nothing:
-     * records are per-account, and Drive needs an account anyway.
-     * Returns whether a key was adopted.
+     * Adoption is allowed ONLY when the restored key is known to
+     * be the Drive archive's key. A local encrypted export seals
+     * under a FRESH BMK every time (the passphrase form of
+     * [BackupCrypto.seal]), unrelated to the archive's key, so "no
+     * key held" alone proves nothing: adopting an unrelated local
+     * key would replace a keyless record whose header is this
+     * device's only pointer to the archive's key, and would leave
+     * sync failing against the archive instead of pausing calmly
+     * for its passphrase.
+     *
+     * The trusted candidate header is the existing record's header
+     * when a record exists (Drive is not consulted then); otherwise
+     * the canonical Drive archive's header, fetched exactly the way
+     * [setupEncryption] fetches it. Adoption fires iff the
+     * passphrase unwraps BOTH headers to the same BMK — header-string
+     * equality would be too strict (the same key re-wrapped later
+     * has a different salt), and BMK equality after a successful
+     * unwrap is exactly setupEncryption's proof. On a match, a
+     * keyless record keeps its own header and only gains the device
+     * key; with no record, the new record takes the ARCHIVE's
+     * header, never the restored file's.
+     *
+     * Two boundary cases:
+     * - No record AND no canonical archive at all: nothing exists
+     *   the restored key could conflict with, so the restored pair
+     *   becomes this device's encryption identity (the fresh-device
+     *   case).
+     * - No record AND a PLAINTEXT canonical archive: never adopt —
+     *   that would silently switch the account's backups to
+     *   encrypted under the restored key.
+     *
+     * Best-effort throughout: any failure (offline, consent needed,
+     * a damaged archive header, a mismatch) changes nothing and
+     * never fails the restore — the calm Security unlock path
+     * remains. A device that ALREADY holds a key keeps it, and a
+     * signed-out restore adopts nothing (records are per-account,
+     * and Drive needs an account anyway). Returns whether a key was
+     * adopted.
      */
     suspend fun adoptRestoredEncryptionKey(
         header: BackupCrypto.Header,
+        passphrase: String,
+    ): Boolean = try {
+        adoptRestoredEncryptionKeyChecked(header, passphrase)
+    } catch (e: Exception) {
+        false
+    }
+
+    /** The adopting half of [adoptRestoredEncryptionKey]; see its
+     *  KDoc for the rule. Any failure is the caller's to swallow. */
+    private suspend fun adoptRestoredEncryptionKeyChecked(
+        restoredHeader: BackupCrypto.Header,
         passphrase: String,
     ): Boolean {
         val uid = signedInUid() ?: return false
         val existing = prefs.getDriveEncryptionRecord(uid)
         if (existing?.deviceKeyBase64 != null) return false
-        val bmk = BackupCrypto.unwrapBmk(header, passphrase) ?: return false
-        prefs.setDriveEncryptionRecord(
-            uid,
-            PreferencesRepository.DriveEncryptionRecord(
-                salt = header.salt,
-                iterations = header.iterations,
-                wrappedKey = header.wrappedKey,
-                deviceKeyBase64 = Base64.getEncoder().encodeToString(bmk),
-            ),
-        )
-        bmk.fill(0)
+
+        val candidateHeader: BackupCrypto.Header?
+        if (existing != null) {
+            // The record's header is this device's pointer to the
+            // archive's key — it is the candidate; Drive is not
+            // consulted at all.
+            candidateHeader =
+                BackupCrypto.Header(existing.salt, existing.iterations, existing.wrappedKey)
+        } else {
+            val token = ensureAccess()
+            val folderId = gateway.findOrCreateFolder(token)
+            val canonical = gateway.findCanonicalBackup(token, folderId)
+            if (canonical == null) {
+                // No archive exists to conflict with: the restored
+                // pair becomes this device's encryption identity.
+                val restoredBmk =
+                    BackupCrypto.unwrapBmk(restoredHeader, passphrase) ?: return false
+                try {
+                    prefs.setDriveEncryptionRecord(
+                        uid,
+                        PreferencesRepository.DriveEncryptionRecord(
+                            salt = restoredHeader.salt,
+                            iterations = restoredHeader.iterations,
+                            wrappedKey = restoredHeader.wrappedKey,
+                            deviceKeyBase64 = Base64.getEncoder().encodeToString(restoredBmk),
+                        ),
+                    )
+                } finally {
+                    restoredBmk.fill(0)
+                }
+                refreshEncryptionRecord()
+                return true
+            }
+            val prefix = gateway.downloadPrefix(token, canonical.id, ARCHIVE_PREFIX_BYTES)
+            if (!BackupCrypto.isEncryptedPrefix(prefix)) {
+                // A plaintext archive: adopting would silently
+                // switch the account's backups to encrypted under
+                // the restored key.
+                return false
+            }
+            // An unparseable header aborts adoption — never mint
+            // over a damaged archive (setupEncryption's posture).
+            candidateHeader = BackupCrypto.parseHeader(prefix) ?: return false
+        }
+        val candidate = candidateHeader ?: return false
+
+        val restoredBmk = BackupCrypto.unwrapBmk(restoredHeader, passphrase)
+        val candidateBmk = BackupCrypto.unwrapBmk(candidate, passphrase)
+        try {
+            if (restoredBmk == null || candidateBmk == null ||
+                !java.security.MessageDigest.isEqual(restoredBmk, candidateBmk)
+            ) {
+                return false
+            }
+            val deviceKeyBase64 = Base64.getEncoder().encodeToString(candidateBmk)
+            if (existing != null) {
+                // Keyless record: keep ITS header — it is the pointer
+                // to the archive's key — and only fill the device key.
+                prefs.setDriveEncryptionRecord(
+                    uid,
+                    existing.copy(deviceKeyBase64 = deviceKeyBase64),
+                )
+            } else {
+                prefs.setDriveEncryptionRecord(
+                    uid,
+                    PreferencesRepository.DriveEncryptionRecord(
+                        salt = candidate.salt,
+                        iterations = candidate.iterations,
+                        wrappedKey = candidate.wrappedKey,
+                        deviceKeyBase64 = deviceKeyBase64,
+                    ),
+                )
+            }
+        } finally {
+            restoredBmk?.fill(0)
+            candidateBmk?.fill(0)
+        }
         refreshEncryptionRecord()
         return true
     }
