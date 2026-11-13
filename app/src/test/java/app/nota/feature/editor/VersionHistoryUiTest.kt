@@ -292,9 +292,13 @@ class VersionHistoryUiTest {
                 contentHtml = "<p>one two three</p>",
             )
         }
-        val longHtml =
-            "<p>alpha bravo charlie delta echo foxtrot golf hotel " +
-                "india juliet kilo lima</p>"
+        // Twelve one-letter words: the restored footer's count is
+        // unmistakably different from the current 3, while the
+        // preview stays as short on screen as the neighbouring
+        // test's — a taller preview pushes the confirm panel's
+        // Restore button to the dialog's bottom edge, where the
+        // injected click lands on dead padding.
+        val longHtml = "<p>a b c d e f g h i j k l</p>"
         runBlocking {
             db.noteVersionDao().insert(
                 NoteVersionEntity(
@@ -323,6 +327,12 @@ class VersionHistoryUiTest {
             displayed("Replace the current text with this version?")
         }
         composeRule.onNodeWithText("Restore").performClick()
+        // The dialog dismisses itself only from the restore
+        // completion callback — the dialog closing proves the
+        // restore executed end to end before the row is checked.
+        awaitTrue("dialog closes once the restore completes") {
+            !displayed("Version history")
+        }
         awaitTrue("stored row restored to the long version") {
             runBlocking { repository.getById(note.id)?.contentHtml == longHtml }
         }
