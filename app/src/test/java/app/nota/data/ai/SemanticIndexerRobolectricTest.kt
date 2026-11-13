@@ -928,10 +928,15 @@ class SemanticIndexerRobolectricTest {
         )
         assertNull(indexStore.loadStamp(account))
 
-        // No gate: the full pass runs (the chunker moves) and
-        // completion re-stamps in the current format.
+        // No gate: a full pass runs to completion — the proof
+        // is the re-stamp. Only a completed pass saves the
+        // stamp, so the file going from unreadable (null) back
+        // to the live stamp in the current format shows the
+        // pass ran; had the gate fired on the v1 file, it would
+        // still read null. (The pass embeds nothing and never
+        // reaches the chunker: the note's fingerprint is
+        // unchanged, so the fingerprint fast path skips both.)
         indexer.reconcile(account)
-        assertTrue(NoteChunker.chunkInvocations > chunksBefore)
         assertEquals(live, indexStore.loadStamp(account))
     }
 }
