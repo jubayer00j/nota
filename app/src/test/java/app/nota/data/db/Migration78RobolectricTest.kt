@@ -148,10 +148,10 @@ class Migration78RobolectricTest {
      * triggers were never Room's to create) and the REAL
      * migration object runs. The stamp contract is then proven
      * at the DAO: a content swap at identical lengths with an
-     * unchanged updatedAt — the sync-tie shape the aggregates
-     * cannot see — moves ONLY the generation, inserts and
-     * deletes move it one write at a time, and pure reads never
-     * move it at all.
+     * unchanged updatedAt — the sync-tie shape no row aggregate
+     * could see — moves the generation (which since R7 IS the
+     * stamp), inserts and deletes move it one write at a time,
+     * and pure reads never move it at all.
      */
     @Test
     fun migration89InstallsWriteGenerationAndPreservesLibrary() = runBlocking {
@@ -200,12 +200,11 @@ class Migration78RobolectricTest {
         )
 
         val s0 = dao.getLibraryStampRow()
-        assertEquals(2L, s0.noteCount)
         assertEquals(0L, s0.writeGeneration)
 
         // The sync-tie write: same lengths, same updatedAt,
-        // different text. Every aggregate holds; only the
-        // generation may move — and it must.
+        // different text. No length or timestamp moves; the
+        // generation — the stamp itself — must.
         dao.upsert(alpha.copy(title = "cccc", plainText = "zzzz"))
         val s1 = dao.getLibraryStampRow()
         assertTrue(s1.writeGeneration > s0.writeGeneration)

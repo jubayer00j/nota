@@ -296,13 +296,18 @@ data class SyncMetaEntity(
  * increment [notesWriteGeneration] on EVERY insert, update and
  * delete, whichever code path wrote — repository, SyncApplier,
  * applyBackup, lock/unlock. The library stamp ([LibraryStampRow])
- * reads it as its change-sensitive component: the stamp's plain
- * aggregates cannot see a content swap at identical lengths with
- * an unchanged updatedAt (same-millisecond writes, or a
- * sync/restore payload whose updatedAt ties the local row's),
- * but the counter moves on the write itself. Device-local
- * bookkeeping in the sync_meta mould: never synced, never backed
- * up (no payload mapping reads it).
+ * IS this counter (R7): it is read on every search keystroke and
+ * every semantic reconcile, so it has to be O(1) — this single
+ * row, never the notes table (the aggregate stamp it replaced
+ * scanned every note body per read). Equality is all any
+ * consumer needs, and the counter makes equality exact: it
+ * moves on the write itself, including a content swap at
+ * identical lengths with an unchanged updatedAt
+ * (same-millisecond writes, or a sync/restore payload whose
+ * updatedAt ties the local row's), which no aggregate over the
+ * rows could see. Device-local bookkeeping in the sync_meta
+ * mould: never synced, never backed up (no payload mapping
+ * reads it).
  */
 @Entity(tableName = "library_meta")
 data class LibraryMetaEntity(

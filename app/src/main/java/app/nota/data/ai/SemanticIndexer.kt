@@ -411,9 +411,10 @@ class SemanticIndexer(
         val stored = loadIndex(accountId)
         val noteDao = databaseProvider.current.noteDao()
 
-        // Performance chapter 2 (F3): the stamp gate. One
-        // aggregate query describes the whole notes table; when
-        // it equals the stamp the last COMPLETED pass recorded,
+        // Performance chapter 2 (F3): the stamp gate. The
+        // stamp is the notes write generation — a single
+        // counter row the notes triggers bump on every write;
+        // when it equals the stamp the last COMPLETED pass recorded,
         // and the stored index still belongs to the active
         // embedding space, the library is exactly the one that
         // pass already reconciled — purged, embedded, current —

@@ -894,14 +894,16 @@ class SemanticIndexerRobolectricTest {
     }
 
     /**
-     * R3 (schema v9): a stamp file written by v8 code — the five
-     * bare aggregates, no format marker, no write generation —
-     * reads as NO stamp and can never gate a pass, even when its
-     * aggregates still match the live library exactly: the
-     * generation makes a v9 stamp a different animal, and the
-     * format break keeps the two from ever comparing equal. The
-     * first reconcile after the upgrade therefore runs a full
-     * pass and re-stamps in the current format.
+     * R3 (schema v9) made the stamp file version-led; R7 shrank
+     * the stamp to the write generation alone and bumped the
+     * format to 3. A stamp file written in format 2 — the
+     * marker plus the six v9-era components — reads as NO
+     * stamp and can never gate a pass, even when the write
+     * generation in its last field still equals the live
+     * counter exactly: the format break keeps pre- and
+     * post-upgrade stamps from ever comparing equal. The
+     * first reconcile after the upgrade therefore runs a
+     * full pass and re-stamps in the current format.
      */
     @Test
     fun preUpgradeStampFileNeverGates() = runBlocking {
@@ -917,13 +919,18 @@ class SemanticIndexerRobolectricTest {
         assertTrue(http.calls.isEmpty())
         assertEquals(chunksBefore, NoteChunker.chunkInvocations)
 
-        // Rewrite the stamp in the pre-upgrade format, carrying
-        // the live library's exact aggregates.
+        // Rewrite the stamp in the previous (format 2) shape,
+        // carrying the LIVE write generation in its slot. That
+        // is the dangerous case now the generation is the whole
+        // stamp: a loader that read the old file's last field
+        // would find it equal and gate. (The five aggregate
+        // slots are irrelevant filler — the format marker alone
+        // disqualifies the file.)
         val live = db.noteDao().getLibraryStampRow()
         indexStore.stampFileFor(account).writeText(
             listOf(
-                live.noteCount, live.maxUpdatedAt, live.sumUpdatedAt,
-                live.sumTitleLength, live.sumPlainTextLength,
+                2, 1, 0, 0, 0, 0,
+                live.writeGeneration,
             ).joinToString(","),
         )
         assertNull(indexStore.loadStamp(account))
@@ -932,7 +939,7 @@ class SemanticIndexerRobolectricTest {
         // is the re-stamp. Only a completed pass saves the
         // stamp, so the file going from unreadable (null) back
         // to the live stamp in the current format shows the
-        // pass ran; had the gate fired on the v1 file, it would
+        // pass ran; had the gate fired on the v2 file, it would
         // still read null. (The pass embeds nothing and never
         // reaches the chunker: the note's fingerprint is
         // unchanged, so the fingerprint fast path skips both.)

@@ -153,29 +153,25 @@ class SemanticIndexStore(private val rootDir: File) {
      *  gate then simply does not fire and a full pass runs,
      *  which is always the safe direction.
      *
-     *  Stamp format 2 (R3): a leading format number, then the
-     *  stamp's six components including the notes write
-     *  generation. Format 1 files — five bare aggregates written
-     *  by schema-v8 code, which knew nothing of the generation —
-     *  read as "no stamp" BY DESIGN: a pre-upgrade stamp must
-     *  never compare equal to a post-upgrade one, so the first
-     *  reconcile after the upgrade always runs a full pass and
-     *  re-stamps in the current format (the fail-safe direction,
-     *  same contract as the index's own version break). */
+     *  Stamp format 3 (R7): a leading format number, then the
+     *  notes write generation alone — the stamp shrank to the
+     *  one component that was ever load-bearing, so nothing
+     *  else is persisted. Format 2 files (the marker plus the
+     *  six v9-era components) and format 1 files (five bare
+     *  aggregates written by schema-v8 code, which knew
+     *  nothing of the generation) read as "no stamp" BY
+     *  DESIGN: a pre-upgrade stamp must never compare equal
+     *  to a post-upgrade one, so the first reconcile after
+     *  the upgrade always runs a full pass and re-stamps in
+     *  the current format (the fail-safe direction, same
+     *  contract as the index's own version break). */
     fun loadStamp(accountId: String): LibraryStampRow? {
         val file = stampFileFor(accountId)
         if (!file.isFile) return null
         return try {
             val parts = file.readText().trim().split(',')
-            if (parts.size != 7 || parts[0].toInt() != STAMP_VERSION) return null
-            LibraryStampRow(
-                noteCount = parts[1].toLong(),
-                maxUpdatedAt = parts[2].toLong(),
-                sumUpdatedAt = parts[3].toLong(),
-                sumTitleLength = parts[4].toLong(),
-                sumPlainTextLength = parts[5].toLong(),
-                writeGeneration = parts[6].toLong(),
-            )
+            if (parts.size != 2 || parts[0].toInt() != STAMP_VERSION) return null
+            LibraryStampRow(writeGeneration = parts[1].toLong())
         } catch (e: Exception) {
             null
         }
@@ -187,12 +183,7 @@ class SemanticIndexStore(private val rootDir: File) {
             val target = stampFileFor(accountId)
             val temp = File(rootDir, target.name + ".tmp")
             temp.writeText(
-                listOf(
-                    STAMP_VERSION,
-                    stamp.noteCount, stamp.maxUpdatedAt, stamp.sumUpdatedAt,
-                    stamp.sumTitleLength, stamp.sumPlainTextLength,
-                    stamp.writeGeneration,
-                ).joinToString(","),
+                listOf(STAMP_VERSION, stamp.writeGeneration).joinToString(","),
             )
             if (!temp.renameTo(target)) {
                 temp.copyTo(target, overwrite = true)
@@ -222,10 +213,11 @@ class SemanticIndexStore(private val rootDir: File) {
         const val VERSION = 2
 
         /** Stamp file format (see [loadStamp]): 1 was the five
-         *  bare aggregates of schema v8; 2 leads with this marker
-         *  and adds the notes write generation. A format-1 file
-         *  reads as "no stamp", never as an equal stamp. */
-        const val STAMP_VERSION = 2
+         *  bare aggregates of schema v8; 2 led with this marker
+         *  and carried all six stamp components; 3 carries the
+         *  notes write generation alone. An older file reads
+         *  as "no stamp", never as an equal stamp. */
+        const val STAMP_VERSION = 3
         const val MAX_NOTES = 100_000
         const val MAX_CHUNKS_PER_NOTE = 10_000
     }

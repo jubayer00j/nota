@@ -40,32 +40,39 @@ data class NoteTextRow(
     val plainText: String,
 )
 
-/** Performance chapter 2 (F3/F6): one aggregate row describing the
- *  whole notes table, cheap enough to read on every search keystroke
- *  and every semantic reconcile, used as the invalidation key for
- *  the corpus cache and the semantic reconcile stamp gate.
+/** Performance chapter 2 (F3/F6): the library stamp — the
+ *  invalidation key for the corpus cache and the semantic
+ *  reconcile stamp gate, read on every search keystroke and
+ *  every semantic reconcile. The stamp IS the notes write
+ *  generation: schema v9's SQLite triggers on the notes table
+ *  increment [writeGeneration] on EVERY insert, update or
+ *  delete, whichever code path wrote (repository, SyncApplier,
+ *  applyBackup, lock/unlock — see [LibraryMetaEntity]), so any
+ *  write to the notes table moves the stamp and pure reads
+ *  never do.
  *
- *  The five aggregates describe the library's shape — note count,
- *  newest edit, total edit-time mass, total title/body lengths —
- *  but on their own they cannot see every change: an edit that
- *  swaps title/body text for different text of the SAME lengths
- *  with updatedAt unchanged (same-millisecond successive writes,
- *  or a sync/restore payload whose updatedAt ties the local
- *  row's) moves none of them. [writeGeneration] is the component
- *  that makes the stamp change-sensitive: schema v9's SQLite
- *  triggers on the notes table increment it on EVERY insert,
- *  update or delete, whichever code path wrote (repository,
- *  SyncApplier, applyBackup, lock/unlock — see [LibraryMetaEntity]),
- *  so any write to the notes table moves the stamp and pure reads
- *  never do. The aggregates stay as the descriptive summary (and
- *  keep pre-generation readers honest); the counter is the proof. */
+ *  Equality is all any consumer needs — the corpus cache and
+ *  the stamp gate only ever compare stamps — and the triggers
+ *  make equality exact, including for an edit that swaps
+ *  title/body text for different text of the SAME lengths
+ *  with updatedAt unchanged (same-millisecond successive
+ *  writes, or a sync/restore payload whose updatedAt ties
+ *  the local row's): the counter moves on the write itself,
+ *  which no aggregate over the rows could see.
+ *
+ *  The stamp is deliberately NOT an aggregate over the notes
+ *  table (R7): the v9-era stamp also carried note count,
+ *  edit-time sums and SUM(LENGTH(plainText)) — and LENGTH on
+ *  TEXT counts characters, so SQLite scanned every note body
+ *  on every stamp read, making even a corpus-cache hit cost
+ *  O(total body size) per keystroke. No consumer ever read
+ *  those components semantically (the corpus byte cap is
+ *  enforced when the corpus is materialised, not from the
+ *  stamp), so the stamp shrank to the one component that was
+ *  doing the work, and reading it is a single-row lookup
+ *  that never touches the notes table. */
 data class LibraryStampRow(
-    val noteCount: Long,
-    val maxUpdatedAt: Long,
-    val sumUpdatedAt: Long,
-    val sumTitleLength: Long,
-    val sumPlainTextLength: Long,
-    val writeGeneration: Long = 0,
+    val writeGeneration: Long,
 )
 
 /** Search Quality Pass: one note's scoring haystacks at text
@@ -292,18 +299,13 @@ interface NoteDao {
     suspend fun getAllNoteTexts(): List<NoteTextRow>
 
     /** Performance chapter 2 (F3/F6): the library stamp — see
-     *  [LibraryStampRow]. One aggregate query over the notes table
-     *  plus the trigger-maintained write generation as a scalar
-     *  subquery; COALESCEs keep an empty library (or a database
-     *  whose counter row was never seeded) at all-zeroes. */
+     *  [LibraryStampRow]. A single-row read of `library_meta`;
+     *  the query never references the notes table, so a stamp
+     *  check costs O(1) however large the library grows. The
+     *  COALESCE keeps a database whose counter row was never
+     *  seeded at zero. */
     @Query(
-        "SELECT COUNT(*) AS noteCount, " +
-            "COALESCE(MAX(updatedAt), 0) AS maxUpdatedAt, " +
-            "COALESCE(SUM(updatedAt), 0) AS sumUpdatedAt, " +
-            "COALESCE(SUM(LENGTH(title)), 0) AS sumTitleLength, " +
-            "COALESCE(SUM(LENGTH(plainText)), 0) AS sumPlainTextLength, " +
-            "COALESCE((SELECT notesWriteGeneration FROM library_meta WHERE id = 1), 0) AS writeGeneration " +
-            "FROM notes",
+        "SELECT COALESCE((SELECT notesWriteGeneration FROM library_meta WHERE id = 1), 0) AS writeGeneration",
     )
     suspend fun getLibraryStampRow(): LibraryStampRow
 
