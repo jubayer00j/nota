@@ -36,6 +36,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -511,5 +512,116 @@ override fun sealCipherResult(): StepResult<Cipher> =
         lockRepo.lockNote(note.id, NoteLockMethod.PIN, NoteLockCrypto.canonicalPin("1234"))
 
         assertTrue(db.noteVersionDao().getForNote(note.id).isEmpty())
+    }
+
+    // PR #55 (Argon F-10): the unlock flow decrypts exactly the
+    // sealed bytes openCipherResult read — a copy replaced
+    // mid-flow no longer poisons the read with a second,
+    // divergent preference read, and a read with no matching
+    // open fails closed.
+    @Test
+    fun biometricCopy_readCopyUsesTheOpenedBytes() = runBlocking {
+        val nek = ByteArray(32) { (0x51 + it).toByte() }
+        val otherNek = ByteArray(32) { (0x71 + it).toByte() }
+
+        val seal1 = biometricStore.sealCipherResult()
+        assertTrue(seal1 is StepResult.Ok)
+        assertTrue(biometricStore.storeCopy("note-x", nek, (seal1 as StepResult.Ok).value))
+
+        val opened = biometricStore.openCipherResult("note-x")
+        assertTrue(opened is StepResult.Ok)
+        val openedCipher = (opened as StepResult.Ok).value
+
+        // The stored copy is replaced AFTER the open (the user
+        // re-enables fingerprint in another flow): the in-flight
+        // read must still yield the NEK the authorised cipher was
+        // built for.
+        val seal2 = biometricStore.sealCipherResult()
+        assertTrue(seal2 is StepResult.Ok)
+        assertTrue(biometricStore.storeCopy("note-x", otherNek, (seal2 as StepResult.Ok).value))
+
+        assertArrayEquals(nek, biometricStore.readCopy("note-x", openedCipher))
+        // No open ever happened for this note: fail closed.
+        assertNull(biometricStore.readCopy("note-y", openedCipher))
+    }
+
+    // PR #55 (Argon F-10): orphaned pre-v3 Keystore aliases are
+    // deleted; unrelated entries are untouched.
+    @Test
+    fun legacyKeystoreAliases_areDeleted() {
+        val keyStore = java.security.KeyStore.getInstance("PKCS12").apply { load(null, null) }
+        val protection = java.security.KeyStore.PasswordProtection(charArrayOf())
+        fun put(alias: String) {
+            keyStore.setEntry(
+                alias,
+                java.security.KeyStore.SecretKeyEntry(
+                    SecretKeySpec(ByteArray(32) { 1 }, "AES"),
+                ),
+                protection,
+            )
+        }
+        put("nota.notelock.devicekey")
+        put("nota.notelock.devicekey.v2")
+        put("unrelated.key")
+
+        app.nota.data.security.AndroidKeystoreNoteLockKeyProvider.deleteLegacyAliases(keyStore)
+
+        assertFalse(keyStore.containsAlias("nota.notelock.devicekey"))
+        assertFalse(keyStore.containsAlias("nota.notelock.devicekey.v2"))
+        assertTrue(keyStore.containsAlias("unrelated.key"))
+    }
+
+    // PR #55 (Argon F-02): crafted ids can never address session
+    // files outside the session root — sessionFile and the
+    // recursive clearSession both refuse them.
+    @Test
+    fun sessionPaths_rejectCraftedIds() {
+        val attachment = AttachmentEntity(
+            id = "att-1", noteId = "note-1", fileName = "a.bin",
+            mimeType = "application/octet-stream", sizeBytes = 1,
+            localPath = "attachments/note-1/a.bin", createdAt = 1000,
+        )
+        try {
+            store.sessionFile("../../files", attachment)
+            fail("sessionFile accepted a traversal note id")
+        } catch (e: IllegalArgumentException) {
+            // expected: refused before any path is composed
+        }
+        try {
+            store.sessionFile("note-1", attachment.copy(id = "../evil"))
+            fail("sessionFile accepted a traversal attachment id")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+        try {
+            store.clearSession("../../files")
+            fail("clearSession accepted a traversal note id")
+        } catch (e: IllegalArgumentException) {
+            // expected
+        }
+    }
+
+    // PR #55 (Argon F-07): the whole-session wipe removes every
+    // note's decrypted session files, root included.
+    @Test
+    fun clearAllSessions_removesEverySession() {
+        val context = RuntimeEnvironment.getApplication()
+        fun attachment(id: String, noteId: String) = AttachmentEntity(
+            id = id, noteId = noteId, fileName = "$id.bin",
+            mimeType = "application/octet-stream", sizeBytes = 3,
+            localPath = "attachments/$noteId/$id.bin", createdAt = 1000,
+        )
+        val a = attachment("att-a", "note-a")
+        val b = attachment("att-b", "note-b")
+        val fileA = store.writeSessionBytes("note-a", a, byteArrayOf(1, 2, 3))
+        val fileB = store.writeSessionBytes("note-b", b, byteArrayOf(4, 5, 6))
+        assertTrue(fileA.exists())
+        assertTrue(fileB.exists())
+
+        store.clearAllSessions()
+
+        assertFalse(fileA.exists())
+        assertFalse(fileB.exists())
+        assertFalse(File(context.cacheDir, "nota-session").exists())
     }
 }
