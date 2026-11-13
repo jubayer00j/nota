@@ -646,9 +646,20 @@ fun RichNoteEditorScreen(
         folderId = restored.folderId
         // F4: the VM parsed the restored row once already (its
         // baseline came from the same parse); re-seed from it.
-        segments = NoteDocument.ensureTrailingTextSegment(
+        val reseeded = NoteDocument.ensureTrailingTextSegment(
             viewModel.restoredSegments ?: NoteDocument.parse(restored.contentHtml),
-        ).map { UiSegment(newUiId(), it) }
+        )
+        segments = reseeded.map { UiSegment(newUiId(), it) }
+        // Codex PR #54 R4: the footer stats are recomputed here,
+        // from the restored segments, exactly as the seed computes
+        // them. Pre-F1 the unconditional autosave tick refreshed
+        // the stats within 1.5 s of a restore and masked the gap;
+        // the F1 tick recomputes only on a DIRTY tick, and a
+        // restore is not dirty (contentDirty is cleared below) —
+        // without this line the footer keeps showing the previous
+        // version's word count and read time until the next edit
+        // or reopen.
+        docStats = docStatsText(NoteDocument.plainText(reseeded))
         contentDirty = false
         lastSyncedTitle = restored.title
         lastSyncedFolderId = restored.folderId

@@ -284,6 +284,61 @@ class VersionHistoryUiTest {
     }
 
     @Test
+    fun versionHistory_restoreRefreshesFooterStats() {
+        val now = System.currentTimeMillis()
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Current Draft",
+                contentHtml = "<p>one two three</p>",
+            )
+        }
+        val longHtml =
+            "<p>alpha bravo charlie delta echo foxtrot golf hotel " +
+                "india juliet kilo lima</p>"
+        runBlocking {
+            db.noteVersionDao().insert(
+                NoteVersionEntity(
+                    id = "v-long", noteId = note.id, title = "Long Draft",
+                    contentHtml = longHtml,
+                    createdAt = now - 120_000,
+                ),
+            )
+        }
+        composeEditor(note.id)
+
+        // The footer is seeded with the CURRENT version's counts.
+        awaitTrue("footer seeded with the current version's stats") {
+            displayed("3 words · 1 min read")
+        }
+
+        // Restore the long version through the real dialog flow.
+        openHistory()
+        awaitTrue("dialog lists the long version") { displayed("Long Draft") }
+        composeRule.onNodeWithText("Long Draft").performClick()
+        awaitTrue("preview shows the restore action") {
+            displayed("Restore this version")
+        }
+        composeRule.onNodeWithText("Restore this version").performClick()
+        awaitTrue("restore confirm panel") {
+            displayed("Replace the current text with this version?")
+        }
+        composeRule.onNodeWithText("Restore").performClick()
+        awaitTrue("stored row restored to the long version") {
+            runBlocking { repository.getById(note.id)?.contentHtml == longHtml }
+        }
+
+        // Codex PR #54 R4 pin: the restore ITSELF refreshes the
+        // footer — no edit follows. Pre-fix, the F1 dirty-only
+        // tick never recomputed stats for a (non-dirty) restore,
+        // so the footer kept the previous version's counts until
+        // the next edit or reopen.
+        awaitTrue("footer shows the restored version's stats without an edit") {
+            displayed("12 words · 1 min read")
+        }
+        assertTrue(!displayed("3 words · 1 min read"))
+    }
+
+    @Test
     fun versionHistory_emptyState_forNoteWithoutHistory() {
         val note = runBlocking {
             repository.createRichNote(
