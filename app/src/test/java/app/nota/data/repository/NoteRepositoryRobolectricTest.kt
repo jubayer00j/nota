@@ -4,6 +4,7 @@ import androidx.room.Room
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.stress.StressLibrary
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -151,5 +152,110 @@ class NoteRepositoryRobolectricTest {
         )
         // Idempotent: with edges present the backfill is a no-op.
         assertTrue(!repository.backfillLinksIfNeeded())
+    }
+
+    @Test
+    fun backfillScansALinkFreeLibraryOnceEver() = runBlocking {
+        // Performance chapter 2 (F7): a library with no links at
+        // all pays the body scan once ever — the done-marker —
+        // not once per launch as the original backfill did.
+        val now = System.currentTimeMillis()
+        db.noteDao().upsert(
+            NoteEntity(id = "p1", title = "Plain", plainText = "no links here", createdAt = now, updatedAt = now),
+        )
+        db.noteDao().upsert(
+            NoteEntity(id = "p2", title = "Also plain", plainText = "still none", createdAt = now, updatedAt = now),
+        )
+        assertTrue(repository.backfillLinksIfNeeded())
+        assertTrue(!repository.backfillLinksIfNeeded())
+        // A [[-bearing row that lands later (written straight
+        // through the DAO, as a pre-1c row would) is not picked
+        // up by the backfill any more: since Phase 1c every
+        // repository write relinks its own note.
+        db.noteDao().upsert(
+            NoteEntity(id = "s9", title = "Late", plainText = "See [[Plain]]", createdAt = now, updatedAt = now),
+        )
+        assertTrue(!repository.backfillLinksIfNeeded())
+        assertTrue(repository.observeLinkedFrom("p1").first().isEmpty())
+    }
+
+    @Test
+    fun searchCorpusIsLoadedOnceUntilANoteChanges() = runBlocking {
+        // Performance chapter 2 (F6): repeated searches on an
+        // unchanged library perform ONE corpus load; a note edit
+        // moves the library stamp and the next search reloads.
+        val first = repository.createRichNote("Alpha", "<p>zebra apple orchard</p>")
+        repository.createRichNote("Beta", "<p>zebra banana grove</p>")
+
+        assertEquals(2, repository.searchNotes("zebra").size)
+        assertEquals(1, repository.corpusLoadCount)
+
+        assertEquals(listOf(first.id), repository.searchNotes("apple").map { it.id })
+        assertEquals(1, repository.corpusLoadCount)
+
+        val stored = db.noteDao().getById(first.id)!!
+        repository.updateRichBody(stored, "Alpha", "<p>zebra cherry orchard</p>")
+        assertEquals(listOf(first.id), repository.searchNotes("cherry").map { it.id })
+        assertEquals(2, repository.corpusLoadCount)
+    }
+
+    @Test
+    fun stressLibrarySearchMatchesBruteForceReference() = runBlocking {
+        // Performance chapter 2 (F6): at stress scale (2,000
+        // seeded notes), the cached-corpus search returns EXACTLY
+        // what a brute-force reference scorer computes over the
+        // raw corpus — same ids, same order, same scores — and
+        // the whole battery costs one corpus load.
+        StressLibrary.seed(db)
+        val queries = listOf("river", "saffron", "stress note 199", "topic 3", "harvest")
+        for (query in queries) {
+            val expected = bruteForceSearch(query)
+            val actual = repository.searchNotes(query)
+            assertEquals("id order for '$query'", expected.map { it.first }, actual.map { it.id })
+            assertEquals("scores for '$query'", expected.map { it.second }, actual.map { it.score })
+        }
+        assertEquals(1, repository.corpusLoadCount)
+    }
+
+    /** The search pipeline with no cache: score every corpus row
+     *  with the production scorer and sort by the production
+     *  order (score, then recency, then id). The reference the
+     *  cached path must match exactly. */
+    private suspend fun bruteForceSearch(raw: String): List<Pair<String, Double>> {
+        val terms = NoteSearch.terms(raw)
+        if (terms.isEmpty()) return emptyList()
+        val texts = db.noteDao().getSearchTexts()
+        val textById = texts.associateBy { it.id }
+        val tagNamesById = HashMap<String, List<String>>()
+        for (chunk in textById.keys.chunked(500)) {
+            for ((noteId, names) in db.tagDao().getTagNamesForNotes(chunk)
+                .groupBy({ it.noteId }, { it.tagName })) {
+                tagNamesById[noteId] = names
+            }
+        }
+        val folderNamesById = db.folderDao().getAll().associate { it.id to it.name }
+        val rowsById = HashMap<String, app.nota.data.db.NoteListRow>()
+        for (chunk in textById.keys.chunked(500)) {
+            for (row in db.noteDao().getRowsByIds(chunk)) rowsById[row.id] = row
+        }
+        val scored = ArrayList<Triple<String, Double, Long>>()
+        for ((id, text) in textById) {
+            val row = rowsById[id] ?: continue
+            val score = NoteSearch.score(
+                title = text.title,
+                body = if (text.locked) "" else text.plainText,
+                tagNames = tagNamesById[id] ?: emptyList(),
+                folderName = row.folderId?.let { folderNamesById[it] },
+                terms = terms,
+            ) ?: continue
+            scored += Triple(id, score.toDouble(), row.updatedAt)
+        }
+        return scored
+            .sortedWith(
+                compareByDescending<Triple<String, Double, Long>> { it.second }
+                    .thenByDescending { it.third }
+                    .thenBy { it.first },
+            )
+            .map { it.first to it.second }
     }
 }

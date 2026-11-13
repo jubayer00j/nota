@@ -3,6 +3,9 @@ package app.nota.data.repository
 import androidx.room.withTransaction
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.LibraryStampRow
+import app.nota.data.db.SearchTextRow
+import app.nota.data.db.SyncMetaEntity
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteLinkEntity
@@ -125,19 +128,32 @@ class NoteRepository(
      * MIGRATION_2_3 created note_links EMPTY, so notes written before
      * Phase 1c have no edges until each is individually re-saved. When
      * the table is empty but notes exist, relink every note that
-     * mentions a [[title]]. Cheap and idempotent: once any edge exists
-     * this returns immediately, and notes without "[[" are skipped
-     * without a relink, so a library with no links at all only pays a
-     * substring scan per note per launch. Returns true when it ran.
+     * mentions a [[title]]. Returns true when it ran.
+     *
+     * Performance chapter 2 (F7): two changes to the original shape.
+     * The scan reads the (id, title, plainText) projection instead of
+     * full entities — contentHtml and lock envelopes are never loaded
+     * for a whole library on a cold start — and a link-free library
+     * now pays the scan ONCE EVER, not once per launch: completing a
+     * scan records a done-marker in sync_meta (inside the same
+     * transaction as the relinks), and later launches short-circuit
+     * on it. Edges are unaffected: a [[-bearing note's entity is
+     * loaded inside the transaction and relinked by the same
+     * [relink] every write path uses.
      */
     suspend fun backfillLinksIfNeeded(): Boolean {
         if (noteLinkDao.count() > 0) return false
-        val notes = noteDao.getAll()
-        if (notes.isEmpty()) return false
+        if (db.syncDao().getMetaValue(BACKFILL_LINKS_DONE_KEY) != null) return false
+        val rows = noteDao.getAllNoteTexts()
+        if (rows.isEmpty()) return false
         db.withTransaction {
-            for (note in notes) {
-                if (note.plainText.contains("[[")) relink(note)
+            for (row in rows) {
+                if (row.plainText.contains("[[")) {
+                    val note = noteDao.getById(row.id) ?: continue
+                    relink(note)
+                }
             }
+            db.syncDao().putMeta(SyncMetaEntity(BACKFILL_LINKS_DONE_KEY, "1"))
         }
         return true
     }
@@ -463,6 +479,50 @@ class NoteRepository(
     suspend fun deleteSavedSearch(search: SavedSearchEntity) = savedSearchDao.delete(search)
 
     // --- Search ---------------------------------------------------------------------
+
+    // Performance chapter 2 (F6): the substring-widening corpus,
+    // cached behind the library stamp. searchNotes re-materialised
+    // every note's plain text on EVERY keystroke (the widening
+    // pass scores the whole eligible corpus in memory — 1.x
+    // parity, deliberately undebounced). The corpus only changes
+    // when the notes table does, and the stamp (see
+    // LibraryStampRow) moves on any note insert, edit, delete,
+    // lock or unlock, so a stamp hit serves the cached rows and a
+    // stamp miss reloads. Tag/folder NAMES are not cached: tag
+    // and folder renames feed scoring without touching the notes
+    // table, so those two small maps are still read per query.
+    private var corpusCacheDb: NotaDatabase? = null
+    private var corpusCacheStamp: LibraryStampRow? = null
+    private var corpusCache: List<SearchTextRow>? = null
+
+    /** Test seam (F6): how many times the search corpus was
+     *  actually loaded from the DAO by this repository. */
+    var corpusLoadCount: Int = 0
+        private set
+
+    private suspend fun searchCorpus(): List<SearchTextRow> {
+        val stamp = noteDao.getLibraryStampRow()
+        val cached = corpusCache
+        if (cached != null && corpusCacheDb === db && corpusCacheStamp == stamp) {
+            return cached
+        }
+        val fresh = noteDao.getSearchTexts()
+        corpusLoadCount++
+        // The cap (see CORPUS_CACHE_MAX_CHARS): above it the
+        // corpus is served from this fresh read but NOT kept
+        // resident — the pre-chapter behaviour, bounded to the
+        // libraries that genuinely cannot afford the memory.
+        if (fresh.sumOf { it.plainText.length } <= CORPUS_CACHE_MAX_CHARS) {
+            corpusCacheDb = db
+            corpusCacheStamp = stamp
+            corpusCache = fresh
+        } else {
+            corpusCacheDb = null
+            corpusCacheStamp = null
+            corpusCache = null
+        }
+        return fresh
+    }
     /**
      * Keyword search (Search Quality Pass, v0.27.0): 1.x's ranked
      * local search over the FTS index.
@@ -490,8 +550,9 @@ class NoteRepository(
 
         // Id-list queries run in chunks: SQLite's bound-variable
         // ceiling on older Android is 999, and a big library's
-        // candidate set must never lean on it.
-        val texts = noteDao.getSearchTexts()
+        // candidate set must never lean on it. (F6: the corpus
+        // itself now comes through the stamp-gated cache.)
+        val texts = searchCorpus()
         if (texts.isEmpty()) return emptyList()
         val textById = texts.associateBy { it.id }
 
@@ -546,5 +607,18 @@ class NoteRepository(
          *  under SQLite's 999 bound-variable ceiling on the
          *  oldest Android versions Nota still runs on. */
         const val ID_QUERY_CHUNK = 500
+
+        /** sync_meta key for the F7 link-backfill done-marker. */
+        const val BACKFILL_LINKS_DONE_KEY = "backfill_links_done_v1"
+
+        /** F6 corpus-cache cap, in plain-text characters. The
+         *  cache's resident cost is the corpus itself (Strings
+         *  are UTF-16: roughly 2 bytes per char, plus the row
+         *  objects) — 8M chars ≈ 16 MB of text, which covers a
+         *  2,000-note stress library (~1.5M chars) with wide
+         *  headroom while staying a sane resident set on a
+         *  2–3 GB phone. A library past the cap keeps the
+         *  per-query read it has always had. */
+        const val CORPUS_CACHE_MAX_CHARS = 8_000_000
     }
 }

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -272,5 +273,63 @@ class AppLockManagerSetupTest {
         val attempts = store.readCollections.get()
         assertTrue("re-observation never retried ($attempts collections)", attempts >= 3)
         assertTrue("re-observation is spinning ($attempts collections)", attempts <= 200)
+    }
+
+    // PR #55 (Argon F-09 + F-07): the auto-lock window is measured
+    // on the monotonic clock seam (a wall-clock jump can neither
+    // stretch nor shorten it), and the lock-engagement hook fires
+    // exactly when the lock engages — not on an in-window return.
+    @Test
+    fun autoLock_monotonicWindow_firesEngagementHookOnce() = runBlocking {
+        var fakeNow = 1_000_000L
+        var engagements = 0
+        val timed = AppLockManager(
+            repository,
+            AppLockBiometricStore(repository, RawKeyProvider()),
+            elapsedRealtimeMillis = { fakeNow },
+            onLockEngaged = { engagements++ },
+        )
+        timed.setCredential(AppLockMethod.PIN, AppLockCrypto.canonicalPin("135790"))
+        awaitManager(timed) { AppLockMethod.PIN in it.settings.value.enabledMethods }
+        timed.setLockTimeoutSeconds(30)
+        awaitManager(timed) { it.settings.value.lockTimeoutSeconds == 30 }
+        assertEquals(
+            UnlockResult.Success,
+            timed.attemptUnlock(AppLockMethod.PIN, AppLockCrypto.canonicalPin("135790")),
+        )
+        assertFalse(timed.isLocked.value)
+
+        // Inside the window: no re-lock, no hook.
+        timed.onAppBackgrounded()
+        fakeNow += 10_000
+        timed.onAppForegrounded()
+        assertFalse(timed.isLocked.value)
+        assertEquals(0, engagements)
+
+        // Past the window: re-lock, hook fires exactly once.
+        timed.onAppBackgrounded()
+        fakeNow += 31_000
+        timed.onAppForegrounded()
+        assertTrue(timed.isLocked.value)
+        assertEquals(1, engagements)
+    }
+
+    // PR #55 (Argon F-09): turning App Lock fully off destroys the
+    // sealed biometric token too — the rule every other off-path
+    // (biometric toggle, last-credential removal) already honours.
+    @Test
+    fun disableAll_clearsTheSealedBiometricToken() = runBlocking {
+        val store = AppLockBiometricStore(repository, RawKeyProvider())
+        val owner = AppLockManager(repository, store)
+        owner.setCredential(AppLockMethod.PIN, AppLockCrypto.canonicalPin("135790"))
+        awaitManager(owner) { AppLockMethod.PIN in it.settings.value.enabledMethods }
+        owner.setBiometricEnabled(true)
+        val sealCipher = store.sealCipherResult()
+        assertTrue(sealCipher is StepResult.Ok)
+        assertTrue(store.sealToken((sealCipher as StepResult.Ok).value) is StepResult.Ok)
+        assertTrue(store.hasToken())
+
+        owner.disableAll()
+        assertFalse(store.hasToken())
     }
 }

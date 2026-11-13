@@ -43,10 +43,7 @@ import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteVersionEntity
 import app.nota.data.html.NoteDocument
-import app.nota.data.html.QuoteSegment
-import app.nota.data.html.TextSegment
 import app.nota.ui.theme.NotaSpacing
-import com.mohamedrejeb.richeditor.model.RichTextState
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -310,19 +307,9 @@ private fun VersionPreview(
     // one library state per text/quote segment, seeded from the
     // stored HTML. Rendering only — toggles and edits go nowhere
     // (onChange below is a no-op by design).
-    val previewStates = remember(version.id) { mutableMapOf<String, RichTextState>() }
-    fun previewStateFor(ui: UiSegment): RichTextState {
-        previewStates[ui.id]?.let { return it }
-        val state = RichTextState()
-        when (val s = ui.segment) {
-            is TextSegment -> state.setHtml(s.html)
-            is QuoteSegment -> state.setHtml(s.innerHtml)
-            else -> Unit
-        }
-        previewStates[ui.id] = state
-        return state
-    }
-
+    // Performance chapter 2 (F2): the preview renders through the
+    // same static read view as read mode — no RichTextStates are
+    // built for it any more either.
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth(),
@@ -366,7 +353,6 @@ private fun VersionPreview(
                 for (ui in previewSegments) {
                     SegmentReadView(
                         ui = ui,
-                        stateFor = { previewStateFor(ui) },
                         onChange = {},
                         attachments = attachments,
                         fileFor = fileFor,
