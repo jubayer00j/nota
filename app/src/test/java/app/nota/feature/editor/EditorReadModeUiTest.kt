@@ -6,6 +6,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -921,6 +922,74 @@ class EditorReadModeUiTest {
             "ticks after the persist are idle again",
             1,
             EditorPerfProbe.syncSegmentsCalls,
+        )
+    }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R8 pin: an immediate persist must refresh the
+    // footer stats itself. Typing marks the note dirty, but Done
+    // (exitToRead -> persistNow) flushes and clears the flag
+    // before any tick can run — and this test NEVER advances
+    // virtual time, so no tick fires at all. Pre-fix, persistNow
+    // left docStats at the seeded counts, so the footer kept
+    // showing them in read mode until a later edit or reopen.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun perfF1_doneFlushRefreshesFooterStatsWithoutATick() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Flush stats",
+                contentHtml = "<p>one two three</p>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("footer seeded with the opened counts") {
+            exists("seed stats") {
+                composeRule.onNodeWithText("3 words · 1 min read").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        // Type four more words into the paragraph (the
+        // EditorAutolinkPopupUiTest field-replacement pattern).
+        val nodes = composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = nodes.indexOfFirst {
+            it.config.getOrNull(SemanticsProperties.EditableText)?.text == "one two three"
+        }
+        if (index < 0) fail("no editable field showing 'one two three'")
+        composeRule.onAllNodes(hasSetTextAction())[index]
+            .performTextReplacement("one two three four five six seven")
+        // Done — the flush. NO advanceVirtualTime anywhere in
+        // this test: the tick cannot have refreshed the stats.
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        // The flush really persisted the typed words...
+        org.junit.Assert.assertTrue(
+            "the Done flush must persist the edit",
+            runBlocking { repository.getById(note.id) }
+                ?.contentHtml?.contains("seven") == true,
+        )
+        // ...and the footer already shows the NEW counts, with
+        // the seeded ones gone (R8: persistNow recomputes the
+        // stats from the segments it persists).
+        awaitTrue("footer refreshed by the flush itself") {
+            exists("new stats") {
+                composeRule.onNodeWithText("7 words · 1 min read").assertIsDisplayed()
+            }
+        }
+        org.junit.Assert.assertTrue(
+            !exists("old stats") {
+                composeRule.onNodeWithText("3 words · 1 min read").assertIsDisplayed()
+            },
         )
     }
 }

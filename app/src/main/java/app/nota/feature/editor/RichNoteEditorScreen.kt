@@ -614,12 +614,24 @@ fun RichNoteEditorScreen(
     }
 
     /** F1: [synced] lets the autosave tick hand over the ONE
-     *  syncSegments pass it already made (for the stats line), so
-     *  a dirty tick serialises exactly once end to end. Every
-     *  other caller syncs here. Either way the dirty flag and the
-     *  metadata mirrors are refreshed at call time. */
+     *  syncSegments pass it already made, so a dirty tick
+     *  serialises exactly once end to end. Every other caller
+     *  syncs here. Either way the dirty flag and the metadata
+     *  mirrors are refreshed at call time.
+     *
+     *  Codex PR #54 R8: the footer stats are also recomputed
+     *  HERE, from the very segments being persisted. Content-
+     *  changing callers that persist on the spot (block
+     *  conversions, the AI-summary insert, the Done flush) clear
+     *  the dirty flag as they go, so the dirty-gated tick never
+     *  refreshes the stats afterwards and the footer kept the
+     *  pre-action counts until the next edit or reopen. One
+     *  plainText pass on an explicit action is cheap; the tick
+     *  hands over its [synced] pass, so a dirty tick still pays
+     *  exactly one pass for stats — now paid inside here. */
     fun persistNow(synced: List<DocSegment>? = null, then: () -> Unit = {}) {
         val toPersist = synced ?: syncSegments()
+        docStats = docStatsText(NoteDocument.plainText(toPersist))
         contentDirty = false
         lastSyncedTitle = title
         lastSyncedFolderId = folderId
@@ -1485,7 +1497,8 @@ fun RichNoteEditorScreen(
                 tagsCsv != lastSyncedTagsCsv
             if (!contentDirty && !metadataDirty) continue
             val synced = syncSegments()
-            docStats = docStatsText(NoteDocument.plainText(synced))
+            // R8: persistNow recomputes the footer stats from
+            // this same pass — no second plainText walk here.
             persistNow(synced)
         }
     }

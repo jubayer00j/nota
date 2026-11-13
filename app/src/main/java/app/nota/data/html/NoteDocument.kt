@@ -788,14 +788,21 @@ object NoteDocument {
         fun finishParagraph() {
             // A paragraph's own boundary spaces are not content
             // (the library's assembly trims them the same way).
+            // Only the HTML-collapsible set is trimmed — NOT via
+            // Kotlin's trimStart()/trimEnd(): their whitespace
+            // definition includes U+00A0, which
+            // collapseHtmlWhitespace deliberately preserves, so
+            // an authored &nbsp; at a paragraph edge is content
+            // the editor shows and read mode must show too
+            // (Codex PR #54 R8).
             if (runs.isNotEmpty()) {
                 val first = runs.first()
-                val trimmedFirst = first.text.trimStart()
+                val trimmedFirst = first.text.trimStart(' ', '\t', '\n', '\r', '')
                 if (trimmedFirst != first.text) {
                     runs[0] = Run(trimmedFirst, first.style, first.link)
                 }
                 val last = runs.last()
-                val trimmedLast = last.text.trimEnd()
+                val trimmedLast = last.text.trimEnd(' ', '\t', '\n', '\r', '')
                 if (trimmedLast != last.text) {
                     runs[runs.lastIndex] = Run(trimmedLast, last.style, last.link)
                 }

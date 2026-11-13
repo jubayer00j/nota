@@ -1632,6 +1632,41 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun annotatedTextPreservesNbspAtParagraphEdges() {
+        // Codex PR #54 R8: authored &nbsp; at a paragraph edge is
+        // content — collapseHtmlWhitespace preserves U+00A0 by
+        // contract, and the boundary trim in finishParagraph must
+        // too. Kotlin's bare trimStart()/trimEnd() treat U+00A0
+        // as whitespace, so read mode stripped edge NBSPs the
+        // editor faithfully shows.
+        assertEquals(
+            "  Hello",
+            NoteDocument.annotatedText("<p>&nbsp;&nbsp;Hello</p>").text,
+        )
+        assertEquals(
+            "Hello  ",
+            NoteDocument.annotatedText("<p>Hello&nbsp;&nbsp;</p>").text,
+        )
+        // Collapsible whitespace OUTSIDE an edge NBSP still
+        // trims — only the NBSP survives, both directions.
+        assertEquals(
+            " Hello ",
+            NoteDocument.annotatedText("<p> &nbsp;Hello&nbsp; </p>").text,
+        )
+        // And plain collapsible edges still trim, both
+        // directions (whitespace runs collapse to one space
+        // before the trim).
+        assertEquals(
+            "Hello",
+            NoteDocument.annotatedText("<p>   Hello   </p>").text,
+        )
+        assertEquals(
+            "Hello",
+            NoteDocument.annotatedText("<p>\t\nHello\r\n</p>").text,
+        )
+    }
+
+    @Test
     fun annotatedTextCarriesLinkAnnotations() {
         val html = "<p>a <a href=\"https://example.com\">link</a> here</p>"
         assertConverterMatches(html)
