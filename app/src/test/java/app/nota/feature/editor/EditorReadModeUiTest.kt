@@ -6,6 +6,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -16,10 +17,12 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import android.os.Looper
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.attachments.PendingInsertStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
+import app.nota.data.html.NoteDocument
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
@@ -36,6 +39,7 @@ import app.nota.feature.chart.CHART_SAVE_TAG
 import app.nota.feature.chart.CHART_TAB_CHART_TAG
 import app.nota.feature.chart.CHART_TITLE_FIELD_TAG
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -47,6 +51,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import org.robolectric.shadows.ShadowLooper
@@ -677,5 +682,314 @@ class EditorReadModeUiTest {
             }
         }
         composeRule.onNodeWithTag(CHART_BLOCK_EDIT_TAG).assertDoesNotExist()
+    }
+
+    // ------------------------------------------------------------------
+    // Performance chapter 2 pins (F1/F2/F4). The autosave tick's
+    // delay is governed by the compose test clock in this harness
+    // (LaunchedEffect delays do not follow the shadow looper), so
+    // virtual time is advanced on BOTH clocks in small steps,
+    // settling composition between steps.
+    // ------------------------------------------------------------------
+
+    private fun advanceVirtualTime(millis: Long) {
+        val shadow = shadowOf(Looper.getMainLooper())
+        var left = millis
+        while (left > 0) {
+            val step = minOf(left, 250L)
+            composeRule.mainClock.advanceTimeBy(step)
+            shadow.idleFor(step, TimeUnit.MILLISECONDS)
+            composeRule.waitForIdle()
+            left -= step
+        }
+    }
+
+    @Test
+    fun perfF2F4_readModeBuildsNoRichTextStates_andParsesOnce() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Perf shapes",
+                contentHtml = "<p>Perf body text</p>" +
+                    "<blockquote><p>Perf quoted line</p></blockquote>" +
+                    "<table><tbody><tr><th>Head</th></tr>" +
+                    "<tr><td>Perf cell</td></tr></tbody></table>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Perf task</p></li></ul>",
+            )
+        }
+        EditorPerfProbe.reset()
+        val parsesBefore = NoteDocument.parseInvocations
+        composeEditor(note.id)
+        awaitTrue("read mode shows every shape") {
+            exists("shapes") {
+                composeRule.onNodeWithText("Perf body text").assertIsDisplayed()
+                composeRule.onNodeWithText("Perf quoted line").assertIsDisplayed()
+                composeRule.onNodeWithText("Perf cell").assertIsDisplayed()
+                composeRule.onNodeWithText("Perf task").assertIsDisplayed()
+            }
+        }
+        // F2: text, quote, table cells and task rows all rendered
+        // WITHOUT constructing a single RichTextState.
+        org.junit.Assert.assertEquals(
+            "read mode must construct zero RichTextStates",
+            0,
+            EditorPerfProbe.richStateConstructions,
+        )
+        // F4: the whole open cost exactly ONE NoteDocument.parse
+        // (the ViewModel's load); the screen seeds from it.
+        org.junit.Assert.assertEquals(
+            "one parse per note open",
+            1,
+            NoteDocument.parseInvocations - parsesBefore,
+        )
+    }
+
+    @Test
+    fun perfF1_idleReadModeDoesNothing_togglePersistsWithExactlyOneSync() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Idle note",
+                contentHtml = "<p>Idle body</p>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Idle task</p></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Idle body").assertIsDisplayed()
+            }
+        }
+        val before = runBlocking { repository.getById(note.id) }
+        EditorPerfProbe.reset()
+
+        // Two full tick windows pass with NO interaction: the
+        // tick must do literally nothing — zero syncSegments
+        // calls, and the stored row is byte-identical.
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "an idle tick must not sync",
+            0,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        org.junit.Assert.assertEquals(
+            "an idle note must not be rewritten",
+            before,
+            runBlocking { repository.getById(note.id) },
+        )
+
+        // A read-mode task toggle marks the document dirty via
+        // updateBlock; the next tick persists it with exactly ONE
+        // sync, and later ticks go back to doing nothing.
+        composeRule.onNode(isToggleable()).performClick()
+        val deadline = System.currentTimeMillis() + 15_000
+        var stored = runBlocking { repository.getById(note.id) }
+        while (System.currentTimeMillis() < deadline &&
+            stored?.contentHtml?.contains("data-checked=\"true\"") != true
+        ) {
+            advanceVirtualTime(400)
+            stored = runBlocking { repository.getById(note.id) }
+        }
+        org.junit.Assert.assertTrue(
+            "the toggle must persist via the tick: ${stored?.contentHtml}",
+            stored?.contentHtml?.contains("data-checked=\"true\"") == true,
+        )
+        org.junit.Assert.assertEquals(
+            "the toggle's persist used exactly one sync",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "ticks after the persist are idle again",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+    }
+
+    @Test
+    fun perfF4_noteEndingInABlockWritesNothingOnOpenAndDone() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Trailing block",
+                contentHtml = "<p>Lead paragraph</p>" +
+                    "<ul data-type=\"taskList\">" +
+                    "<li data-type=\"taskItem\" data-checked=\"false\">" +
+                    "<p>Trailing task</p></li></ul>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Lead paragraph").assertIsDisplayed()
+            }
+        }
+        val before = runBlocking { repository.getById(note.id) }
+        // Open -> pencil -> Done with NO edits: the screen's added
+        // trailing text segment must be stripped by the persist
+        // comparison, so nothing is written (updatedAt included).
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        advanceVirtualTime(2_000)
+        org.junit.Assert.assertEquals(
+            "opening and closing an unchanged note writes nothing",
+            before,
+            runBlocking { repository.getById(note.id) },
+        )
+    }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R1 pins: structural edits (insert / remove)
+    // assign segments directly — they must mark the note dirty so
+    // the F1 tick autosaves them. Before the fix a pure insert or
+    // remove never reached the tick and only an explicit flush
+    // (Done) saved it.
+    // ---------------------------------------------------------------
+
+    // NOTE — no toolbar-insert pin exists, deliberately: the
+    // insert menu is a DropdownMenu, and under this Robolectric
+    // harness its popup items never enter the semantics tree
+    // (proven twice for this chapter: a 15 s wait by displayedness
+    // AND by pure existence both timed out — the same wall PR #34
+    // hit and PR #50 designed around with its inline strip). The
+    // structural-insert half of the R1 fix (insertBlock /
+    // insertBlockAtCaret dirtying) is the identical one-line
+    // pattern the remove pin below proves against the real tick;
+    // the classification of every segments-assignment site is in
+    // the PR #54 R1 comment.
+
+    @Test
+    fun perfF1_structuralRemovePersistsExactlyOnceOnTheNextTick() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Remove target",
+                contentHtml = "<p>Remove body</p>" +
+                    "<blockquote><p>Remove quoted line</p></blockquote>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("read mode body") {
+            exists("body") {
+                composeRule.onNodeWithText("Remove quoted line").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        EditorPerfProbe.reset()
+        // The quote row's ✕ flows through removeBlock — a pure
+        // structural edit the pre-fix tick never saved.
+        awaitTrue("remove affordance") {
+            exists("remove quote") {
+                composeRule.onNodeWithContentDescription("Remove quote").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Remove quote").performClick()
+        val deadline = System.currentTimeMillis() + 15_000
+        var stored = runBlocking { repository.getById(note.id) }
+        while (System.currentTimeMillis() < deadline &&
+            stored?.contentHtml?.contains("Remove quoted line") == true
+        ) {
+            advanceVirtualTime(400)
+            stored = runBlocking { repository.getById(note.id) }
+        }
+        org.junit.Assert.assertTrue(
+            "the removal must persist via the tick: ${stored?.contentHtml}",
+            stored?.contentHtml?.contains("Remove quoted line") == false,
+        )
+        org.junit.Assert.assertEquals(
+            "the removal's persist used exactly one sync",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+        advanceVirtualTime(3_400)
+        org.junit.Assert.assertEquals(
+            "ticks after the persist are idle again",
+            1,
+            EditorPerfProbe.syncSegmentsCalls,
+        )
+    }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R8 pin: an immediate persist must refresh the
+    // footer stats itself. Typing marks the note dirty, but Done
+    // (exitToRead -> persistNow) flushes and clears the flag
+    // before any tick can run — and this test NEVER advances
+    // virtual time, so no tick fires at all. Pre-fix, persistNow
+    // left docStats at the seeded counts, so the footer kept
+    // showing them in read mode until a later edit or reopen.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun perfF1_doneFlushRefreshesFooterStatsWithoutATick() {
+        val note = runBlocking {
+            repository.createRichNote(
+                title = "Flush stats",
+                contentHtml = "<p>one two three</p>",
+            )
+        }
+        composeEditor(note.id)
+        awaitTrue("footer seeded with the opened counts") {
+            exists("seed stats") {
+                composeRule.onNodeWithText("3 words · 1 min read").assertIsDisplayed()
+            }
+        }
+        composeRule.onNodeWithContentDescription("Edit note").performClick()
+        awaitTrue("edit mode") {
+            exists("done") {
+                composeRule.onNodeWithContentDescription("Done editing").assertIsDisplayed()
+            }
+        }
+        // Type four more words into the paragraph (the
+        // EditorAutolinkPopupUiTest field-replacement pattern).
+        val nodes = composeRule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = nodes.indexOfFirst {
+            it.config.getOrNull(SemanticsProperties.EditableText)?.text == "one two three"
+        }
+        if (index < 0) fail("no editable field showing 'one two three'")
+        composeRule.onAllNodes(hasSetTextAction())[index]
+            .performTextReplacement("one two three four five six seven")
+        // Done — the flush. NO advanceVirtualTime anywhere in
+        // this test: the tick cannot have refreshed the stats.
+        composeRule.onNodeWithContentDescription("Done editing").performClick()
+        awaitTrue("back to read mode") {
+            exists("edit door") {
+                composeRule.onNodeWithContentDescription("Edit note").assertIsDisplayed()
+            }
+        }
+        // The flush really persisted the typed words...
+        org.junit.Assert.assertTrue(
+            "the Done flush must persist the edit",
+            runBlocking { repository.getById(note.id) }
+                ?.contentHtml?.contains("seven") == true,
+        )
+        // ...and the footer already shows the NEW counts, with
+        // the seeded ones gone (R8: persistNow recomputes the
+        // stats from the segments it persists).
+        awaitTrue("footer refreshed by the flush itself") {
+            exists("new stats") {
+                composeRule.onNodeWithText("7 words · 1 min read").assertIsDisplayed()
+            }
+        }
+        org.junit.Assert.assertTrue(
+            !exists("old stats") {
+                composeRule.onNodeWithText("3 words · 1 min read").assertIsDisplayed()
+            },
+        )
     }
 }

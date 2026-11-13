@@ -174,7 +174,6 @@ import app.nota.feature.export.NoteExportDelivery
 import app.nota.feature.export.NoteExportDialog
 import app.nota.feature.export.ExportSaveStore
 import app.nota.feature.reminders.ReminderDialog
-import com.mohamedrejeb.richeditor.ui.BasicRichText
 import org.koin.compose.koinInject
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.NoteLinkTarget
@@ -279,6 +278,28 @@ private val BLOCK_SWAP_OVERSHOOT = 24.dp
  * autocomplete inserts literal [[Title]] text (1.x-compatible), resolved
  * into backlink edges by the repository on save.
  */
+/**
+ * Performance chapter 2 test seams: construction/work counters
+ * the F1/F2 pins assert on. Production code only increments;
+ * tests read and reset. (richStateConstructions counts states
+ * BUILT by richStateFor — cache hits are not constructions.)
+ */
+internal object EditorPerfProbe {
+    @Volatile var syncSegmentsCalls: Int = 0
+    @Volatile var richStateConstructions: Int = 0
+    fun reset() {
+        syncSegmentsCalls = 0
+        richStateConstructions = 0
+    }
+}
+
+/** The footer stats line's text for a note's plain text. */
+internal fun docStatsText(plain: String): String {
+    val words = plain.split(Regex("\\s+")).count { it.isNotEmpty() }
+    val minutes = maxOf(1, (words + 199) / 200)
+    return "$words words · $minutes min read"
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalRichTextApi::class)
 @Composable
 fun RichNoteEditorScreen(
@@ -361,6 +382,26 @@ fun RichNoteEditorScreen(
     var activeSegmentId by remember { mutableStateOf<String?>(null) }
     var focusMode by remember { mutableStateOf(false) }
     var docStats by remember { mutableStateOf("") }
+    // Performance chapter 2 (F1): the autosave tick's change
+    // signal. Rich-text edits never flow through a callback —
+    // they land in the hoisted RichTextStates and are only read
+    // back at sync time — so dirtiness is OBSERVED: a snapshot
+    // flow per composed text state (SegmentDirtyEffect) flips
+    // [contentDirty], block content changes go through
+    // updateBlock which flips it too, structural mutations
+    // (insertBlock / removeBlock / insertBlockAtCaret and the
+    // attachment-panel block drop) flip it directly at the
+    // mutation site (Codex PR #54 R1: they assign segments
+    // without passing through either channel), and the cheap
+    // metadata fields (title, folder, tags) are compared
+    // against last-synced mirrors. Conversions and the drag
+    // commit skip the flag: they persistNow() on the spot.
+    // persistNow clears the flag and refreshes the mirrors at
+    // call time (snapshot semantics: a later edit re-marks).
+    var contentDirty by remember { mutableStateOf(false) }
+    var lastSyncedTitle by remember { mutableStateOf<String?>(null) }
+    var lastSyncedFolderId by remember { mutableStateOf<String?>(null) }
+    var lastSyncedTagsCsv by remember { mutableStateOf("") }
 
     var menuExpanded by remember { mutableStateOf(false) }
     var insertMenuExpanded by remember { mutableStateOf(false) }
@@ -515,26 +556,42 @@ fun RichNoteEditorScreen(
 
     val current = note
     // Phase 2b: a locked note initialises from the SESSION's decrypted
-    // HTML only — the stored contentHtml is an envelope and must never
-    // reach the editor. While gated, sourceHtml stays null and no
-    // segments are built at all.
-    val sourceHtml = if (current?.locked == true) sessionHtml else current?.contentHtml
-    if (current != null && sourceHtml != null && initializedFor != current.id) {
+    // body only — the stored contentHtml is an envelope and must never
+    // reach the editor. While gated, the session has not started and
+    // no segments are built at all.
+    // Performance chapter 2 (F4): the screen seeds from the
+    // ViewModel's SINGLE parse of the note (or of the session's
+    // decrypted body) — it no longer parses the stored HTML again
+    // here in composition.
+    val seedSegments = if (current?.locked == true) {
+        viewModel.sessionSegments
+    } else {
+        viewModel.loadedSegments
+    }
+    if (current != null && seedSegments != null && initializedFor != current.id) {
         initializedFor = current.id
         title = current.title
         folderId = current.folderId
         segments = NoteDocument.ensureTrailingTextSegment(
-            NoteDocument.parse(sourceHtml),
+            seedSegments,
         ).map { UiSegment(newUiId(), it) }
+        // F1: the stats line is seeded from the parse's own plain
+        // text, so opening a note shows its counts immediately —
+        // no syncSegments pass is needed (or paid) for it.
+        docStats = docStatsText(NoteDocument.plainText(seedSegments))
+        lastSyncedTitle = current.title
+        lastSyncedFolderId = current.folderId
     }
     var tagsSeeded by remember { mutableStateOf(false) }
     if (!tagsSeeded && existingTags.isNotEmpty()) {
         tagsCsv = existingTags.joinToString(", ")
+        lastSyncedTagsCsv = tagsCsv
         tagsSeeded = true
     }
 
     fun richStateFor(ui: UiSegment): RichTextState {
         textStates[ui.id]?.let { return it }
+        EditorPerfProbe.richStateConstructions++
         val state = RichTextState()
         when (val s = ui.segment) {
             is TextSegment -> state.setHtml(s.html)
@@ -545,16 +602,41 @@ fun RichNoteEditorScreen(
         return state
     }
 
-    fun syncSegments(): List<DocSegment> = segments.map { ui ->
-        when (val s = ui.segment) {
-            is TextSegment -> TextSegment(textStates[ui.id]?.toHtml() ?: s.html)
-            is QuoteSegment -> QuoteSegment(textStates[ui.id]?.toHtml() ?: s.innerHtml)
-            else -> s
+    fun syncSegments(): List<DocSegment> {
+        EditorPerfProbe.syncSegmentsCalls++
+        return segments.map { ui ->
+            when (val s = ui.segment) {
+                is TextSegment -> TextSegment(textStates[ui.id]?.toHtml() ?: s.html)
+                is QuoteSegment -> QuoteSegment(textStates[ui.id]?.toHtml() ?: s.innerHtml)
+                else -> s
+            }
         }
     }
 
-    fun persistNow(then: () -> Unit = {}) {
-        viewModel.persist(title, syncSegments(), folderId, tagsCsv, then)
+    /** F1: [synced] lets the autosave tick hand over the ONE
+     *  syncSegments pass it already made, so a dirty tick
+     *  serialises exactly once end to end. Every other caller
+     *  syncs here. Either way the dirty flag and the metadata
+     *  mirrors are refreshed at call time.
+     *
+     *  Codex PR #54 R8: the footer stats are also recomputed
+     *  HERE, from the very segments being persisted. Content-
+     *  changing callers that persist on the spot (block
+     *  conversions, the AI-summary insert, the Done flush) clear
+     *  the dirty flag as they go, so the dirty-gated tick never
+     *  refreshes the stats afterwards and the footer kept the
+     *  pre-action counts until the next edit or reopen. One
+     *  plainText pass on an explicit action is cheap; the tick
+     *  hands over its [synced] pass, so a dirty tick still pays
+     *  exactly one pass for stats — now paid inside here. */
+    fun persistNow(synced: List<DocSegment>? = null, then: () -> Unit = {}) {
+        val toPersist = synced ?: syncSegments()
+        docStats = docStatsText(NoteDocument.plainText(toPersist))
+        contentDirty = false
+        lastSyncedTitle = title
+        lastSyncedFolderId = folderId
+        lastSyncedTagsCsv = tagsCsv
+        viewModel.persist(title, toPersist, folderId, tagsCsv, then)
     }
 
     /**
@@ -574,12 +656,32 @@ fun RichNoteEditorScreen(
         focusedTaskItem = null
         title = restored.title
         folderId = restored.folderId
-        segments = NoteDocument.ensureTrailingTextSegment(
-            NoteDocument.parse(restored.contentHtml),
-        ).map { UiSegment(newUiId(), it) }
+        // F4: the VM parsed the restored row once already (its
+        // baseline came from the same parse); re-seed from it.
+        val reseeded = NoteDocument.ensureTrailingTextSegment(
+            viewModel.restoredSegments ?: NoteDocument.parse(restored.contentHtml),
+        )
+        segments = reseeded.map { UiSegment(newUiId(), it) }
+        // Codex PR #54 R4: the footer stats are recomputed here,
+        // from the restored segments, exactly as the seed computes
+        // them. Pre-F1 the unconditional autosave tick refreshed
+        // the stats within 1.5 s of a restore and masked the gap;
+        // the F1 tick recomputes only on a DIRTY tick, and a
+        // restore is not dirty (contentDirty is cleared below) —
+        // without this line the footer keeps showing the previous
+        // version's word count and read time until the next edit
+        // or reopen.
+        docStats = docStatsText(NoteDocument.plainText(reseeded))
+        contentDirty = false
+        lastSyncedTitle = restored.title
+        lastSyncedFolderId = restored.folderId
     }
 
     fun updateBlock(id: String, segment: DocSegment) {
+        // F1: block-level changes (read-mode task toggles above
+        // all — they never enter edit mode) mark the document
+        // dirty so the next tick persists them.
+        contentDirty = true
         segments = segments.map { if (it.id == id) it.copy(segment = segment) else it }
     }
 
@@ -661,10 +763,17 @@ fun RichNoteEditorScreen(
         if (focusedTaskItem?.first == id) focusedTaskItem = null
         evictCellTextStates(cellTextStates, id)
         evictCellRichStates(cellRichStates, id)
+        // Codex PR #54 R1: a structural removal bypasses
+        // updateBlock and the dirty effect — flip the flag or
+        // the F1 tick never autosaves it.
+        contentDirty = true
         segments = ensureTrailing(segments.filterNot { it.id == id })
     }
 
     fun insertBlock(segment: DocSegment) {
+        // Codex PR #54 R1: same structural-dirty rule as
+        // removeBlock — the tick must see a pure insert.
+        contentDirty = true
         val ui = UiSegment(newUiId(), segment)
         val activeIndex = segments.indexOfFirst { it.id == activeSegmentId }
         segments = ensureTrailing(
@@ -700,6 +809,12 @@ fun RichNoteEditorScreen(
             insertBlock(block)
             return
         }
+        // Codex PR #54 R1: the split path below assigns segments
+        // directly (twice, when a caret segment is minted) —
+        // dirty once here so both assignments are covered. (The
+        // fallback above delegates to insertBlock, which dirties
+        // itself.)
+        contentDirty = true
         val isQuote = activeSegment is QuoteSegment
         val split = splitHtmlAtCaret(state)
         fun sideKept(html: String): Boolean = if (isQuote) {
@@ -1264,7 +1379,7 @@ fun RichNoteEditorScreen(
      *  it so a later launch doesn't route back into a finished visit. */
     fun leaveNote() {
         retirePendingInsert()
-        persistNow(onBack)
+        persistNow(then = onBack)
     }
 
     val activeState: RichTextState? = activeSegmentId?.let { textStates[it] }
@@ -1362,17 +1477,29 @@ fun RichNoteEditorScreen(
     }
 
     // Autosave tick + stats refresh.
+    // Performance chapter 2 (F1): the tick is CHANGE-AWARE. It
+    // used to sync (serialise every text state), derive stats and
+    // call persist every 1.5 s forever — in read mode too — so a
+    // huge note paid several whole-document serialisations per
+    // tick whether or not anything had changed, and the cost
+    // grew with every state ever built. Now an idle tick does
+    // literally nothing: no sync, no stats, no persist call. A
+    // dirty tick syncs ONCE and hands that single pass to
+    // persistNow (which hands it to the VM, whose change check
+    // is a segment comparison — no second serialisation).
     LaunchedEffect(initializedFor) {
         if (initializedFor == null) return@LaunchedEffect
         while (true) {
             delay(1500)
-            if (segments.isNotEmpty()) {
-                val plain = NoteDocument.plainText(syncSegments())
-                val words = plain.split(Regex("\\s+")).count { it.isNotEmpty() }
-                val minutes = maxOf(1, (words + 199) / 200)
-                docStats = "$words words · $minutes min read"
-                persistNow()
-            }
+            if (segments.isEmpty()) continue
+            val metadataDirty = title != lastSyncedTitle ||
+                folderId != lastSyncedFolderId ||
+                tagsCsv != lastSyncedTagsCsv
+            if (!contentDirty && !metadataDirty) continue
+            val synced = syncSegments()
+            // R8: persistNow recomputes the footer stats from
+            // this same pass — no second plainText walk here.
+            persistNow(synced)
         }
     }
 
@@ -2067,6 +2194,7 @@ fun RichNoteEditorScreen(
                 focusRequester = segmentFocusRequesters
                     .getOrPut(ui.id) { FocusRequester() },
                 stateFor = { richStateFor(ui) },
+                onStateDirty = { contentDirty = true },
                 cellTextStates = cellTextStates,
                 cellRichStates = cellRichStates,
                 fieldGeometries = fieldGeometries,
@@ -2223,7 +2351,6 @@ fun RichNoteEditorScreen(
                         SelectionContainer {
                             SegmentReadView(
                                 ui = ui,
-                                stateFor = { richStateFor(ui) },
                                 onChange = { updateBlock(ui.id, it) },
                                 attachments = attachments,
                                 fileFor = { viewModel.attachmentFile(it) },
@@ -2368,6 +2495,11 @@ fun RichNoteEditorScreen(
                             // the VM strips it from the stored document.
                             val targetSrc =
                                 NoteDocument.ATTACHMENT_SRC_PREFIX + attachment.id
+                            // Codex PR #54 R1: this structural drop
+                            // assigns segments directly — dirty it
+                            // so the F1 tick persists the working
+                            // copy too, not just the VM's strip.
+                            contentDirty = true
                             segments = ensureTrailing(
                                 segments.filterNot {
                                     (it.segment as? ImageSegment)?.src == targetSrc ||
@@ -3222,6 +3354,9 @@ private fun SegmentEditor(
     focusRequester: FocusRequester? = null,
     dragHandleModifier: Modifier? = null,
     stateFor: () -> RichTextState,
+    // Performance chapter 2 (F1): fired when this segment's
+    // rich-text state actually changes (see SegmentDirtyEffect).
+    onStateDirty: () -> Unit = {},
     // Phase 3.8 (Codex finding 3): the screen-owned cell/item field
     // text states, hoisted above this editor so the list slot and
     // the drag ghost share them (see the screen's declaration).
@@ -3276,6 +3411,7 @@ private fun SegmentEditor(
         is TextSegment -> {
             val state = stateFor()
             AutolinkEffect(state)
+            SegmentDirtyEffect(state, onStateDirty)
             var editorModifier = Modifier.fillMaxWidth().then(focusModifier).then(activeModifier)
             if (focusRequester != null) {
                 editorModifier = editorModifier.focusRequester(focusRequester)
@@ -3319,6 +3455,7 @@ private fun SegmentEditor(
         is QuoteSegment -> {
             val state = stateFor()
             AutolinkEffect(state)
+            SegmentDirtyEffect(state, onStateDirty)
             Row(Modifier.fillMaxWidth().then(focusModifier)) {
                 Box(
                     Modifier.width(3.dp).heightIn(min = 48.dp)
@@ -3508,13 +3645,22 @@ private fun SegmentEditor(
 }
 
 /**
- * Phase 3.6 (G3): the READ rendering of one segment. Text and quotes
- * render through the library's read-only [BasicRichText] over the
- * SAME [RichTextState] the editor uses, so flipping modes is
- * seamless and warm; its link taps stay live (the renderer consumes
- * them itself). Task checkboxes stay toggleable (a toggle is a
- * state change, not an edit session — Noma parity). Everything
- * else is a static rendering.
+ * Phase 3.6 (G3): the READ rendering of one segment. Task
+ * checkboxes stay toggleable (a toggle is a state change, not an
+ * edit session — Noma parity). Everything else is a static
+ * rendering.
+ *
+ * Performance chapter 2 (F2): text, quotes, table cells and task
+ * rows no longer build a library [RichTextState] each — that
+ * construction (HTML parse into the library's span tree plus its
+ * editor machinery) was the per-block cost of opening a note in
+ * read mode, the exact cost Noma's static read view removed.
+ * They render as Compose [Text] over [NoteDocument.annotatedText],
+ * a pure HTML-to-AnnotatedString conversion whose fidelity is
+ * pinned against the library's own output in tests. Selection
+ * still works (the caller wraps this view in a
+ * SelectionContainer); links carry LinkAnnotation.Url and open
+ * through the platform's default handler.
  *
  * Phase 6 (Editor Refinement #2): there are NO tap handlers here
  * any more. Read mode used to route every tap into edit mode,
@@ -3524,11 +3670,9 @@ private fun SegmentEditor(
  * copy natively; the pencil in the app bar is the only door into
  * edit mode.
  */
-@OptIn(ExperimentalRichTextApi::class)
 @Composable
 internal fun SegmentReadView(
     ui: UiSegment,
-    stateFor: () -> RichTextState,
     onChange: (DocSegment) -> Unit,
     attachments: List<AttachmentEntity>,
     fileFor: (AttachmentEntity) -> java.io.File,
@@ -3542,8 +3686,8 @@ internal fun SegmentReadView(
     val readTextStyle = bodyStyle.copy(color = MaterialTheme.colorScheme.onSurface)
     when (val segment = ui.segment) {
         is TextSegment -> {
-            BasicRichText(
-                state = stateFor(),
+            Text(
+                text = remember(segment.html) { NoteDocument.annotatedText(segment.html) },
                 style = readTextStyle,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -3555,8 +3699,10 @@ internal fun SegmentReadView(
                         .background(MaterialTheme.colorScheme.primary),
                 )
                 Spacer(Modifier.width(NotaSpacing.sm))
-                BasicRichText(
-                    state = stateFor(),
+                Text(
+                    text = remember(segment.innerHtml) {
+                        NoteDocument.annotatedText(segment.innerHtml)
+                    },
                     style = readTextStyle,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -3610,11 +3756,10 @@ internal fun SegmentReadView(
                                 // paragraphs), not plain text to
                                 // flatten. Header-row cells keep their
                                 // bold base style.
-                                val cellState = remember(cell) {
-                                    RichTextState().apply { setHtml(cell) }
-                                }
-                                BasicRichText(
-                                    state = cellState,
+                                Text(
+                                    text = remember(cell) {
+                                        NoteDocument.annotatedText(cell)
+                                    },
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         color = MaterialTheme.colorScheme.onSurface,
                                         fontWeight = if (segment.headerRow && r == 0) {
@@ -3821,13 +3966,10 @@ private fun ReadTaskRows(
                     CheckboxDefaults.colors()
                 },
             )
-            val itemState = remember(blockId, itemPath.joinToString("."), item.contentHtml) {
-                RichTextState().apply {
-                    setHtml(item.contentHtml)
-                }
-            }
-            BasicRichText(
-                state = itemState,
+            Text(
+                text = remember(blockId, itemPath.joinToString("."), item.contentHtml) {
+                    NoteDocument.annotatedText(item.contentHtml)
+                },
                 style = if (item.checked) {
                     readTextStyle.copy(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -3853,13 +3995,10 @@ private fun ReadTaskRows(
                     .padding(start = (depth * 24).dp),
             ) {
                 Spacer(Modifier.width(48.dp))
-                val afterState = remember(
-                    blockId, itemPath.joinToString("."), item.contentAfterHtml,
-                ) {
-                    RichTextState().apply { setHtml(item.contentAfterHtml) }
-                }
-                BasicRichText(
-                    state = afterState,
+                Text(
+                    text = remember(
+                        blockId, itemPath.joinToString("."), item.contentAfterHtml,
+                    ) { NoteDocument.annotatedText(item.contentAfterHtml) },
                     style = if (item.checked) {
                         readTextStyle.copy(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -4008,6 +4147,29 @@ private fun evictCellRichStates(
  * in [applyAutolink] reads live state, so a second collector
  * always sees the first one's link and stands down.
  */
+/**
+ * Performance chapter 2 (F1): observes a rich-text state's
+ * content and reports genuine changes. Emissions caused by
+ * seeding (setHtml during state construction) are skipped —
+ * the first emission after each (re)composition of the effect
+ * is the seed. RichCellText (table cells) uses the same pattern
+ * inline; segments needed it as a reusable effect because text
+ * edits never pass through any callback the screen owns.
+ */
+@Composable
+private fun SegmentDirtyEffect(state: RichTextState, onDirty: () -> Unit) {
+    LaunchedEffect(state) {
+        var seeded = false
+        snapshotFlow { state.annotatedString }.collect {
+            if (!seeded) {
+                seeded = true
+            } else {
+                onDirty()
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalRichTextApi::class)
 @Composable
 private fun AutolinkEffect(state: RichTextState) {

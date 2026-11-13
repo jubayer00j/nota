@@ -4,6 +4,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import app.nota.data.db.LibraryStampRow
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -135,10 +136,65 @@ class SemanticIndexStore(private val rootDir: File) {
         }
     }
 
-    /** Drops the account's whole index (sign-out, full rebuild). */
+    /** Drops the account's whole index (sign-out, full rebuild).
+     *  The reconcile stamp goes with it: a stamp that outlived
+     *  its index would let the stamp gate skip a pass the index
+     *  still needs. */
     fun delete(accountId: String) {
         runCatching { fileFor(accountId).delete() }
         runCatching { File(rootDir, fileFor(accountId).name + ".tmp").delete() }
+        runCatching { stampFileFor(accountId).delete() }
+    }
+
+    /** Performance chapter 2 (F3): the library stamp the last
+     *  COMPLETED reconcile pass answered for, persisted next to
+     *  the index so the stamp gate survives process death. Any
+     *  unreadable or malformed file reads as "no stamp" — the
+     *  gate then simply does not fire and a full pass runs,
+     *  which is always the safe direction.
+     *
+     *  Stamp format 3 (R7): a leading format number, then the
+     *  notes write generation alone — the stamp shrank to the
+     *  one component that was ever load-bearing, so nothing
+     *  else is persisted. Format 2 files (the marker plus the
+     *  six v9-era components) and format 1 files (five bare
+     *  aggregates written by schema-v8 code, which knew
+     *  nothing of the generation) read as "no stamp" BY
+     *  DESIGN: a pre-upgrade stamp must never compare equal
+     *  to a post-upgrade one, so the first reconcile after
+     *  the upgrade always runs a full pass and re-stamps in
+     *  the current format (the fail-safe direction, same
+     *  contract as the index's own version break). */
+    fun loadStamp(accountId: String): LibraryStampRow? {
+        val file = stampFileFor(accountId)
+        if (!file.isFile) return null
+        return try {
+            val parts = file.readText().trim().split(',')
+            if (parts.size != 2 || parts[0].toInt() != STAMP_VERSION) return null
+            LibraryStampRow(writeGeneration = parts[1].toLong())
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun saveStamp(accountId: String, stamp: LibraryStampRow) {
+        runCatching {
+            rootDir.mkdirs()
+            val target = stampFileFor(accountId)
+            val temp = File(rootDir, target.name + ".tmp")
+            temp.writeText(
+                listOf(STAMP_VERSION, stamp.writeGeneration).joinToString(","),
+            )
+            if (!temp.renameTo(target)) {
+                temp.copyTo(target, overwrite = true)
+                runCatching { temp.delete() }
+            }
+        }
+    }
+
+    fun stampFileFor(accountId: String): File {
+        val safe = accountId.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(rootDir, "semantic-$safe.stamp")
     }
 
     fun fileFor(accountId: String): File {
@@ -155,6 +211,13 @@ class SemanticIndexStore(private val rootDir: File) {
          *  so it reads as "no index" under the store's standing
          *  contract and the first reconcile rebuilds it. */
         const val VERSION = 2
+
+        /** Stamp file format (see [loadStamp]): 1 was the five
+         *  bare aggregates of schema v8; 2 led with this marker
+         *  and carried all six stamp components; 3 carries the
+         *  notes write generation alone. An older file reads
+         *  as "no stamp", never as an equal stamp. */
+        const val STAMP_VERSION = 3
         const val MAX_NOTES = 100_000
         const val MAX_CHUNKS_PER_NOTE = 10_000
     }

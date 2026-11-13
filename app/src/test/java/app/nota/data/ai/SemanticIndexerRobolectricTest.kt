@@ -17,6 +17,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -289,7 +290,11 @@ class SemanticIndexerRobolectricTest {
         // the next pass (desiredNotes exclusion drives the purge).
         notes.setArchived(active, true)
         indexer.reconcile(account)
-        assertNull(indexStore.load(account))
+        // PR #54 R2: a completed pass that purges to empty now
+        // stores an EMPTY index instead of deleting the file —
+        // the purge contract itself is unchanged: the vectors
+        // are GONE, and nothing surfaces below.
+        assertTrue(indexStore.load(account)?.notes.isNullOrEmpty())
         assertTrue(indexer.search(account, "apple").isEmpty())
     }
 
@@ -344,7 +349,9 @@ class SemanticIndexerRobolectricTest {
         notes.delete(b)
         indexer.reconcile(account)
         assertEquals(0, indexer.status(account).indexedNotes)
-        assertNull(indexStore.load(account))
+        // PR #54 R2: emptied by a completed pass ⇒ an empty
+        // index is stored, not a deleted file (see above).
+        assertTrue(indexStore.load(account)?.notes.isNullOrEmpty())
     }
 
     @Test
@@ -638,5 +645,305 @@ class SemanticIndexerRobolectricTest {
             setOf(1),
             indexer.revalidateAskCitations(account, sent, citations),
         )
+    }
+
+    // ---------------------------------------------------------------
+    // Performance chapter 2 (F3/F8): the stamp gate and the
+    // whole-note fingerprint fast paths. CI asserts COUNTS, never
+    // wall-clock: provider calls and NoteChunker invocations.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun unchangedLibrarySecondReconcileDoesNoChunkingAndNoProviderCalls() = runBlocking {
+        saveGeminiKey()
+        notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+
+        // The stamp gate fired: the pass returned before any
+        // chunking and before any provider call, index intact.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+        assertEquals(2, indexer.status(account).indexedNotes)
+    }
+
+    @Test
+    fun lockingOneNotePurgesExactlyItsVectorsAndEmbedsNothingElse() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        val banana = notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+
+        // Lock the banana note the way the lock flow leaves it in
+        // the table: sealed body, empty projection, locked flag.
+        val bananaRow = db.noteDao().getById(banana.id)!!
+        db.noteDao().upsert(bananaRow.copy(locked = true, contentHtml = "", plainText = ""))
+
+        http.calls.clear()
+        indexer.reconcile(account)
+
+        // The purge is exact and local: banana's vectors are gone,
+        // apple's remain, and nothing was embedded on the way.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(1, indexer.status(account).indexedNotes)
+        assertEquals(listOf(apple.id), indexer.search(account, "apple").map { it.noteId })
+        assertTrue(indexer.search(account, "banana").isEmpty())
+    }
+
+    @Test
+    fun searchAndAskOnUnchangedLibraryTakeTheFingerprintFastPath() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+
+        // Search: unchanged notes align their stored vectors by
+        // fingerprint — zero chunker invocations.
+        val chunksBefore = NoteChunker.chunkInvocations
+        val hits = indexer.search(account, "apple")
+        assertEquals(listOf(apple.id), hits.map { it.noteId })
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+
+        // Ask retrieval: the pre-embed validity pass chunks
+        // nothing for unchanged notes; the post-embed pass chunks
+        // exactly once per candidate note, solely to re-derive
+        // the excerpt texts (which are stored nowhere).
+        val excerpts = indexer.retrieveAskExcerpts(account, "apple picking")
+        assertTrue(excerpts.isNotEmpty())
+        assertEquals(chunksBefore + 2, NoteChunker.chunkInvocations)
+
+        // Citation revalidation on unchanged notes: zero chunker
+        // invocations, every citation still valid.
+        val citationChunks = NoteChunker.chunkInvocations
+        val valid = indexer.revalidateAskCitations(
+            account,
+            excerpts,
+            excerpts.mapIndexed { i, e -> AskCitation(i + 1, e.noteId, e.chunkIndex) },
+        )
+        assertEquals(excerpts.size, valid.size)
+        assertEquals(citationChunks, NoteChunker.chunkInvocations)
+    }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R1: the no-config reconcile path persists its
+    // purge but must NOT advance the library stamp — the stamp
+    // records the last COMPLETED (embedding) pass. A library that
+    // changed while unconfigured must still be embedded by the
+    // next configured reconcile, not gated out as "unchanged".
+    // ---------------------------------------------------------------
+
+    @Test
+    fun unconfiguredReconcilePurgesWithoutStamping_thenConfiguredReconcileEmbedsTheChanges() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        val banana = notes.createRichNote("Banana bread", "<p>banana banana recipe</p>")
+        indexer.reconcile(account)
+        assertEquals(2, indexer.status(account).indexedNotes)
+        val stampAfterIndexing = indexStore.loadStamp(account)
+        assertNotNull(stampAfterIndexing)
+
+        // The key goes away; while unconfigured the library
+        // changes twice: apple's body is edited, banana is locked
+        // (the lock flow's table shape: sealed body, empty
+        // projection, locked flag — as in the purge pin above).
+        settings.clearAccount(account)
+        notes.updateRichBody(apple, "Apple harvest", "<p>banana banana orchard edit</p>")
+        val bananaRow = db.noteDao().getById(banana.id)!!
+        db.noteDao().upsert(bananaRow.copy(locked = true, contentHtml = "", plainText = ""))
+
+        http.calls.clear()
+        indexer.reconcile(account)
+
+        // The purge half still ran, locally: banana's vectors are
+        // gone, nothing was embedded — and the stamp did NOT move,
+        // so this pass is not recorded as a completed one.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(setOf(apple.id), indexStore.load(account)?.notes?.keys)
+        assertEquals(stampAfterIndexing, indexStore.loadStamp(account))
+
+        // The key returns: the gate must not skip — apple's edit,
+        // made while unconfigured, is embedded now, and banana
+        // stays purged.
+        saveGeminiKey()
+        indexer.reconcile(account)
+        assertTrue(http.calls.isNotEmpty())
+        assertTrue(
+            embeddedDocumentTexts(http.calls).any { it.contains("orchard edit") },
+        )
+        assertEquals(setOf(apple.id), indexStore.load(account)?.notes?.keys)
+        assertEquals(
+            listOf(apple.id),
+            indexer.search(account, "banana").map { it.noteId },
+        )
+    }
+
+    // ---------------------------------------------------------------
+    // PR #54 Codex R2: a completed CONFIGURED pass that leaves
+    // nothing indexed stores an EMPTY index (active signature,
+    // zero notes) instead of deleting the file. persist() deletes
+    // on an empty working set, and a missing index can never
+    // satisfy the stamp gate's stored-index check — so an empty
+    // library (or one purged to empty) re-ran the full candidate
+    // scan on every reconcile despite an unchanged stamp. Search
+    // and Ask treat an empty index exactly like a missing one
+    // (both check notes.isEmpty()), so no answer changes.
+    // ---------------------------------------------------------------
+
+    @Test
+    fun emptyLibraryReconcileStampsAndGates() = runBlocking {
+        saveGeminiKey()
+        // A library with zero indexable notes: its only note is
+        // blank (blank title, empty body — the chunker's blank
+        // rule keeps it out of the desired set).
+        notes.createRichNote("", "<p></p>")
+        indexer.reconcile(account)
+
+        // The completed pass left an empty index behind. This
+        // load reads the on-disk file directly (not the indexer
+        // cache), so it also proves the store's format round-
+        // trips a zero-note index: non-null, the active space's
+        // signature intact, zero notes. The stamp landed too.
+        val stored = indexStore.load(account)
+        assertNotNull(stored)
+        assertTrue(stored!!.notes.isEmpty())
+        assertTrue(stored.signature.contains("gemini-embedding-001"))
+        assertNotNull(indexStore.loadStamp(account))
+        assertEquals(0, indexer.status(account).indexedNotes)
+
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+
+        // The gate hit on the unchanged library: the pass
+        // returned before any chunking and any provider call.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+    }
+
+    @Test
+    fun purgeToEmptyStillGates() = runBlocking {
+        saveGeminiKey()
+        val apple = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        indexer.reconcile(account)
+        assertEquals(1, indexer.status(account).indexedNotes)
+
+        // Lock the only indexed note (the lock flow's table
+        // shape, as in the purge pins above): the next reconcile
+        // purges it and the working set empties.
+        val row = db.noteDao().getById(apple.id)!!
+        db.noteDao().upsert(row.copy(locked = true, contentHtml = "", plainText = ""))
+        indexer.reconcile(account)
+
+        // The purge left an empty index stored — not a deleted
+        // file — so the gate survives the purge.
+        assertEquals(0, indexer.status(account).indexedNotes)
+        val stored = indexStore.load(account)
+        assertNotNull(stored)
+        assertTrue(stored!!.notes.isEmpty())
+        assertTrue(indexer.search(account, "apple").isEmpty())
+
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+
+        // Still gates: zero chunker invocations, zero provider
+        // calls on the unchanged, now-empty library.
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+    }
+
+    @Test
+    fun emptyIndexDoesNotGateAForeignSpace() = runBlocking {
+        saveGeminiKey()
+        val note = notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+
+        // Arrange the state a completed pass over an empty
+        // library leaves under space A — an empty index signed
+        // with A's signature — together with the stamp of the
+        // CURRENT library, so the only thing that can keep the
+        // gate from firing after the space switch is the
+        // signature check itself.
+        val configA = settings.activeEmbeddingConfig(account)!!
+        indexStore.save(
+            account,
+            StoredSemanticIndex(configA.spaceSignature(), 0, emptyMap()),
+        )
+        indexStore.saveStamp(account, db.noteDao().getLibraryStampRow())
+
+        // Control: under space A the gate hits — nothing runs.
+        indexer.reconcile(account)
+        assertTrue(http.calls.isEmpty())
+
+        // Switch the embedding space; the library and its stamp
+        // are untouched, but the stored empty index belongs to A.
+        saveGeminiKey(embeddingModel = "custom-emb-9")
+        indexer.reconcile(account)
+
+        // No gate hit: the full pass ran under B and embedded
+        // the note through the provider.
+        assertTrue(http.calls.any { it.url.contains("custom-emb-9") })
+        val stored = indexStore.load(account)
+        assertEquals(setOf(note.id), stored?.notes?.keys)
+        assertTrue(stored!!.signature.contains("custom-emb-9"))
+    }
+
+    /**
+     * R3 (schema v9) made the stamp file version-led; R7 shrank
+     * the stamp to the write generation alone and bumped the
+     * format to 3. A stamp file written in format 2 — the
+     * marker plus the six v9-era components — reads as NO
+     * stamp and can never gate a pass, even when the write
+     * generation in its last field still equals the live
+     * counter exactly: the format break keeps pre- and
+     * post-upgrade stamps from ever comparing equal. The
+     * first reconcile after the upgrade therefore runs a
+     * full pass and re-stamps in the current format.
+     */
+    @Test
+    fun preUpgradeStampFileNeverGates() = runBlocking {
+        saveGeminiKey()
+        notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        indexer.reconcile(account)
+        assertEquals(1, indexer.status(account).indexedNotes)
+
+        // Control: the current stamp gates — nothing runs.
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+
+        // Rewrite the stamp in the previous (format 2) shape,
+        // carrying the LIVE write generation in its slot. That
+        // is the dangerous case now the generation is the whole
+        // stamp: a loader that read the old file's last field
+        // would find it equal and gate. (The five aggregate
+        // slots are irrelevant filler — the format marker alone
+        // disqualifies the file.)
+        val live = db.noteDao().getLibraryStampRow()
+        indexStore.stampFileFor(account).writeText(
+            listOf(
+                2, 1, 0, 0, 0, 0,
+                live.writeGeneration,
+            ).joinToString(","),
+        )
+        assertNull(indexStore.loadStamp(account))
+
+        // No gate: a full pass runs to completion — the proof
+        // is the re-stamp. Only a completed pass saves the
+        // stamp, so the file going from unreadable (null) back
+        // to the live stamp in the current format shows the
+        // pass ran; had the gate fired on the v2 file, it would
+        // still read null. (The pass embeds nothing and never
+        // reaches the chunker: the note's fingerprint is
+        // unchanged, so the fingerprint fast path skips both.)
+        indexer.reconcile(account)
+        assertEquals(live, indexStore.loadStamp(account))
     }
 }
