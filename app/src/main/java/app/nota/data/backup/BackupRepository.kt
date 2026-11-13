@@ -716,9 +716,13 @@ class BackupRepository(
 
         /** Backup-carried IDs become filesystem path segments (attachment
          *  files live under attachments/<noteId>/): only the ID alphabet
-         *  Nota/1.x actually mint (UUIDs, slugs) is accepted. */
+         *  Nota/1.x actually mint (UUIDs, slugs) is accepted. A lone "."
+         *  is refused explicitly: it passes the alphabet and contains
+         *  no "..", yet as a path segment it names the directory itself
+         *  (Codex PR #55 R1). ".." and longer dot-only ids already fail
+         *  the contains("..") check. */
         fun isSafeId(id: String): Boolean =
-            id.isNotEmpty() && id.length <= 128 && !id.contains("..") &&
+            id.isNotEmpty() && id.length <= 128 && id != "." && !id.contains("..") &&
                 id.all { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
     }
 }

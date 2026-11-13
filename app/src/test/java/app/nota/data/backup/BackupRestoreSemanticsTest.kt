@@ -15,6 +15,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -336,6 +337,38 @@ class BackupRestoreSemanticsTest {
         )
         val counts = stack.backup.restore(zip, null, RestoreMode.REPLACE)
         assertNull(stack.db.noteDao().getById("../../evil-note"))
+        assertNotNull(stack.db.noteDao().getById("good-note"))
+        assertEquals(1, stack.db.noteDao().getAll().size)
+        assertEquals(1, counts.skipped)
+    }
+
+    // PR #55 Codex R1: a lone "." id slipped past isSafeId — dots
+    // are legal id characters and "." contains no "..", yet as a
+    // path segment it names the directory ITSELF: the session
+    // cache's containment check then rejected the poisoned note on
+    // every open/close. ".." and longer dot-only ids already failed
+    // the contains("..") check; "." is now refused explicitly, and
+    // SyncApplier's intake inherits the refusal (same predicate).
+    @Test
+    fun isSafeId_dotOnlyIds_areRefused() {
+        assertFalse(BackupRepository.isSafeId("."))
+        assertFalse(BackupRepository.isSafeId(".."))
+        assertFalse(BackupRepository.isSafeId("..."))
+        assertTrue(BackupRepository.isSafeId("good-note"))
+        assertTrue(BackupRepository.isSafeId("a.b"))
+    }
+
+    @Test
+    fun restore_noteWithDotOnlyId_isSkippedAndCounted() = runBlocking {
+        val stack = newStack()
+        val zip = payloadZip(
+            listOf(
+                noteJson(".", "Dot", 1000),
+                noteJson("good-note", "Good", 1000),
+            ),
+        )
+        val counts = stack.backup.restore(zip, null, RestoreMode.REPLACE)
+        assertNull(stack.db.noteDao().getById("."))
         assertNotNull(stack.db.noteDao().getById("good-note"))
         assertEquals(1, stack.db.noteDao().getAll().size)
         assertEquals(1, counts.skipped)
