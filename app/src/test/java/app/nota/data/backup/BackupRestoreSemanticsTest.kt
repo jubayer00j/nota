@@ -404,9 +404,9 @@ class BackupRestoreSemanticsTest {
             return sections
         }
 
-        val legacy = exclusions(app.nota.R.xml.backup_rules)
+        val legacy = exclusions(app.nota.notes.R.xml.backup_rules)
         assertTrue(legacy.getValue("full-backup-content").contains("file:semantic-index/"))
-        val extraction = exclusions(app.nota.R.xml.data_extraction_rules)
+        val extraction = exclusions(app.nota.notes.R.xml.data_extraction_rules)
         val cloud = extraction.getValue("cloud-backup")
         assertTrue(cloud.contains("file:semantic-index/"))
         assertEquals(cloud, extraction.getValue("device-transfer"))
