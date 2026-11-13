@@ -2,7 +2,9 @@ package app.nota.feature.capture
 
 import android.content.ComponentName
 import android.content.Intent
+import android.net.Uri
 import app.nota.MainActivity
+import app.nota.data.attachments.isAcceptableImportUri
 import app.nota.data.capture.CaptureIntake
 import app.nota.data.capture.CaptureIntents
 import app.nota.data.capture.CaptureRequest
@@ -14,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -173,6 +176,74 @@ class CaptureDoorIntentsRobolectricTest {
                 while (store.records.value.size < 2) delay(25)
             }
             assertEquals(2, store.records.value.size)
+        }
+    }
+
+    // PR #55 (Argon F-01): a share carrying a file:// stream must
+    // never have that URI opened with Nota's own file access — the
+    // image is skipped and the rest of the share proceeds.
+    @Test
+    fun stageShare_fileSchemeStream_isNeverOpened() {
+        runBlocking {
+            val store = store()
+            val intake = CaptureIntake(context, store)
+            val payload = tempFolder.newFile("payload.png").apply {
+                writeBytes(byteArrayOf(1, 2, 3, 4))
+            }
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(Intent.EXTRA_STREAM, Uri.fromFile(payload))
+                putExtra(Intent.EXTRA_TEXT, "kept text")
+            }
+            intake.stageShare(share, "guest")
+            withTimeout(10_000) {
+                while (store.records.value.isEmpty()) delay(25)
+            }
+            val record = store.records.value.single()
+            val request = record.request
+            assertTrue(request is CaptureRequest.Share)
+            assertTrue((request as CaptureRequest.Share).images.isEmpty())
+            val stagingDir = File(File(tempFolder.root, "pending_captures"), record.id)
+            assertTrue(
+                stagingDir.listFiles()?.none { it.name.startsWith("img-") } ?: true,
+            )
+        }
+    }
+
+    // PR #55 (Argon F-01): the import-scheme predicate itself —
+    // content:// only, every other scheme refused.
+    @Test
+    fun importUriPredicate_acceptsContentOnly() {
+        assertTrue(isAcceptableImportUri(Uri.parse("content://media/external/images/1")))
+        assertFalse(isAcceptableImportUri(Uri.parse("file:///data/data/app.nota.notes/databases/x")))
+        assertFalse(isAcceptableImportUri(Uri.parse("https://example.com/a.png")))
+        assertFalse(isAcceptableImportUri(Uri.parse("android.resource://app.nota.notes/1")))
+    }
+
+    // PR #55 (Argon F-12): a share that yields nothing degrades to
+    // a plain new-note capture AND leaves no orphan staging
+    // directory behind.
+    @Test
+    fun stageShare_emptyShare_degradesToNewNote_withoutStagingDir() {
+        runBlocking {
+            val store = store()
+            val intake = CaptureIntake(context, store)
+            val payload = tempFolder.newFile("rejected.png").apply {
+                writeBytes(byteArrayOf(9, 9, 9))
+            }
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(Intent.EXTRA_STREAM, Uri.fromFile(payload))
+            }
+            intake.stageShare(share, "guest")
+            withTimeout(10_000) {
+                while (store.records.value.isEmpty()) delay(25)
+            }
+            val record = store.records.value.single()
+            assertTrue(record.request is CaptureRequest.NewNote)
+            assertFalse(
+                File(File(tempFolder.root, "pending_captures"), record.id).exists(),
+            )
         }
     }
 }

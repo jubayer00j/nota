@@ -1,6 +1,7 @@
 package app.nota.data.backup
 
 import android.content.Context
+import android.util.Log
 import androidx.room.withTransaction
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.AttachmentEntity
@@ -328,9 +329,25 @@ class BackupRepository(
                 )
             }
 
+            // ---- Crafted-id filter (PR #55, Argon F-02): a note id
+            // from an archive is data, not a trusted path segment —
+            // it becomes a directory name under attachments/ and
+            // under the editor's session cache. Notes whose id fails
+            // isSafeId are refused outright (counted below, never
+            // silent); attachments are refused in the plan when
+            // either their own id or their note id is unsafe.
+            // Folders, tags and reminders carry no filesystem path,
+            // so they stay unfiltered (their cross-references are
+            // existence-checked below, as before).
+            val safeNotes = handle.notes.filter { isSafeId(it.id) }
+            val skippedNotes = handle.notes.size - safeNotes.size
+            val skippedAttachments = handle.attachments.count {
+                !isSafeId(it.meta.id) || !isSafeId(it.meta.noteId)
+            }
+
             // ---- Partition templates out of the note payload.
-            val templateNotes = handle.notes.filter { it.isTemplate }
-            val payloadNotes = handle.notes.filter { !it.isTemplate }
+            val templateNotes = safeNotes.filter { it.isTemplate }
+            val payloadNotes = safeNotes.filter { !it.isTemplate }
 
             // ---- Attachment plan: which staged payloads win a row (the
             // files themselves land after the row transaction, below).
@@ -354,8 +371,14 @@ class BackupRepository(
                 // A crafted archive can carry path-traversal noteIds
                 // ("../../…"): such attachments are skipped outright —
                 // their payload must never be written outside the
-                // attachment root (Codex review, P1).
-                AttPlan(staged, wins && staged.meta.noteId in survivingNoteIds && isSafeId(staged.meta.noteId))
+                // attachment root (Codex review, P1). PR #55 (Argon
+                // F-02) extends the same rule to the attachment's OWN
+                // id, which reaches the session-file path.
+                AttPlan(
+                    staged,
+                    wins && staged.meta.noteId in survivingNoteIds &&
+                        isSafeId(staged.meta.noteId) && isSafeId(staged.meta.id),
+                )
             }
 
             if (mode == RestoreMode.REPLACE) {
@@ -513,6 +536,15 @@ class BackupRepository(
                 allProvider = { attachmentDao.getAll() },
                 extraKnownPaths = { provider.allAttachmentLocalPaths() },
             )
+            val skippedTotal = skippedNotes + skippedAttachments
+            if (skippedTotal > 0) {
+                Log.w(
+                    TAG,
+                    "Restore skipped $skippedTotal crafted-id entities " +
+                        "($skippedNotes notes, $skippedAttachments attachments)",
+                )
+                counts += MergeCounts(skipped = skippedTotal)
+            }
             counts
         }
 
@@ -671,6 +703,8 @@ class BackupRepository(
     private suspend fun rebuildFtsAndLinks() = rebuildLibraryIndexes(db)
 
     companion object {
+        private const val TAG = "NotaBackup"
+
         fun wordCount(plainText: String): Int =
             plainText.split(Regex("\\s+")).count { it.isNotEmpty() }
 
@@ -682,9 +716,13 @@ class BackupRepository(
 
         /** Backup-carried IDs become filesystem path segments (attachment
          *  files live under attachments/<noteId>/): only the ID alphabet
-         *  Nota/1.x actually mint (UUIDs, slugs) is accepted. */
+         *  Nota/1.x actually mint (UUIDs, slugs) is accepted. A lone "."
+         *  is refused explicitly: it passes the alphabet and contains
+         *  no "..", yet as a path segment it names the directory itself
+         *  (Codex PR #55 R1). ".." and longer dot-only ids already fail
+         *  the contains("..") check. */
         fun isSafeId(id: String): Boolean =
-            id.isNotEmpty() && id.length <= 128 && !id.contains("..") &&
+            id.isNotEmpty() && id.length <= 128 && id != "." && !id.contains("..") &&
                 id.all { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }
     }
 }

@@ -1,5 +1,6 @@
 package app.nota.data.security
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import app.nota.data.preferences.PreferencesRepository
@@ -58,13 +59,20 @@ interface NoteLockDeviceKeyProvider {
  * `setInvalidatedByBiometricEnrollment(true)`, which on Samsung's
  * API-27 keystore leaves keys permanently invalidated from birth —
  * the same defect that killed App Lock fingerprint enabling in
- * 0.3.1 (see AndroidKeystoreAppLockKeyProvider's doc for the named
- * tradeoff of dropping the flag). v2-sealed copies cannot be
- * opened by a v3 cipher, so they are orphaned by this upgrade —
- * the record's credential slots are untouched, the user unlocks
- * once with their backup credential and re-enables fingerprint,
- * which seals a fresh v3 copy. (Phase 2b copies were already
- * orphaned the same way by the v2 upgrade.)
+ * 0.3.1. v2-sealed copies cannot be opened by a v3 cipher, so they
+ * are orphaned by this upgrade — the record's credential slots are
+ * untouched, the user unlocks once with their backup credential
+ * and re-enables fingerprint, which seals a fresh v3 copy. (Phase
+ * 2b copies were already orphaned the same way by the v2 upgrade.)
+ *
+ * PR #55 (Argon F-06): the flag is now set EXPLICITLY from
+ * [BiometricEnrollmentPolicy] — `false` below API 28, `true` on
+ * API 28+. The v3 key as originally generated omitted the setter,
+ * which did NOT disable enrolment invalidation on API 28+ (the
+ * platform default is `true`); key parameters are fixed at
+ * generation, so existing v3 keys keep the behaviour they were
+ * created with and only newly minted keys take the explicit
+ * value — no migration. See BiometricEnrollmentPolicy's doc.
  */
 class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
 
@@ -153,6 +161,12 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
         } catch (e: Exception) {
             return StepResult.Failed(BiometricStep.KEY_GENERATION, stepReason(e))
         }
+        // PR #55 (Argon F-10): the orphaned v1/v2 aliases were
+        // never deleted — dead keys linger in the Keystore
+        // forever. Remove them opportunistically whenever the
+        // provider loads; deleting an alias nothing can use any
+        // more is always safe.
+        deleteLegacyAliases(keyStore)
         try {
             (keyStore.getEntry(ALIAS, null) as? KeyStore.SecretKeyEntry)?.let {
                 return StepResult.Ok(it.secretKey)
@@ -171,9 +185,16 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .setKeySize(256)
                     .setUserAuthenticationRequired(true)
-                    // Deliberately NO setInvalidatedByBiometricEnrollment:
-                    // see the class doc — on Samsung API-27 firmware the
-                    // flag poisons the key at birth.
+                    // Explicit on every API level (PR #55, Argon
+                    // F-06): see BiometricEnrollmentPolicy — the
+                    // platform default is `true`, so omitting this
+                    // setter never disabled enrolment invalidation
+                    // on API 28+.
+                    .setInvalidatedByBiometricEnrollment(
+                        BiometricEnrollmentPolicy.invalidatedByBiometricEnrollment(
+                            Build.VERSION.SDK_INT,
+                        ),
+                    )
                     .build(),
             )
             StepResult.Ok(generator.generateKey())
@@ -191,6 +212,21 @@ class AndroidKeystoreNoteLockKeyProvider : NoteLockDeviceKeyProvider {
         /** Phase 2b alias — orphaned by the crypto-binding upgrade. */
         const val LEGACY_ALIAS = "nota.notelock.devicekey"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
+
+        /**
+         * Deletes the orphaned pre-v3 aliases from [keyStore]
+         * (PR #55, Argon F-10). Best-effort per alias: a keystore
+         * that refuses a deletion keeps a dead key, nothing more.
+         * Takes the KeyStore as a parameter so the behaviour is
+         * unit-testable against an in-memory keystore.
+         */
+        fun deleteLegacyAliases(keyStore: KeyStore) {
+            for (alias in listOf(LEGACY_ALIAS, PRIOR_ALIAS)) {
+                runCatching {
+                    if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
+                }
+            }
+        }
     }
 }
 
@@ -224,6 +260,18 @@ class NoteLockBiometricStore(
      *  fingerprint copy for the same note id. */
     private fun accountId(): String = provider.accountId.value
 
+    /** The sealed copy [openCipherResult] most recently read,
+     *  held only until [readCopy] completes the flow (PR #55,
+     *  Argon F-10). */
+    private data class PendingCopy(
+        val accountId: String,
+        val noteId: String,
+        val packed: String,
+    )
+
+    @Volatile
+    private var pendingCopy: PendingCopy? = null
+
     /** Cipher for an ENABLING prompt (seal direction). */
     fun sealCipherResult(): StepResult<Cipher> = keyProvider.sealCipherResult()
 
@@ -249,14 +297,23 @@ class NoteLockBiometricStore(
      * gate shows which one happened).
      */
     suspend fun openCipherResult(noteId: String): StepResult<Cipher> {
+        val account = accountId()
         val packed = try {
-            preferences.getNoteLockBiometricCopy(accountId(), noteId)
+            preferences.getNoteLockBiometricCopy(account, noteId)
         } catch (e: Exception) {
             return StepResult.Failed(BiometricStep.TOKEN_READ, stepReason(e))
         } ?: return StepResult.Failed(
             BiometricStep.TOKEN_READ,
             "no fingerprint copy is stored for this note",
         )
+        // PR #55 (Argon F-10): the sealed bytes are read ONCE per
+        // unlock flow. readCopy used to re-read the preference —
+        // a second read that could observe a different value than
+        // the one this cipher was built from (a copy replaced
+        // mid-flow would fail the GCM check: fail-closed, but a
+        // spurious failure). The flow now decrypts exactly the
+        // bytes the cipher was opened for.
+        pendingCopy = PendingCopy(account, noteId, packed)
         return keyProvider.openCipherResult(packed)
     }
 
@@ -264,13 +321,17 @@ class NoteLockBiometricStore(
      * Reads the device copy BY COMPLETING the decryption with the
      * prompt-authorised [cipher]; null when absent or unreadable.
      * The GCM tag check inside doFinal is the unlock proof.
+     *
+     * Decrypts the copy [openCipherResult] read for this exact
+     * (account, note) pair — a [readCopy] with no matching open,
+     * or for another note or account, fails closed with null.
      */
     suspend fun readCopy(noteId: String, cipher: Cipher): ByteArray? {
-        val packed = try {
-            preferences.getNoteLockBiometricCopy(accountId(), noteId)
-        } catch (e: Exception) {
-            null
-        } ?: return null
+        val pending = pendingCopy
+        if (pending == null || pending.noteId != noteId || pending.accountId != accountId()) {
+            return null
+        }
+        val packed = pending.packed
         val raw = try {
             Base64.getDecoder().decode(packed)
         } catch (e: IllegalArgumentException) {
@@ -285,6 +346,10 @@ class NoteLockBiometricStore(
     }
 
     suspend fun removeCopy(noteId: String) {
-        preferences.removeNoteLockBiometricCopy(accountId(), noteId)
+        val account = accountId()
+        // A removed copy must not linger as this flow's pending
+        // bytes (PR #55, Argon F-10).
+        pendingCopy?.let { if (it.noteId == noteId && it.accountId == account) pendingCopy = null }
+        preferences.removeNoteLockBiometricCopy(account, noteId)
     }
 }

@@ -2,6 +2,7 @@ package app.nota.feature.settings
 
 import app.nota.data.ai.AiProviderId
 import app.nota.data.ai.SemanticIndexStatus
+import app.nota.data.backup.MergeCounts
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -79,5 +80,38 @@ class AiSetupCopyTest {
         assertFalse(indexStaleNoteVisible(status(canIndex = false, indexed = 3, current = false)))
         assertFalse(indexStaleNoteVisible(status(canIndex = true, indexed = 0, current = false)))
         assertFalse(indexStaleNoteVisible(status(canIndex = true, indexed = 3, current = true)))
+    }
+
+    // ------------------------------------------------ restore copy
+
+    @Test
+    fun restoreMessages_noSkips_keepTheHistoricalWording() {
+        // Zero refused entities: the completion lines stay
+        // byte-identical to the pre-PR #55 wording.
+        val counts = MergeCounts(added = 5, updated = 2, deleted = 1)
+        assertEquals(
+            "Restored (merge): 5 added, 2 updated, 1 deleted.",
+            restoreMergeMessage(counts),
+        )
+        assertEquals(
+            "Restored (replace): 5 added.",
+            restoreReplaceMessage(counts),
+        )
+    }
+
+    @Test
+    fun restoreMessages_withSkips_appendTheSkippedCount() {
+        // PR #55 Codex R1: MergeCounts.skipped existed but no
+        // message rendered it — a restore that refused crafted-id
+        // entities reported plain success. Both modes now say so.
+        val counts = MergeCounts(added = 5, updated = 2, deleted = 1, skipped = 3)
+        assertEquals(
+            "Restored (merge): 5 added, 2 updated, 1 deleted · 3 skipped (unsafe IDs).",
+            restoreMergeMessage(counts),
+        )
+        assertEquals(
+            "Restored (replace): 5 added · 3 skipped (unsafe IDs).",
+            restoreReplaceMessage(counts),
+        )
     }
 }
