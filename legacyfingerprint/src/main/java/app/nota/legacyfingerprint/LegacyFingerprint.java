@@ -62,34 +62,49 @@ public final class LegacyFingerprint {
             return null;
         }
         CancellationSignal signal = new CancellationSignal();
-        manager.authenticate(
-                new FingerprintManager.CryptoObject(cipher),
-                signal,
-                0,
-                new FingerprintManager.AuthenticationCallback() {
-                    @Override
-                    public void onAuthenticationError(int errorCode, CharSequence errString) {
-                        callback.onError(errorCode, errString);
-                    }
+        try {
+            manager.authenticate(
+                    new FingerprintManager.CryptoObject(cipher),
+                    signal,
+                    0,
+                    new FingerprintManager.AuthenticationCallback() {
+                        @Override
+                        public void onAuthenticationError(int errorCode, CharSequence errString) {
+                            callback.onError(errorCode, errString);
+                        }
 
-                    @Override
-                    public void onAuthenticationHelp(int helpCode, CharSequence helpString) {
-                        callback.onHelp(helpCode, helpString);
-                    }
+                        @Override
+                        public void onAuthenticationHelp(int helpCode, CharSequence helpString) {
+                            callback.onHelp(helpCode, helpString);
+                        }
 
-                    @Override
-                    public void onAuthenticationSucceeded(
-                            FingerprintManager.AuthenticationResult result) {
-                        FingerprintManager.CryptoObject crypto = result.getCryptoObject();
-                        callback.onSucceeded(crypto != null ? crypto.getCipher() : null);
-                    }
+                        @Override
+                        public void onAuthenticationSucceeded(
+                                FingerprintManager.AuthenticationResult result) {
+                            FingerprintManager.CryptoObject crypto = result.getCryptoObject();
+                            callback.onSucceeded(crypto != null ? crypto.getCipher() : null);
+                        }
 
-                    @Override
-                    public void onAuthenticationFailed() {
-                        callback.onFailed();
-                    }
-                },
-                handler);
+                        @Override
+                        public void onAuthenticationFailed() {
+                            callback.onFailed();
+                        }
+                    },
+                    handler);
+        } catch (SecurityException | RuntimeException e) {
+            // PR #55 (Argon F-11): on flaky OEM sensor stacks
+            // (API 26-27 is this bridge's whole territory) the
+            // framework call itself can throw — a dying fingerprint
+            // service, a permission state that changed under us.
+            // Letting that escape would crash the caller; the
+            // callback contract already has a terminal error
+            // channel, so report through it and start no session.
+            CharSequence message = e.getMessage() != null
+                    ? e.getMessage()
+                    : "Fingerprint sensor unavailable";
+            callback.onError(FingerprintManager.FINGERPRINT_ERROR_HW_UNAVAILABLE, message);
+            return null;
+        }
         return signal;
     }
 }

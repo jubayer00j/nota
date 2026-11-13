@@ -1,6 +1,7 @@
 package app.nota.data.sync
 
 import android.content.Context
+import android.util.Log
 import androidx.room.withTransaction
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.backup.BackupReader
@@ -88,8 +89,29 @@ class SyncApplier(
         val attachmentDao = db.attachmentDao()
         val reminderDao = db.reminderDao()
 
-        val templateNotes = merged.notes.filter { it.isTemplate }
-        val regularNotes = merged.notes.filter { !it.isTemplate }
+        // ---- Crafted-id filter (PR #55, Argon F-02): the merged
+        // snapshot descends from a remote archive, so its ids are
+        // untrusted path segments (attachments/<noteId>/ and the
+        // editor's session cache). Entities failing isSafeId are
+        // refused here; reminders and cross-refs that pointed at a
+        // refused note drop through the existing existence checks,
+        // and a refused id that is also local is deleted by the
+        // knowledge-bounded pass below (it is known, and the
+        // filtered merge no longer carries it). Sync has no result
+        // shape to extend, so refusals are counted to the log.
+        val safeNotes = merged.notes.filter { BackupRepository.isSafeId(it.id) }
+        val safeAttachments = merged.attachments.filter {
+            BackupRepository.isSafeId(it.id) && BackupRepository.isSafeId(it.noteId)
+        }
+        val skippedCount =
+            (merged.notes.size - safeNotes.size) +
+                (merged.attachments.size - safeAttachments.size)
+        if (skippedCount > 0) {
+            Log.w(TAG, "Sync apply skipped $skippedCount crafted-id entities")
+        }
+
+        val templateNotes = safeNotes.filter { it.isTemplate }
+        val regularNotes = safeNotes.filter { !it.isTemplate }
         val mergedNoteIds = regularNotes.map { it.id }.toSet()
         val validFolderIds = merged.folders.map { it.id }.toSet()
         val stagedById = remoteHandle?.attachments?.associateBy { it.meta.id } ?: emptyMap()
@@ -98,7 +120,7 @@ class SyncApplier(
         // a restore; a failed byte copy aborts the whole apply).
         data class PlannedAttachment(val row: AttachmentEntity, val bytesFrom: File?)
         val planned = mutableListOf<PlannedAttachment>()
-        for (meta in merged.attachments) {
+        for (meta in safeAttachments) {
             if (meta.noteId !in mergedNoteIds) continue
             val existing = attachmentDao.getById(meta.id)
             val cloneSource = conflictAttachmentSources[meta.id]
@@ -291,4 +313,8 @@ class SyncApplier(
                 ?.takeIf { it.isNotBlank() }
                 ?: "${meta.id}-${meta.name}",
         )
+
+    private companion object {
+        const val TAG = "NotaSyncApplier"
+    }
 }

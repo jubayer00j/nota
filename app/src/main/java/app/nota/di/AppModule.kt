@@ -67,7 +67,17 @@ val appModule = module {
     // a sealed-token store over an auth-required Keystore key.
     single<AppLockDeviceKeyProvider> { AndroidKeystoreAppLockKeyProvider() }
     single { AppLockBiometricStore(get(), get()) }
-    single { AppLockManager(get(), get()) }
+    // PR #55 (Argon F-07): when App Lock engages, the decrypted
+    // attachment session cache is wiped with it — plaintext session
+    // copies must not outlive an unlocked session. The lambda
+    // resolves the store lazily at engagement time.
+    single {
+        AppLockManager(
+            get(),
+            get(),
+            onLockEngaged = { get<AttachmentStore>().clearAllSessions() },
+        )
+    }
     // Phase 2b per-note lock: Keystore device-key provider + biometric
     // copy store + the lock repository (Koin singles).
     single<NoteLockDeviceKeyProvider> { AndroidKeystoreNoteLockKeyProvider() }
