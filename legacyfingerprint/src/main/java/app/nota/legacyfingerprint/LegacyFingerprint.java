@@ -91,14 +91,16 @@ public final class LegacyFingerprint {
                         }
                     },
                     handler);
-        } catch (SecurityException | RuntimeException e) {
+        } catch (RuntimeException e) {
             // PR #55 (Argon F-11): on flaky OEM sensor stacks
             // (API 26-27 is this bridge's whole territory) the
             // framework call itself can throw — a dying fingerprint
-            // service, a permission state that changed under us.
-            // Letting that escape would crash the caller; the
-            // callback contract already has a terminal error
-            // channel, so report through it and start no session.
+            // service, a permission state that changed under us
+            // (SecurityException is a RuntimeException, so the one
+            // catch covers both). Letting that escape would crash
+            // the caller; the callback contract already has a
+            // terminal error channel, so report through it and
+            // start no session.
             CharSequence message = e.getMessage() != null
                     ? e.getMessage()
                     : "Fingerprint sensor unavailable";
