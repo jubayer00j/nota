@@ -170,6 +170,24 @@ class NotesViewModel(
             itemCache: NoteListItemCache,
             coverPath: (AttachmentEntity) -> String,
         ): NotesUiState {
+            // Performance chapter 2 (F5, Codex R6): prune the
+            // item cache to the notes that still exist. The
+            // snapshot ALWAYS carries the full library — the
+            // active, archived and trashed row queries partition
+            // every note row between them (trashedAt null/not-null
+            // × archived 0/1) — so their id union is the complete
+            // live set, and an id missing from all three belongs
+            // to a hard-deleted note whose cached item (row
+            // excerpt included) must not stay reachable for the
+            // chain's lifetime. The filter below only picks which
+            // slice gets enriched; it never narrows this set, so
+            // a pass composed under a folder/tag/trash view cannot
+            // evict notes that merely sit outside that view.
+            val liveIds = HashSet<String>(active.size + archived.size + trashed.size)
+            active.forEach { liveIds += it.id }
+            archived.forEach { liveIds += it.id }
+            trashed.forEach { liveIds += it.id }
+            itemCache.retainOnly(liveIds)
             val tagsById = tags.associateBy { it.id }
             val foldersById = folders.associateBy { it.id }
             val tagIdsByNote = crossRefs.groupBy({ it.noteId }, { it.tagId })
@@ -249,7 +267,12 @@ class NotesViewModel(
      *  selection toggle rebuilds none. Keyed by note id with the
      *  full input tuple as the validity check — note ids are
      *  UUIDs, so entries can never collide across accounts, and
-     *  the cache lives as long as its library chain. */
+     *  the cache lives as long as its library chain. Entries do
+     *  NOT live that long by default, though: every pass prunes
+     *  the cache to the ids the snapshot still holds (see
+     *  [retainOnly]), so a hard-deleted note's item is dropped
+     *  on the next emission instead of staying reachable — row
+     *  excerpt and all — until the chain dies. */
     private class NoteListItemCache {
         private data class Inputs(
             val row: app.nota.data.db.NoteListRow,
@@ -262,6 +285,16 @@ class NotesViewModel(
         )
 
         private val cache = HashMap<String, Pair<Inputs, NoteListItem>>()
+
+        /** Drops every cached entry whose note id is not in
+         *  [liveIds]. Called once per toUiState pass with the
+         *  FULL library's id set (the snapshot's active +
+         *  archived + trashed union — never a filtered view), so
+         *  surviving notes keep their entries, and with them
+         *  their shared item identity, untouched. */
+        fun retainOnly(liveIds: Set<String>) {
+            cache.keys.retainAll(liveIds)
+        }
 
         fun item(
             note: app.nota.data.db.NoteListRow,

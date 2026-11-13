@@ -33,6 +33,10 @@ import org.robolectric.shadows.ShadowLooper
  * update must rebuild exactly that note's item, with every
  * neighbour's instance shared (assertSame, not equality: the
  * point is that no work happened, not that the output matches).
+ * The third pin covers the cache's pruning contract (Codex R6):
+ * a hard delete evicts the note's entry on the next pass, while
+ * passes composed under a filtered view never evict notes that
+ * merely sit outside that view.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -134,6 +138,65 @@ class NotesViewModelSharingRobolectricTest {
             assertSame(beforeById[cId], afterById[cId])
             // The edited note: a fresh item carrying the new row.
             assertNotSame(beforeById[bId], afterById[bId])
+        } finally {
+            collectJob.cancel()
+        }
+    }
+
+    @Test
+    fun hardDeletePrunesTheCachedItemAndFilteredViewsKeepSurvivorsShared() {
+        val (a, b) = runBlocking {
+            val a = repository.createRichNote("Alpha", "<p>alpha body</p>")
+            val b = repository.createRichNote("Beta", "<p>beta body</p>")
+            a to b
+        }
+        // Kept aside so the SAME row can be resurrected after the
+        // hard delete, with byte-identical enrichment inputs.
+        val entityB = runBlocking { db.noteDao().getById(b.id)!! }
+
+        val collectJob = collectScope.launch { viewModel.uiState.collect {} }
+        try {
+            awaitTrue("two items listed") { viewModel.uiState.value.items.size == 2 }
+            val beforeById = viewModel.uiState.value.items.associateBy { it.note.id }
+
+            // Move to a view whose visible slice contains NEITHER
+            // note. Pruning scoped to the visible slice (instead
+            // of the full snapshot) would evict both live notes on
+            // the passes that run under this filter.
+            viewModel.setFilter(NotesFilter.Trash)
+            awaitTrue("trash view shown empty") {
+                viewModel.uiState.value.filter == NotesFilter.Trash &&
+                    viewModel.uiState.value.items.isEmpty()
+            }
+
+            runBlocking { repository.deletePermanently(entityB) }
+            // Force a full pass over the post-delete snapshot
+            // while still under the trash filter, so that pass's
+            // prune — and nothing else — decides what survives.
+            viewModel.setSort(SortOrder.TitleAsc)
+            awaitTrue("post-delete pass ran") {
+                viewModel.uiState.value.sort == SortOrder.TitleAsc
+            }
+
+            viewModel.setFilter(NotesFilter.All)
+            awaitTrue("only Alpha remains") {
+                viewModel.uiState.value.items.map { it.note.id } == listOf(a.id)
+            }
+            // Alpha sat outside every visible slice while the
+            // delete pass ran, yet its cached item survived
+            // untouched: the prune used the full snapshot
+            // (active + archived + trashed), not the filtered view.
+            assertSame(beforeById[a.id], viewModel.uiState.value.items.single())
+
+            // Resurrect Beta with the very row that was deleted.
+            // Had its cache entry survived the hard delete, the
+            // identical input tuple would hit it and hand back the
+            // pre-delete instance; a pruned cache must build fresh.
+            runBlocking { repository.upsert(entityB) }
+            awaitTrue("Beta listed again") { viewModel.uiState.value.items.size == 2 }
+            val afterById = viewModel.uiState.value.items.associateBy { it.note.id }
+            assertNotSame(beforeById[b.id], afterById[b.id])
+            assertSame(beforeById[a.id], afterById[a.id])
         } finally {
             collectJob.cancel()
         }
