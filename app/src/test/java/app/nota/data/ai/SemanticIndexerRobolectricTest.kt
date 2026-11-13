@@ -892,4 +892,46 @@ class SemanticIndexerRobolectricTest {
         assertEquals(setOf(note.id), stored?.notes?.keys)
         assertTrue(stored!!.signature.contains("custom-emb-9"))
     }
+
+    /**
+     * R3 (schema v9): a stamp file written by v8 code — the five
+     * bare aggregates, no format marker, no write generation —
+     * reads as NO stamp and can never gate a pass, even when its
+     * aggregates still match the live library exactly: the
+     * generation makes a v9 stamp a different animal, and the
+     * format break keeps the two from ever comparing equal. The
+     * first reconcile after the upgrade therefore runs a full
+     * pass and re-stamps in the current format.
+     */
+    @Test
+    fun preUpgradeStampFileNeverGates() = runBlocking {
+        saveGeminiKey()
+        notes.createRichNote("Apple harvest", "<p>apple apple picking season</p>")
+        indexer.reconcile(account)
+        assertEquals(1, indexer.status(account).indexedNotes)
+
+        // Control: the current stamp gates — nothing runs.
+        http.calls.clear()
+        val chunksBefore = NoteChunker.chunkInvocations
+        indexer.reconcile(account)
+        assertTrue(http.calls.isEmpty())
+        assertEquals(chunksBefore, NoteChunker.chunkInvocations)
+
+        // Rewrite the stamp in the pre-upgrade format, carrying
+        // the live library's exact aggregates.
+        val live = db.noteDao().getLibraryStampRow()
+        indexStore.stampFileFor(account).writeText(
+            listOf(
+                live.noteCount, live.maxUpdatedAt, live.sumUpdatedAt,
+                live.sumTitleLength, live.sumPlainTextLength,
+            ).joinToString(","),
+        )
+        assertNull(indexStore.loadStamp(account))
+
+        // No gate: the full pass runs (the chunker moves) and
+        // completion re-stamps in the current format.
+        indexer.reconcile(account)
+        assertTrue(NoteChunker.chunkInvocations > chunksBefore)
+        assertEquals(live, indexStore.loadStamp(account))
+    }
 }

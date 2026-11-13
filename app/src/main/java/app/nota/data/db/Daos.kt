@@ -42,19 +42,30 @@ data class NoteTextRow(
 
 /** Performance chapter 2 (F3/F6): one aggregate row describing the
  *  whole notes table, cheap enough to read on every search keystroke
- *  and every semantic reconcile. Two libraries with equal stamp rows
- *  have the same note count, the same newest edit, the same total
- *  edit-time mass and the same total title/body lengths — any note
- *  insert, delete, edit, lock or unlock moves at least one component
- *  (locking empties plainText, unlocking restores it; every state op
- *  bumps updatedAt). Used as the invalidation key for the corpus
- *  cache and the semantic reconcile stamp gate. */
+ *  and every semantic reconcile, used as the invalidation key for
+ *  the corpus cache and the semantic reconcile stamp gate.
+ *
+ *  The five aggregates describe the library's shape — note count,
+ *  newest edit, total edit-time mass, total title/body lengths —
+ *  but on their own they cannot see every change: an edit that
+ *  swaps title/body text for different text of the SAME lengths
+ *  with updatedAt unchanged (same-millisecond successive writes,
+ *  or a sync/restore payload whose updatedAt ties the local
+ *  row's) moves none of them. [writeGeneration] is the component
+ *  that makes the stamp change-sensitive: schema v9's SQLite
+ *  triggers on the notes table increment it on EVERY insert,
+ *  update or delete, whichever code path wrote (repository,
+ *  SyncApplier, applyBackup, lock/unlock — see [LibraryMetaEntity]),
+ *  so any write to the notes table moves the stamp and pure reads
+ *  never do. The aggregates stay as the descriptive summary (and
+ *  keep pre-generation readers honest); the counter is the proof. */
 data class LibraryStampRow(
     val noteCount: Long,
     val maxUpdatedAt: Long,
     val sumUpdatedAt: Long,
     val sumTitleLength: Long,
     val sumPlainTextLength: Long,
+    val writeGeneration: Long = 0,
 )
 
 /** Search Quality Pass: one note's scoring haystacks at text
@@ -281,14 +292,17 @@ interface NoteDao {
     suspend fun getAllNoteTexts(): List<NoteTextRow>
 
     /** Performance chapter 2 (F3/F6): the library stamp — see
-     *  [LibraryStampRow]. One aggregate query over the notes table;
-     *  COALESCEs keep an empty library at all-zeroes. */
+     *  [LibraryStampRow]. One aggregate query over the notes table
+     *  plus the trigger-maintained write generation as a scalar
+     *  subquery; COALESCEs keep an empty library (or a database
+     *  whose counter row was never seeded) at all-zeroes. */
     @Query(
         "SELECT COUNT(*) AS noteCount, " +
             "COALESCE(MAX(updatedAt), 0) AS maxUpdatedAt, " +
             "COALESCE(SUM(updatedAt), 0) AS sumUpdatedAt, " +
             "COALESCE(SUM(LENGTH(title)), 0) AS sumTitleLength, " +
-            "COALESCE(SUM(LENGTH(plainText)), 0) AS sumPlainTextLength " +
+            "COALESCE(SUM(LENGTH(plainText)), 0) AS sumPlainTextLength, " +
+            "COALESCE((SELECT notesWriteGeneration FROM library_meta WHERE id = 1), 0) AS writeGeneration " +
             "FROM notes",
     )
     suspend fun getLibraryStampRow(): LibraryStampRow

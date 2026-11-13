@@ -288,3 +288,24 @@ data class SyncMetaEntity(
     @PrimaryKey val key: String,
     val value: String,
 )
+
+/**
+ * Library write-generation counter (schema v9, Performance
+ * chapter 2 R3). A single-row table (the row is id = 1, seeded
+ * by [installLibraryMeta]): SQLite triggers on the notes table
+ * increment [notesWriteGeneration] on EVERY insert, update and
+ * delete, whichever code path wrote — repository, SyncApplier,
+ * applyBackup, lock/unlock. The library stamp ([LibraryStampRow])
+ * reads it as its change-sensitive component: the stamp's plain
+ * aggregates cannot see a content swap at identical lengths with
+ * an unchanged updatedAt (same-millisecond writes, or a
+ * sync/restore payload whose updatedAt ties the local row's),
+ * but the counter moves on the write itself. Device-local
+ * bookkeeping in the sync_meta mould: never synced, never backed
+ * up (no payload mapping reads it).
+ */
+@Entity(tableName = "library_meta")
+data class LibraryMetaEntity(
+    @PrimaryKey val id: Int,
+    val notesWriteGeneration: Long,
+)
