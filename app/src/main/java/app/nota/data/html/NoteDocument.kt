@@ -1,5 +1,17 @@
 package app.nota.data.html
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.ParagraphStyle
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.BaselineShift
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextIndent
+import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.sp
 import app.nota.data.text.PlainTextCodec
 import kotlin.math.roundToInt
 
@@ -165,7 +177,15 @@ object NoteDocument {
 
     // ---------------------------------------------------------------- parse
 
+    /** Test seam (Performance chapter 2, F4): counts [parse]
+     *  invocations so tests can pin one parse per note open.
+     *  Production code never reads it. */
+    @Volatile
+    var parseInvocations: Int = 0
+        private set
+
     fun parse(html: String): List<DocSegment> {
+        parseInvocations++
         if (html.isBlank()) return listOf(TextSegment(""))
         val out = mutableListOf<DocSegment>()
         val text = StringBuilder()
@@ -672,6 +692,578 @@ object NoteDocument {
                 is OpaqueSegment -> append(segment.rawHtml)
             }
         }
+    }
+
+    // ------------------------------------------------- static read rendering (F2)
+
+    /**
+     * Performance chapter 2 (F2): the STATIC read rendering of one
+     * text-shaped HTML fragment (a [TextSegment]'s html, a
+     * [QuoteSegment]'s innerHtml, a table cell, a task item's
+     * content) as an [AnnotatedString] — the Noma #53 analogue.
+     * Read mode used to build a full rich-editor state per
+     * fragment (the library's setHtml parse + document model),
+     * which is exactly the cost that made big notes open slowly;
+     * this converter walks the fragment once and builds the
+     * display string directly, so read mode constructs ZERO
+     * editor states.
+     *
+     * Fidelity contract: for the dialect Nota stores (its own
+     * serialiser's output and the shapes the guard layer lets
+     * into a text segment), the result matches what the library's
+     * `RichTextState.setHtml` produces in its annotated string —
+     * same text, same span styles over the same ranges, same
+     * paragraph styles — pinned by the fixture corpus in
+     * NoteDocumentTest. The mapping mirrors the library's HTML
+     * parser (compose-rich-editor 1.2.1): element styles from its
+     * span-style table, heading sizes from its HeadingStyle table
+     * (H1 2em … H6 0.75em, all bold), list markers from its
+     * paragraph types (• / ◦ / ▪ by level; decimal / lower-roman /
+     * lower-alpha counters honouring `start` and `value`), link
+     * ink from its default config (blue, underlined), CSS `style`
+     * attributes through its CssEncoder rules (hex / rgb / rgba
+     * colours, the white-and-transparent background exclusion,
+     * weight / style / decoration / size keywords), and its
+     * whitespace rule (newlines become spaces, runs collapse,
+     * NBSP never does; a paragraph's own leading/trailing space
+     * is trimmed, as the library's paragraph assembly does).
+     * Deliberate divergences, display-only: links additionally
+     * carry a [LinkAnnotation.Url] so a plain Text can open them
+     * (the library surfaces links through its own state click
+     * handling instead), and inline code renders without the
+     * pill outline the library DRAWS behind code spans (its span
+     * style for code is empty — the text and its ranges are
+     * identical).
+     */
+    fun annotatedText(html: String): AnnotatedString {
+        data class Run(val text: String, val style: SpanStyle, val link: String?)
+        data class Para(
+            val marker: String?,
+            val indent: TextIndent?,
+            val runs: List<Run>,
+            val keepBlank: Boolean,
+        )
+
+        val paragraphs = mutableListOf<Para>()
+        var runs = mutableListOf<Run>()
+        var marker: String? = null
+        var indent: TextIndent? = null
+        var keepBlank = false
+        // Inline style stack: each open element contributes a
+        // span-style layer (null = no contribution). The effective
+        // style merges the layers outermost-first over the
+        // paragraph's heading style.
+        val styleStack = mutableListOf<SpanStyle?>()
+        val linkStack = mutableListOf<String?>()
+        var headingStyle: SpanStyle? = null
+        // List context: one entry per open list — whether an item
+        // is currently open in it. Text arriving while the
+        // innermost list has no open item is not content.
+        val listItemOpen = mutableListOf<Boolean>()
+        val listOrdered = mutableListOf<Boolean>()
+        val counters = mutableMapOf<Int, Int>()
+
+        fun effectiveStyle(): SpanStyle {
+            var style = headingStyle ?: SpanStyle()
+            for (layer in styleStack) {
+                if (layer != null) style = mergeSpanStyles(style, layer)
+            }
+            return style
+        }
+
+        fun addText(raw: String) {
+            if (listItemOpen.isNotEmpty() && !listItemOpen.last()) return
+            val text = collapseHtmlWhitespace(unescapeText(raw))
+            if (text.isEmpty()) return
+            val style = effectiveStyle()
+            val link = linkStack.lastOrNull()
+            val last = runs.lastOrNull()
+            if (last != null && last.style == style && last.link == link) {
+                runs[runs.lastIndex] = Run(last.text + text, style, link)
+            } else {
+                runs += Run(text, style, link)
+            }
+        }
+
+        fun finishParagraph() {
+            // A paragraph's own boundary spaces are not content
+            // (the library's assembly trims them the same way).
+            // Only the HTML-collapsible set is trimmed — NOT via
+            // Kotlin's trimStart()/trimEnd(): their whitespace
+            // definition includes U+00A0, which
+            // collapseHtmlWhitespace deliberately preserves, so
+            // an authored &nbsp; at a paragraph edge is content
+            // the editor shows and read mode must show too
+            // (Codex PR #54 R8).
+            if (runs.isNotEmpty()) {
+                val first = runs.first()
+                val trimmedFirst = first.text.trimStart(' ', '\t', '\n', '\r', '')
+                if (trimmedFirst != first.text) {
+                    runs[0] = Run(trimmedFirst, first.style, first.link)
+                }
+                val last = runs.last()
+                val trimmedLast = last.text.trimEnd(' ', '\t', '\n', '\r', '')
+                if (trimmedLast != last.text) {
+                    runs[runs.lastIndex] = Run(trimmedLast, last.style, last.link)
+                }
+                if (runs.first().text.isEmpty()) runs.removeAt(0)
+                if (runs.isNotEmpty() && runs.last().text.isEmpty()) {
+                    runs.removeAt(runs.lastIndex)
+                }
+            }
+            val text = runs.joinToString("") { it.text }
+            if (text.isNotEmpty() || keepBlank) {
+                paragraphs += Para(marker, indent, runs.toList(), keepBlank)
+            }
+            runs = mutableListOf()
+            marker = null
+            indent = null
+            keepBlank = false
+            headingStyle = null
+        }
+
+        fun popStyle() {
+            if (styleStack.isNotEmpty()) styleStack.removeAt(styleStack.lastIndex)
+        }
+
+        var i = 0
+        val n = html.length
+        while (i < n) {
+            val lt = html.indexOf('<', i)
+            if (lt < 0) {
+                addText(html.substring(i))
+                break
+            }
+            if (lt > i) addText(html.substring(i, lt))
+            if (html.startsWith("<!--", lt)) {
+                val end = html.indexOf("-->", lt + 4)
+                i = if (end < 0) n else end + 3
+                continue
+            }
+            val tag = readTag(html, lt) ?: run {
+                addText("<")
+                i = lt + 1
+                continue
+            }
+            i = tag.end
+            val name = tag.name
+            if (tag.closing) {
+                when (name) {
+                    "p", "h1", "h2", "h3", "h4", "h5", "h6", "div", "li" -> {
+                        finishParagraph()
+                        popStyle()
+                        if (name == "li" && listItemOpen.isNotEmpty()) {
+                            listItemOpen[listItemOpen.lastIndex] = false
+                        }
+                    }
+                    "ul", "ol" -> {
+                        if (listItemOpen.isNotEmpty()) {
+                            listItemOpen.removeAt(listItemOpen.lastIndex)
+                            listOrdered.removeAt(listOrdered.lastIndex)
+                        }
+                    }
+                    "a" -> {
+                        if (linkStack.isNotEmpty()) linkStack.removeAt(linkStack.lastIndex)
+                        popStyle()
+                    }
+                    "br" -> Unit
+                    else -> popStyle()
+                }
+                continue
+            }
+            when (name) {
+                "br" -> {
+                    // A line break ends the paragraph; the
+                    // continuation is a line-break paragraph,
+                    // kept even when blank.
+                    finishParagraph()
+                    keepBlank = true
+                }
+                "p", "div" -> {
+                    if (runs.isNotEmpty()) finishParagraph()
+                    keepBlank = true
+                    styleStack += cssSpanStyle(tag.attrs)
+                }
+                "h1", "h2", "h3", "h4", "h5", "h6" -> {
+                    if (runs.isNotEmpty()) finishParagraph()
+                    keepBlank = true
+                    headingStyle = headingSpanStyle(name)
+                    styleStack += cssSpanStyle(tag.attrs)
+                }
+                "ul", "ol" -> {
+                    if (runs.isNotEmpty()) finishParagraph()
+                    listItemOpen += false
+                    listOrdered += (name == "ol")
+                    if (name == "ol") {
+                        val level = listItemOpen.size
+                        val start = attr(tag.attrs, "start").toIntOrNull()
+                        counters[level] = (start ?: 1) - 1
+                    }
+                }
+                "li" -> {
+                    if (runs.isNotEmpty()) finishParagraph()
+                    keepBlank = true
+                    val level = listItemOpen.size.coerceAtLeast(1)
+                    if (listItemOpen.isNotEmpty()) {
+                        listItemOpen[listItemOpen.lastIndex] = true
+                    }
+                    val ordered = listOrdered.lastOrNull() == true
+                    marker = if (ordered) {
+                        val value = attr(tag.attrs, "value").toIntOrNull()
+                        val next = value ?: ((counters[level] ?: 0) + 1)
+                        counters[level] = next
+                        orderedMarker(next, level) + " "
+                    } else {
+                        unorderedPrefix(level) + " "
+                    }
+                    // The library's list paragraph indent is
+                    // (38 x level) on BOTH lines — its annotated
+                    // string carries TextIndent(38.sp, 38.sp) for
+                    // a level-1 item (pinned against the real
+                    // binary in NoteDocumentTest). The converter
+                    // reproduces that value exactly rather than
+                    // zeroing the first line.
+                    indent = TextIndent(
+                        firstLine = (LIST_INDENT_SP * level).sp,
+                        restLine = (LIST_INDENT_SP * level).sp,
+                    )
+                    styleStack += cssSpanStyle(tag.attrs)
+                }
+                "a" -> {
+                    val href = attr(tag.attrs, "href")
+                    linkStack += href.ifEmpty { null }
+                    styleStack += mergeSpanStyles(
+                        SpanStyle(
+                            color = Color.Blue,
+                            textDecoration = TextDecoration.Underline,
+                        ),
+                        cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                    )
+                }
+                "strong", "b" -> styleStack += mergeSpanStyles(
+                    SpanStyle(fontWeight = FontWeight.Bold),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "em", "i" -> styleStack += mergeSpanStyles(
+                    SpanStyle(fontStyle = FontStyle.Italic),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "u" -> styleStack += mergeSpanStyles(
+                    SpanStyle(textDecoration = TextDecoration.Underline),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "s", "strike", "del" -> styleStack += mergeSpanStyles(
+                    SpanStyle(textDecoration = TextDecoration.LineThrough),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "sub" -> styleStack += mergeSpanStyles(
+                    SpanStyle(baselineShift = BaselineShift.Subscript),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "sup" -> styleStack += mergeSpanStyles(
+                    SpanStyle(baselineShift = BaselineShift.Superscript),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "mark" -> styleStack += mergeSpanStyles(
+                    SpanStyle(background = Color.Yellow),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "small" -> styleStack += mergeSpanStyles(
+                    SpanStyle(fontSize = 0.8.em),
+                    cssSpanStyle(tag.attrs) ?: SpanStyle(),
+                )
+                "code", "span" -> styleStack += cssSpanStyle(tag.attrs)
+                else -> {
+                    if (name in SOFT_BLOCK_TAGS) {
+                        if (runs.isNotEmpty()) finishParagraph()
+                        keepBlank = true
+                        styleStack += cssSpanStyle(tag.attrs)
+                    } else {
+                        styleStack += cssSpanStyle(tag.attrs)
+                    }
+                }
+            }
+        }
+        finishParagraph()
+
+        val builder = AnnotatedString.Builder()
+        paragraphs.forEachIndexed { index, para ->
+            builder.pushStyle(ParagraphStyle(textIndent = para.indent))
+            if (para.marker != null) builder.append(para.marker)
+            for (run in para.runs) {
+                builder.pushStyle(run.style)
+                if (run.link != null) builder.pushLink(LinkAnnotation.Url(run.link))
+                builder.append(run.text)
+                if (run.link != null) builder.pop()
+                builder.pop()
+            }
+            if (index < paragraphs.lastIndex) builder.append('\n')
+            builder.pop()
+        }
+        return builder.toAnnotatedString()
+    }
+
+    private val SOFT_BLOCK_TAGS = setOf(
+        "blockquote", "section", "article", "aside", "header", "footer",
+        "nav", "main", "figure", "figcaption", "address", "pre",
+    )
+
+    /** The library's list indent (DefaultListIndent = 38) per level. */
+    private const val LIST_INDENT_SP = 38
+
+    private fun unorderedPrefix(level: Int): String =
+        when (level) {
+            1 -> "•"
+            2 -> "◦"
+            else -> "▪"
+        }
+
+    private fun orderedMarker(value: Int, level: Int): String =
+        when (level) {
+            1 -> "$value."
+            2 -> toLowerRoman(value) + "."
+            else -> toLowerAlpha(value) + "."
+        }
+
+    private fun toLowerRoman(value: Int): String {
+        if (value <= 0) return value.toString()
+        val table = listOf(
+            1000 to "m", 900 to "cm", 500 to "d", 400 to "cd",
+            100 to "c", 90 to "xc", 50 to "l", 40 to "xl",
+            10 to "x", 9 to "ix", 5 to "v", 4 to "iv", 1 to "i",
+        )
+        var rest = value
+        val out = StringBuilder()
+        for ((amount, glyph) in table) {
+            while (rest >= amount) {
+                out.append(glyph)
+                rest -= amount
+            }
+        }
+        return out.toString()
+    }
+
+    private fun toLowerAlpha(value: Int): String {
+        if (value <= 0) return value.toString()
+        var rest = value
+        val out = StringBuilder()
+        while (rest > 0) {
+            rest--
+            out.append('a' + (rest % 26))
+            rest /= 26
+        }
+        return out.reverse().toString()
+    }
+
+    private fun headingSpanStyle(tag: String): SpanStyle = when (tag) {
+        "h1" -> SpanStyle(fontSize = 2.em, fontWeight = FontWeight.Bold)
+        "h2" -> SpanStyle(fontSize = 1.5.em, fontWeight = FontWeight.Bold)
+        "h3" -> SpanStyle(fontSize = 1.17.em, fontWeight = FontWeight.Bold)
+        "h4" -> SpanStyle(fontSize = 1.12.em, fontWeight = FontWeight.Bold)
+        "h5" -> SpanStyle(fontSize = 0.83.em, fontWeight = FontWeight.Bold)
+        else -> SpanStyle(fontSize = 0.75.em, fontWeight = FontWeight.Bold)
+    }
+
+    /** Merges two span styles with [outer] as the base and
+     *  [inner]'s specified fields winning — the accumulation the
+     *  library performs down a nesting chain. */
+    private fun mergeSpanStyles(outer: SpanStyle, inner: SpanStyle): SpanStyle =
+        SpanStyle(
+            color = if (inner.color != Color.Unspecified) inner.color else outer.color,
+            fontSize = if (inner.fontSize != androidx.compose.ui.unit.TextUnit.Unspecified) {
+                inner.fontSize
+            } else {
+                outer.fontSize
+            },
+            fontWeight = inner.fontWeight ?: outer.fontWeight,
+            fontStyle = inner.fontStyle ?: outer.fontStyle,
+            fontFamily = inner.fontFamily ?: outer.fontFamily,
+            fontFeatureSettings = inner.fontFeatureSettings ?: outer.fontFeatureSettings,
+            letterSpacing = if (
+                inner.letterSpacing != androidx.compose.ui.unit.TextUnit.Unspecified
+            ) {
+                inner.letterSpacing
+            } else {
+                outer.letterSpacing
+            },
+            baselineShift = inner.baselineShift ?: outer.baselineShift,
+            textGeometricTransform = inner.textGeometricTransform ?: outer.textGeometricTransform,
+            localeList = inner.localeList ?: outer.localeList,
+            background = if (inner.background != Color.Unspecified) {
+                inner.background
+            } else {
+                outer.background
+            },
+            textDecoration = inner.textDecoration ?: outer.textDecoration,
+            shadow = inner.shadow ?: outer.shadow,
+        )
+
+    /** The CSS `style` attribute's span contribution, following
+     *  the library's CssEncoder: colour, background (white and
+     *  transparent excluded — they are page background, not
+     *  highlight), font weight / style / size, letter spacing,
+     *  baseline shift and text decoration. Null when the element
+     *  carries no style attribute at all. */
+    private fun cssSpanStyle(attrs: String): SpanStyle? {
+        val styleAttr = attr(attrs, "style")
+        if (styleAttr.isEmpty()) return null
+        val map = HashMap<String, String>()
+        for (part in styleAttr.split(";")) {
+            val pair = part.split(":")
+            if (pair.size == 2) map[pair[0].trim()] = pair[1].trim()
+        }
+        if (map.isEmpty()) return null
+        val background = (map["background"] ?: map["background-color"])
+            ?.let { parseCssColor(it) }
+            ?.takeUnless { it.alpha == 0f || (it.red == 1f && it.green == 1f && it.blue == 1f) }
+        return SpanStyle(
+            color = map["color"]?.let { parseCssColor(it) } ?: Color.Unspecified,
+            fontSize = map["font-size"]?.let { parseCssSize(it)?.sp }
+                ?: androidx.compose.ui.unit.TextUnit.Unspecified,
+            fontWeight = map["font-weight"]?.let { parseCssFontWeight(it) },
+            fontStyle = map["font-style"]?.let {
+                when (it) {
+                    "italic", "oblique" -> FontStyle.Italic
+                    "normal" -> FontStyle.Normal
+                    else -> null
+                }
+            },
+            letterSpacing = map["letter-spacing"]?.let { parseCssSize(it)?.sp }
+                ?: androidx.compose.ui.unit.TextUnit.Unspecified,
+            baselineShift = map["baseline-shift"]?.let {
+                when (it) {
+                    "sub" -> BaselineShift.Subscript
+                    "super" -> BaselineShift.Superscript
+                    else -> null
+                }
+            },
+            background = background ?: Color.Unspecified,
+            textDecoration = map["text-decoration"]?.let { parseCssTextDecoration(it) },
+        )
+    }
+
+    private val CSS_RGB = Regex("""rgb\((\d+), (\d+), (\d+)\)""")
+    private val CSS_RGBA = Regex("""rgba\((\d+), (\d+), (\d+), ([\d.]+)\)""")
+    private val CSS_HEX = Regex("""#?([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})""")
+
+    /** The library's colour grammar: rgb()/rgba() (comma-space
+     *  form), 3/6-digit hex, and the common named colours. */
+    private fun parseCssColor(cssColor: String): Color? {
+        CSS_RGB.find(cssColor)?.let { match ->
+            return Color(
+                match.groupValues[1].toInt(),
+                match.groupValues[2].toInt(),
+                match.groupValues[3].toInt(),
+            )
+        }
+        CSS_RGBA.find(cssColor)?.let { match ->
+            return Color(
+                match.groupValues[1].toInt(),
+                match.groupValues[2].toInt(),
+                match.groupValues[3].toInt(),
+                (match.groupValues[4].toFloat() * 255).toInt(),
+            )
+        }
+        CSS_HEX.find(cssColor)?.let { match ->
+            val hex = match.groupValues[1]
+            val expanded = if (hex.length == 3) {
+                "${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}"
+            } else {
+                hex
+            }
+            return Color(
+                expanded.substring(0, 2).toInt(16),
+                expanded.substring(2, 4).toInt(16),
+                expanded.substring(4, 6).toInt(16),
+            )
+        }
+        return CSS_NAMED_COLORS[cssColor.lowercase()]
+    }
+
+    private val CSS_NAMED_COLORS = mapOf(
+        "black" to Color(0xFF000000),
+        "white" to Color(0xFFFFFFFF),
+        "red" to Color(0xFFFF0000),
+        "green" to Color(0xFF008000),
+        "blue" to Color(0xFF0000FF),
+        "yellow" to Color(0xFFFFFF00),
+        "gray" to Color(0xFF808080),
+        "grey" to Color(0xFF808080),
+        "orange" to Color(0xFFFFA500),
+        "purple" to Color(0xFF800080),
+        "pink" to Color(0xFFFFC0CB),
+        "brown" to Color(0xFFA52A2A),
+        "cyan" to Color(0xFF00FFFF),
+        "magenta" to Color(0xFFFF00FF),
+        "transparent" to Color(0x00000000),
+    )
+
+    private val CSS_SIZE = Regex("""([-]?\d+(\.\d+)?)\s*(px|pt|em|rem|%)""")
+
+    /** The library's size grammar (span-style form, in sp):
+     *  px as-is, pt × 1.333, em/rem × 16, % × 16/100. */
+    private fun parseCssSize(cssSize: String): Float? {
+        if (cssSize == "0") return 0f
+        val match = CSS_SIZE.find(cssSize) ?: return null
+        val value = match.groupValues[1].toFloat()
+        return when (match.groupValues[3]) {
+            "px" -> value
+            "pt" -> value * 1.333f
+            "em" -> value * 16
+            "rem" -> value * 16
+            "%" -> value * 16 / 100f
+            else -> null
+        }
+    }
+
+    private fun parseCssFontWeight(cssFontWeight: String): FontWeight? =
+        when (cssFontWeight.lowercase()) {
+            "100", "lighter" -> FontWeight.Thin
+            "200" -> FontWeight.ExtraLight
+            "300" -> FontWeight.Light
+            "400", "normal" -> FontWeight.Normal
+            "500", "medium" -> FontWeight.Medium
+            "600", "semibold" -> FontWeight.SemiBold
+            "700", "bold" -> FontWeight.Bold
+            "800", "extrabold" -> FontWeight.ExtraBold
+            "900", "black", "bolder" -> FontWeight.Black
+            else -> null
+        }
+
+    private fun parseCssTextDecoration(cssTextDecoration: String): TextDecoration? {
+        val parts = cssTextDecoration.split(" ").map { it.trim() }.filter { it.isNotEmpty() }
+        var decoration: TextDecoration? = null
+        for (part in parts) {
+            val next = when (part) {
+                "underline" -> TextDecoration.Underline
+                "line-through" -> TextDecoration.LineThrough
+                "none" -> TextDecoration.None
+                else -> null
+            } ?: continue
+            decoration = if (decoration == null) next else decoration + next
+        }
+        return decoration
+    }
+
+    /** The library's whitespace rule (removeHtmlTextExtraSpaces):
+     *  newlines become spaces and runs of collapsible whitespace
+     *  shrink to one space; NBSP (U+00A0) is neither collapsed
+     *  nor trimmed. */
+    private fun collapseHtmlWhitespace(text: String): String {
+        if (text.isEmpty()) return text
+        val out = StringBuilder(text.length)
+        var lastWasSpace = false
+        for (c in text) {
+            val collapsible = c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ''
+            if (collapsible) {
+                if (!lastWasSpace) out.append(' ')
+                lastWasSpace = true
+            } else {
+                out.append(c)
+                lastWasSpace = false
+            }
+        }
+        return out.toString()
     }
 
     /** Builds an [ImageSegment] from a parsed `<img>` tag (all parse paths). */

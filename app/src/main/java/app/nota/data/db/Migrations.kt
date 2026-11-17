@@ -130,3 +130,72 @@ val MIGRATION_4_5: Migration = object : Migration(4, 5) {
         )
     }
 }
+
+/**
+ * Creates (idempotently) the schema v9 library write-generation
+ * machinery: the `library_meta` table (the CREATE matches
+ * [LibraryMetaEntity] exactly, so Room's post-migration schema
+ * validation passes), its singleton counter row, and the three
+ * triggers that bump the counter on every notes write.
+ *
+ * Three callers, one definition, so an upgraded install and a
+ * fresh install end up identical:
+ * - [MIGRATION_8_9], for installs upgrading from v8 (Room has not
+ *   created the table there — hence the CREATE TABLE).
+ * - The [NotaDatabase] open callback (onCreate + onOpen), for
+ *   fresh installs (Room creates the entity table itself; the
+ *   callback owes the row and the triggers, which Room's schema
+ *   cannot express) and as an every-open self-heal, so a database
+ *   that somehow lost the row or a trigger converges on the next
+ *   open instead of stamping a frozen generation forever.
+ * - Tests that build a database without [NotaDatabase.build] and
+ *   need the counter live.
+ *
+ * The triggers fire inside the writing transaction, so a bulk
+ * restore of thousands of notes pays one single-row UPDATE per
+ * note inside its own transaction (and a rolled-back write rolls
+ * its increments back with it — the counter counts COMMITTED
+ * writes, which is exactly the stamp's contract).
+ */
+fun installLibraryMeta(db: SupportSQLiteDatabase) {
+    db.execSQL(
+        "CREATE TABLE IF NOT EXISTS `library_meta` (`id` INTEGER NOT NULL, " +
+            "`notesWriteGeneration` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+    )
+    db.execSQL(
+        "INSERT OR IGNORE INTO `library_meta` (`id`, `notesWriteGeneration`) VALUES (1, 0)",
+    )
+    db.execSQL(
+        "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_insert` " +
+            "AFTER INSERT ON `notes` BEGIN " +
+            "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
+            "END",
+    )
+    db.execSQL(
+        "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_update` " +
+            "AFTER UPDATE ON `notes` BEGIN " +
+            "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
+            "END",
+    )
+    db.execSQL(
+        "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_delete` " +
+            "AFTER DELETE ON `notes` BEGIN " +
+            "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
+            "END",
+    )
+}
+
+/**
+ * Performance chapter 2 R3 (v0.33.0) adds the library
+ * write-generation counter: the `library_meta` table, its
+ * singleton row (generation 0 — a pre-upgrade library has no
+ * recorded writes, and the semantic stamp's own format break
+ * guarantees no pre-upgrade stamp can gate a post-upgrade pass)
+ * and the notes triggers, all via [installLibraryMeta]. No
+ * existing table is touched and no note data moves.
+ */
+val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        installLibraryMeta(db)
+    }
+}

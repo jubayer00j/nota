@@ -1,5 +1,10 @@
 package app.nota.data.html
 
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.ParagraphStyle
+import androidx.compose.ui.text.SpanStyle
+import com.mohamedrejeb.richeditor.model.RichTextState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -1479,4 +1484,200 @@ class NoteDocumentTest {
         )
     }
 
+
+    // ------------------------------------------------------------------
+    // Performance chapter 2 (F2): the static read-mode converter.
+    // NoteDocument.annotatedText must render the same segment HTML
+    // the rich-editor library renders — same text, same EFFECTIVE
+    // span and paragraph styles (see effectiveSpanStyles) — or read
+    // mode would look different from edit mode. The library
+    // attaches NO link annotation (its clicks are state-handled),
+    // so link annotations are asserted separately — the converter's
+    // LinkAnnotation.Url is a deliberate display-only addition.
+    // ------------------------------------------------------------------
+
+    private fun libraryAnnotated(html: String): AnnotatedString =
+        RichTextState().apply { setHtml(html) }.annotatedString
+
+    // The comparison is over EFFECTIVE styles: for every elementary
+    // interval between span boundaries, the style a reader actually
+    // gets is the fold (SpanStyle.merge, inner ranges winning) of
+    // every range covering it. The library's annotated string
+    // carries nested, duplicated and even zero-length ranges (its
+    // span tree pushed per DOM node); the converter emits one
+    // merged range per run. Both describe the same rendering iff
+    // the effective style of every interval matches — which is
+    // exactly what read mode needs to be faithful.
+    private fun effectiveSpanStyles(
+        annotated: AnnotatedString,
+    ): List<Triple<Int, Int, SpanStyle>> {
+        if (annotated.text.isEmpty()) return emptyList()
+        val bounds = sortedSetOf(0, annotated.text.length)
+        annotated.spanStyles.forEach { bounds += it.start; bounds += it.end }
+        val points = bounds.toList()
+        val out = mutableListOf<Triple<Int, Int, SpanStyle>>()
+        for (i in 0 until points.lastIndex) {
+            val start = points[i]
+            val end = points[i + 1]
+            if (start == end) continue
+            var effective = SpanStyle()
+            for (range in annotated.spanStyles) {
+                if (range.start <= start && range.end >= end) {
+                    effective = effective.merge(range.item)
+                }
+            }
+            val last = out.lastOrNull()
+            if (last != null && last.second == start && last.third == effective) {
+                out[out.lastIndex] = Triple(last.first, end, effective)
+            } else {
+                out += Triple(start, end, effective)
+            }
+        }
+        return out
+    }
+
+    private fun effectiveParagraphStyles(
+        annotated: AnnotatedString,
+    ): List<Triple<Int, Int, ParagraphStyle>> {
+        if (annotated.text.isEmpty()) return emptyList()
+        val bounds = sortedSetOf(0, annotated.text.length)
+        annotated.paragraphStyles.forEach { bounds += it.start; bounds += it.end }
+        val points = bounds.toList()
+        val out = mutableListOf<Triple<Int, Int, ParagraphStyle>>()
+        for (i in 0 until points.lastIndex) {
+            val start = points[i]
+            val end = points[i + 1]
+            if (start == end) continue
+            var effective = ParagraphStyle()
+            for (range in annotated.paragraphStyles) {
+                if (range.start <= start && range.end >= end) {
+                    effective = effective.merge(range.item)
+                }
+            }
+            val last = out.lastOrNull()
+            if (last != null && last.second == start && last.third == effective) {
+                out[out.lastIndex] = Triple(last.first, end, effective)
+            } else {
+                out += Triple(start, end, effective)
+            }
+        }
+        return out
+    }
+
+    private fun assertConverterMatches(html: String) {
+        val expected = libraryAnnotated(html)
+        val actual = NoteDocument.annotatedText(html)
+        // Paragraph separators: the library's string model joins
+        // paragraphs with a single SPACE (its own renderer breaks
+        // lines from the paragraph spans, not from the text). The
+        // converter joins with '\n' because a plain Compose Text
+        // needs the newline to draw the same line breaks. Both
+        // separators are exactly one character, so every span
+        // offset is directly comparable; the text comparison
+        // normalises the separator only.
+        assertEquals(
+            "text for $html",
+            expected.text,
+            actual.text.replace('\n', ' '),
+        )
+        assertEquals(
+            "span styles for $html",
+            effectiveSpanStyles(expected),
+            effectiveSpanStyles(actual),
+        )
+        assertEquals(
+            "paragraph styles for $html",
+            effectiveParagraphStyles(expected),
+            effectiveParagraphStyles(actual),
+        )
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForPlainAndMultiParagraph() {
+        assertConverterMatches("<p>Hello world</p>")
+        assertConverterMatches("<p>First</p><p>Second</p>")
+        assertConverterMatches("<p>Marks &amp; more &lt;here&gt;</p>")
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForInlineStyles() {
+        assertConverterMatches(
+            "<p>Marks in <strong>bold</strong> and <em>italic</em> and " +
+                "<u>under</u> and <s>strike</s></p>",
+        )
+        assertConverterMatches("<p>nested <strong>bold <em>both</em></strong> plain</p>")
+        assertConverterMatches("<p>code <code>val x</code> end</p>")
+        assertConverterMatches("<p>a <mark>highlight</mark> here</p>")
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForCssSpans() {
+        assertConverterMatches(
+            "<p><span style=\"color: rgb(179, 38, 30);\">red</span> and " +
+                "<span style=\"background-color: rgb(253, 214, 51);\">hl</span></p>",
+        )
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForHeadings() {
+        assertConverterMatches("<h1>Title</h1><h2>Sub</h2><h3>SubSub</h3><p>body</p>")
+    }
+
+    @Test
+    fun annotatedTextMatchesLibraryForLists() {
+        assertConverterMatches("<ul><li>one</li><li>two</li></ul>")
+        assertConverterMatches("<ol><li>first</li><li>second</li></ol>")
+        assertConverterMatches("<ul><li>outer<ul><li>inner</li></ul></li></ul>")
+        assertConverterMatches("<p>line one<br>line two</p>")
+    }
+
+    @Test
+    fun annotatedTextPreservesNbspAtParagraphEdges() {
+        // Codex PR #54 R8: authored &nbsp; at a paragraph edge is
+        // content — collapseHtmlWhitespace preserves U+00A0 by
+        // contract, and the boundary trim in finishParagraph must
+        // too. Kotlin's bare trimStart()/trimEnd() treat U+00A0
+        // as whitespace, so read mode stripped edge NBSPs the
+        // editor faithfully shows.
+        assertEquals(
+            "  Hello",
+            NoteDocument.annotatedText("<p>&nbsp;&nbsp;Hello</p>").text,
+        )
+        assertEquals(
+            "Hello  ",
+            NoteDocument.annotatedText("<p>Hello&nbsp;&nbsp;</p>").text,
+        )
+        // Collapsible whitespace OUTSIDE an edge NBSP still
+        // trims — only the NBSP survives, both directions.
+        assertEquals(
+            " Hello ",
+            NoteDocument.annotatedText("<p> &nbsp;Hello&nbsp; </p>").text,
+        )
+        // And plain collapsible edges still trim, both
+        // directions (whitespace runs collapse to one space
+        // before the trim).
+        assertEquals(
+            "Hello",
+            NoteDocument.annotatedText("<p>   Hello   </p>").text,
+        )
+        assertEquals(
+            "Hello",
+            NoteDocument.annotatedText("<p>\t\nHello\r\n</p>").text,
+        )
+    }
+
+    @Test
+    fun annotatedTextCarriesLinkAnnotations() {
+        val html = "<p>a <a href=\"https://example.com\">link</a> here</p>"
+        assertConverterMatches(html)
+        val actual = NoteDocument.annotatedText(html)
+        val links = actual.getLinkAnnotations(0, actual.length)
+        assertEquals(1, links.size)
+        val link = links.single()
+        assertEquals("link", actual.text.substring(link.start, link.end))
+        assertEquals(
+            "https://example.com",
+            (link.item as LinkAnnotation.Url).url,
+        )
+    }
 }

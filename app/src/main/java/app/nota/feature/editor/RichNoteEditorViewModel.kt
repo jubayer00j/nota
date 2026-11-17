@@ -174,32 +174,67 @@ class RichNoteEditorViewModel(
     var textInserter: ((String) -> Unit)? = null
 
     private var loadedNoteId: String? = null
-    private var baselineHtml: String = ""
+
+    /** Performance chapter 2 (F4): the change baseline is the
+     *  PARSED segment list, not a re-serialised HTML string.
+     *  Loading used to parse the stored HTML and immediately
+     *  serialise it back for the baseline (a second whole-document
+     *  pass) while the screen parsed the same HTML again for its
+     *  working segments. Now the load parses ONCE: the segments
+     *  are handed to the screen ([loadedSegments] /
+     *  [sessionSegments] / [restoredSegments]) and the baseline is
+     *  the same list in storage form (trailing caret segment
+     *  stripped). Persist compares segment lists — DocSegments
+     *  are data classes, so equality is structural — and only
+     *  serialises when something actually changed. */
+    private var baselineSegments: List<DocSegment> = emptyList()
     private var baselineTitle: String = ""
+
+    /** The segments of the load's single parse, for the screen
+     *  to seed from (null until [load] lands, and for locked
+     *  notes, whose body arrives via [sessionSegments]). */
+    var loadedSegments: List<DocSegment>? = null
+        private set
+
+    /** The lock session's single parse of the decrypted body,
+     *  for the screen to seed from when the session starts. */
+    var sessionSegments: List<DocSegment>? = null
+        private set
+
+    /** The restored version's single parse, for the screen's
+     *  post-restore re-seed. */
+    var restoredSegments: List<DocSegment>? = null
+        private set
     private var baselineFolderId: String? = null
     private var baselineTagsCsv: String = ""
 
     fun load(noteId: String) {
         if (loadedNoteId == noteId) return
         loadedNoteId = noteId
+        loadedSegments = null
+        sessionSegments = null
+        restoredSegments = null
         viewModelScope.launch {
             val loaded = repository.getById(noteId)
-            _note.value = loaded
             if (loaded != null && !loaded.locked) {
-                // Storage form (Phase 1.5 fix 2): the editor's ephemeral
-                // trailing caret segment is stripped here too, so merely
-                // opening a block-ending note never counts as a change.
-                // A LOCKED note's contentHtml is an envelope, not HTML:
-                // no baseline is taken from it — the session start sets
-                // the baseline from the decrypted body instead.
-                baselineHtml = NoteDocument.serialize(
-                    NoteDocument.stripTrailingEmptyTextSegments(
-                        NoteDocument.parse(loaded.contentHtml),
-                    ),
-                )
+                // F4: ONE parse — the screen seeds from these very
+                // segments and the baseline is the same list in
+                // storage form (Phase 1.5 fix 2: the editor's
+                // ephemeral trailing caret segment is stripped, so
+                // merely opening a block-ending note never counts
+                // as a change). A LOCKED note's contentHtml is an
+                // envelope, not HTML: no baseline is taken from
+                // it — the session start sets both from the
+                // decrypted body instead. The fields land BEFORE
+                // _note publishes, so a screen reacting to the
+                // note always sees its segments.
+                val parsed = NoteDocument.parse(loaded.contentHtml)
+                loadedSegments = parsed
+                baselineSegments = NoteDocument.stripTrailingEmptyTextSegments(parsed)
                 baselineTitle = loaded.title
                 baselineFolderId = loaded.folderId
             }
+            _note.value = loaded
         }
         viewModelScope.launch {
             repository.observeTagsForNote(noteId).collect { tags ->
@@ -363,10 +398,12 @@ class RichNoteEditorViewModel(
         sessionNek = nek
         _lockError.value = null
         val data = noteLockRepository.decryptNoteData(current, nek)
+        // F4: the session's one parse — the screen seeds from
+        // these segments; the baseline is the same list stripped.
+        val parsed = NoteDocument.parse(data.contentHtml)
+        sessionSegments = parsed
+        baselineSegments = NoteDocument.stripTrailingEmptyTextSegments(parsed)
         _sessionHtml.value = data.contentHtml
-        baselineHtml = NoteDocument.serialize(
-            NoteDocument.stripTrailingEmptyTextSegments(NoteDocument.parse(data.contentHtml)),
-        )
         baselineTitle = current.title
         baselineFolderId = current.folderId
         writeSessionTemps(current.id, data.attachmentBytes)
@@ -520,12 +557,16 @@ class RichNoteEditorViewModel(
         // Storage form (Phase 1.5 fix 2): never persist the editor's
         // trailing caret segment; repeated saves cannot accumulate
         // empty paragraphs at the end of a note.
-        val html = NoteDocument.serialize(
-            NoteDocument.stripTrailingEmptyTextSegments(segments),
-        )
+        // F4: the change check compares SEGMENTS against the
+        // baseline segments — no serialisation at all on the
+        // no-change path (opening + closing a note costs zero
+        // document passes beyond the load's single parse), and
+        // the HTML is built only when the body actually changed.
+        val stripped = NoteDocument.stripTrailingEmptyTextSegments(segments)
         val tags = tagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         val baselineTags = baselineTagsCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-        val bodyChanged = html != baselineHtml || title != baselineTitle
+        val bodyChanged = stripped != baselineSegments || title != baselineTitle
+        val html = if (bodyChanged) NoteDocument.serialize(stripped) else ""
         val folderChanged = folderId != baselineFolderId
         val tagsChanged = tags != baselineTags
         if (!bodyChanged && !folderChanged && !tagsChanged) {
@@ -549,7 +590,7 @@ class RichNoteEditorViewModel(
             // Phase 2b: a locked note persists ONLY through the seal —
             // never through the plaintext write path (which now also
             // refuses locked notes as defence-in-depth).
-            persistLocked(current, title, html, folderId, tags, bodyChanged, folderChanged, tagsChanged, onPersisted)
+            persistLocked(current, title, html, stripped, folderId, tags, bodyChanged, folderChanged, tagsChanged, onPersisted)
             return
         }
         _saveState.value = SaveState.Saving
@@ -557,7 +598,7 @@ class RichNoteEditorViewModel(
             var updated = current
             if (bodyChanged) {
                 updated = repository.updateRichBody(updated, title, html)
-                baselineHtml = html
+                baselineSegments = stripped
                 baselineTitle = title
             }
             if (folderChanged) {
@@ -586,6 +627,7 @@ class RichNoteEditorViewModel(
         current: NoteEntity,
         title: String,
         html: String,
+        strippedSegments: List<DocSegment>,
         folderId: String?,
         tags: List<String>,
         bodyChanged: Boolean,
@@ -607,7 +649,7 @@ class RichNoteEditorViewModel(
             }
             if (bodyChanged) {
                 noteLockRepository.saveLockedContent(updated, nek, html)
-                baselineHtml = html
+                baselineSegments = strippedSegments
                 updated = repository.getById(current.id) ?: updated
                 // Attachments sealed by the save now hold envelopes on
                 // disk; refresh the session temps so image blocks keep
@@ -672,11 +714,11 @@ class RichNoteEditorViewModel(
             val restored = loadedNoteId?.let { repository.getById(it) }
             if (restored != null) {
                 _note.value = restored
-                baselineHtml = NoteDocument.serialize(
-                    NoteDocument.stripTrailingEmptyTextSegments(
-                        NoteDocument.parse(restored.contentHtml),
-                    ),
-                )
+                // F4: one parse — the baseline AND the screen's
+                // re-seed both come from it.
+                val parsed = NoteDocument.parse(restored.contentHtml)
+                restoredSegments = parsed
+                baselineSegments = NoteDocument.stripTrailingEmptyTextSegments(parsed)
                 baselineTitle = restored.title
                 baselineFolderId = restored.folderId
                 _saveState.value = SaveState.Saved(System.currentTimeMillis())
@@ -886,7 +928,7 @@ class RichNoteEditorViewModel(
                 val html = NoteDocument.serialize(kept)
                 val updated = repository.updateRichBody(owner, owner.title, html)
                 if (loadedNoteId == owner.id) {
-                    baselineHtml = html
+                    baselineSegments = NoteDocument.stripTrailingEmptyTextSegments(kept)
                     _note.value = updated
                 }
             }
