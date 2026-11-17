@@ -17,6 +17,10 @@
          to whichever account was active when the share arrived —
          it must never travel into a platform backup. -->
     <exclude domain="file" path="pending_captures/" />
+    <!-- The semantic index (Phase 4.2) is device-local BY DESIGN: a
+         note's vectors are derived from its text, so they must never
+         leave the device in a platform backup (PR #55, Argon F-04). -->
+    <exclude domain="file" path="semantic-index/" />
     <!-- The preferences DataStore file holds the App Lock PBKDF2 verifiers
          (Phase 2a): credential hashes must never leave the device in a
          platform backup, where low-entropy PIN/pattern verifiers could be

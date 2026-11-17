@@ -6,6 +6,7 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import app.nota.data.attachments.isAcceptableImportUri
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -93,6 +94,17 @@ class CaptureIntake(
             ),
             id = recordId,
         )
+        if (request is CaptureRequest.NewNote) {
+            // PR #55 (Argon F-12): a share that yielded nothing —
+            // no subject, no text, every image rejected or
+            // unreadable — degrades to a plain new-note capture
+            // (1.x's degrade rule, in ShareNormalizer). Its staging
+            // directory holds nothing delivery could use (the copy
+            // step leaves no surviving files for rejected images),
+            // so remove it instead of leaving an orphan directory
+            // under pending_captures until the next store sweep.
+            store.deleteStaging(recordId)
+        }
         store.stage(
             CaptureRecord(id = recordId, accountId = accountId, request = request),
         )
@@ -107,6 +119,15 @@ class CaptureIntake(
         dir: File,
         index: Int,
     ): RawShareImage? {
+        // PR #55 (Argon F-01): a share intent is another app's
+        // input, and this process resolves whatever URI it is
+        // handed — a file:// URI pointing inside Nota's own
+        // sandbox (its database, its DataStore) would be opened
+        // with Nota's own access and copied into a capture the
+        // sender can then ask the user to share back out. Only
+        // content:// URIs are ever opened here; a rejected scheme
+        // skips just this image and the share proceeds without it.
+        if (!isAcceptableImportUri(uri)) return null
         var mimeType = resolver.getType(uri)
         if (mimeType == null && intentType != null && intentType.startsWith("image/") &&
             intentType != "image/*"

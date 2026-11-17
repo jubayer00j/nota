@@ -67,14 +67,15 @@ class OkHttpAiClient(
             }
 
             override fun onResponse(call: Call, response: Response) {
+                val code = response.code
                 val body = try {
-                    response.body.string()
+                    response.use { readBodyCapped(it) }
                 } catch (e: IOException) {
                     if (!cont.isCancelled) cont.resumeWithException(AiNetworkException(e))
                     return
                 }
                 if (!cont.isCancelled) {
-                    cont.resume(AiHttpResponse(response.code, body))
+                    cont.resume(AiHttpResponse(code, body))
                 }
             }
         })
@@ -82,6 +83,40 @@ class OkHttpAiClient(
 
     private companion object {
         val JSON_MEDIA = "application/json; charset=UTF-8".toMediaType()
+
+        /** Hard cap on a response body (PR #55, Argon F-12). An AI
+         *  endpoint is user-configured and may be buggy or hostile;
+         *  [okhttp3.ResponseBody.string] would buffer an unbounded
+         *  body whole into memory. 4 MB is far above any legitimate
+         *  completion or embedding payload. */
+        const val MAX_BODY_BYTES = 4L * 1024 * 1024
+
+        /** Streams [response]'s body under [MAX_BODY_BYTES];
+         *  exceeding the cap aborts with an [IOException], which
+         *  the caller maps to the same transport-failure outcome
+         *  ([AiNetworkException]) as any other read error — the
+         *  error outcome the AI layer already understands. Bodies
+         *  are JSON, decoded as UTF-8 (what the providers emit). */
+        fun readBodyCapped(response: Response): String {
+            val body = response.body
+            if (body.contentLength() > MAX_BODY_BYTES) {
+                throw IOException("AI response body exceeds the $MAX_BODY_BYTES-byte cap")
+            }
+            val source = body.source()
+            val out = java.io.ByteArrayOutputStream()
+            val chunk = ByteArray(8192)
+            var total = 0L
+            while (true) {
+                val read = source.read(chunk)
+                if (read == -1) break
+                total += read
+                if (total > MAX_BODY_BYTES) {
+                    throw IOException("AI response body exceeds the $MAX_BODY_BYTES-byte cap")
+                }
+                out.write(chunk, 0, read)
+            }
+            return out.toString(Charsets.UTF_8.name())
+        }
 
         /** Timeouts sized for generation, not pings (Codex review,
          *  Phase 4.1): OkHttp's defaults (10s read) would abort a

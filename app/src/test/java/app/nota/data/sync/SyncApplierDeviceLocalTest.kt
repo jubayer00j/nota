@@ -17,6 +17,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -175,5 +177,45 @@ class SyncApplierDeviceLocalTest {
         val row = db.reminderDao().getById("r1")
         assertEquals(2_000L, row?.triggerAt)
         assertEquals("DAILY", row?.repeatRule)
+    }
+
+    // PR #55 (Argon F-02): a crafted note id arriving through sync
+    // is refused at the apply boundary — the merged snapshot
+    // descends from a remote archive, so its ids are untrusted
+    // path segments. The well-formed note lands; the crafted one
+    // never becomes a row.
+    @Test
+    fun syncApplyRefusesCraftedNoteIds() = runBlocking {
+        val merged = BackupWriter.ExportData(
+            manifest = BackupManifest(
+                backupFormatVersion = 2, ownerId = "uid-1",
+                libraryId = "lib", nomaVersion = "0.24.0",
+                createdAt = "2026-11-10T00:00:00Z", noteCount = 2,
+                folderCount = 0, tagCount = 0, attachmentCount = 0,
+                reminderCount = 0, deviceId = "device-a",
+            ),
+            folders = emptyList(), tags = emptyList(),
+            reminders = emptyList(),
+            syncSyncedAtIso = "2026-11-10T00:00:00Z",
+            notes = listOf(bxNote("good-note"), bxNote("../../evil-note")),
+            attachments = emptyList(), tombstones = emptyList(),
+        )
+        applier.apply(
+            merged = merged,
+            remoteHandle = null,
+            conflictAttachmentSources = emptyMap(),
+            knownEntityIds = mapOf(
+                EntityHash.ENTITY_NOTE to setOf("good-note", "../../evil-note"),
+                EntityHash.ENTITY_FOLDER to emptySet(),
+                EntityHash.ENTITY_TAG to emptySet(),
+                EntityHash.ENTITY_REMINDER to emptySet(),
+                EntityHash.ENTITY_ATTACHMENT to emptySet(),
+            ),
+            mergedAttachmentContent = emptyMap(),
+            localAttachmentContent = emptyMap(),
+        )
+        assertNotNull(db.noteDao().getById("good-note"))
+        assertNull(db.noteDao().getById("../../evil-note"))
+        assertEquals(1, db.noteDao().getAll().size)
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import app.nota.data.backup.BackupRepository
+import app.nota.data.backup.MergeCounts
 import app.nota.data.backup.PendingRestoreState
 import app.nota.data.backup.PendingRestoreStore
 import app.nota.data.backup.RestoreMode
@@ -386,8 +387,7 @@ fun BackupSection(
                     onClick = {
                         pendingRestoreStore.performApply { handle ->
                             val counts = backupRepository.applyBackup(handle, RestoreMode.MERGE)
-                            "Restored (merge): ${counts.added} added, " +
-                                "${counts.updated} updated, ${counts.deleted} deleted."
+                            restoreMergeMessage(counts)
                         }
                     },
                     enabled = !applying,
@@ -398,7 +398,7 @@ fun BackupSection(
                     onClick = {
                         pendingRestoreStore.performApply { handle ->
                             val counts = backupRepository.applyBackup(handle, RestoreMode.REPLACE)
-                            "Restored (replace): ${counts.added} added."
+                            restoreReplaceMessage(counts)
                         }
                     },
                     enabled = !applying,
@@ -410,3 +410,22 @@ fun BackupSection(
         // without writing — same contract as before, now lock-proof.
     }
 }
+
+/** The restore completion line for a merge apply. PR #55 Codex R1:
+ *  [MergeCounts.skipped] is appended when the archive carried
+ *  crafted-id entities the restore refused — a count nobody renders
+ *  is not observability. Zero skips keep the historical wording
+ *  byte-identical (no noise for normal restores). */
+internal fun restoreMergeMessage(counts: MergeCounts): String =
+    "Restored (merge): ${counts.added} added, " +
+        "${counts.updated} updated, ${counts.deleted} deleted" +
+        skippedSuffix(counts.skipped) + "."
+
+/** The restore completion line for a replace apply; see
+ *  [restoreMergeMessage] for the skipped-count rule. */
+internal fun restoreReplaceMessage(counts: MergeCounts): String =
+    "Restored (replace): ${counts.added} added" +
+        skippedSuffix(counts.skipped) + "."
+
+private fun skippedSuffix(skipped: Int): String =
+    if (skipped > 0) " · $skipped skipped (unsafe IDs)" else ""

@@ -51,6 +51,14 @@ class NotaApplication : Application() {
                 // database on the device — the attachments/ root is
                 // shared, and another account's binaries are not
                 // orphans (see AttachmentStore.reconcile).
+                // PR #55 (Argon F-07): decrypted attachment session
+                // files never survive a cold start — a crash or
+                // force-stop used to leave plaintext copies of a
+                // locked note's attachments in the cache forever.
+                // They are re-derived at every note unlock, so
+                // wiping the whole session root before the sweep
+                // is always safe.
+                store.clearAllSessions()
                 store.reconcile(
                     allProvider = { repository.observeAttachments().first() },
                     extraKnownPaths = { provider.allAttachmentLocalPaths() },

@@ -11,10 +11,32 @@
         <!-- Quick-capture staging (Phase 5.2) — never backed up;
              see backup_rules.xml. -->
         <exclude domain="file" path="pending_captures/" />
+        <!-- The semantic index (Phase 4.2) is device-local by
+             design — never backed up; see backup_rules.xml. -->
+        <exclude domain="file" path="semantic-index/" />
         <!-- App Lock verifiers live in the preferences DataStore file
-             (Phase 2a) — never backed up; see backup_rules.xml. No
-             device-transfer section is declared, exactly as before, so
-             D2D semantics for the notes database are unchanged. -->
+             (Phase 2a) — never backed up; see backup_rules.xml. -->
         <exclude domain="file" path="datastore/" />
     </cloud-backup>
+    <!-- Device-to-device transfer (Android 12+ setup migration).
+         An ABSENT device-transfer section does not mean "the cloud
+         rules apply": the platform transfers EVERYTHING (PR #55,
+         Argon F-04 — this file previously declared no section on
+         exactly that mistaken assumption). The explicit block below
+         mirrors the cloud-backup exclusions, so a platform transfer
+         carries no more than a platform backup would. Nota's own
+         Drive backup/sync is the data path between devices, and
+         device-bound material (App Lock verifiers and Keystore-
+         sealed copies in the DataStore) could not decrypt on the
+         destination device anyway. -->
+    <device-transfer>
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="file" path="attachments/" />
+        <exclude domain="file" path="pending_insert.json" />
+        <exclude domain="file" path="pending_insert.json.tmp" />
+        <exclude domain="file" path="pending_captures/" />
+        <exclude domain="file" path="semantic-index/" />
+        <exclude domain="file" path="datastore/" />
+    </device-transfer>
 </data-extraction-rules>

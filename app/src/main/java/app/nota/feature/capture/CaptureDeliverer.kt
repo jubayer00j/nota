@@ -1,6 +1,5 @@
 package app.nota.feature.capture
 
-import android.net.Uri
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.capture.CaptureRecord
 import app.nota.data.capture.CaptureRequest
@@ -18,10 +17,11 @@ import java.time.LocalDate
  * - today → the daily note, ensured exactly like the Today tab;
  * - share → a note with the share's title and body; each staged
  *   image is imported through the ordinary attachment pipeline
- *   ([AttachmentStore.importImage] — downscale + JPEG re-encode,
- *   same as a picker import) and embedded as its own
- *   `<p><img …></p>` paragraph. One unreadable image never sinks
- *   the whole capture (1.x's rule).
+ *   ([AttachmentStore.importImageFile] — downscale + JPEG
+ *   re-encode, same as a picker import, from the staged file
+ *   directly rather than through a file:// URI) and embedded as
+ *   its own `<p><img …></p>` paragraph. One unreadable image never
+ *   sinks the whole capture (1.x's rule).
  *
  * The record's staged files are deleted when delivery finishes,
  * whatever happened — the record is already out of the store, so
@@ -62,9 +62,9 @@ class CaptureDeliverer(
         var content = request.contentHtml
         for (image in request.images) {
             val attachment = runCatching {
-                attachmentStore.importImage(
+                attachmentStore.importImageFile(
                     note.id,
-                    Uri.fromFile(captureStore.stagedFile(record, image)),
+                    captureStore.stagedFile(record, image),
                 )
             }.getOrNull() ?: continue
             // 1.x escapes exactly & and " in the alt attribute.

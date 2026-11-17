@@ -1,5 +1,6 @@
 package app.nota.data.security
 
+import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import app.nota.data.preferences.PreferencesRepository
@@ -41,6 +42,33 @@ interface AppLockDeviceKeyProvider {
 }
 
 /**
+ * The enrolment-invalidation decision for every biometric device
+ * key Nota mints (App Lock and per-note lock alike), as a pure
+ * function of the API level so it is unit-testable without a
+ * device (PR #55, Argon F-06).
+ *
+ * The platform default for `setInvalidatedByBiometricEnrollment`
+ * is `true` — a key that omits the setter is still invalidated
+ * when a new biometric is enrolled. The explicit split:
+ *
+ * - Below API 28: `false`. Nota's API 26–27 support exists for
+ *   the J7 generation of Samsung firmware, where an explicit
+ *   `true` poisoned keys at birth (Phase 2.6) and the firmware
+ *   ignores the flag in practice; explicit `false` preserves the
+ *   device-proven 0.3.3 behaviour (a newly enrolled finger can
+ *   authorise the existing sealed token until fingerprint unlock
+ *   is turned off or the lock removed).
+ * - API 28 and above: `true` — the safer behaviour, chosen
+ *   deliberately: enrolling a new fingerprint irreversibly
+ *   invalidates the key, and the user re-enables fingerprint
+ *   unlock once with their credential.
+ */
+object BiometricEnrollmentPolicy {
+    fun invalidatedByBiometricEnrollment(sdkInt: Int): Boolean =
+        sdkInt >= Build.VERSION_CODES.P
+}
+
+/**
  * Production provider: AES-256-GCM key in the Android Keystore
  * (alias `nota.applock.devicekey.v2`) with
  * `setUserAuthenticationRequired(true)` — EVERY use of the key
@@ -57,19 +85,32 @@ interface AppLockDeviceKeyProvider {
  *   sealed under a v1 key fail closed and the user re-enables —
  *   the same one-time cost as the 2.5 crypto-binding migration.
  *
- * - `setInvalidatedByBiometricEnrollment(true)` is NOT set any
- *   more. On Samsung's API-27 keystore that flag leaves keys
- *   permanently invalidated from birth (the enrollment version
- *   the keystore compares against is never stable there), so the
- *   very first cipher init threw KeyPermanentlyInvalidatedException
- *   and enabling fingerprint died inside this provider — silently,
- *   behind a null. NAMED TRADEOFF: enrolling an additional
- *   fingerprint no longer auto-destroys the App Lock token; the
- *   newly enrolled finger can authorise the existing sealed token
- *   until the user turns Fingerprint unlock off (which clears the
- *   token) or removes App Lock. The token remains sealed under an
- *   auth-required key and unlock still requires a real decryption
- *   — the CryptoObject binding is unchanged.
+ * - `setInvalidatedByBiometricEnrollment` is set EXPLICITLY from
+ *   [BiometricEnrollmentPolicy] (PR #55, Argon F-06, reversing the
+ *   Phase 2.6 omission). The history matters: on Samsung's API-27
+ *   keystore an explicit `true` left keys permanently invalidated
+ *   from birth (the enrollment version the keystore compares
+ *   against is never stable there), so the very first cipher init
+ *   threw KeyPermanentlyInvalidatedException and enabling
+ *   fingerprint died inside this provider — silently, behind a
+ *   null. Omitting the setter did NOT buy enrolment tolerance,
+ *   though: the platform default for the flag is `true`, so keys
+ *   minted after 2.6 on API 28+ were enrolment-invalidated all
+ *   along, whatever the old comment here claimed. The policy now
+ *   states the behaviour per API level instead of inheriting it:
+ *   explicit `false` below API 28 (the J7 behaviour, device-proven
+ *   in 0.3.3: a newly enrolled finger can authorise the existing
+ *   sealed token until the user turns Fingerprint unlock off —
+ *   which clears the token — or removes App Lock; Samsung's API-27
+ *   firmware ignores the flag either way) and explicit `true` on
+ *   API 28+, where a newly enrolled fingerprint irreversibly
+ *   invalidates the key and the user re-enables fingerprint unlock
+ *   once with their credential. Key parameters are fixed at
+ *   generation, so this changes only newly minted keys; existing
+ *   keys keep the behaviour they were created with — no migration.
+ *   The token remains sealed under an auth-required key and unlock
+ *   still requires a real decryption — the CryptoObject binding
+ *   is unchanged.
  */
 class AndroidKeystoreAppLockKeyProvider : AppLockDeviceKeyProvider {
 
@@ -144,9 +185,16 @@ class AndroidKeystoreAppLockKeyProvider : AppLockDeviceKeyProvider {
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .setKeySize(256)
                     .setUserAuthenticationRequired(true)
-                    // Deliberately NO setInvalidatedByBiometricEnrollment:
-                    // see the class doc — on Samsung API-27 firmware the
-                    // flag poisons the key at birth.
+                    // Explicit on every API level (PR #55, Argon
+                    // F-06): see BiometricEnrollmentPolicy and the
+                    // class doc — the platform default is `true`,
+                    // so omitting this setter never disabled
+                    // enrolment invalidation on API 28+.
+                    .setInvalidatedByBiometricEnrollment(
+                        BiometricEnrollmentPolicy.invalidatedByBiometricEnrollment(
+                            Build.VERSION.SDK_INT,
+                        ),
+                    )
                     .build(),
             )
             StepResult.Ok(generator.generateKey())

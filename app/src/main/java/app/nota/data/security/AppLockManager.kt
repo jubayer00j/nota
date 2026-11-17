@@ -1,5 +1,6 @@
 package app.nota.data.security
 
+import android.os.SystemClock
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -49,6 +50,20 @@ sealed interface UnlockResult {
 class AppLockManager(
     private val repository: PreferencesRepository,
     private val biometricStore: AppLockBiometricStore,
+    /** Clock for the in-memory background window (PR #55, Argon
+     *  F-09): monotonic elapsed-realtime, so wall-clock changes
+     *  (NTP sync, a manual time change) can neither extend the
+     *  unlocked window indefinitely nor force a spurious re-lock.
+     *  A constructor seam so tests control the window. Persisted
+     *  lockout deadlines stay wall-clock — they must survive a
+     *  reboot, and a monotonic clock resets there. */
+    private val elapsedRealtimeMillis: () -> Long = { SystemClock.elapsedRealtime() },
+    /** Fired at the single moment the lock ENGAGES (PR #55,
+     *  Argon F-07): production wipes the decrypted attachment
+     *  session cache, whose plaintext must not outlive an
+     *  unlocked session. Cold start needs no hook — the lock
+     *  starts engaged and NotaApplication wipes directly. */
+    private val onLockEngaged: () -> Unit = {},
     /** Pause before re-observing the lock settings after the
      *  repository flow completes on a transient read error (see
      *  init). A constructor seam so tests can run the retry loop
@@ -79,8 +94,13 @@ class AppLockManager(
      *  never lose an increment to a concurrent submission (Codex, PR #7). */
     private val attemptMutex = Mutex()
 
+    /** When the process last backgrounded, on the MONOTONIC
+     *  elapsed-realtime clock (PR #55, Argon F-09) — in-memory
+     *  only, never persisted: the window it measures is a
+     *  within-process convenience, while persisted lockout
+     *  deadlines (which must survive reboots) stay wall-clock. */
     @Volatile
-    private var backgroundedAtMillis: Long? = null
+    private var backgroundedAtElapsedMillis: Long? = null
 
     init {
         scope.launch {
@@ -124,28 +144,41 @@ class AppLockManager(
         ProcessLifecycleOwner.get().lifecycle.addObserver(
             object : DefaultLifecycleObserver {
                 override fun onStop(owner: LifecycleOwner) {
-                    backgroundedAtMillis = System.currentTimeMillis()
+                    onAppBackgrounded()
                 }
 
                 override fun onStart(owner: LifecycleOwner) {
-                    maybeRelock()
+                    onAppForegrounded()
                 }
             },
         )
     }
 
+    /** Process backgrounded: stamp the monotonic window start.
+     *  Internal (not private) so tests can drive the lifecycle
+     *  without a real ProcessLifecycleOwner. */
+    internal fun onAppBackgrounded() {
+        backgroundedAtElapsedMillis = elapsedRealtimeMillis()
+    }
+
+    /** Process foregrounded: re-lock when the window has elapsed. */
+    internal fun onAppForegrounded() {
+        maybeRelock()
+    }
+
     private fun maybeRelock() {
         val current = _settings.value
         if (!current.isEnabled || _isLocked.value) {
-            backgroundedAtMillis = null
+            backgroundedAtElapsedMillis = null
             return
         }
-        val backgroundedAt = backgroundedAtMillis ?: return
-        backgroundedAtMillis = null
-        val elapsed = System.currentTimeMillis() - backgroundedAt
+        val backgroundedAt = backgroundedAtElapsedMillis ?: return
+        backgroundedAtElapsedMillis = null
+        val elapsed = elapsedRealtimeMillis() - backgroundedAt
         val timeoutMs = current.lockTimeoutSeconds.toLong() * 1_000L
         if (timeoutMs <= 0L || elapsed >= timeoutMs) {
             _isLocked.value = true
+            onLockEngaged()
         }
     }
 
@@ -176,7 +209,7 @@ class AppLockManager(
         val verified = biometricStore.verifyTokenResult(authorisedCipher)
         if (verified is StepResult.Failed) return verified
         _isLocked.value = false
-        backgroundedAtMillis = null
+        backgroundedAtElapsedMillis = null
         scope.launch {
             attemptMutex.withLock { repository.setAppLockFailedAttempts(0, 0L) }
         }
@@ -239,7 +272,7 @@ class AppLockManager(
         return if (ok) {
             repository.setAppLockFailedAttempts(0, 0L)
             _isLocked.value = false
-            backgroundedAtMillis = null
+            backgroundedAtElapsedMillis = null
             UnlockResult.Success
         } else {
             val attempts = current.failedAttempts + 1
@@ -315,6 +348,11 @@ class AppLockManager(
     /** Turns App Lock fully off (all slots + biometric flag cleared). */
     suspend fun disableAll() {
         repository.clearAppLock()
+        // PR #55 (Argon F-09): the sealed biometric token must die
+        // with the lock — the same rule setBiometricEnabled(false)
+        // and removeCredential already honour. Leaving it behind
+        // meant a stale token outlived the feature that owns it.
+        biometricStore.clear()
         _isLocked.value = false
     }
 

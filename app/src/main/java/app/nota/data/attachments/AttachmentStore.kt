@@ -1,5 +1,6 @@
 package app.nota.data.attachments
 
+import android.content.ContentResolver
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -48,13 +49,46 @@ class AttachmentStore(
 
     fun fileFor(attachment: AttachmentEntity): File = File(context.filesDir, attachment.localPath)
 
-    suspend fun importImage(noteId: String, uri: Uri): AttachmentEntity =
-        fileMutex.withLock { importImageLocked(noteId, uri) }
+    suspend fun importImage(noteId: String, uri: Uri): AttachmentEntity {
+        // PR #55 (Argon F-01): external URIs are content://-only —
+        // see isAcceptableImportUri. The picker flows that feed this
+        // entry only ever produce content:// URIs; Nota's own
+        // already-on-device files enter through importImageFile.
+        require(isAcceptableImportUri(uri)) {
+            "Refusing to import an image from a non-content URI"
+        }
+        return fileMutex.withLock { importImageLocked(noteId, uri) }
+    }
 
-    private suspend fun importImageLocked(noteId: String, uri: Uri): AttachmentEntity = withContext(Dispatchers.IO) {
-        val resolver = context.contentResolver
+    /**
+     * [importImage] for bytes that already live in a plain [file]
+     * on this device — the capture deliverer's staged share copies
+     * (Phase 5.2). A file:// URI must never be the import path
+     * (PR #55, Argon F-01): it would be resolved with Nota's own
+     * file access, which is exactly the confused-deputy shape the
+     * URI guard exists to close.
+     */
+    suspend fun importImageFile(noteId: String, file: File): AttachmentEntity =
+        fileMutex.withLock {
+            importImageStreamLocked(noteId, file.name) { file.inputStream() }
+        }
+
+    private suspend fun importImageLocked(noteId: String, uri: Uri): AttachmentEntity =
+        importImageStreamLocked(noteId, displayName(uri)) {
+            context.contentResolver.openInputStream(uri)
+        }
+
+    /** The shared import pipeline behind [importImageLocked] and
+     *  [importImageFile]: [openStream] is opened fresh for each of
+     *  the three reads (bounds, EXIF, decode), exactly as the URI
+     *  path always did. */
+    private suspend fun importImageStreamLocked(
+        noteId: String,
+        sourceName: String?,
+        openStream: () -> java.io.InputStream?,
+    ): AttachmentEntity = withContext(Dispatchers.IO) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        openStream()?.use { BitmapFactory.decodeStream(it, null, bounds) }
         val width = bounds.outWidth
         val height = bounds.outHeight
         require(width > 0 && height > 0) { "Not a readable image" }
@@ -68,7 +102,7 @@ class AttachmentStore(
         // no EXIF (screenshots, PNGs, unreadable metadata) default to
         // ORIENTATION_NORMAL and pass through untouched.
         val orientation = runCatching {
-            resolver.openInputStream(uri)?.use { input ->
+            openStream()?.use { input ->
                 ExifInterface(input).getAttributeInt(
                     ExifInterface.TAG_ORIENTATION,
                     ExifInterface.ORIENTATION_NORMAL,
@@ -76,7 +110,7 @@ class AttachmentStore(
             } ?: ExifInterface.ORIENTATION_NORMAL
         }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
         val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
-        var bitmap = resolver.openInputStream(uri)?.use {
+        var bitmap = openStream()?.use {
             BitmapFactory.decodeStream(it, null, decodeOpts)
         } ?: error("Could not read image")
         bitmap = applyExifOrientation(bitmap, orientation)
@@ -104,7 +138,7 @@ class AttachmentStore(
         val entity = AttachmentEntity(
             id = UUID.randomUUID().toString(),
             noteId = noteId,
-            fileName = displayName(uri) ?: fileName,
+            fileName = sourceName ?: fileName,
             mimeType = "image/jpeg",
             sizeBytes = file.length(),
             localPath = "attachments/$noteId/$fileName",
@@ -116,8 +150,15 @@ class AttachmentStore(
         entity
     }
 
-    suspend fun importFile(noteId: String, uri: Uri): AttachmentEntity =
-        fileMutex.withLock { importFileLocked(noteId, uri) }
+    suspend fun importFile(noteId: String, uri: Uri): AttachmentEntity {
+        // PR #55 (Argon F-01): same content://-only rule as
+        // importImage — this entry is fed only by the system
+        // document picker.
+        require(isAcceptableImportUri(uri)) {
+            "Refusing to import a file from a non-content URI"
+        }
+        return fileMutex.withLock { importFileLocked(noteId, uri) }
+    }
 
     /**
      * Imports a finished voice recording (PR #51) from a plain
@@ -245,11 +286,41 @@ class AttachmentStore(
     // and are wiped when the session ends. The editor resolves them
     // through the same fileFor-style seam it uses for stored files.
 
-    private fun sessionDir(noteId: String): File =
-        File(File(context.cacheDir, "nota-session"), noteId)
+    /** The decrypted-session root: plaintext copies of a locked
+     *  note's attachments live here only while the note is open;
+     *  see [clearAllSessions]. */
+    private fun sessionRoot(): File = File(context.cacheDir, "nota-session")
 
-    fun sessionFile(noteId: String, attachment: AttachmentEntity): File =
-        File(sessionDir(noteId), attachment.id + ".bin")
+    private fun sessionDir(noteId: String): File {
+        // PR #55 (Argon F-02): note ids reach this path segment from
+        // note rows — including rows a crafted backup or sync payload
+        // created before the restore/sync-side id filter landed.
+        // Reject anything that is not a well-formed id, and prove
+        // the result still lives under the session root, so a
+        // separator-bearing id can never address files outside it
+        // (the danger is real: clearSession deletes recursively).
+        require(app.nota.data.backup.BackupRepository.isSafeId(noteId)) {
+            "Unsafe note id for a session path"
+        }
+        val root = sessionRoot().canonicalFile
+        val dir = File(root, noteId).canonicalFile
+        require(dir.path.startsWith(root.path + File.separator)) {
+            "Session directory escapes its root"
+        }
+        return dir
+    }
+
+    fun sessionFile(noteId: String, attachment: AttachmentEntity): File {
+        require(app.nota.data.backup.BackupRepository.isSafeId(attachment.id)) {
+            "Unsafe attachment id for a session path"
+        }
+        val dir = sessionDir(noteId)
+        val file = File(dir, attachment.id + ".bin").canonicalFile
+        require(file.path.startsWith(dir.canonicalFile.path + File.separator)) {
+            "Session file escapes its directory"
+        }
+        return file
+    }
 
     /** Writes decrypted session bytes for [attachment]; returns the file. */
     fun writeSessionBytes(noteId: String, attachment: AttachmentEntity, bytes: ByteArray): File {
@@ -262,6 +333,25 @@ class AttachmentStore(
     /** Deletes every session temp file for [noteId] (session end). */
     fun clearSession(noteId: String) {
         sessionDir(noteId).deleteRecursively()
+    }
+
+    /**
+     * Removes EVERY decrypted session (PR #55, Argon F-07). Session
+     * files are plaintext copies of a locked note's attachments;
+     * they are re-derived from the encrypted store at every note
+     * unlock (the editor's session-open flow), so nothing
+     * legitimate reads them across a process boundary or while the
+     * app is locked — yet a crash, a force-stop or an app lock that
+     * engaged while a note was open used to leave them on disk
+     * indefinitely. Called at cold start (NotaApplication) and
+     * whenever App Lock engages (AppLockManager's lock hook).
+     * Best-effort and idempotent: a missing root is not an error.
+     * If App Lock engages while a locked note is open in the
+     * editor, that session's attachment images are re-derived on
+     * the next save/refresh or note re-open.
+     */
+    fun clearAllSessions() {
+        sessionRoot().deleteRecursively()
     }
 
     suspend fun delete(attachment: AttachmentEntity): Unit = fileMutex.withLock {
@@ -385,3 +475,20 @@ class AttachmentStore(
         const val JPEG_QUALITY = 85
     }
 }
+
+/**
+ * The single URI-scheme rule for every path that opens an
+ * externally supplied URI (PR #55, Argon F-01): only `content://`
+ * URIs are acceptable. A `file://` URI would be resolved with
+ * Nota's own file access — including paths inside Nota's private
+ * sandbox (its database, its DataStore) — making Nota a confused
+ * deputy for whichever app supplied the URI; `http(s)://` and
+ * `android.resource://` URIs are likewise never legitimate import
+ * sources. Legitimate flows are unaffected: the system pickers
+ * (photo picker, document picker) and Nota's own FileProvider only
+ * ever hand out `content://` URIs, and bytes Nota already holds in
+ * a plain file enter through [AttachmentStore.importImageFile],
+ * never through a URI.
+ */
+fun isAcceptableImportUri(uri: Uri): Boolean =
+    uri.scheme == ContentResolver.SCHEME_CONTENT

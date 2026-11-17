@@ -1,6 +1,8 @@
 package app.nota.data.ai
 
 import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -366,5 +368,45 @@ class GeminiProviderTest {
         assertEquals(1, single.size)
         assertEquals(0.75f, single[0][0])
         assertTrue(http.calls.single().url.endsWith(":embedContent"))
+    }
+
+    // PR #55 (Argon F-12): the production HTTP client caps the
+    // response body — an over-cap body fails as the transport
+    // error the AI layer already maps (AiNetworkException ->
+    // OFFLINE), never as an unbounded in-memory string.
+    @Test
+    fun httpClient_overCapBody_failsAsTransportError() = runBlocking {
+        val server = MockWebServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200)
+                    .setBody("x".repeat(4 * 1024 * 1024 + 1024)),
+            )
+            server.start()
+            try {
+                OkHttpAiClient().post(server.url("/v1/chat").toString(), emptyMap(), "{}")
+                fail("an over-cap body must not be read into memory")
+            } catch (e: AiNetworkException) {
+                // expected: the same outcome as any transport failure
+            }
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun httpClient_inCapBody_roundTrips() = runBlocking {
+        val server = MockWebServer()
+        try {
+            server.enqueue(MockResponse().setResponseCode(200).setBody("{\"ok\":true}"))
+            server.start()
+            val response = OkHttpAiClient().post(
+                server.url("/v1/chat").toString(), emptyMap(), "{}",
+            )
+            assertEquals(200, response.status)
+            assertEquals("{\"ok\":true}", response.body)
+        } finally {
+            server.shutdown()
+        }
     }
 }

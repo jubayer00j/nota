@@ -236,4 +236,15 @@ class AppLockBiometricStoreTest {
         assertFalse(store.hasToken())
         assertTrue(store.openCipherResult() is StepResult.Failed)
     }
+
+    // PR #55 (Argon F-06): the enrolment-invalidation policy is
+    // explicit per API level — enrolment-tolerant below API 28
+    // (the device-proven J7 behaviour), invalidating on API 28+.
+    @Test
+    fun enrollmentPolicy_explicitPerApiLevel() {
+        assertFalse(BiometricEnrollmentPolicy.invalidatedByBiometricEnrollment(26))
+        assertFalse(BiometricEnrollmentPolicy.invalidatedByBiometricEnrollment(27))
+        assertTrue(BiometricEnrollmentPolicy.invalidatedByBiometricEnrollment(28))
+        assertTrue(BiometricEnrollmentPolicy.invalidatedByBiometricEnrollment(35))
+    }
 }

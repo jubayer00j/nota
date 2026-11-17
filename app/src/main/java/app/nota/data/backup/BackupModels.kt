@@ -20,9 +20,22 @@ class BackupKeyNeededError(message: String) : Exception(message)
 
 enum class RestoreMode { MERGE, REPLACE }
 
-data class MergeCounts(val added: Int = 0, val updated: Int = 0, val deleted: Int = 0) {
+data class MergeCounts(
+    val added: Int = 0,
+    val updated: Int = 0,
+    val deleted: Int = 0,
+    /** Entities the restore refused outright (PR #55, Argon F-02:
+     *  crafted ids that fail [BackupRepository.isSafeId]). Counted,
+     *  never silent — the restore result surfaces them. */
+    val skipped: Int = 0,
+) {
     operator fun plus(other: MergeCounts): MergeCounts =
-        MergeCounts(added + other.added, updated + other.updated, deleted + other.deleted)
+        MergeCounts(
+            added + other.added,
+            updated + other.updated,
+            deleted + other.deleted,
+            skipped + other.skipped,
+        )
 }
 
 data class BackupManifest(

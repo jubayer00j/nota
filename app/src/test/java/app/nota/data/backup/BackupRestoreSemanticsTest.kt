@@ -15,6 +15,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -317,6 +318,131 @@ class BackupRestoreSemanticsTest {
         val filesDir = stack.context.filesDir
         assertTrue(!java.io.File(filesDir.parentFile, "evil").exists())
         assertTrue(!java.io.File(filesDir, "evil").exists())
+    }
+
+    // PR #55 (Argon F-02): a crafted NOTE id is refused at the
+    // restore boundary too — before this, only attachment noteIds
+    // were filtered, and a separator-bearing note id flowed into
+    // note rows and from there into filesystem path segments
+    // (attachments/<noteId>/, the editor's session cache). The
+    // refusal is counted on the restore result, never silent.
+    @Test
+    fun restore_noteWithCraftedId_isSkippedAndCounted() = runBlocking {
+        val stack = newStack()
+        val zip = payloadZip(
+            listOf(
+                noteJson("../../evil-note", "Evil", 1000),
+                noteJson("good-note", "Good", 1000),
+            ),
+        )
+        val counts = stack.backup.restore(zip, null, RestoreMode.REPLACE)
+        assertNull(stack.db.noteDao().getById("../../evil-note"))
+        assertNotNull(stack.db.noteDao().getById("good-note"))
+        assertEquals(1, stack.db.noteDao().getAll().size)
+        assertEquals(1, counts.skipped)
+    }
+
+    // PR #55 Codex R1: a lone "." id slipped past isSafeId — dots
+    // are legal id characters and "." contains no "..", yet as a
+    // path segment it names the directory ITSELF: the session
+    // cache's containment check then rejected the poisoned note on
+    // every open/close. ".." and longer dot-only ids already failed
+    // the contains("..") check; "." is now refused explicitly, and
+    // SyncApplier's intake inherits the refusal (same predicate).
+    @Test
+    fun isSafeId_dotOnlyIds_areRefused() {
+        assertFalse(BackupRepository.isSafeId("."))
+        assertFalse(BackupRepository.isSafeId(".."))
+        assertFalse(BackupRepository.isSafeId("..."))
+        assertTrue(BackupRepository.isSafeId("good-note"))
+        assertTrue(BackupRepository.isSafeId("a.b"))
+    }
+
+    @Test
+    fun restore_noteWithDotOnlyId_isSkippedAndCounted() = runBlocking {
+        val stack = newStack()
+        val zip = payloadZip(
+            listOf(
+                noteJson(".", "Dot", 1000),
+                noteJson("good-note", "Good", 1000),
+            ),
+        )
+        val counts = stack.backup.restore(zip, null, RestoreMode.REPLACE)
+        assertNull(stack.db.noteDao().getById("."))
+        assertNotNull(stack.db.noteDao().getById("good-note"))
+        assertEquals(1, stack.db.noteDao().getAll().size)
+        assertEquals(1, counts.skipped)
+    }
+
+    // PR #55 (Argon F-02): the attachment's OWN id is a path
+    // segment too (the editor's session files are <id>.bin).
+    @Test
+    fun restore_attachmentWithCraftedOwnId_isSkippedAndCounted() = runBlocking {
+        val stack = newStack()
+        val note = noteJson("good-note", "Good", 1000)
+        val evilAttJson = """{"id": "../../att-evil", "noteId": "good-note", "name": "evil.txt", "mimeType": "text/plain", "size": 4, "createdAt": 1000, "data": "data:text/plain;base64,ZXZpbA=="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "settings.json" to "null",
+                "sync.json" to """{"deviceId": null, "syncedAt": "2024-10-26T00:00:00.000Z", "tombstones": []}""",
+                "notes/good-note.json" to note,
+                "attachments/att-evil.json" to evilAttJson,
+            ),
+        )
+        val counts = stack.backup.restore(zip, null, RestoreMode.REPLACE)
+        assertTrue(stack.db.attachmentDao().getAll().isEmpty())
+        assertTrue(counts.skipped >= 1)
+    }
+
+    // PR #55 (Argon F-04): the platform backup/transfer rules must
+    // exclude the device-local semantic index in every section,
+    // and the device-transfer section must mirror the cloud
+    // exclusions exactly (an ABSENT device-transfer section makes
+    // Android 12+ transfer everything, rules notwithstanding).
+    @Test
+    fun backupRules_excludeSemanticIndex_andDeviceTransferMirrorsCloud() {
+        val context = RuntimeEnvironment.getApplication()
+
+        fun exclusions(resId: Int): Map<String, Set<String>> {
+            val sections = mutableMapOf<String, MutableSet<String>>()
+            var section: String? = null
+            val parser = context.resources.getXml(resId)
+            var event = parser.eventType
+            while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+                when (event) {
+                    org.xmlpull.v1.XmlPullParser.START_TAG -> {
+                        when (parser.name) {
+                            "full-backup-content", "cloud-backup", "device-transfer" ->
+                                section = parser.name
+                            "exclude" -> {
+                                val domain = parser.getAttributeValue(null, "domain")
+                                val path = parser.getAttributeValue(null, "path")
+                                if (section != null && domain != null && path != null) {
+                                    sections.getOrPut(section!!) { mutableSetOf() } += "$domain:$path"
+                                }
+                            }
+                        }
+                    }
+                    org.xmlpull.v1.XmlPullParser.END_TAG -> {
+                        if (parser.name == section) section = null
+                    }
+                }
+                event = parser.next()
+            }
+            parser.close()
+            return sections
+        }
+
+        val legacy = exclusions(app.nota.notes.R.xml.backup_rules)
+        assertTrue(legacy.getValue("full-backup-content").contains("file:semantic-index/"))
+        val extraction = exclusions(app.nota.notes.R.xml.data_extraction_rules)
+        val cloud = extraction.getValue("cloud-backup")
+        assertTrue(cloud.contains("file:semantic-index/"))
+        assertEquals(cloud, extraction.getValue("device-transfer"))
     }
 
     @Test
