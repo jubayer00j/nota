@@ -22,6 +22,10 @@ import app.nota.data.preferences.SwipeAction
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
 import app.nota.ui.theme.NotaTheme
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -331,6 +335,70 @@ class NotesSwipeGhostUiTest {
             }
         } finally {
             runBlocking { preferences.setSwipeRightAction(SwipeAction.ARCHIVE) }
+        }
+    }
+
+    /** Codex R5 (PR #54): the row timestamp must be rendered with
+     *  the CURRENT default time zone every time it is composed.
+     *  F5 hoisted the formatter into a static (UPDATED_FORMAT),
+     *  which froze the zone captured when the file class loaded —
+     *  after a device time-zone change, rows kept showing the old
+     *  zone until the process restarted. Main always built the
+     *  formatter per call; the hoist is reverted, and this pins the
+     *  restored behaviour: a note composed under one default zone,
+     *  then recomposed after the default zone changes, must show
+     *  the new zone's rendering. Against the static the two steps
+     *  cannot both pass — it can only ever render its one captured
+     *  zone, and the two zones below render this instant on
+     *  different days. */
+    @Test
+    fun updatedLabel_followsTheCurrentTimeZone() {
+        val originalZone = TimeZone.getDefault()
+        // 2026-06-15T16:30:00Z: "15 Jun, 4:30 PM" in UTC,
+        // "16 Jun, 6:30 AM" in Pacific/Kiritimati (UTC+14).
+        val instant = 1_781_541_000_000L
+        fun referenceLabel(): String =
+            SimpleDateFormat("d MMM, h:mm a", Locale.getDefault())
+                .format(Date(instant))
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+            assertEquals("UTC", TimeZone.getDefault().id)
+            val utcLabel = referenceLabel()
+            runBlocking {
+                provider.current.noteDao()
+                    .upsert(note("zonepin", "Zone pin", updatedAt = instant))
+            }
+            awaitTrue("row label rendered in UTC") {
+                try {
+                    composeRule.onNodeWithText(utcLabel).assertIsDisplayed()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+
+            TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Kiritimati"))
+            assertEquals("Pacific/Kiritimati", TimeZone.getDefault().id)
+            val kiritimatiLabel = referenceLabel()
+            assertTrue(utcLabel != kiritimatiLabel)
+            // Same note, same updatedAt — only the body changes, so
+            // the row recomposes and must re-render its timestamp.
+            val pin = runBlocking { repository.getById("zonepin") }!!
+            runBlocking {
+                provider.current.noteDao()
+                    .upsert(pin.copy(plainText = "Zone pin body, edited"))
+            }
+            awaitTrue("row label re-rendered in the new zone") {
+                try {
+                    composeRule.onNodeWithText(kiritimatiLabel).assertIsDisplayed()
+                    composeRule.onNodeWithText(utcLabel).assertDoesNotExist()
+                    true
+                } catch (e: AssertionError) {
+                    false
+                }
+            }
+        } finally {
+            TimeZone.setDefault(originalZone)
         }
     }
 }

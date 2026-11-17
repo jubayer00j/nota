@@ -135,8 +135,25 @@ class DatabaseProvider(
     companion object {
         /** Test seam: a provider whose [current] is a prebuilt database
          *  (Robolectric tests build in-memory/temporary databases and
-         *  hand them over). Production code never uses this. */
-        fun forDatabase(context: Context, db: NotaDatabase): DatabaseProvider =
-            DatabaseProvider(context, NotaDatabase.GUEST_ACCOUNT, db)
+         *  hand them over). Production code never uses this.
+         *
+         *  The hand-over also runs [installLibraryMeta]: production
+         *  installs the write-generation machinery (counter row +
+         *  notes triggers) through the `NotaDatabase.build` callback
+         *  on create and on every open, but a prebuilt database never
+         *  saw that callback — Room creates the `library_meta` table
+         *  from the entity, yet cannot express its seed row or the
+         *  triggers. Without the install the generation silently
+         *  freezes at zero, and since R7 made the generation the
+         *  whole library stamp, every stamp-gated mechanism in the
+         *  harness (corpus cache, reconcile gate) froze with it —
+         *  13 failures across the five stamp-dependent Robolectric
+         *  classes in gate 43465738840, while production's sole
+         *  construction path was never affected. The install is
+         *  idempotent and is the same one the callback runs. */
+        fun forDatabase(context: Context, db: NotaDatabase): DatabaseProvider {
+            installLibraryMeta(db.openHelper.writableDatabase)
+            return DatabaseProvider(context, NotaDatabase.GUEST_ACCOUNT, db)
+        }
     }
 }

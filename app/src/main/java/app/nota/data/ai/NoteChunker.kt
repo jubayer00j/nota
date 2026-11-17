@@ -51,9 +51,17 @@ object NoteChunker {
         }
     }
 
+    /** Test seam (Performance chapter 2, F3/F8): counts [chunk]
+     *  invocations so tests can pin that unchanged notes are never
+     *  re-chunked. Production code never reads it. */
+    @Volatile
+    var chunkInvocations: Int = 0
+        private set
+
     /** Splits a note into embedding passages; empty for a note
      *  with no title and no body text. */
     fun chunk(title: String, plainText: String): List<String> {
+        chunkInvocations++
         val text = embeddedText(title, plainText)
         if (text.isBlank()) return emptyList()
         val blocks = text.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
