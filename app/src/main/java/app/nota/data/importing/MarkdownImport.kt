@@ -827,6 +827,11 @@ object MarkdownImporter {
                 )
                 continue
             }
+            // Defence in depth for direct callers: the ZIP path
+            // already enforces this cap in bytes at read time (see
+            // parseImportZip). String.length is UTF-16 units, not
+            // UTF-8 bytes, so it can only ever trip for text supplied
+            // pre-built, never for ZIP members.
             if (file.text.length > ImportCaps.MAX_IMPORT_FILE_BYTES) {
                 result.skippedFiles += SkippedImportFile(file.name, "File is larger than 100 MB.")
                 continue
@@ -912,17 +917,24 @@ object MarkdownImporter {
             reader.walk { entry ->
                 if (entry.name.endsWith("/")) return@walk
                 if (Regex("\\.(md|markdown|txt)$", RegexOption.IGNORE_CASE).containsMatchIn(entry.name)) {
-                    val text = entry.readTextUpTo(app.nota.data.backup.BackupQuota.MAX_UNCOMPRESSED_BYTES)
-                    if (text == null) {
+                    // The per-file cap is enforced in BYTES before the
+                    // member is retained: readBytesUpTo returns null
+                    // past 100 MiB without buffering the whole member
+                    // (the old code buffered under the 512 MiB archive
+                    // cap, then checked String.length — a multibyte file
+                    // could pass the character count while far exceeding
+                    // 100 MiB on disk).
+                    val bytes = entry.readBytesUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
+                    if (bytes == null) {
                         result.skippedFiles += SkippedImportFile(
                             importBaseName(entry.name),
-                            "Couldn't be read from the ZIP.",
+                            "File is larger than 100 MB.",
                         )
                     } else {
                         files += MarkdownFileInput(
                             name = importBaseName(entry.name),
                             path = entry.name,
-                            text = text,
+                            text = bytes.toString(Charsets.UTF_8),
                             lastModified = if (entry.time > 0) entry.time else 0L,
                         )
                     }

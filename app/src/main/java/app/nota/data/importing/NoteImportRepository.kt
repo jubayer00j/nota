@@ -154,6 +154,10 @@ class NoteImportRepository(
                     "No Markdown or text files in that selection.",
                 )
             }
+            // The per-source caps (5,000 per ZIP / per file list) do
+            // not bound the merged run on their own — enforce the cap
+            // across the whole selection here.
+            merged.enforceNoteCap()
             val run = importNotes(merged.notes, onProgress)
             ImportOutcome(merged, run.report, run.imageSaveFailures)
         } finally {
@@ -230,9 +234,16 @@ class NoteImportRepository(
             return tag
         }
 
-        val total = imported.size
+        // Defence in depth: the run-level cap (enforced at the merge
+        // by every selection path) is re-checked here so no caller can
+        // push more than 5,000 notes through the engine. Excess notes
+        // are reported as failed, never silently dropped.
+        val overCap = imported.drop(ImportCaps.MAX_IMPORT_NOTES)
+        val capped = imported.take(ImportCaps.MAX_IMPORT_NOTES)
+
+        val total = capped.size
         var done = 0
-        for (item in imported) {
+        for (item in capped) {
             try {
                 val key = dedupeKey(item.title, item.createdAt)
                 if (key in seen) {
@@ -255,6 +266,11 @@ class NoteImportRepository(
             }
             done++
             onProgress(done, total)
+        }
+
+        if (overCap.isNotEmpty()) {
+            failed += overCap.size
+            failedNames += overCap.map { it.sourceName }
         }
 
         if (importedCount > 0 || failed > 0) {
@@ -316,10 +332,15 @@ class NoteImportRepository(
                     // The image itself failed to save (a format the
                     // pipeline can't decode, e.g. SVG): keep the alt
                     // text in its place rather than losing the note,
-                    // and count it — no silent drops.
+                    // and count it — no silent drops. A null token
+                    // (Keep attachments, appended at the end) gets the
+                    // same fallback as an appended paragraph; a blank
+                    // alt has nothing to preserve.
                     saveFailures++
                     if (image.token != null) {
                         content = content.replace(image.token, escapeImportHtml(image.alt))
+                    } else if (image.alt.isNotBlank()) {
+                        content += "<p>${escapeImportHtml(image.alt)}</p>"
                     }
                 } finally {
                     if (image.deleteAfterUse) runCatching { image.stagedFile.delete() }

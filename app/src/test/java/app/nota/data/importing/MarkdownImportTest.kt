@@ -210,6 +210,47 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun enforceNoteCapTruncatesMergedSourcesIntoSkippedFiles() {
+        // Two capped sources merged into one run: 2,501 + 2,500 notes
+        // must come out as exactly 5,000 notes, with the one excess
+        // reported — never silently dropped.
+        val result = ImportParseResult()
+        val first = ImportParseResult()
+        repeat(2_501) { i ->
+            first.notes += ImportedNote(
+                title = "First $i", contentHtml = "<p>x</p>",
+                createdAt = 1_700_000_000_000L + i, updatedAt = 1_700_000_000_000L,
+                pinned = false, archived = false, trashedAt = null,
+                tagNames = emptyList(), folderName = null, images = emptyList(),
+                sourceName = "first-$i.md",
+            )
+        }
+        val second = ImportParseResult()
+        repeat(2_500) { i ->
+            second.notes += ImportedNote(
+                title = "Second $i", contentHtml = "<p>x</p>",
+                createdAt = 1_800_000_000_000L + i, updatedAt = 1_800_000_000_000L,
+                pinned = false, archived = false, trashedAt = null,
+                tagNames = emptyList(), folderName = null, images = emptyList(),
+                sourceName = "second-$i.md",
+            )
+        }
+        result.absorb(first)
+        result.absorb(second)
+        result.enforceNoteCap()
+        assertEquals(5_000, result.notes.size)
+        assertEquals(
+            listOf(
+                SkippedImportFile(
+                    "second-2499.md",
+                    "Import limit reached (5,000 notes per run).",
+                ),
+            ),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
     fun normaliseImportPathResolvesDots() {
         assertEquals("a/c", normaliseImportPath("a/./b/../c"))
         assertEquals("x/y", normaliseImportPath("/x/y"))

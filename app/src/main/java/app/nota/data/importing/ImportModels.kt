@@ -78,6 +78,22 @@ class ImportParseResult {
         imagesUnresolved += other.imagesUnresolved
         coloredNotes += other.coloredNotes
     }
+
+    /** The 5,000-note cap applies to the whole run, not per source:
+     *  merging several capped sources can still exceed it. Excess
+     *  notes are dropped into [skippedFiles] with the same reason the
+     *  per-source caps use — never silently dropped. */
+    fun enforceNoteCap() {
+        if (notes.size <= ImportCaps.MAX_IMPORT_NOTES) return
+        val excess = notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).toList()
+        notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).clear()
+        for (note in excess) {
+            skippedFiles += SkippedImportFile(
+                note.sourceName,
+                "Import limit reached (5,000 notes per run).",
+            )
+        }
+    }
 }
 
 /** The engine's write report — 1.x `ImportReport` verbatim. */

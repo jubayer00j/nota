@@ -297,4 +297,124 @@ class NoteImportRobolectricTest {
         assertEquals(1, result.imageSaveFailures)
         assertEquals("<p>a missing image</p>", stack.db.noteDao().getAll().single().contentHtml)
     }
+
+    @Test
+    fun keepAttachmentsResolveRegardlessOfArchiveOrder() {
+        // F1: the parser converts one JSON at a time after a names-only
+        // pass, so attachment resolution must not depend on whether an
+        // image entry sits before or after its JSON in the archive.
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/late.json" to """{"title":"Late","textContent":"l","attachments":[{"filePath":"Takeout/Keep/late.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+                "Takeout/Keep/early.json" to """{"title":"Early","textContent":"e","attachments":[{"filePath":"Takeout/Keep/early.png","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}""",
+            ),
+            mapOf(
+                "Takeout/Keep/late.png" to pngBytes,
+                "Takeout/Keep/early.png" to pngBytes,
+            ),
+        )
+        val result = KeepTakeoutParser.parse(zip, stagingDir())
+        assertEquals(2, result.notes.size)
+        assertEquals(0, result.attachmentsSkipped)
+        assertEquals(1, result.notes.first { it.title == "Late" }.images.size)
+        assertEquals(1, result.notes.first { it.title == "Early" }.images.size)
+    }
+
+    @Test
+    fun sharedKeepImageEmbedsInBothNotes() = runBlocking {
+        // F2: attachments stream to one temp file per entry, then each
+        // referencing note gets its own staged copy — a shared image
+        // must survive in every note that references it.
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/one.json" to """{"title":"One","textContent":"o","attachments":[{"filePath":"Takeout/Keep/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+                "Takeout/Keep/two.json" to """{"title":"Two","textContent":"t","attachments":[{"filePath":"Takeout/Keep/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}""",
+            ),
+            mapOf("Takeout/Keep/shared.png" to pngBytes),
+        )
+        val stack = newStack()
+        val outcome = stack.repo.importKeepZip(zip)
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.imageSaveFailures)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "One" }.contentHtml.contains("nota-attachment://"))
+        assertTrue(notes.first { it.title == "Two" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(2, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun markdownZipMemberOverByteCapIsSkipped() {
+        // F3: 34,952,534 CJK characters = 104,857,602 UTF-8 bytes —
+        // over the 100 MiB byte cap, but under it as a character
+        // count. The old code buffered it and let the char-count check
+        // pass; the byte cap at read time must reject it.
+        val big = "字".repeat(34_952_534)
+        val zip = zipOf(linkedMapOf("big.md" to big))
+        val result = MarkdownImporter.parseImportZip(zip, stagingDir())
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("big.md", "File is larger than 100 MB.")),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun importNotesCapsAcrossTheWholeRun() = runBlocking {
+        // F4: the engine-level guard — 5,001 identical notes: the
+        // first writes, the next 4,999 are duplicates, and the one
+        // past the cap is reported as failed, never silently dropped.
+        val stack = newStack()
+        val notes = (0..5_000).map { i ->
+            ImportedNote(
+                title = "Cap", contentHtml = "<p>x</p>",
+                createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+                pinned = false, archived = false, trashedAt = null,
+                tagNames = emptyList(), folderName = null, images = emptyList(),
+                sourceName = "cap-$i.md",
+            )
+        }
+        val result = stack.repo.importNotes(notes)
+        assertEquals(1, result.report.imported)
+        assertEquals(4_999, result.report.duplicates)
+        assertEquals(1, result.report.failed)
+        assertEquals(listOf("cap-5000.md"), result.report.failedNames)
+    }
+
+    @Test
+    fun unsaveableImageWithNullTokenKeepsAltText() = runBlocking {
+        // F5: a Keep-style image (null token, appended at the end)
+        // that fails to save must still leave its alt text in the
+        // note, as an appended paragraph.
+        val stack = newStack()
+        val missing = File(stagingDir(), "gone.png")
+        val note = ImportedNote(
+            title = "MissingKeepImage",
+            contentHtml = "<p>Body text</p>",
+            createdAt = 1_700_000_000_000L,
+            updatedAt = 1_700_000_000_000L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = listOf(
+                ImportedImage(
+                    name = "gone.png",
+                    mimeType = "image/png",
+                    stagedFile = missing,
+                    sizeBytes = 123L,
+                    alt = "a missing image",
+                    token = null,
+                ),
+            ),
+            sourceName = "missing-keep.json",
+        )
+        val result = stack.repo.importNotes(listOf(note))
+        assertEquals(1, result.report.imported)
+        assertEquals(1, result.imageSaveFailures)
+        assertEquals(
+            "<p>Body text</p><p>a missing image</p>",
+            stack.db.noteDao().getAll().single().contentHtml,
+        )
+    }
 }

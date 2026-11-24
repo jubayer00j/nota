@@ -15,8 +15,11 @@ import org.json.JSONObject
  *
  * Nota divergences: task lists use Nota's own serialiser shape (see
  * MarkdownImport's header), text bodies go through [PlainTextCodec],
- * and attachment bytes are staged to files (two walks of the archive:
- * notes first, then only the attachments they reference).
+ * and attachment bytes are staged to files (three walks of the archive:
+ * entry names first, then one JSON at a time, then only the attachments
+ * the notes reference — at most one JSON string and zero image byte
+ * arrays are ever retained in memory, so a large Takeout can't OOM
+ * the import on a 1 GB-RAM device).
  */
 object KeepTakeoutParser {
 
@@ -51,69 +54,84 @@ object KeepTakeoutParser {
         stagingDir.mkdirs()
         val reader = ZipImportReader(zipFile)
 
-        // Pass 1: read every .json entry (bounded per file); all other
-        // entries are drained + counted by the walker.
-        val jsonTexts = LinkedHashMap<String, String?>()
+        // Pass 1: entry names only. The walker retains names (8 MiB
+        // budget) and counts every byte under the archive quota; no
+        // file contents are buffered at all.
         try {
-            reader.walk { entry ->
-                if (entry.name.endsWith("/")) return@walk
-                if (!entry.name.lowercase().endsWith(".json")) return@walk
-                jsonTexts[entry.name] = entry.readTextUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
-            }
+            reader.walk { /* names only; the walker drains + counts */ }
         } catch (e: ImportZipException) {
             result.skippedFiles += SkippedImportFile("Takeout ZIP", e.message ?: "That ZIP couldn't be read.")
             return result
         }
 
-        val jsonNames = jsonTexts.keys.toList()
+        val jsonNames = reader.entryNames.filter { it.lowercase().endsWith(".json") }
         val inKeep = jsonNames.filter { name ->
             name.split('/').any { segment -> segment.equals("keep", ignoreCase = true) }
         }
         val candidates = if (inKeep.isNotEmpty()) inKeep else jsonNames
+        val candidateSet = candidates.toSet()
 
-        // Convert the JSONs; image attachments are resolved to entry
-        // names now and extracted in pass 2.
+        // Pass 2: convert one JSON at a time. Each raw string is
+        // dropped as soon as its draft is built, so at most one JSON
+        // is ever retained — a Takeout of many large notes no longer
+        // holds hundreds of MiB alive while parsing. Attachment
+        // resolution uses the complete name list from pass 1, so it
+        // works no matter where an attachment sits in the archive.
         val drafts = mutableListOf<KeepDraft>()
-        for (name in candidates) {
-            val base = importBaseName(name)
-            if (drafts.size >= ImportCaps.MAX_IMPORT_NOTES) {
-                result.skippedFiles += SkippedImportFile(
-                    base,
-                    "Import limit reached (5,000 notes per run).",
-                )
-                continue
+        try {
+            reader.walk { entry ->
+                if (entry.name !in candidateSet) return@walk
+                val base = importBaseName(entry.name)
+                if (drafts.size >= ImportCaps.MAX_IMPORT_NOTES) {
+                    result.skippedFiles += SkippedImportFile(
+                        base,
+                        "Import limit reached (5,000 notes per run).",
+                    )
+                    return@walk
+                }
+                val raw = entry.readTextUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
+                if (raw == null) {
+                    result.skippedFiles += SkippedImportFile(base, "File is larger than 100 MB.")
+                    return@walk
+                }
+                val json = try {
+                    JSONObject(raw)
+                } catch (e: Exception) {
+                    result.skippedFiles += SkippedImportFile(base, "Not valid JSON — skipped.")
+                    return@walk
+                }
+                val draft = keepJsonToDraft(json, base, reader.entryNames, result)
+                if (draft != null) drafts += draft
             }
-            val raw = jsonTexts[name]
-            if (raw == null) {
-                result.skippedFiles += SkippedImportFile(base, "File is larger than 100 MB.")
-                continue
-            }
-            val json = try {
-                JSONObject(raw)
-            } catch (e: Exception) {
-                result.skippedFiles += SkippedImportFile(base, "Not valid JSON — skipped.")
-                continue
-            }
-            val draft = keepJsonToDraft(json, base, reader.entryNames, result)
-            if (draft != null) drafts += draft
+        } catch (e: ImportZipException) {
+            // Pass 1 already counted the same bytes under the quota, so
+            // this is unreachable in practice; the whole archive is
+            // abandoned rather than partially applied.
+            result.skippedFiles += SkippedImportFile("Takeout ZIP", e.message ?: "That ZIP couldn't be read.")
+            return result
         }
 
-        // Pass 2: extract the referenced attachment entries. Bytes are
-        // read once per entry and written per referencing note (each
-        // note owns its staged copy — the engine deletes it after the
-        // save attempt).
+        // Pass 3: stream each referenced attachment entry straight to
+        // a per-entry temp file — image bytes are never held in memory.
+        // Each note then gets its own staged copy of the temp file (the
+        // engine deletes it after the save attempt, so notes can't
+        // share one file).
         val wanted = drafts.flatMap { it.attachments }.map { it.entryName }.toSet()
-        val extracted = HashMap<String, ByteArray?>()
+        val stagedByEntry = HashMap<String, File?>()
         if (wanted.isNotEmpty()) {
+            var entryIndex = 0
             try {
                 reader.walk { entry ->
                     if (entry.name in wanted) {
-                        extracted[entry.name] = entry.readBytesUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
+                        val temp = File(stagingDir, "keep-entry-${entryIndex++}.tmp")
+                        val ok = entry.copyToUpTo(temp, ImportCaps.MAX_IMPORT_FILE_BYTES)
+                        // copyToUpTo deletes the target when over the cap.
+                        stagedByEntry[entry.name] = if (ok) temp else null
                     }
                 }
             } catch (e: ImportZipException) {
-                // Pass 1 already counted the whole archive under the
-                // quota, so this is unreachable in practice; anything
+                // The archive was already counted twice under the quota,
+                // so this is unreachable in practice; anything
                 // unextracted is counted as skipped below.
             }
         }
@@ -122,14 +140,14 @@ object KeepTakeoutParser {
         for (draft in drafts) {
             val images = mutableListOf<ImportedImage>()
             for (spec in draft.attachments) {
-                val bytes = extracted[spec.entryName]
-                if (bytes == null) {
+                val temp = stagedByEntry[spec.entryName]
+                if (temp == null) {
                     result.attachmentsSkipped += 1
                     continue
                 }
                 val staged = File(stagingDir, stagingFileName(spec.filePath, usedNames))
                 try {
-                    staged.writeBytes(bytes)
+                    temp.copyTo(staged, overwrite = true)
                 } catch (e: Exception) {
                     result.attachmentsSkipped += 1
                     continue
@@ -138,7 +156,7 @@ object KeepTakeoutParser {
                     name = importBaseName(spec.filePath),
                     mimeType = spec.mimeType,
                     stagedFile = staged,
-                    sizeBytes = bytes.size.toLong(),
+                    sizeBytes = temp.length(),
                     alt = importBaseName(spec.filePath),
                     token = null, // appended at the end of the content, in order
                 )
