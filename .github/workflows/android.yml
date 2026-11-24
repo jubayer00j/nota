@@ -1,5 +1,10 @@
 name: Build Android App
 
+# Least privilege (SEC-07): the gate only reads the repo and uploads
+# test/APK artifacts, which the runtime token still permits.
+permissions:
+  contents: read
+
 on:
   push:
     branches: ["main"]
@@ -139,6 +144,7 @@ jobs:
   # of its own.)
   test-fast-a:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -272,6 +278,7 @@ jobs:
 
   test-fast-b:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -374,6 +381,7 @@ jobs:
 
   test-fast-b2:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -426,6 +434,7 @@ jobs:
 
   test-fast-b3:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -492,6 +501,7 @@ jobs:
 
   test-ui:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -551,6 +561,7 @@ jobs:
   build-android:
     needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-ui]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository

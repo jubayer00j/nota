@@ -275,18 +275,38 @@ object BackupCrypto {
      * verifying the GCM tag via doFinal — any failure raises
      * [BackupUnlockError] and the caller deletes the temp file. Only when
      * this returns has decryption succeeded; the DB is untouched until then.
+     *
+     * The plaintext is counted as it streams out and capped at
+     * [maxPlainBytes] (Carbon audit SEC-04a): a crafted archive must not
+     * be able to decrypt into an unbounded temp ZIP before
+     * [BackupReader]'s own quotas ever see it. A trip raises
+     * [BackupError] with the shared too-large message — NOT the
+     * passphrase-flavoured [BackupUnlockError].
      */
-    fun decryptTo(envelope: OpenedEnvelope, bmk: ByteArray, zipOut: OutputStream) {
+    fun decryptTo(
+        envelope: OpenedEnvelope,
+        bmk: ByteArray,
+        zipOut: OutputStream,
+        maxPlainBytes: Long = BackupQuota.MAX_DECRYPTED_ZIP_BYTES,
+    ) {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(bmk, "AES"), GCMParameterSpec(128, envelope.iv))
+        var written = 0L
+        fun emit(bytes: ByteArray) {
+            written += bytes.size
+            if (written > maxPlainBytes) throw BackupError(BACKUP_TOO_LARGE_MESSAGE)
+            zipOut.write(bytes)
+        }
         try {
             envelope.ctStream.pumpDecoded { bytes, offset, length ->
                 val plain = cipher.update(bytes, offset, length)
-                if (plain != null && plain.isNotEmpty()) zipOut.write(plain)
+                if (plain != null && plain.isNotEmpty()) emit(plain)
             }
             val tail = cipher.doFinal()
-            if (tail.isNotEmpty()) zipOut.write(tail)
+            if (tail.isNotEmpty()) emit(tail)
             zipOut.flush()
+        } catch (e: BackupError) {
+            throw e
         } catch (e: BackupUnlockError) {
             throw e
         } catch (e: Exception) {
