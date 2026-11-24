@@ -6,9 +6,9 @@ import java.io.InputStream
 
 /**
  * Guards for staging files picked through SAF before the import engine
- * ever sees them. The pickers accept `*/*`, so without a guard a huge
- * unsupported file — or a giant compressed ZIP — was copied into cache
- * in full before any type or size check ran (Codex R2).
+ * ever sees them. The pickers accept any MIME type, so without a guard
+ * a huge unsupported file — or a giant compressed ZIP — was copied into
+ * cache in full before any type or size check ran (Codex R2).
  *
  * - [isSupportedPick] is the extension gate, checked BEFORE any copy.
  *   The set mirrors what the engine accepts: ZIPs, Markdown/text, and
