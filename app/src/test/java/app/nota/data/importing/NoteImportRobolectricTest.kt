@@ -262,13 +262,16 @@ class NoteImportRobolectricTest {
     }
 
     @Test
-    fun undecodableImageKeepsAltTextAndCountsAsSaveFailure() = runBlocking {
+    fun unsaveableImageKeepsAltTextAndCountsAsSaveFailure() = runBlocking {
         val stack = newStack()
-        val svg = File(stagingDir(), "x.svg").apply {
-            writeText("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")
-        }
+        // A staged file that isn't there: AttachmentStore throws on the
+        // stream open, deterministically, in any environment (a decode
+        // failure would depend on the bitmap shadow under Robolectric).
+        // The engine must keep the note, swap the token for the alt
+        // text, and count the failure — no silent drop.
+        val missing = File(stagingDir(), "gone.png")
         val note = ImportedNote(
-            title = "SvgNote",
+            title = "MissingImageNote",
             contentHtml = "<p>%%NOMA_IMPORT_IMAGE_0%%</p>",
             createdAt = 1_700_000_000_000L,
             updatedAt = 1_700_000_000_000L,
@@ -279,19 +282,19 @@ class NoteImportRobolectricTest {
             folderName = null,
             images = listOf(
                 ImportedImage(
-                    name = "x.svg",
-                    mimeType = "image/svg+xml",
-                    stagedFile = svg,
-                    sizeBytes = svg.length(),
-                    alt = "an svg",
+                    name = "gone.png",
+                    mimeType = "image/png",
+                    stagedFile = missing,
+                    sizeBytes = 123L,
+                    alt = "a missing image",
                     token = "%%NOMA_IMPORT_IMAGE_0%%",
                 ),
             ),
-            sourceName = "svg.md",
+            sourceName = "missing.md",
         )
         val result = stack.repo.importNotes(listOf(note))
         assertEquals(1, result.report.imported)
         assertEquals(1, result.imageSaveFailures)
-        assertEquals("<p>an svg</p>", stack.db.noteDao().getAll().single().contentHtml)
+        assertEquals("<p>a missing image</p>", stack.db.noteDao().getAll().single().contentHtml)
     }
 }
