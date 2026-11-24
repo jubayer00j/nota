@@ -341,7 +341,15 @@ jobs:
       # it touches no AI code — a fork-composition interaction
       # (Robolectric sandbox/classloader neighbours). B2 keeps
       # its pre-4.1 composition, which was green on main.
-      - name: Run fast unit tests (shard B, 21 of 48 shard-B classes)
+      # Phase 10 (PR #57): shard B's own list is split AGAIN,
+      # into B + B4 below. On 2026-11-24 the combined B step
+      # (~13 min by then) was killed by runner shutdown signals
+      # on consecutive attempts while every shorter shard
+      # completed; halving the step is the same remedy as the
+      # 3.8 three-way split. The PARTITION is unchanged in
+      # total: B ∪ B2 ∪ B3 ∪ B4 is exactly the old shard-B
+      # class list, each class in exactly one B shard.
+      - name: Run fast unit tests (shard B, 12 of 51 shard-B classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiBackupExclusionTest" \
@@ -356,6 +364,55 @@ jobs:
             --tests "app.nota.data.sync.SyncApplierDeviceLocalTest" \
             --tests "app.nota.data.drive.DriveRepositoryTest" \
             --tests "app.nota.data.html.NoteDocumentTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-B test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-b
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  # Phase 10 (PR #57): the second half of shard B's class list —
+  # see the split history above test-fast-b's run step. Structurally
+  # a clone of test-fast-b2/test-fast-b3.
+  test-fast-b4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run fast unit tests (shard B4, 11 of 51 shard-B classes)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.html.NoteDocumentNestedTest" \
             --tests "app.nota.data.html.TaskTreeTest" \
             --tests "app.nota.data.preferences.PreferencesSwipeActionTest" \
@@ -369,11 +426,11 @@ jobs:
             --tests "app.nota.feature.widget.WidgetDataSourceRobolectricTest" \
             --stacktrace
 
-      - name: Upload fast-shard-B test reports
+      - name: Upload fast-shard-B4 test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unit-test-evidence-fast-b
+          name: unit-test-evidence-fast-b4
           path: |
             app/build/probe-output
             app/build/reports/tests
@@ -559,7 +616,7 @@ jobs:
           if-no-files-found: ignore
 
   build-android:
-    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-ui]
+    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-fast-b4, test-ui]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
