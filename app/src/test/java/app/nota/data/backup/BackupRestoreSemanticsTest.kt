@@ -361,6 +361,62 @@ class BackupRestoreSemanticsTest {
     }
 
     @Test
+    fun quota_attachmentJsonTail_countsAgainstQuota() {
+        val attJson = """{"id": "att-q", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                // Valid attachment JSON followed by a 20,000-char tail in
+                // the SAME entry: the parser stops at the closing '}',
+                // so the tail must still be charged by the counted drain
+                // (SEC-04a / Codex PR #57 R1) — otherwise closeEntry()
+                // would inflate it uncounted.
+                "attachments/att-q.json" to attJson + " ".repeat(20_000),
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 100, maxUncompressedBytes = 4_096, maxDecryptedZipBytes = 1_000_000),
+        )
+        try {
+            reader.read(zip, null)
+            fail("expected BackupError")
+        } catch (e: BackupError) {
+            assertTrue(e.message!!.contains("too large"))
+        }
+    }
+
+    @Test
+    fun quota_attachmentJsonSmallTail_readsCleanly() {
+        val attJson = """{"id": "att-q", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                "attachments/att-q.json" to attJson + " ".repeat(100),
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 100, maxUncompressedBytes = 1_000_000, maxDecryptedZipBytes = 1_000_000),
+        )
+        val handle = reader.read(zip, null)
+        try {
+            assertEquals(listOf("One"), handle.notes.map { it.title })
+            val staged = handle.attachments.single()
+            assertEquals("att-q", staged.meta.id)
+            assertEquals("hello", staged.stagedFile.readText())
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
     fun quota_encryptedArchive_decryptedZipCapTrips_failsCleanly() {
         val plainZip = payloadZip(listOf(noteJson("q-sealed", "Sealed", 1000)))
         val sealed = File.createTempFile("sealed-quota", ".zip")

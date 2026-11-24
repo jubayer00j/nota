@@ -224,42 +224,47 @@ class BackupReader(
                     // (SEC-04a) trips while streaming — not after the
                     // entry has been inflated into memory or a file.
                     val counted = CountingInputStream(zip, counter)
-                    try {
-                        when {
-                            name == "manifest.json" -> {
-                                manifest = parseManifest(readEntryText(counted))
-                                deviceId = manifest?.deviceId
-                            }
-                            name == "folders.json" ->
-                                folders = parseFolders(readEntryTextStrict(counted, name))
-                            name == "tags.json" ->
-                                tags = parseTags(readEntryTextStrict(counted, name))
-                            name == "reminders.json" ->
-                                reminders = parseReminders(readEntryTextStrict(counted, name))
-                            name == "settings.json" -> {
-                                // Never imported (device-local credentials
-                                // by design); the entry is drained only.
-                                drainEntry(counted)
-                            }
-                            name == "sync.json" -> {
-                                val parsed = parseSyncTolerant(readEntryText(counted))
-                                if (parsed != null) {
-                                    tombstones = parsed.first
-                                    if (parsed.second != null) deviceId = parsed.second
-                                }
-                            }
-                            name.startsWith("notes/") && name.endsWith(".json") -> {
-                                parseNoteOrNull(readEntryText(counted))?.let { notes += it }
-                            }
-                            name.startsWith("attachments/") && name.endsWith(".json") &&
-                                !name.endsWith("index.json") -> {
-                                parseAttachmentEntry(counted, stagingDir)?.let { attachments += it }
-                            }
-                            else -> drainEntry(counted) // raw attachment entries etc: drained (streaming), names pass below
+                    when {
+                        name == "manifest.json" -> {
+                            manifest = parseManifest(readEntryText(counted))
+                            deviceId = manifest?.deviceId
                         }
-                    } finally {
-                        zip.closeEntry()
+                        name == "folders.json" ->
+                            folders = parseFolders(readEntryTextStrict(counted, name))
+                        name == "tags.json" ->
+                            tags = parseTags(readEntryTextStrict(counted, name))
+                        name == "reminders.json" ->
+                            reminders = parseReminders(readEntryTextStrict(counted, name))
+                        name == "settings.json" -> {
+                            // Never imported (device-local credentials
+                            // by design); the entry is drained only.
+                            drainEntry(counted)
+                        }
+                        name == "sync.json" -> {
+                            val parsed = parseSyncTolerant(readEntryText(counted))
+                            if (parsed != null) {
+                                tombstones = parsed.first
+                                if (parsed.second != null) deviceId = parsed.second
+                            }
+                        }
+                        name.startsWith("notes/") && name.endsWith(".json") -> {
+                            parseNoteOrNull(readEntryText(counted))?.let { notes += it }
+                        }
+                        name.startsWith("attachments/") && name.endsWith(".json") &&
+                            !name.endsWith("index.json") -> {
+                            parseAttachmentEntry(counted, stagingDir)?.let { attachments += it }
+                        }
+                        else -> drainEntry(counted) // raw attachment entries etc: drained (streaming), names pass below
                     }
+                    // Charge any unread tail through the counted stream
+                    // (the attachment parser stops at the closing '}',
+                    // so a tail after valid JSON would otherwise be
+                    // drained uncounted by closeEntry() below — SEC-04a).
+                    // On any failure the restore aborts, so there is
+                    // nothing to drain: the outer use{} closes the
+                    // stream and abandons the entry without inflating it.
+                    drainEntry(counted)
+                    zip.closeEntry()
                 }
             }
         } catch (e: BackupError) {
