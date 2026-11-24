@@ -194,10 +194,12 @@ class NoteImportRepository(
             if (trimmed.isEmpty()) return null
             val key = trimmed.lowercase()
             folderByName[key]?.let { return it }
+            val now = System.currentTimeMillis()
             val folder = FolderEntity(
                 id = UUID.randomUUID().toString(),
                 name = trimmed,
-                createdAt = System.currentTimeMillis(),
+                createdAt = now,
+                updatedAt = now,
             )
             folderDao.upsert(folder)
             folderByName[key] = folder.id
