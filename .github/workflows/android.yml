@@ -149,11 +149,17 @@ jobs:
   # stable across three runs (130.1 / 134.6 / 132.6) — against
   # 14.6–68.8s for every other shard, and the runner fleet
   # killed B 17 times in one evening. DriveRepositoryTest now
-  # runs ALONE in the new test-fast-b5; fast-a's two heaviest
-  # classes (AppLockManagerSetupTest 20.0s, AiSettingsStoreTest
-  # 8.9s) move to test-fast-b4. The five balanced shards sit at
-  # 34–44s of measured class time each; the partition total is
-  # unchanged (124 classes, each in exactly one fast shard).
+  # runs ALONE in the new test-fast-b5; fast-a's heaviest
+  # class (AppLockManagerSetupTest 20.0s) moves to test-fast-b4.
+  # The five balanced shards sit at 35–49s of measured class
+  # time each; the partition total is unchanged (124 classes,
+  # each in exactly one fast shard). LANDMINE found while
+  # rebalancing: GuestLibraryTransferTest (fast-a) fails with
+  # SQLITE_BUSY in NotaDatabase's onOpen callback when
+  # AiSettingsStoreTest leaves fast-a — removing it shifted the
+  # forkEvery=25 boundaries and changed the test's fork/sandbox
+  # neighbours. AiSettingsStoreTest therefore STAYS in fast-a;
+  # keep it ahead of GuestLibraryTransferTest in the partition.
   # test-fast-b2's list is deliberately UNCHANGED — the Phase
   # 4.1 fork-pool landmine documented above still applies.
   # Every test job also restores a cached Robolectric runtime
@@ -252,11 +258,12 @@ jobs:
           fi
           rm -rf app/build/reports/tests app/build/test-results
 
-      - name: Run fast unit tests (shard A, 71 classes)
+      - name: Run fast unit tests (shard A, 72 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
             --tests "app.nota.data.ai.AiProviderHelpTest" \
+            --tests "app.nota.data.ai.AiSettingsStoreTest" \
             --tests "app.nota.data.ai.AskNotaTest" \
             --tests "app.nota.data.ai.NoteChunkerTest" \
             --tests "app.nota.data.ai.SemanticIndexCacheSlotTest" \
@@ -557,7 +564,7 @@ jobs:
           fi
           rm -rf app/build/reports/tests app/build/test-results
 
-      - name: Run fast unit tests (shard B4, 13 classes)
+      - name: Run fast unit tests (shard B4, 12 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.html.NoteDocumentNestedTest" \
@@ -572,7 +579,6 @@ jobs:
             --tests "app.nota.data.capture.ShareIntentsRobolectricTest" \
             --tests "app.nota.feature.widget.WidgetDataSourceRobolectricTest" \
             --tests "app.nota.data.security.AppLockManagerSetupTest" \
-            --tests "app.nota.data.ai.AiSettingsStoreTest" \
             --stacktrace
 
       - name: Upload fast-shard-B4 test reports
