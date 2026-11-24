@@ -169,6 +169,16 @@ jobs:
   # is never downloaded mid-step again: the 2026-11-24
   # MavenArtifactFetcher flake failed EVERY Robolectric class
   # in a shard at sandbox boot when its download died.)
+  # (Fix round, same PR: the suite needs TWO android-all
+  # runtimes — SDK 35 for the @Config(sdk = [35]) classes and
+  # SDK 36 for the unpinned ones (targetSdk default). The
+  # first probe fetched only SDK 35; the SDK 36 download then
+  # flaked mid-step and killed six classes at sandbox boot.
+  # The probe now runs one class of each kind, checks the
+  # local repository for both runtimes first, and forces a
+  # real (uncached) execution when either is missing. The
+  # cache key moved to a v2 prefix because the v1 entry,
+  # saved by the first job to finish, held only SDK 35.)
   test-fast-a:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -208,9 +218,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
@@ -230,19 +240,33 @@ jobs:
           fi
 
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
               --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
               --stacktrace
           }
           ok=0
@@ -254,6 +278,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
@@ -384,9 +409,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
@@ -433,19 +458,33 @@ jobs:
       # total: B ∪ B2 ∪ B3 ∪ B4 is exactly the old shard-B
       # class list, each class in exactly one B shard.
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
               --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
               --stacktrace
           }
           ok=0
@@ -457,6 +496,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
@@ -519,9 +559,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       - name: Materialise google-services.json
         env:
@@ -536,19 +576,33 @@ jobs:
           fi
 
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
               --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
               --stacktrace
           }
           ok=0
@@ -560,6 +614,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
@@ -627,9 +682,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       - name: Materialise google-services.json
         env:
@@ -644,19 +699,33 @@ jobs:
           fi
 
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
               --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
               --stacktrace
           }
           ok=0
@@ -668,6 +737,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
@@ -716,9 +786,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       - name: Materialise google-services.json
         env:
@@ -733,19 +803,33 @@ jobs:
           fi
 
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
               --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
               --stacktrace
           }
           ok=0
@@ -757,6 +841,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
@@ -812,9 +897,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       - name: Materialise google-services.json
         env:
@@ -829,19 +914,33 @@ jobs:
           fi
 
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
               --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
               --stacktrace
           }
           ok=0
@@ -853,6 +952,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
@@ -932,9 +1032,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-
+            robolectric-4.16.1-v2-
 
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
@@ -954,19 +1054,31 @@ jobs:
           fi
 
       # CI pipeline hardening (2026-11-24): prefetch probe —
-      # run ONE cheap Robolectric class through the real test
-      # task BEFORE the shard step, so the android-all runtime
-      # is downloaded (or confirmed cached) here, with retries,
-      # instead of mid-step, where a download flake fails every
-      # class at sandbox boot. The UI probe also pulls the native-graphics
-      # runtime (nativeruntime-dist-compat) the Compose suites need. The probe also
-      # warms the compile and configuration caches for the
-      # shard step; its reports are removed afterwards so the
-      # uploaded evidence is the shard step's alone.
-      - name: Prefetch Robolectric runtime (probe class)
+      # run ONE cheap UI class through the real test task
+      # BEFORE the shard step, so the android-all runtime
+      # (SDK 35 — every UI suite pins @Config(sdk = [35])) and
+      # the native-graphics runtime (nativeruntime-dist-compat)
+      # are downloaded (or confirmed cached) here, with
+      # retries, instead of mid-step, where a download flake
+      # fails every class at sandbox boot. The probe also
+      # warms the compile cache for the shard step; its
+      # reports are removed afterwards so the uploaded
+      # evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
         run: |
+          # If either runtime is missing from the local
+          # repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/nativeruntime-dist-compat/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
           probe() {
-            ./gradlew -PnotaTestShard=ui :app:testDebugUnitTest \
+            ./gradlew -PnotaTestShard=ui :app:testDebugUnitTest $extra \
               --tests "app.nota.feature.notes.SwipeUndoRaceUiTest" \
               --stacktrace
           }
@@ -979,6 +1091,7 @@ jobs:
           if [ "$ok" -ne 1 ]; then
             echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
             rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
             probe
           fi
           rm -rf app/build/reports/tests app/build/test-results
