@@ -293,6 +293,212 @@ class BackupRestoreSemanticsTest {
         assertArrayEquals(pattern, stack2.store.fileFor(restored).readBytes())
     }
 
+    // ------------------------------------------- ZIP quotas (SEC-04a)
+
+    private fun readerWithQuota(quota: BackupQuota): BackupReader {
+        val dir = File.createTempFile("reader-work", "")
+        dir.delete()
+        dir.mkdirs()
+        return BackupReader(dir, quota)
+    }
+
+    @Test
+    fun quota_entryCountTrip_failsCleanly() {
+        val zip = payloadZip(
+            listOf(noteJson("q-1", "One", 1000), noteJson("q-2", "Two", 1000)),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 3, maxUncompressedBytes = 1_000_000, maxDecryptedZipBytes = 1_000_000),
+        )
+        try {
+            reader.read(zip, null)
+            fail("expected BackupError")
+        } catch (e: BackupError) {
+            assertTrue(e.message!!.contains("too large"))
+        }
+    }
+
+    @Test
+    fun quota_uncompressedBytesTrip_failsCleanly() {
+        val bigContent = "<p>" + "x".repeat(20_000) + "</p>"
+        val zip = payloadZip(listOf(noteJson("q-big", "Big", 1000, content = bigContent)))
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 1_000, maxUncompressedBytes = 4_096, maxDecryptedZipBytes = 1_000_000),
+        )
+        try {
+            reader.read(zip, null)
+            fail("expected BackupError")
+        } catch (e: BackupError) {
+            assertTrue(e.message!!.contains("too large"))
+        }
+    }
+
+    @Test
+    fun quota_legitBackupWithAttachment_readsCleanly() {
+        val attJson = """{"id": "att-q", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                "attachments/att-q.json" to attJson,
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 100, maxUncompressedBytes = 1_000_000, maxDecryptedZipBytes = 1_000_000),
+        )
+        val handle = reader.read(zip, null)
+        try {
+            assertEquals(listOf("One"), handle.notes.map { it.title })
+            val staged = handle.attachments.single()
+            assertEquals("att-q", staged.meta.id)
+            assertEquals("hello", staged.stagedFile.readText())
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun quota_attachmentJsonTail_countsAgainstQuota() {
+        val attJson = """{"id": "att-q", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                // Valid attachment JSON followed by a 20,000-char tail in
+                // the SAME entry: the parser stops at the closing '}',
+                // so the tail must still be charged by the counted drain
+                // (SEC-04a / Codex PR #57 R1) — otherwise closeEntry()
+                // would inflate it uncounted.
+                "attachments/att-q.json" to attJson + " ".repeat(20_000),
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 100, maxUncompressedBytes = 4_096, maxDecryptedZipBytes = 1_000_000),
+        )
+        try {
+            reader.read(zip, null)
+            fail("expected BackupError")
+        } catch (e: BackupError) {
+            assertTrue(e.message!!.contains("too large"))
+        }
+    }
+
+    @Test
+    fun quota_attachmentJsonSmallTail_readsCleanly() {
+        val attJson = """{"id": "att-q", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                "attachments/att-q.json" to attJson + " ".repeat(100),
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 100, maxUncompressedBytes = 1_000_000, maxDecryptedZipBytes = 1_000_000),
+        )
+        val handle = reader.read(zip, null)
+        try {
+            assertEquals(listOf("One"), handle.notes.map { it.title })
+            val staged = handle.attachments.single()
+            assertEquals("att-q", staged.meta.id)
+            assertEquals("hello", staged.stagedFile.readText())
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun quota_retainedNameBytes_stopCollecting_restoresWithSynthesisedNames() {
+        // Three staged attachments, each with a raw entry whose
+        // stripped name is 46 UTF-8 bytes ("att-x-" + 40 chars). The
+        // 100-byte retained-name budget fits the first two names
+        // (46 + 46 = 92); collecting the third would exceed it, so
+        // the names pass stops there — att-c keeps a synthesised name
+        // (rawEntrySuffix null) and the restore still succeeds
+        // (SEC-04a / Codex PR #57 R2).
+        fun attJson(id: String) =
+            """{"id": "$id", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val suffixA = "a".repeat(40)
+        val suffixB = "b".repeat(40)
+        val suffixC = "c".repeat(40)
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                "attachments/att-a.json" to attJson("att-a"),
+                "attachments/att-b.json" to attJson("att-b"),
+                "attachments/att-c.json" to attJson("att-c"),
+            ),
+            linkedMapOf(
+                "attachments/att-a-$suffixA" to byteArrayOf(1),
+                "attachments/att-b-$suffixB" to byteArrayOf(2),
+                "attachments/att-c-$suffixC" to byteArrayOf(3),
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(
+                maxEntries = 100, maxUncompressedBytes = 1_000_000,
+                maxDecryptedZipBytes = 1_000_000, maxRetainedNameBytes = 100,
+            ),
+        )
+        val handle = reader.read(zip, null)
+        try {
+            assertEquals(listOf("One"), handle.notes.map { it.title })
+            val byId = handle.attachments.associateBy { it.meta.id }
+            assertEquals(setOf("att-a", "att-b", "att-c"), byId.keys)
+            assertEquals(suffixA, byId.getValue("att-a").meta.rawEntrySuffix)
+            assertEquals(suffixB, byId.getValue("att-b").meta.rawEntrySuffix)
+            assertNull(byId.getValue("att-c").meta.rawEntrySuffix)
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
+    fun quota_encryptedArchive_decryptedZipCapTrips_failsCleanly() {
+        val plainZip = payloadZip(listOf(noteJson("q-sealed", "Sealed", 1000)))
+        val sealed = File.createTempFile("sealed-quota", ".zip")
+        sealed.outputStream().buffered().use { out -> BackupCrypto.seal(plainZip, "pw", out) }
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 1_000, maxUncompressedBytes = 1_000_000, maxDecryptedZipBytes = 16),
+        )
+        try {
+            reader.read(sealed, "pw")
+            fail("expected BackupError")
+        } catch (e: BackupError) {
+            assertTrue(e.message!!.contains("too large"))
+        }
+    }
+
+    @Test
+    fun quota_encryptedArchive_underQuota_opens() {
+        val plainZip = payloadZip(listOf(noteJson("q-sealed", "Sealed", 1000)))
+        val sealed = File.createTempFile("sealed-ok", ".zip")
+        sealed.outputStream().buffered().use { out -> BackupCrypto.seal(plainZip, "pw", out) }
+        val reader = readerWithQuota(
+            BackupQuota(maxEntries = 100, maxUncompressedBytes = 1_000_000, maxDecryptedZipBytes = 1_000_000),
+        )
+        val handle = reader.read(sealed, "pw")
+        try {
+            assertTrue(handle.encrypted)
+            assertEquals(listOf("Sealed"), handle.notes.map { it.title })
+        } finally {
+            handle.close()
+        }
+    }
+
     // ------------------------------------------- Codex review regressions
 
     @Test

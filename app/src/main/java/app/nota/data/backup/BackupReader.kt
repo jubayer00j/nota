@@ -1,11 +1,66 @@
 package app.nota.data.backup
 
 import java.io.File
+import java.io.FilterInputStream
 import java.io.InputStream
 import java.io.Reader
 import java.util.zip.ZipInputStream
 import org.json.JSONArray
 import org.json.JSONObject
+
+/** User-readable failure for every quota trip in this file and in
+ *  [BackupCrypto.decryptTo] — surfaces through the same [BackupError]
+ *  channel as the other corrupt-backup failures. */
+internal const val BACKUP_TOO_LARGE_MESSAGE =
+    "This backup file is too large to import safely."
+
+/**
+ * Decompression quotas for one backup read (Carbon audit SEC-04a).
+ * Restore is user-initiated on a file the user picked, but a crafted
+ * archive must still not be able to inflate without bound into
+ * staging files or memory. The ceilings sit far above any legitimate
+ * backup — the 2,000-note stress library produces well under 10,000
+ * entries and only tens of MB uncompressed, so the entry cap carries
+ * >2× headroom and the byte cap >10× — while a ZIP bomb is stopped
+ * WHILE streaming, before anything is applied: a trip raises
+ * [BackupError] and the whole read is discarded, never a partial
+ * restore.
+ */
+class BackupQuota(
+    val maxEntries: Int,
+    val maxUncompressedBytes: Long,
+    val maxDecryptedZipBytes: Long,
+    /** Cumulative UTF-8 byte budget for the attachment entry names
+     *  the names-only second pass retains as Strings. Entry names are
+     *  charged nowhere else (pass 2 re-opens the archive without a
+     *  counting stream) and a ZIP name can be up to 65,535 bytes, so
+     *  the entry-count cap alone would let a crafted archive retain
+     *  hundreds of MB of name Strings. The pass is best-effort: once
+     *  the budget is spent it stops collecting and later attachments
+     *  fall back to synthesised names. */
+    val maxRetainedNameBytes: Long = MAX_RETAINED_NAME_BYTES,
+) {
+    companion object {
+        const val MAX_ENTRIES = 20_000
+        const val MAX_UNCOMPRESSED_BYTES = 512L * 1024 * 1024
+
+        /** The decrypted ZIP can never legitimately be larger than
+         *  the uncompressed total accepted from it; stored
+         *  (uncompressed) entries add only a few MB of per-entry
+         *  header overhead at the maximum entry count, absorbed by
+         *  this slack. */
+        const val MAX_DECRYPTED_ZIP_BYTES = MAX_UNCOMPRESSED_BYTES + 32L * 1024 * 1024
+
+        /** 8 MiB of retained entry names is far above any legitimate
+         *  backup (thousands of attachments with ordinary file names
+         *  total well under 1 MB) while keeping the names pass's heap
+         *  footprint bounded on low-memory devices. */
+        const val MAX_RETAINED_NAME_BYTES = 8L * 1024 * 1024
+        val DEFAULT = BackupQuota(
+            MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, MAX_DECRYPTED_ZIP_BYTES, MAX_RETAINED_NAME_BYTES,
+        )
+    }
+}
 
 /**
  * The backup reader (Phase 2c) — mirrors 1.x `readBackupArchive` /
@@ -22,7 +77,10 @@ import org.json.JSONObject
  *   straight into a staging file — payload bytes never sit in memory.
  * - Validation errors mirror 1.x's messages verbatim.
  */
-class BackupReader(private val workDir: File) {
+class BackupReader(
+    private val workDir: File,
+    private val quota: BackupQuota = BackupQuota.DEFAULT,
+) {
 
     class StagedAttachment(
         val meta: BxAttachmentMeta,
@@ -126,7 +184,9 @@ class BackupReader(private val workDir: File) {
                         header = opened.envelope.header
                         try {
                             tmp.outputStream().buffered().use { out ->
-                                BackupCrypto.decryptTo(opened.envelope, opened.bmk, out)
+                                BackupCrypto.decryptTo(
+                                    opened.envelope, opened.bmk, out, quota.maxDecryptedZipBytes,
+                                )
                             }
                         } finally {
                             if (opened.zeroBmkAfter) opened.bmk.fill(0)
@@ -169,47 +229,59 @@ class BackupReader(private val workDir: File) {
         var tombstones: List<BxTombstone> = emptyList()
         var deviceId: String? = null
 
+        val counter = QuotaCounter(quota)
         try {
             ZipInputStream(zipFile.inputStream().buffered()).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
+                    counter.onEntry()
                     val name = entry.name
-                    try {
-                        when {
-                            name == "manifest.json" -> {
-                                manifest = parseManifest(readEntryText(zip))
-                                deviceId = manifest?.deviceId
-                            }
-                            name == "folders.json" ->
-                                folders = parseFolders(readEntryTextStrict(zip, name))
-                            name == "tags.json" ->
-                                tags = parseTags(readEntryTextStrict(zip, name))
-                            name == "reminders.json" ->
-                                reminders = parseReminders(readEntryTextStrict(zip, name))
-                            name == "settings.json" -> {
-                                // Never imported (device-local credentials
-                                // by design); the entry is drained only.
-                                drainEntry(zip)
-                            }
-                            name == "sync.json" -> {
-                                val parsed = parseSyncTolerant(readEntryText(zip))
-                                if (parsed != null) {
-                                    tombstones = parsed.first
-                                    if (parsed.second != null) deviceId = parsed.second
-                                }
-                            }
-                            name.startsWith("notes/") && name.endsWith(".json") -> {
-                                parseNoteOrNull(readEntryText(zip))?.let { notes += it }
-                            }
-                            name.startsWith("attachments/") && name.endsWith(".json") &&
-                                !name.endsWith("index.json") -> {
-                                parseAttachmentEntry(zip, stagingDir)?.let { attachments += it }
-                            }
-                            else -> drainEntry(zip) // raw attachment entries etc: drained (streaming), names pass below
+                    // Every decompressed byte of this entry flows
+                    // through the counting stream, so the byte quota
+                    // (SEC-04a) trips while streaming — not after the
+                    // entry has been inflated into memory or a file.
+                    val counted = CountingInputStream(zip, counter)
+                    when {
+                        name == "manifest.json" -> {
+                            manifest = parseManifest(readEntryText(counted))
+                            deviceId = manifest?.deviceId
                         }
-                    } finally {
-                        zip.closeEntry()
+                        name == "folders.json" ->
+                            folders = parseFolders(readEntryTextStrict(counted, name))
+                        name == "tags.json" ->
+                            tags = parseTags(readEntryTextStrict(counted, name))
+                        name == "reminders.json" ->
+                            reminders = parseReminders(readEntryTextStrict(counted, name))
+                        name == "settings.json" -> {
+                            // Never imported (device-local credentials
+                            // by design); the entry is drained only.
+                            drainEntry(counted)
+                        }
+                        name == "sync.json" -> {
+                            val parsed = parseSyncTolerant(readEntryText(counted))
+                            if (parsed != null) {
+                                tombstones = parsed.first
+                                if (parsed.second != null) deviceId = parsed.second
+                            }
+                        }
+                        name.startsWith("notes/") && name.endsWith(".json") -> {
+                            parseNoteOrNull(readEntryText(counted))?.let { notes += it }
+                        }
+                        name.startsWith("attachments/") && name.endsWith(".json") &&
+                            !name.endsWith("index.json") -> {
+                            parseAttachmentEntry(counted, stagingDir)?.let { attachments += it }
+                        }
+                        else -> drainEntry(counted) // raw attachment entries etc: drained (streaming), names pass below
                     }
+                    // Charge any unread tail through the counted stream
+                    // (the attachment parser stops at the closing '}',
+                    // so a tail after valid JSON would otherwise be
+                    // drained uncounted by closeEntry() below — SEC-04a).
+                    // On any failure the restore aborts, so there is
+                    // nothing to drain: the outer use{} closes the
+                    // stream and abandons the entry without inflating it.
+                    drainEntry(counted)
+                    zip.closeEntry()
                 }
             }
         } catch (e: BackupError) {
@@ -230,11 +302,31 @@ class BackupReader(private val workDir: File) {
         val rawNames = mutableListOf<String>()
         try {
             ZipInputStream(zipFile.inputStream().buffered()).use { zip ->
+                var seenEntries = 0
+                var retainedNameBytes = 0L
                 while (true) {
                     val entry = zip.nextEntry ?: break
+                    // The entry-count quota is re-checked on this
+                    // pass too; content bytes are not re-counted
+                    // because pass 1 already bounded the uncompressed
+                    // total of this exact archive.
+                    if (++seenEntries > quota.maxEntries) {
+                        throw BackupError(BACKUP_TOO_LARGE_MESSAGE)
+                    }
                     val name = entry.name
                     if (name.startsWith("attachments/") && !name.endsWith(".json")) {
-                        rawNames += name.removePrefix("attachments/")
+                        val stripped = name.removePrefix("attachments/")
+                        // The retained names live on the heap as
+                        // Strings and are charged nowhere else, so
+                        // charge their UTF-8 size here and stop
+                        // collecting once the budget is spent — the
+                        // pass is best-effort, and attachments past
+                        // the budget fall back to synthesised names,
+                        // exactly as when a name is absent.
+                        val nameBytes = stripped.toByteArray(Charsets.UTF_8).size.toLong()
+                        if (retainedNameBytes + nameBytes > quota.maxRetainedNameBytes) break
+                        retainedNameBytes += nameBytes
+                        rawNames += stripped
                     }
                     zip.closeEntry()
                 }
@@ -272,17 +364,17 @@ class BackupReader(private val workDir: File) {
 
     /** Discards the current entry through a fixed buffer — never loads
      *  an entry (e.g. a multi-MB raw attachment) into memory. */
-    private fun drainEntry(zip: ZipInputStream) {
+    private fun drainEntry(zip: InputStream) {
         val buf = ByteArray(8192)
         while (zip.read(buf) >= 0) { /* discard */ }
     }
 
-    private fun readEntryText(zip: ZipInputStream): String =
+    private fun readEntryText(zip: InputStream): String =
         String(zip.readBytes(), Charsets.UTF_8)
 
     /** Strict variant for the top-level arrays, mirroring 1.x `readJson`:
      *  a parse failure is the "looks corrupted" error. */
-    private fun readEntryTextStrict(zip: ZipInputStream, path: String): String {
+    private fun readEntryTextStrict(zip: InputStream, path: String): String {
         val text = readEntryText(zip)
         try {
             JSONArray(text)
@@ -523,7 +615,7 @@ class BackupReader(private val workDir: File) {
      * data URL whose Base64 body is decoded straight to the file.
      * Malformed records are skipped (staging file removed).
      */
-    private fun parseAttachmentEntry(zip: ZipInputStream, stagingDir: File): StagedAttachment? {
+    private fun parseAttachmentEntry(zip: InputStream, stagingDir: File): StagedAttachment? {
         val staged = File(stagingDir, "att-${System.nanoTime()}.bin")
         return try {
             val parser = AttachmentJsonParser(zip, staged)
@@ -534,10 +626,51 @@ class BackupReader(private val workDir: File) {
             } else {
                 StagedAttachment(meta, staged)
             }
+        } catch (e: BackupError) {
+            // A quota trip (SEC-04a) is restore-fatal, never a
+            // skippable malformed record.
+            staged.delete()
+            throw e
         } catch (e: Exception) {
             staged.delete()
             null
         }
+    }
+}
+
+/** Mutable counters enforcing one [BackupQuota] during a ZIP pass. */
+private class QuotaCounter(private val quota: BackupQuota) {
+    private var entries = 0
+    private var bytes = 0L
+
+    fun onEntry() {
+        entries++
+        if (entries > quota.maxEntries) throw BackupError(BACKUP_TOO_LARGE_MESSAGE)
+    }
+
+    fun onBytes(n: Int) {
+        bytes += n
+        if (bytes > quota.maxUncompressedBytes) throw BackupError(BACKUP_TOO_LARGE_MESSAGE)
+    }
+}
+
+/** An [InputStream] that charges every byte read to [counter], so a
+ *  quota trip lands WHILE streaming — not after the entry has already
+ *  been inflated into memory or a staging file. */
+private class CountingInputStream(
+    delegate: InputStream,
+    private val counter: QuotaCounter,
+) : FilterInputStream(delegate) {
+    override fun read(): Int {
+        val r = super.read()
+        if (r >= 0) counter.onBytes(1)
+        return r
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        val n = super.read(b, off, len)
+        if (n > 0) counter.onBytes(n)
+        return n
     }
 }
 
