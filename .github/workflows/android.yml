@@ -203,7 +203,13 @@ jobs:
   # the native runtime in its probe on every run. fast-a's
   # probe now also runs RemindersSectionTest and checks for
   # all three artifacts, so the entry under its own key is
-  # complete by construction. The other five fast shards
+  # complete by construction. (Its restore-keys still fall
+  # back to the shared v2 prefix, so the first run on the
+  # new key tops up a sibling entry - both android-all
+  # runtimes, plus the native runtime if the UI entry is the
+  # newest match - instead of cold-downloading all three
+  # artifacts into an empty repository.) The other five
+  # fast shards
   # keep the shared v2 key and its existing entry - the two
   # android-all runtimes are all their probes require. The
   # remaining sixteen @GraphicsMode(NATIVE) classes are UI
@@ -251,6 +257,7 @@ jobs:
           key: robolectric-4.16.1-v2-a-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
             robolectric-4.16.1-v2-a-
+            robolectric-4.16.1-v2-
 
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
