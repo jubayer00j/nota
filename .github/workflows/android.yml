@@ -142,6 +142,27 @@ jobs:
   # suite); every other F1–F8 pin extends an existing suite in
   # place, and the stress seeder is a helper with no test class
   # of its own.)
+  # (CI pipeline hardening, 2026-11-24: the fast partition is
+  # REBALANCED BY MEASURED TIME instead of class count. Per-class
+  # times from the PR #57 green run: shard B's step carried
+  # 173.5s of class time — DriveRepositoryTest alone is 132.6s,
+  # stable across three runs (130.1 / 134.6 / 132.6) — against
+  # 14.6–68.8s for every other shard, and the runner fleet
+  # killed B 17 times in one evening. DriveRepositoryTest now
+  # runs ALONE in the new test-fast-b5; fast-a's two heaviest
+  # classes (AppLockManagerSetupTest 20.0s, AiSettingsStoreTest
+  # 8.9s) move to test-fast-b4. The five balanced shards sit at
+  # 34–44s of measured class time each; the partition total is
+  # unchanged (124 classes, each in exactly one fast shard).
+  # test-fast-b2's list is deliberately UNCHANGED — the Phase
+  # 4.1 fork-pool landmine documented above still applies.
+  # Every test job also restores a cached Robolectric runtime
+  # repository (~/.m2/repository/org/robolectric — outside the
+  # Gradle User Home) and runs a one-class prefetch probe
+  # before its test step, so Robolectric's android-all runtime
+  # is never downloaded mid-step again: the 2026-11-24
+  # MavenArtifactFetcher flake failed EVERY Robolectric class
+  # in a shard at sandbox boot when its download died.)
   test-fast-a:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -171,6 +192,20 @@ jobs:
         with:
           cache-read-only: false
 
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
       # Gradle task runs. The google-services plugin fails the build
@@ -188,12 +223,40 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard A, 66 of 114 non-UI classes)
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard A, 71 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
             --tests "app.nota.data.ai.AiProviderHelpTest" \
-            --tests "app.nota.data.ai.AiSettingsStoreTest" \
             --tests "app.nota.data.ai.AskNotaTest" \
             --tests "app.nota.data.ai.NoteChunkerTest" \
             --tests "app.nota.data.ai.SemanticIndexCacheSlotTest" \
@@ -227,7 +290,6 @@ jobs:
             --tests "app.nota.data.repository.NoteListRowsRobolectricTest" \
             --tests "app.nota.feature.notes.NotesViewModelSharingRobolectricTest" \
             --tests "app.nota.data.security.AppLockBiometricStoreTest" \
-            --tests "app.nota.data.security.AppLockManagerSetupTest" \
             --tests "app.nota.data.security.NoteLockRecordTest" \
             --tests "app.nota.data.sync.SyncEngineTest" \
             --tests "app.nota.data.text.RichBodyTest" \
@@ -305,6 +367,20 @@ jobs:
         with:
           cache-read-only: false
 
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
       # Gradle task runs. The google-services plugin fails the build
@@ -349,7 +425,36 @@ jobs:
       # 3.8 three-way split. The PARTITION is unchanged in
       # total: B ∪ B2 ∪ B3 ∪ B4 is exactly the old shard-B
       # class list, each class in exactly one B shard.
-      - name: Run fast unit tests (shard B, 12 of 51 shard-B classes)
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard B, 11 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiBackupExclusionTest" \
@@ -362,7 +467,6 @@ jobs:
             --tests "app.nota.data.db.Migration67RobolectricTest" \
             --tests "app.nota.data.db.Migration78RobolectricTest" \
             --tests "app.nota.data.sync.SyncApplierDeviceLocalTest" \
-            --tests "app.nota.data.drive.DriveRepositoryTest" \
             --tests "app.nota.data.html.NoteDocumentTest" \
             --stacktrace
 
@@ -398,6 +502,20 @@ jobs:
         with:
           cache-read-only: false
 
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
       - name: Materialise google-services.json
         env:
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
@@ -410,7 +528,36 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B4, 11 of 51 shard-B classes)
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard B4, 13 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.html.NoteDocumentNestedTest" \
@@ -424,6 +571,8 @@ jobs:
             --tests "app.nota.data.capture.PendingCaptureStoreTest" \
             --tests "app.nota.data.capture.ShareIntentsRobolectricTest" \
             --tests "app.nota.feature.widget.WidgetDataSourceRobolectricTest" \
+            --tests "app.nota.data.security.AppLockManagerSetupTest" \
+            --tests "app.nota.data.ai.AiSettingsStoreTest" \
             --stacktrace
 
       - name: Upload fast-shard-B4 test reports
@@ -436,6 +585,102 @@ jobs:
             app/build/reports/tests
           if-no-files-found: ignore
 
+
+  # CI pipeline hardening (2026-11-24): DriveRepositoryTest
+  # runs ALONE here. At ~133s of measured class time (stable
+  # across three green runs) it is a single indivisible class
+  # larger than the whole per-shard budget; inside shard B it
+  # made B's step the fleet's biggest target. Isolated, its
+  # step is ~4.5 min and a runner kill costs one small rerun.
+  test-fast-b5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard B5, 1 class)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            --tests "app.nota.data.drive.DriveRepositoryTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-B5 test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-b5
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
   test-fast-b2:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -455,6 +700,20 @@ jobs:
         with:
           cache-read-only: false
 
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
       - name: Materialise google-services.json
         env:
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
@@ -467,7 +726,36 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B2, 7 of 47 shard-B classes)
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard B2, 7 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.repository.NoteLockRepositoryRobolectricTest" \
@@ -508,6 +796,20 @@ jobs:
         with:
           cache-read-only: false
 
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
       - name: Materialise google-services.json
         env:
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
@@ -520,7 +822,36 @@ jobs:
             exit 1
           fi
 
-      - name: Run fast unit tests (shard B3, 20 of 47 shard-B classes)
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard B3, 21 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiSummaryHtmlTest" \
@@ -585,6 +916,20 @@ jobs:
         with:
           cache-read-only: false
 
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-
+
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
       # Gradle task runs. The google-services plugin fails the build
@@ -602,6 +947,36 @@ jobs:
             exit 1
           fi
 
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run ONE cheap Robolectric class through the real test
+      # task BEFORE the shard step, so the android-all runtime
+      # is downloaded (or confirmed cached) here, with retries,
+      # instead of mid-step, where a download flake fails every
+      # class at sandbox boot. The UI probe also pulls the native-graphics
+      # runtime (nativeruntime-dist-compat) the Compose suites need. The probe also
+      # warms the compile and configuration caches for the
+      # shard step; its reports are removed afterwards so the
+      # uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe class)
+        run: |
+          probe() {
+            ./gradlew -PnotaTestShard=ui :app:testDebugUnitTest \
+              --tests "app.nota.feature.notes.SwipeUndoRaceUiTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
       - name: Run Compose-UI tests
         run: ./gradlew -PnotaTestShard=ui :app:testDebugUnitTest --stacktrace
 
@@ -616,7 +991,7 @@ jobs:
           if-no-files-found: ignore
 
   build-android:
-    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-fast-b4, test-ui]
+    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-fast-b4, test-fast-b5, test-ui]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
