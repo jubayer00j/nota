@@ -140,6 +140,78 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun mixedMarkerNestingNestsByIndent() {
+        // R3-F1: a numbered sub-list under a bullet parent nests inside
+        // the parent item — 1.x flattens it into a sibling <ol>.
+        val result = parseOne("mixed.md", "- Shopping\n  1. Milk\n  2. Eggs\n- Chores")
+        assertEquals(
+            "<ul><li><p>Shopping</p><ol><li><p>Milk</p></li><li><p>Eggs</p></li></ol></li>" +
+                "<li><p>Chores</p></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun numberedParentWithBulletChildrenNests() {
+        // R3-F1: the mirror case — bullets nest under a numbered parent.
+        val result = parseOne("mixed2.md", "1. First\n   - sub a\n   - sub b\n2. Second")
+        assertEquals(
+            "<ol><li><p>First</p><ul><li><p>sub a</p></li><li><p>sub b</p></li></ul></li>" +
+                "<li><p>Second</p></li></ol>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun letteredItemsNestUnderBulletParent() {
+        // R3-F1: a sequence-confirmed lettered list nests too, keeping
+        // its marker system.
+        val result = parseOne("mixed3.md", "- Items\n  a. alpha\n  b. beta")
+        assertEquals(
+            "<ul><li><p>Items</p><ol type=\"a\"><li><p>alpha</p></li><li><p>beta</p></li></ol></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun topLevelKindChangeStillSplitsLists() {
+        // R3-F1: nesting is by indent — a kind change AT the base
+        // indent is still two sibling lists, as before.
+        val result = parseOne("split.md", "1. one\n2. two\n- bullet")
+        assertEquals(
+            "<ol><li><p>one</p></li><li><p>two</p></li></ol>" +
+                "<ul><li><p>bullet</p></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun taskParentWithOrderedChildrenKeepsNumbering() {
+        // R3-F1: a nested ordered list under a task parent stays an
+        // ordered list (its level decides its own kind).
+        val result = parseOne("mixed4.md", "- [ ] Shopping\n  1. Milk")
+        assertEquals(
+            "<ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>Shopping</p>" +
+                "<ol><li><p>Milk</p></li></ol></div></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun orderedParentWithTaskChildrenKeepsCheckbox() {
+        // R3-F1: a nested task under a numbered parent stays a task list.
+        val result = parseOne("mixed5.md", "1. First\n   - [ ] sub")
+        assertEquals(
+            "<ol><li><p>First</p>" +
+                "<ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>sub</p></div></li>" +
+                "</ul></li></ol>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
     fun rawHtmlIsEscapedNeverPassedThrough() {
         val result = parseOne("raw.md", "<script>alert(1)</script>")
         assertEquals(

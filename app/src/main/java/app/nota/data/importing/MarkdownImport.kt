@@ -18,6 +18,13 @@ import java.io.File
  *  - image bytes are staged files, not in-memory blobs;
  *  - front-matter dates use a scoped java.time format chain where 1.x
  *    uses JS `Date.parse`.
+ *  - mixed-marker list nesting: a deeper-indented item of another kind
+ *    nests under the item above it (1.x flattens such items into
+ *    sibling lists). Each nested level renders in its own kind, and a
+ *    nested level containing a task item renders as a task list — so
+ *    imported lists keep their structure where 1.x loses it. A plain
+ *    nested bullet under a task parent likewise stays a plain bullet
+ *    (1.x renders it as an unchecked task item).
  */
 
 /* ---------------- Escaping (1.x verbatim) ---------------- */
@@ -714,10 +721,14 @@ private fun renderMarkdownBlocks(markdown: String, images: InlineImageSink): Str
     return blocks.joinToString("")
 }
 
-/** Splits a run of items into same-kind runs and renders each. */
+/** Splits a list block into top-level lists and renders each. A kind
+ *  change only starts a new list at the run's base indent: a
+ *  deeper-indented item of another kind is a nested child of the item
+ *  above it, not a sibling list. */
 private fun renderList(items: List<ListItem>, images: InlineImageSink): String {
     val out = StringBuilder()
     var run = mutableListOf<ListItem>()
+    var runBaseIndent = 0
     fun flush() {
         if (run.isEmpty()) return
         out.append(renderListRun(run, images))
@@ -728,7 +739,11 @@ private fun renderList(items: List<ListItem>, images: InlineImageSink): String {
     // a / A / i / I systems among themselves.
     fun runKey(item: ListItem) = if (item.ordered) "ol:${item.listType}" else "ul"
     for (item in items) {
-        if (run.isNotEmpty() && runKey(run[0]) != runKey(item)) flush()
+        if (run.isNotEmpty() && runKey(run[0]) != runKey(item) &&
+            item.indent <= runBaseIndent
+        ) flush()
+        if (run.isEmpty()) runBaseIndent = item.indent
+        else runBaseIndent = minOf(runBaseIndent, item.indent)
         run += item
     }
     flush()
@@ -752,19 +767,24 @@ private fun orderedListAttrs(item: ListItem): String {
 }
 
 /**
- * Renders one same-kind list run with one level of nesting (deeper
- * indents clamp to the first nested level). A run of unordered items
- * containing any task item becomes a task list — plain items ride
- * along as unchecked tasks, since task lists can't mix item types.
- * Task items use Nota's own serialiser shape (see the file header).
+ * Renders one top-level list run with one level of nesting (deeper
+ * indents clamp to the first nested level). A run may mix marker kinds
+ * in its nested items — each nested level renders in its own kind.
+ * Task-ness is decided per level, from that level's own items: a level
+ * of unordered items containing any task item becomes a task list —
+ * plain items at that level ride along as unchecked tasks, since task
+ * lists can't mix item types. So a nested ordered list under a task
+ * parent stays an ordered list, and a nested task under an ordered
+ * parent stays a task list. Task items use Nota's own serialiser shape
+ * (see the file header).
  */
 private fun renderListRun(items: List<ListItem>, images: InlineImageSink): String {
     val baseIndent = items.minOf { it.indent }
-    val asTasks = !items[0].ordered && items.any { it.task }
     val normalised = items.map { it.copy(indent = minOf(it.indent, baseIndent + 1)) }
 
     fun renderItems(list: List<ListItem>): String {
         val out = StringBuilder()
+        val levelTasks = !list[0].ordered && list.any { it.task }
         var idx = 0
         while (idx < list.size) {
             val item = list[idx]
@@ -776,7 +796,7 @@ private fun renderListRun(items: List<ListItem>, images: InlineImageSink): Strin
             }
             val textHtml = renderInline(item.text, images)
             val childHtml = if (children.isNotEmpty()) renderItems(children) else ""
-            if (asTasks) {
+            if (levelTasks) {
                 out.append("<li data-type=\"taskItem\" data-checked=\"")
                     .append(if (item.checked) "true" else "false")
                     .append("\"><div><p>").append(textHtml).append("</p>")
@@ -787,7 +807,7 @@ private fun renderListRun(items: List<ListItem>, images: InlineImageSink): Strin
             }
             idx = next
         }
-        if (asTasks) return "<ul data-type=\"taskList\">$out</ul>"
+        if (levelTasks) return "<ul data-type=\"taskList\">$out</ul>"
         val first = list[0]
         if (!first.ordered) return "<ul>$out</ul>"
         return "<ol${orderedListAttrs(first)}>$out</ol>"
@@ -822,8 +842,24 @@ object MarkdownImporter {
         files: List<MarkdownFileInput>,
         resolver: ImportImageResolver?,
     ): ImportParseResult {
+        // One shared result on purpose: appendParsedFile's note-cap
+        // check reads result.notes.size, so routing each file through
+        // a fresh result would never trip the cap.
         val result = ImportParseResult()
         for (file in files) appendParsedFile(result, file, resolver)
+        return result
+    }
+
+    /** One file's parse, as a standalone result — the loose-file
+     *  selection path converts each file as it is read (see
+     *  NoteImportRepository.importMarkdownSelection) so a multi-file
+     *  selection never retains every file's text at once. */
+    fun parseMarkdownFile(
+        file: MarkdownFileInput,
+        resolver: ImportImageResolver?,
+    ): ImportParseResult {
+        val result = ImportParseResult()
+        appendParsedFile(result, file, resolver)
         return result
     }
 

@@ -107,10 +107,11 @@ class NoteImportRepository(
             // type, or over the staging cap) still belong in the
             // report — never silently dropped.
             merged.skippedFiles += preselectedSkipped
-            val textInputs = mutableListOf<MarkdownFileInput>()
             val resolverFiles = LinkedHashMap<String, File>()
             for (file in staged) resolverFiles[file.name] = file.file
+            val resolver = createImportImageResolver(resolverFiles)
             var zipIndex = 0
+            var looseTextSeen = 0
             for (file in staged) {
                 val lower = file.name.lowercase()
                 when {
@@ -124,13 +125,28 @@ class NoteImportRepository(
                                 file.name,
                                 "File is larger than 100 MB.",
                             )
+                        } else if (merged.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
+                            // The run cap applies as files are read, so
+                            // a many-file selection stops retaining text
+                            // once the cap is reached (mirrors
+                            // parseImportZip's per-member check).
+                            merged.skippedFiles += SkippedImportFile(
+                                file.name,
+                                "Import limit reached (5,000 notes per run).",
+                            )
                         } else {
-                            textInputs += MarkdownFileInput(
+                            looseTextSeen++
+                            // Converted immediately and the text dropped:
+                            // a loose-file selection never holds every
+                            // file's text at once (the R2 ZIP-path fix,
+                            // same shape).
+                            val input = MarkdownFileInput(
                                 name = file.name,
                                 path = file.name,
                                 text = withContext(Dispatchers.IO) { file.file.readText() },
                                 lastModified = file.lastModified,
                             )
+                            merged.absorb(MarkdownImporter.parseMarkdownFile(input, resolver))
                         }
                     }
                     importMimeFromName(file.name) != null -> {
@@ -142,14 +158,8 @@ class NoteImportRepository(
                     )
                 }
             }
-            merged.absorb(
-                MarkdownImporter.parseMarkdownFiles(
-                    textInputs,
-                    createImportImageResolver(resolverFiles),
-                ),
-            )
             if (merged.notes.isEmpty() && merged.skippedFiles.isEmpty() &&
-                textInputs.isEmpty() && zipIndex == 0
+                looseTextSeen == 0 && zipIndex == 0
             ) {
                 // The selection was only images (resolver fodder with
                 // nothing to resolve into) — 1.x's "No Markdown or text

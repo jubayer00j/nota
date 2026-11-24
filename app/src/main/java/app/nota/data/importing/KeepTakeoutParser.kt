@@ -64,6 +64,16 @@ object KeepTakeoutParser {
             return result
         }
 
+        // A truncated name inventory means some .json entries were
+        // never listed, so their notes would silently never import —
+        // say so in the report instead (the visible notes still import).
+        if (reader.namesTruncated) {
+            result.skippedFiles += SkippedImportFile(
+                "Takeout ZIP",
+                "The archive's file-name list was truncated, so some notes may not have been imported.",
+            )
+        }
+
         val jsonNames = reader.entryNames.filter { it.lowercase().endsWith(".json") }
         val inKeep = jsonNames.filter { name ->
             name.split('/').any { segment -> segment.equals("keep", ignoreCase = true) }

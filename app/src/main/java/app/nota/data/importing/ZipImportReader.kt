@@ -27,6 +27,13 @@ class ImportZipException(message: String) : Exception(message)
  * partial is applied from that archive (same contract as BackupReader).
  * Entry names are used only for matching; parsers derive staging file
  * names from sanitised basenames, never from raw entry paths.
+ *
+ * [entryNames] is best-effort under the name budget: when the budget
+ * runs out, further names are dropped — and [namesTruncated] records
+ * it. Parsers that enumerate candidates from [entryNames] (the Keep
+ * parser's .json list) must check the flag, or a truncated inventory
+ * silently skips notes. Walks that read entry names straight from the
+ * archive (the Markdown ZIP path's inventory) are unaffected.
  */
 class ZipImportReader(private val zipFile: File) {
 
@@ -35,6 +42,12 @@ class ZipImportReader(private val zipFile: File) {
     private var retainedNameBytes = 0L
     private var entryCount = 0
     private var totalBytes = 0L
+
+    /** True once any entry name had to be dropped for the retained-name
+     *  budget. Sticky for the reader's lifetime (never reset between
+     *  walks) — a later walk cannot un-truncate the inventory. */
+    var namesTruncated = false
+        private set
 
     /** Every entry name seen so far (best-effort under the name budget). */
     val entryNames: List<String> get() = retainedNames
@@ -138,12 +151,14 @@ class ZipImportReader(private val zipFile: File) {
     }
 
     private fun retainName(name: String) {
+        if (name in retainedNameSet) return // already listed
         val bytes = name.toByteArray(Charsets.UTF_8).size.toLong()
-        if (retainedNameBytes + bytes <= BackupQuota.MAX_RETAINED_NAME_BYTES &&
-            retainedNameSet.add(name)
-        ) {
-            retainedNames += name
-            retainedNameBytes += bytes
+        if (retainedNameBytes + bytes > BackupQuota.MAX_RETAINED_NAME_BYTES) {
+            namesTruncated = true
+            return
         }
+        retainedNameSet += name
+        retainedNames += name
+        retainedNameBytes += bytes
     }
 }

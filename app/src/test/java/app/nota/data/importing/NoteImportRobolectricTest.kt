@@ -462,4 +462,57 @@ class NoteImportRobolectricTest {
             stack.db.noteDao().getAll().single().contentHtml,
         )
     }
+
+    @Test
+    fun looseFileSelectionCapsAcrossFiles() = runBlocking {
+        // R3-F2: a loose-file selection converts each file as it is
+        // read — the run cap applies across the whole selection, with
+        // the excess reported as skipped, never silently dropped.
+        val stack = newStack()
+        val dir = stagingDir()
+        val staged = (0..5_000).map { i ->
+            val file = File(dir, "loose-$i.md").apply { writeText("# Note $i\n\nbody $i") }
+            StagedImportFile("loose-$i.md", file, 1_700_000_000_000L + i)
+        }
+        val outcome = stack.repo.importMarkdownSelection(staged)
+        assertEquals(5_000, outcome.report.imported)
+        assertEquals(
+            listOf(
+                SkippedImportFile(
+                    "loose-5000.md",
+                    "Import limit reached (5,000 notes per run).",
+                ),
+            ),
+            outcome.parse.skippedFiles,
+        )
+        assertEquals(5_000, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun keepTakeoutWithTruncatedNameInventoryReportsIt() {
+        // R3-F3: entry names past the 8 MiB retained-name budget are
+        // dropped from the inventory, so a note whose name sits past
+        // the cut is never enumerated — the outcome must say so
+        // instead of silently importing nothing. (ZIP entry names top
+        // out at 64 KiB, so ~150 entries at ~60 KiB each clear the
+        // budget; the note JSON is written last, past the cut.)
+        val entries = LinkedHashMap<String, String>()
+        repeat(150) { i ->
+            entries["Takeout/Keep/filler-$i-" + "x".repeat(59_900) + ".txt"] = ""
+        }
+        val noteName = "Takeout/Keep/" + "n".repeat(59_900) + ".json"
+        entries[noteName] =
+            """{"title":"Hidden","textContent":"never listed","createdTimestampUsec":1700000000000000}"""
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(
+                SkippedImportFile(
+                    "Takeout ZIP",
+                    "The archive's file-name list was truncated, so some notes may not have been imported.",
+                ),
+            ),
+            result.skippedFiles,
+        )
+    }
 }
