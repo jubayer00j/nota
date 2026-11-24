@@ -30,6 +30,15 @@ class BackupQuota(
     val maxEntries: Int,
     val maxUncompressedBytes: Long,
     val maxDecryptedZipBytes: Long,
+    /** Cumulative UTF-8 byte budget for the attachment entry names
+     *  the names-only second pass retains as Strings. Entry names are
+     *  charged nowhere else (pass 2 re-opens the archive without a
+     *  counting stream) and a ZIP name can be up to 65,535 bytes, so
+     *  the entry-count cap alone would let a crafted archive retain
+     *  hundreds of MB of name Strings. The pass is best-effort: once
+     *  the budget is spent it stops collecting and later attachments
+     *  fall back to synthesised names. */
+    val maxRetainedNameBytes: Long = MAX_RETAINED_NAME_BYTES,
 ) {
     companion object {
         const val MAX_ENTRIES = 20_000
@@ -41,7 +50,15 @@ class BackupQuota(
          *  header overhead at the maximum entry count, absorbed by
          *  this slack. */
         const val MAX_DECRYPTED_ZIP_BYTES = MAX_UNCOMPRESSED_BYTES + 32L * 1024 * 1024
-        val DEFAULT = BackupQuota(MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, MAX_DECRYPTED_ZIP_BYTES)
+
+        /** 8 MiB of retained entry names is far above any legitimate
+         *  backup (thousands of attachments with ordinary file names
+         *  total well under 1 MB) while keeping the names pass's heap
+         *  footprint bounded on low-memory devices. */
+        const val MAX_RETAINED_NAME_BYTES = 8L * 1024 * 1024
+        val DEFAULT = BackupQuota(
+            MAX_ENTRIES, MAX_UNCOMPRESSED_BYTES, MAX_DECRYPTED_ZIP_BYTES, MAX_RETAINED_NAME_BYTES,
+        )
     }
 }
 
@@ -286,6 +303,7 @@ class BackupReader(
         try {
             ZipInputStream(zipFile.inputStream().buffered()).use { zip ->
                 var seenEntries = 0
+                var retainedNameBytes = 0L
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     // The entry-count quota is re-checked on this
@@ -297,7 +315,18 @@ class BackupReader(
                     }
                     val name = entry.name
                     if (name.startsWith("attachments/") && !name.endsWith(".json")) {
-                        rawNames += name.removePrefix("attachments/")
+                        val stripped = name.removePrefix("attachments/")
+                        // The retained names live on the heap as
+                        // Strings and are charged nowhere else, so
+                        // charge their UTF-8 size here and stop
+                        // collecting once the budget is spent — the
+                        // pass is best-effort, and attachments past
+                        // the budget fall back to synthesised names,
+                        // exactly as when a name is absent.
+                        val nameBytes = stripped.toByteArray(Charsets.UTF_8).size.toLong()
+                        if (retainedNameBytes + nameBytes > quota.maxRetainedNameBytes) break
+                        retainedNameBytes += nameBytes
+                        rawNames += stripped
                     }
                     zip.closeEntry()
                 }

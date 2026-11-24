@@ -417,6 +417,56 @@ class BackupRestoreSemanticsTest {
     }
 
     @Test
+    fun quota_retainedNameBytes_stopCollecting_restoresWithSynthesisedNames() {
+        // Three staged attachments, each with a raw entry whose
+        // stripped name is 46 UTF-8 bytes ("att-x-" + 40 chars). The
+        // 100-byte retained-name budget fits the first two names
+        // (46 + 46 = 92); collecting the third would exceed it, so
+        // the names pass stops there — att-c keeps a synthesised name
+        // (rawEntrySuffix null) and the restore still succeeds
+        // (SEC-04a / Codex PR #57 R2).
+        fun attJson(id: String) =
+            """{"id": "$id", "noteId": "q-1", "name": "hello.txt", "mimeType": "text/plain", "size": 5, "createdAt": 1000, "data": "data:text/plain;base64,aGVsbG8="}"""
+        val suffixA = "a".repeat(40)
+        val suffixB = "b".repeat(40)
+        val suffixC = "c".repeat(40)
+        val zip = zipOf(
+            linkedMapOf(
+                "manifest.json" to manifestJson(1),
+                "folders.json" to "[]",
+                "tags.json" to "[]",
+                "reminders.json" to "[]",
+                "notes/q-1.json" to noteJson("q-1", "One", 1000),
+                "attachments/att-a.json" to attJson("att-a"),
+                "attachments/att-b.json" to attJson("att-b"),
+                "attachments/att-c.json" to attJson("att-c"),
+            ),
+            linkedMapOf(
+                "attachments/att-a-$suffixA" to byteArrayOf(1),
+                "attachments/att-b-$suffixB" to byteArrayOf(2),
+                "attachments/att-c-$suffixC" to byteArrayOf(3),
+            ),
+        )
+        val reader = readerWithQuota(
+            BackupQuota(
+                maxEntries = 100, maxUncompressedBytes = 1_000_000,
+                maxDecryptedZipBytes = 1_000_000, maxRetainedNameBytes = 100,
+            ),
+        )
+        val handle = reader.read(zip, null)
+        try {
+            assertEquals(listOf("One"), handle.notes.map { it.title })
+            val byId = handle.attachments.associateBy { it.meta.id }
+            assertEquals(setOf("att-a", "att-b", "att-c"), byId.keys)
+            assertEquals(suffixA, byId.getValue("att-a").meta.rawEntrySuffix)
+            assertEquals(suffixB, byId.getValue("att-b").meta.rawEntrySuffix)
+            assertNull(byId.getValue("att-c").meta.rawEntrySuffix)
+        } finally {
+            handle.close()
+        }
+    }
+
+    @Test
     fun quota_encryptedArchive_decryptedZipCapTrips_failsCleanly() {
         val plainZip = payloadZip(listOf(noteJson("q-sealed", "Sealed", 1000)))
         val sealed = File.createTempFile("sealed-quota", ".zip")
