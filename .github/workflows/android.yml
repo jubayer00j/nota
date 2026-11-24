@@ -179,6 +179,17 @@ jobs:
   # real (uncached) execution when either is missing. The
   # cache key moved to a v2 prefix because the v1 entry,
   # saved by the first job to finish, held only SDK 35.)
+  # (Codex fix round, same PR: test-ui now uses its OWN cache
+  # key (robolectric-4.16.1-v2-ui-*). Every UI suite pins
+  # SDK 35, so test-ui's probe fetches only that runtime; cache
+  # entries are immutable and first-saver-wins, so if test-ui
+  # saved the SHARED key first, the entry would permanently
+  # lack SDK 36 and every fast shard would re-download it in
+  # its probe on every run. The fast shards keep the shared
+  # v2 key — their probes fetch both runtimes, so whichever
+  # of them saves first leaves a complete entry. The partial
+  # shared entry saved during this PR's first green run was
+  # deleted via the API so the next fast job re-saves whole.)
   test-fast-a:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1032,9 +1043,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
+          key: robolectric-4.16.1-v2-ui-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: |
-            robolectric-4.16.1-v2-
+            robolectric-4.16.1-v2-ui-
 
       # Phase 3a: google-services.json is never committed (Noma
       # precedent) — materialise it from the repo secret before any
