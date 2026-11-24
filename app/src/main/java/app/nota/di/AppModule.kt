@@ -12,6 +12,7 @@ import app.nota.data.auth.GuestLibraryTransfer
 import app.nota.data.backup.BackupRepository
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
+import app.nota.data.importing.NoteImportRepository
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.security.AndroidKeystoreAppLockKeyProvider
 import app.nota.data.security.AndroidKeystoreNoteLockKeyProvider
@@ -90,6 +91,7 @@ val appModule = module {
     single { NoteLockRepository(get(), get(), get(), get(), get()) }
     // Phase 2c backup/restore engine (local ZIP + NOMAENC1 + crossover).
     single { BackupRepository(androidContext(), get(), get(), get()) }
+    single { NoteImportRepository(androidContext(), get(), get()) }
     // Phase 4.1 BYOK AI: Keystore-sealed per-account provider keys
     // (device-local preferences — never Room, never a backup), the
     // HTTP seam, and the call orchestration. Registered before
