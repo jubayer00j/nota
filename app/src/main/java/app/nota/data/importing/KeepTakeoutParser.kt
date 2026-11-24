@@ -19,7 +19,9 @@ import org.json.JSONObject
  * entry names first, then one JSON at a time, then only the attachments
  * the notes reference — at most one JSON string and zero image byte
  * arrays are ever retained in memory, so a large Takeout can't OOM
- * the import on a 1 GB-RAM device).
+ * the import on a 1 GB-RAM device). Each attachment entry is staged
+ * once and shared by every note that references it, so a shared image
+ * never multiplies into per-note copies on disk.
  */
 object KeepTakeoutParser {
 
@@ -122,21 +124,27 @@ object KeepTakeoutParser {
         }
 
         // Pass 3: stream each referenced attachment entry straight to
-        // a per-entry temp file — image bytes are never held in memory.
-        // Each note then gets its own staged copy of the temp file (the
-        // engine deletes it after the save attempt, so notes can't
-        // share one file).
+        // ONE staged file — image bytes are never held in memory, and
+        // every note that references the entry shares that file. (The
+        // old shape copied it once per note, so a shared image
+        // referenced by many notes multiplied into gigabytes of cache
+        // before import began.) The staged name comes from the entry
+        // itself, sanitised + uniquified like every other staged
+        // file, so the stored attachment keeps the image's own name.
+        // The shared file is never deleted per note
+        // (deleteAfterUse = false): the engine only reads it, and the
+        // run-level staging-dir cleanup in importKeepZip owns it.
         val wanted = drafts.flatMap { it.attachments }.map { it.entryName }.toSet()
         val stagedByEntry = HashMap<String, File?>()
         if (wanted.isNotEmpty()) {
-            var entryIndex = 0
+            val usedNames = mutableSetOf<String>()
             try {
                 reader.walk { entry ->
                     if (entry.name in wanted) {
-                        val temp = File(stagingDir, "keep-entry-${entryIndex++}.tmp")
-                        val ok = entry.copyToUpTo(temp, ImportCaps.MAX_IMPORT_FILE_BYTES)
+                        val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
+                        val ok = entry.copyToUpTo(staged, ImportCaps.MAX_IMPORT_FILE_BYTES)
                         // copyToUpTo deletes the target when over the cap.
-                        stagedByEntry[entry.name] = if (ok) temp else null
+                        stagedByEntry[entry.name] = if (ok) staged else null
                     }
                 }
             } catch (e: ImportZipException) {
@@ -146,19 +154,11 @@ object KeepTakeoutParser {
             }
         }
 
-        val usedNames = mutableSetOf<String>()
         for (draft in drafts) {
             val images = mutableListOf<ImportedImage>()
             for (spec in draft.attachments) {
-                val temp = stagedByEntry[spec.entryName]
-                if (temp == null) {
-                    result.attachmentsSkipped += 1
-                    continue
-                }
-                val staged = File(stagingDir, stagingFileName(spec.filePath, usedNames))
-                try {
-                    temp.copyTo(staged, overwrite = true)
-                } catch (e: Exception) {
+                val staged = stagedByEntry[spec.entryName]
+                if (staged == null) {
                     result.attachmentsSkipped += 1
                     continue
                 }
@@ -166,9 +166,10 @@ object KeepTakeoutParser {
                     name = importBaseName(spec.filePath),
                     mimeType = spec.mimeType,
                     stagedFile = staged,
-                    sizeBytes = temp.length(),
+                    sizeBytes = staged.length(),
                     alt = importBaseName(spec.filePath),
                     token = null, // appended at the end of the content, in order
+                    deleteAfterUse = false, // shared by every referencing note
                 )
             }
             result.notes += ImportedNote(

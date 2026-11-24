@@ -1,5 +1,6 @@
 package app.nota.data.importing
 
+import app.nota.data.backup.BackupQuota
 import app.nota.data.text.PlainTextCodec
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -152,17 +153,22 @@ fun interface ImportImageResolver {
 }
 
 /**
- * Builds a resolver over a path → staged-file map (picked files or ZIP
+ * Builds a resolver over a path → staged-file list (picked files or ZIP
  * entries). Exact normalised-path match first, then a unique basename
- * match (flat exports often lose the folder structure).
+ * match (flat exports often lose the folder structure). A reference is
+ * ambiguous when two DIFFERENT files share the matched name — e.g. two
+ * picked images both called `image.png` — and stays unresolved (the
+ * reference is counted at the call site) instead of silently embedding
+ * whichever file was staged last. The same staged file listed twice
+ * is one candidate, not an ambiguity.
  */
-fun createImportImageResolver(files: Map<String, File>): ImportImageResolver {
+fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResolver {
     // (normalised path, display name, staged file) per entry — matching
     // runs on the ORIGINAL paths/names, never on staging file names.
-    val entries = files.map { (path, file) ->
+    val entries = files.distinct().map { (path, file) ->
         Triple(normaliseImportPath(path), importBaseName(path.replace('\\', '/')), file)
     }
-    val byPath = entries.associate { (path, _, file) -> path to file }
+    val byPath = entries.groupBy { it.first }
     fun pick(name: String, file: File): ResolvedImportImage = ResolvedImportImage(
         name = name,
         mimeType = importMimeFromName(name) ?: "",
@@ -173,7 +179,7 @@ fun createImportImageResolver(files: Map<String, File>): ImportImageResolver {
         val target = resolveRef(fromPath, ref)
         val direct = byPath[target]
         if (direct != null) {
-            pick(importBaseName(target), direct)
+            if (direct.size == 1) pick(importBaseName(target), direct[0].third) else null
         } else {
             val base = importBaseName(target).lowercase()
             val matches = entries.filter { it.second.lowercase() == base }
@@ -951,7 +957,9 @@ object MarkdownImporter {
      *
      *  Three walks, each streaming the archive once, so at most one
      *  member's text is ever in memory: walk 1 inventories the text
-     *  members (names + times only), walk 2 stages the images, walk 3
+     *  members (names + times only, bounded by the same retained-name
+     *  budget as the reader — names past it are dropped and the
+     *  truncation is reported), walk 2 stages the images, walk 3
      *  converts one text member at a time and drops its string right
      *  after. The old shape kept every decoded string in a list until
      *  the whole archive was read — up to ~1 GiB of UTF-16 for a
@@ -970,10 +978,26 @@ object MarkdownImporter {
         val textMembers = LinkedHashMap<String, Long>()
         val imageFiles = LinkedHashMap<String, File>()
         val usedNames = mutableSetOf<String>()
+        // The inventory is bounded by the same retained-name budget
+        // as the reader's own list (R3-F3): names past the budget are
+        // dropped one by one — never collected, never imported — and
+        // the truncation is reported below, so a quota-compliant
+        // archive of many long names can't exhaust the heap through
+        // the inventory alone. The budget check mirrors
+        // ZipImportReader.retainName: a name that doesn't fit is
+        // skipped, later names are still tried.
+        var textMemberNameBytes = 0L
+        var inventoryTruncated = false
         try {
             reader.walk { entry ->
                 if (entry.name.endsWith("/")) return@walk
                 if (isMarkdownTextEntry(entry.name)) {
+                    val nameBytes = entry.name.toByteArray(Charsets.UTF_8).size.toLong()
+                    if (textMemberNameBytes + nameBytes > BackupQuota.MAX_RETAINED_NAME_BYTES) {
+                        inventoryTruncated = true
+                        return@walk
+                    }
+                    textMemberNameBytes += nameBytes
                     textMembers.putIfAbsent(
                         entry.name,
                         if (entry.time > 0) entry.time else 0L,
@@ -991,7 +1015,7 @@ object MarkdownImporter {
                 // An unreadable/oversize image just leaves its
                 // references unresolved (counted at the reference).
             }
-            val resolver = createImportImageResolver(imageFiles)
+            val resolver = createImportImageResolver(imageFiles.toList())
             reader.walk { entry ->
                 if (entry.name !in textMembers) return@walk
                 val base = importBaseName(entry.name)
@@ -1031,6 +1055,12 @@ object MarkdownImporter {
             result.notes.clear()
             result.skippedFiles += SkippedImportFile("ZIP archive", e.message ?: "That ZIP couldn't be read.")
             return result
+        }
+        if (inventoryTruncated) {
+            result.skippedFiles += SkippedImportFile(
+                "ZIP archive",
+                "The archive's file-name list was truncated, so some notes may not have been imported.",
+            )
         }
         return result
     }

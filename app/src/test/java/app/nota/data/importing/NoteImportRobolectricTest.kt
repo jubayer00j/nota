@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -322,9 +323,9 @@ class NoteImportRobolectricTest {
 
     @Test
     fun sharedKeepImageEmbedsInBothNotes() = runBlocking {
-        // F2: attachments stream to one temp file per entry, then each
-        // referencing note gets its own staged copy — a shared image
-        // must survive in every note that references it.
+        // F2: attachments stream to one staged file per entry, shared
+        // by every referencing note — a shared image must survive in
+        // every note that references it.
         val zip = zipOf(
             linkedMapOf(
                 "Takeout/Keep/one.json" to """{"title":"One","textContent":"o","attachments":[{"filePath":"Takeout/Keep/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
@@ -514,5 +515,86 @@ class NoteImportRobolectricTest {
             ),
             result.skippedFiles,
         )
+    }
+
+    @Test
+    fun markdownZipInventoryBudgetTruncatesLongNames() {
+        // R4-F1: the walk-1 inventory is bounded by the same 8 MiB
+        // retained-name budget as the reader — names past it are
+        // dropped and the truncation is reported, never silent.
+        // (~150 entries at ~60 KiB each clear the budget; the last
+        // note sits past the cut.)
+        val entries = LinkedHashMap<String, String>()
+        repeat(150) { i ->
+            entries["notes/filler-$i-" + "x".repeat(59_900) + ".md"] = "# Filler $i\n\nbody"
+        }
+        entries["notes/" + "z".repeat(59_900) + ".md"] = "# Hidden\n\nnever listed"
+        val result = MarkdownImporter.parseImportZip(zipOf(entries), stagingDir())
+        assertTrue(result.notes.size in 1 until 150)
+        assertTrue(result.notes.none { it.title == "Hidden" })
+        assertTrue(
+            result.skippedFiles.contains(
+                SkippedImportFile(
+                    "ZIP archive",
+                    "The archive's file-name list was truncated, so some notes may not have been imported.",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun duplicatePickerImageNamesStayUnresolved() = runBlocking {
+        // R4-F2: two picked images sharing a display name are
+        // ambiguous — the reference stays unresolved (alt kept,
+        // counted) instead of silently embedding the last one. A
+        // uniquely named image in the same selection still embeds.
+        val stack = newStack()
+        val dir = stagingDir()
+        val first = File(dir, "img-a.png").apply { writeBytes(pngBytes) }
+        val second = File(dir, "img-b.png").apply { writeBytes(pngBytes) }
+        val unique = File(dir, "only.png").apply { writeBytes(pngBytes) }
+        val amb = File(dir, "a.md").apply { writeText("# A\n\n![alt](image.png)") }
+        val ok = File(dir, "b.md").apply { writeText("# B\n\n![ok](only.png)") }
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.md", amb, 1_700_000_000_000L),
+                StagedImportFile("b.md", ok, 1_700_000_000_000L),
+                StagedImportFile("image.png", first, 1_700_000_000_000L),
+                StagedImportFile("image.png", second, 1_700_000_000_000L),
+                StagedImportFile("only.png", unique, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(2, outcome.report.imported)
+        assertEquals(1, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals("<p>alt</p>", notes.first { it.title == "A" }.contentHtml)
+        assertTrue(notes.first { it.title == "B" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun sharedKeepImageStagesOnce() {
+        // R4-F3: one staged file per attachment entry, shared by
+        // every note that references it — no per-note copies on disk,
+        // and the stored name stays the image's own name.
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/one.json" to """{"title":"One","textContent":"o","attachments":[{"filePath":"Takeout/Keep/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+                "Takeout/Keep/two.json" to """{"title":"Two","textContent":"t","attachments":[{"filePath":"Takeout/Keep/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}""",
+            ),
+            mapOf("Takeout/Keep/shared.png" to pngBytes),
+        )
+        val dir = stagingDir()
+        val result = KeepTakeoutParser.parse(zip, dir)
+        assertEquals(2, result.notes.size)
+        assertEquals(0, result.attachmentsSkipped)
+        val staged = dir.listFiles()?.toList().orEmpty()
+        assertEquals(1, staged.size)
+        assertEquals("shared.png", staged[0].name)
+        val first = result.notes.first { it.title == "One" }.images.single()
+        val second = result.notes.first { it.title == "Two" }.images.single()
+        assertEquals(first.stagedFile, second.stagedFile)
+        assertFalse(first.deleteAfterUse)
+        assertFalse(second.deleteAfterUse)
     }
 }

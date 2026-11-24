@@ -6,6 +6,8 @@ import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -250,7 +252,7 @@ class MarkdownImportTest {
     @Test
     fun localImageResolvesToTokenAndRemoteImageKeepsAlt() {
         val imageFile = File.createTempFile("pic", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
-        val resolver = createImportImageResolver(mapOf("pic.png" to imageFile))
+        val resolver = createImportImageResolver(listOf("pic.png" to imageFile))
         val result = parseOne(
             "img.md",
             "![alt text](pic.png)\n\n![remote](https://example.com/a.png)",
@@ -267,7 +269,7 @@ class MarkdownImportTest {
 
     @Test
     fun unresolvedImageKeepsAltTextAndCounts() {
-        val resolver = createImportImageResolver(emptyMap())
+        val resolver = createImportImageResolver(emptyList())
         val result = parseOne("img2.md", "![missing alt](nope.png)", resolver = resolver)
         assertEquals("<p>missing alt</p>", result.notes[0].contentHtml)
         assertEquals(1, result.imagesUnresolved)
@@ -276,11 +278,37 @@ class MarkdownImportTest {
     @Test
     fun resolverFallsBackToUniqueBasename() {
         val imageFile = File.createTempFile("shot", ".png").apply { writeBytes(byteArrayOf(9)) }
-        val resolver = createImportImageResolver(mapOf("elsewhere/shot.png" to imageFile))
+        val resolver = createImportImageResolver(listOf("elsewhere/shot.png" to imageFile))
         val resolved = resolver.resolve("docs/note.md", "shot.png")
         assertTrue(resolved != null)
         assertEquals("shot.png", resolved!!.name)
         imageFile.delete()
+    }
+
+    @Test
+    fun resolverLeavesAmbiguousNamesUnresolved() {
+        // R4-F2: two different files sharing a display name are
+        // ambiguous — the reference stays unresolved instead of
+        // silently embedding whichever was staged last. The same
+        // staged file listed twice is one candidate, not an ambiguity,
+        // and a unique full path still resolves.
+        val first = File.createTempFile("amb-a", ".png").apply { writeBytes(byteArrayOf(1)) }
+        val second = File.createTempFile("amb-b", ".png").apply { writeBytes(byteArrayOf(2)) }
+        val ambiguous = createImportImageResolver(
+            listOf("image.png" to first, "image.png" to second),
+        )
+        assertNull(ambiguous.resolve("note.md", "image.png"))
+        val pathed = createImportImageResolver(
+            listOf("a/image.png" to first, "b/image.png" to second),
+        )
+        assertNull(pathed.resolve("note.md", "image.png"))
+        assertNotNull(pathed.resolve("note.md", "a/image.png"))
+        val sameTwice = createImportImageResolver(
+            listOf("image.png" to first, "image.png" to first),
+        )
+        assertNotNull(sameTwice.resolve("note.md", "image.png"))
+        first.delete()
+        second.delete()
     }
 
     @Test

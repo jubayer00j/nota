@@ -107,8 +107,11 @@ class NoteImportRepository(
             // type, or over the staging cap) still belong in the
             // report — never silently dropped.
             merged.skippedFiles += preselectedSkipped
-            val resolverFiles = LinkedHashMap<String, File>()
-            for (file in staged) resolverFiles[file.name] = file.file
+            // A LIST, not a map: two picked images can share a display
+            // name, and a map would silently keep only the last one —
+            // the resolver treats a duplicated name as ambiguous and
+            // leaves the reference unresolved (counted) instead.
+            val resolverFiles = staged.map { it.name to it.file }
             val resolver = createImportImageResolver(resolverFiles)
             var zipIndex = 0
             var looseTextSeen = 0
