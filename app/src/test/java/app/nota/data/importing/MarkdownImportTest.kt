@@ -1,9 +1,11 @@
 package app.nota.data.importing
 
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -255,5 +257,66 @@ class MarkdownImportTest {
         assertEquals("a/c", normaliseImportPath("a/./b/../c"))
         assertEquals("x/y", normaliseImportPath("/x/y"))
         assertEquals("a/b", normaliseImportPath("a\\b"))
+    }
+
+    @Test
+    fun parseMarkdownFilesEnforcesNoteCapAcrossInputs() {
+        // R2-F1: the per-file conversion shared by the list path and
+        // the ZIP path caps the run at 5,000 notes — the 5,001st input
+        // is reported as skipped, never silently dropped.
+        val inputs = (0..5_000).map { i ->
+            MarkdownFileInput("n$i.md", "n$i.md", "body $i", 1_700_000_000_000L)
+        }
+        val result = MarkdownImporter.parseMarkdownFiles(inputs, null)
+        assertEquals(5_000, result.notes.size)
+        assertEquals(
+            listOf(
+                SkippedImportFile(
+                    "n5000.md",
+                    "Import limit reached (5,000 notes per run).",
+                ),
+            ),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun supportedPickTypesMatchWhatTheEngineAccepts() {
+        // R2-F2: ZIPs, Markdown/text, and the resolver's image types
+        // stage; anything else is rejected before any copy.
+        for (name in listOf("takeout.zip", "note.md", "note.markdown", "note.txt", "pic.png", "pic.jpg", "pic.jpeg", "pic.gif", "pic.webp", "pic.avif", "pic.svg", "pic.bmp", "NOTE.MD", "Pic.PNG")) {
+            assertTrue(name, PickedFileStaging.isSupportedPick(name))
+        }
+        for (name in listOf("doc.pdf", "app.exe", "data.json", "notes", "archive.tar.gz", "photo.heic")) {
+            assertFalse(name, PickedFileStaging.isSupportedPick(name))
+        }
+    }
+
+    @Test
+    fun cappedCopyKeepsBytesUnderCap() {
+        val target = File.createTempFile("stage-ok", ".bin")
+        val bytes = ByteArray(100) { it.toByte() }
+        assertTrue(PickedFileStaging.copyCapped(ByteArrayInputStream(bytes), target, 100L))
+        assertEquals(bytes.toList(), target.readBytes().toList())
+        target.delete()
+    }
+
+    @Test
+    fun cappedCopyDeletesPartialOverCap() {
+        // R2-F2: one byte past the cap trips the copy and leaves no
+        // partial file behind.
+        val target = File.createTempFile("stage-over", ".bin")
+        assertFalse(
+            PickedFileStaging.copyCapped(ByteArrayInputStream(ByteArray(101)), target, 100L),
+        )
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun cappedCopyAcceptsEmptyStream() {
+        val target = File.createTempFile("stage-empty", ".bin")
+        assertTrue(PickedFileStaging.copyCapped(ByteArrayInputStream(ByteArray(0)), target, 100L))
+        assertEquals(0L, target.length())
+        target.delete()
     }
 }

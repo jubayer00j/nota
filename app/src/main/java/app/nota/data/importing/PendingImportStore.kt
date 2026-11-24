@@ -29,11 +29,15 @@ sealed interface PendingImportState {
 }
 
 /** What the UI staged: a temp dir (deleted at the terminal transition)
- *  plus either a Keep ZIP or the picked file set. */
+ *  plus either a Keep ZIP or the picked file set. [skippedFiles] holds
+ *  picks the UI already rejected before copying (unsupported type, or
+ *  over the staging cap) — they still belong in the report, so the
+ *  engine folds them into the outcome's skipped files. */
 class StagedImport(
     val tempDir: File,
     val keepZip: File?,
     val files: List<StagedImportFile>,
+    val skippedFiles: List<SkippedImportFile> = emptyList(),
 )
 
 class PendingImportStore(

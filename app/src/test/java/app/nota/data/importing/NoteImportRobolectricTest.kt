@@ -381,6 +381,51 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun markdownZipConvertsEntriesOneAtATime() {
+        // R2-F1: a multi-entry ZIP converts incrementally — every
+        // entry lands in archive order with its content intact, and
+        // the image resolves even though the text is dropped after
+        // each conversion. One member carries ~1 MiB of text.
+        val zip = zipOf(
+            linkedMapOf(
+                "notes/one.md" to "# One\n\nfirst",
+                "notes/two.md" to "# Two\n\n" + "x".repeat(1_000_000),
+                "notes/three.md" to "# Three\n\n![p](pic.png)",
+            ),
+            mapOf("notes/pic.png" to pngBytes),
+        )
+        val result = MarkdownImporter.parseImportZip(zip, stagingDir())
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+        assertEquals(listOf("One", "Two", "Three"), result.notes.map { it.title })
+        assertEquals("<p>first</p>", result.notes[0].contentHtml)
+        assertTrue(result.notes[1].contentHtml.length > 1_000_000)
+        assertTrue(result.notes[1].contentHtml.startsWith("<p>"))
+        val three = result.notes[2]
+        assertEquals(1, three.images.size)
+        assertNotNull(three.images[0].token)
+        assertTrue(three.contentHtml.contains(three.images[0].token!!))
+    }
+
+    @Test
+    fun markdownSelectionCarriesPreselectedSkips() = runBlocking {
+        // R2-F2: picks the UI rejected before copying (unsupported
+        // type, or over the staging cap) still appear in the report
+        // as skipped files — never silently dropped.
+        val stack = newStack()
+        val dir = stagingDir()
+        val md = File(dir, "a.md").apply { writeText("# A\n\nbody") }
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("a.md", md, 1_700_000_000_000L)),
+            listOf(SkippedImportFile("c.pdf", "Not a Markdown, text or ZIP file.")),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(
+            listOf(SkippedImportFile("c.pdf", "Not a Markdown, text or ZIP file.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
     fun unsaveableImageWithNullTokenKeepsAltText() = runBlocking {
         // F5: a Keep-style image (null token, appended at the end)
         // that fails to save must still leave its alt text in the

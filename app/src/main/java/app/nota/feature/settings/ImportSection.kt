@@ -25,6 +25,8 @@ import androidx.compose.ui.platform.LocalContext
 import app.nota.data.importing.NoteImportRepository
 import app.nota.data.importing.PendingImportState
 import app.nota.data.importing.PendingImportStore
+import app.nota.data.importing.PickedFileStaging
+import app.nota.data.importing.SkippedImportFile
 import app.nota.data.importing.StagedImport
 import app.nota.data.importing.StagedImportFile
 import app.nota.data.importing.stagingFileName
@@ -67,6 +69,12 @@ fun ImportSection(
         pendingImportStore.stageAndRun(
             stage = {
                 val dir = newImportTempDir(context)
+                // Reject before copying: the picker accepts anything,
+                // and a non-ZIP must never be staged in full first.
+                val name = pickedDisplayName(context, uri)
+                if (!name.lowercase().endsWith(".zip")) {
+                    error("That file isn't a ZIP archive — pick your Google Keep Takeout ZIP.")
+                }
                 val target = File(dir, "keep-takeout.zip")
                 copyPickedFile(context, uri, target)
                 StagedImport(tempDir = dir, keepZip = target, files = emptyList())
@@ -88,20 +96,47 @@ fun ImportSection(
             stage = {
                 val dir = newImportTempDir(context)
                 val usedNames = mutableSetOf<String>()
-                val stagedFiles = uris.map { uri ->
+                val stagedFiles = mutableListOf<StagedImportFile>()
+                val skipped = mutableListOf<SkippedImportFile>()
+                for (uri in uris) {
                     val name = pickedDisplayName(context, uri)
+                    // Reject unsupported types BEFORE copying — the
+                    // picker accepts anything, and an unsupported file
+                    // must never be staged in full first. Rejected
+                    // picks are still reported, never silently dropped.
+                    if (!PickedFileStaging.isSupportedPick(name)) {
+                        skipped += SkippedImportFile(name, "Not a Markdown, text or ZIP file.")
+                        continue
+                    }
                     val target = File(dir, stagingFileName(name, usedNames))
-                    copyPickedFile(context, uri, target)
-                    StagedImportFile(
+                    val input = context.contentResolver.openInputStream(uri)
+                    if (input == null) {
+                        skipped += SkippedImportFile(name, "Couldn't be read.")
+                        continue
+                    }
+                    if (!PickedFileStaging.copyCapped(input, target)) {
+                        skipped += SkippedImportFile(name, "File is larger than 544 MB.")
+                        continue
+                    }
+                    stagedFiles += StagedImportFile(
                         name = name,
                         file = target,
                         lastModified = pickedLastModified(context, uri),
                     )
                 }
-                StagedImport(tempDir = dir, keepZip = null, files = stagedFiles)
+                StagedImport(
+                    tempDir = dir,
+                    keepZip = null,
+                    files = stagedFiles,
+                    skippedFiles = skipped,
+                )
             },
             run = { input, onProgress ->
-                importRepository.importMarkdownSelection(input.files, onProgress).toSummary()
+                importRepository.importMarkdownSelection(
+                    input.files,
+                    input.skippedFiles,
+                    onProgress,
+                ).toSummary()
             },
         )
     }
@@ -221,10 +256,15 @@ fun ImportSection(
 private fun newImportTempDir(context: Context): File =
     File(context.cacheDir, "import-pick-${System.nanoTime()}").apply { mkdirs() }
 
+/** Single-file staging for the Keep launcher: the copy is capped
+ *  (see [PickedFileStaging]) — a file over the cap fails the stage
+ *  with a message instead of filling the cache first. */
 private fun copyPickedFile(context: Context, uri: Uri, target: File) {
     val input = context.contentResolver.openInputStream(uri)
         ?: error("Could not open the chosen file.")
-    input.use { ins -> target.outputStream().use { out -> ins.copyTo(out) } }
+    if (!PickedFileStaging.copyCapped(input, target)) {
+        error("That file is too large to import safely.")
+    }
 }
 
 /** The picked file's display name (its identity for titles, folders

@@ -97,11 +97,16 @@ class NoteImportRepository(
      */
     suspend fun importMarkdownSelection(
         staged: List<StagedImportFile>,
+        preselectedSkipped: List<SkippedImportFile> = emptyList(),
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): ImportOutcome {
         val stagingDir = File(context.cacheDir, "import-mdsel-${UUID.randomUUID()}")
         return try {
             val merged = ImportParseResult()
+            // Picks the UI already rejected before copying (unsupported
+            // type, or over the staging cap) still belong in the
+            // report — never silently dropped.
+            merged.skippedFiles += preselectedSkipped
             val textInputs = mutableListOf<MarkdownFileInput>()
             val resolverFiles = LinkedHashMap<String, File>()
             for (file in staged) resolverFiles[file.name] = file.file

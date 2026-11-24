@@ -55,6 +55,10 @@ internal fun importBaseName(path: String): String {
     return parts.lastOrNull() ?: path
 }
 
+/** A ZIP member / picked file that parses as a Markdown or text note. */
+internal fun isMarkdownTextEntry(name: String): Boolean =
+    Regex("\\.(md|markdown|txt)$", RegexOption.IGNORE_CASE).containsMatchIn(name)
+
 /** Filesystem-safe staging name from an entry/pick name (basename
  *  only; only path separators and control characters are replaced, so
  *  the staged name stays as close to the original as possible). */
@@ -819,26 +823,35 @@ object MarkdownImporter {
         resolver: ImportImageResolver?,
     ): ImportParseResult {
         val result = ImportParseResult()
-        for (file in files) {
-            if (result.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
-                result.skippedFiles += SkippedImportFile(
-                    file.name,
-                    "Import limit reached (5,000 notes per run).",
-                )
-                continue
-            }
-            // Defence in depth for direct callers: the ZIP path
-            // already enforces this cap in bytes at read time (see
-            // parseImportZip). String.length is UTF-16 units, not
-            // UTF-8 bytes, so it can only ever trip for text supplied
-            // pre-built, never for ZIP members.
-            if (file.text.length > ImportCaps.MAX_IMPORT_FILE_BYTES) {
-                result.skippedFiles += SkippedImportFile(file.name, "File is larger than 100 MB.")
-                continue
-            }
-            result.notes += markdownFileToImportedNote(file, resolver, result)
-        }
+        for (file in files) appendParsedFile(result, file, resolver)
         return result
+    }
+
+    /** One file's parse, shared by the list path and the ZIP path
+     *  (which converts each member as it is read so no archive's text
+     *  is ever retained in full). */
+    private fun appendParsedFile(
+        result: ImportParseResult,
+        file: MarkdownFileInput,
+        resolver: ImportImageResolver?,
+    ) {
+        if (result.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
+            result.skippedFiles += SkippedImportFile(
+                file.name,
+                "Import limit reached (5,000 notes per run).",
+            )
+            return
+        }
+        // Defence in depth for direct callers: the ZIP path
+        // already enforces this cap in bytes at read time (see
+        // parseImportZip). String.length is UTF-16 units, not
+        // UTF-8 bytes, so it can only ever trip for text supplied
+        // pre-built, never for ZIP members.
+        if (file.text.length > ImportCaps.MAX_IMPORT_FILE_BYTES) {
+            result.skippedFiles += SkippedImportFile(file.name, "File is larger than 100 MB.")
+            return
+        }
+        result.notes += markdownFileToImportedNote(file, resolver, result)
     }
 
     private fun markdownFileToImportedNote(
@@ -898,7 +911,15 @@ object MarkdownImporter {
     }
 
     /** Parses a ZIP of Markdown/text files (the folder-in-a-ZIP case).
-     *  Image entries are staged into [stagingDir] for the resolver. */
+     *  Image entries are staged into [stagingDir] for the resolver.
+     *
+     *  Three walks, each streaming the archive once, so at most one
+     *  member's text is ever in memory: walk 1 inventories the text
+     *  members (names + times only), walk 2 stages the images, walk 3
+     *  converts one text member at a time and drops its string right
+     *  after. The old shape kept every decoded string in a list until
+     *  the whole archive was read — up to ~1 GiB of UTF-16 for a
+     *  512 MiB archive — before the note cap applied. */
     fun parseImportZip(zipFile: File, stagingDir: File): ImportParseResult {
         val result = ImportParseResult()
         if (!isZipFile(zipFile)) {
@@ -910,41 +931,22 @@ object MarkdownImporter {
         }
         stagingDir.mkdirs()
         val reader = ZipImportReader(zipFile)
-        val files = mutableListOf<MarkdownFileInput>()
+        val textMembers = LinkedHashMap<String, Long>()
         val imageFiles = LinkedHashMap<String, File>()
         val usedNames = mutableSetOf<String>()
         try {
             reader.walk { entry ->
                 if (entry.name.endsWith("/")) return@walk
-                if (Regex("\\.(md|markdown|txt)$", RegexOption.IGNORE_CASE).containsMatchIn(entry.name)) {
-                    // The per-file cap is enforced in BYTES before the
-                    // member is retained: readBytesUpTo returns null
-                    // past 100 MiB without buffering the whole member
-                    // (the old code buffered under the 512 MiB archive
-                    // cap, then checked String.length — a multibyte file
-                    // could pass the character count while far exceeding
-                    // 100 MiB on disk).
-                    val bytes = entry.readBytesUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
-                    if (bytes == null) {
-                        result.skippedFiles += SkippedImportFile(
-                            importBaseName(entry.name),
-                            "File is larger than 100 MB.",
-                        )
-                    } else {
-                        files += MarkdownFileInput(
-                            name = importBaseName(entry.name),
-                            path = entry.name,
-                            text = bytes.toString(Charsets.UTF_8),
-                            lastModified = if (entry.time > 0) entry.time else 0L,
-                        )
-                    }
+                if (isMarkdownTextEntry(entry.name)) {
+                    textMembers.putIfAbsent(
+                        entry.name,
+                        if (entry.time > 0) entry.time else 0L,
+                    )
                 }
             }
             reader.walk { entry ->
                 if (entry.name.endsWith("/")) return@walk
-                if (Regex("\\.(md|markdown|txt)$", RegexOption.IGNORE_CASE).containsMatchIn(entry.name)) {
-                    return@walk
-                }
+                if (isMarkdownTextEntry(entry.name)) return@walk
                 if (importMimeFromName(entry.name) == null) return@walk
                 val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
                 if (entry.copyToUpTo(staged, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
@@ -953,13 +955,48 @@ object MarkdownImporter {
                 // An unreadable/oversize image just leaves its
                 // references unresolved (counted at the reference).
             }
+            val resolver = createImportImageResolver(imageFiles)
+            reader.walk { entry ->
+                if (entry.name !in textMembers) return@walk
+                val base = importBaseName(entry.name)
+                if (result.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
+                    result.skippedFiles += SkippedImportFile(
+                        base,
+                        "Import limit reached (5,000 notes per run).",
+                    )
+                    return@walk
+                }
+                // The per-file cap is enforced in BYTES before the
+                // member is retained: readBytesUpTo returns null
+                // past 100 MiB without buffering the whole member
+                // (the old code buffered under the 512 MiB archive
+                // cap, then checked String.length — a multibyte file
+                // could pass the character count while far exceeding
+                // 100 MiB on disk).
+                val bytes = entry.readBytesUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
+                if (bytes == null) {
+                    result.skippedFiles += SkippedImportFile(
+                        base,
+                        "File is larger than 100 MB.",
+                    )
+                    return@walk
+                }
+                val input = MarkdownFileInput(
+                    name = base,
+                    path = entry.name,
+                    text = bytes.toString(Charsets.UTF_8),
+                    lastModified = textMembers[entry.name] ?: 0L,
+                )
+                appendParsedFile(result, input, resolver)
+            }
         } catch (e: ImportZipException) {
+            // A quota trip aborts the whole archive: nothing partial
+            // is applied from it (same contract as the backup reader).
+            result.notes.clear()
             result.skippedFiles += SkippedImportFile("ZIP archive", e.message ?: "That ZIP couldn't be read.")
             return result
         }
-        val parsed = parseMarkdownFiles(files, createImportImageResolver(imageFiles))
-        parsed.skippedFiles.addAll(0, result.skippedFiles)
-        return parsed
+        return result
     }
 }
 
