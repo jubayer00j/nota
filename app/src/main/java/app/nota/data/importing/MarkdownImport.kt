@@ -898,7 +898,19 @@ object MarkdownImporter {
             result.skippedFiles += SkippedImportFile(file.name, "File is larger than 100 MB.")
             return
         }
-        result.notes += markdownFileToImportedNote(file, resolver, result)
+        // Aggregate text budget (Codex R6-F1): estimated from the
+        // source length BEFORE conversion, so an over-budget file
+        // costs no parse work and leaves no image counts behind.
+        // The true check runs in addNote below (HTML can expand the
+        // source slightly).
+        if (result.retainedTextChars + file.text.length > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
+            result.skippedFiles += SkippedImportFile(
+                file.name,
+                ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+            )
+            return
+        }
+        result.addNote(markdownFileToImportedNote(file, resolver, result))
     }
 
     private fun markdownFileToImportedNote(

@@ -98,6 +98,10 @@ fun ImportSection(
                 val usedNames = mutableSetOf<String>()
                 val stagedFiles = mutableListOf<StagedImportFile>()
                 val skipped = mutableListOf<SkippedImportFile>()
+                // One budget spans the whole selection (Codex R6-F2):
+                // the per-file cap alone lets several large picks
+                // stage gigabytes into cache before parsing starts.
+                val budget = PickedFileStaging.StagingBudget()
                 for (uri in uris) {
                     val name = pickedDisplayName(context, uri)
                     // Reject unsupported types BEFORE copying — the
@@ -114,15 +118,20 @@ fun ImportSection(
                         skipped += SkippedImportFile(name, "Couldn't be read.")
                         continue
                     }
-                    if (!PickedFileStaging.copyCapped(input, target)) {
-                        skipped += SkippedImportFile(name, "File is larger than 544 MB.")
-                        continue
+                    when (PickedFileStaging.stageOne(input, target, budget)) {
+                        is PickedFileStaging.StagedPick.Ok -> stagedFiles += StagedImportFile(
+                            name = name,
+                            file = target,
+                            lastModified = pickedLastModified(context, uri),
+                        )
+                        PickedFileStaging.StagedPick.TooBig ->
+                            skipped += SkippedImportFile(name, "File is larger than 544 MB.")
+                        PickedFileStaging.StagedPick.OverBudget ->
+                            skipped += SkippedImportFile(
+                                name,
+                                "Total staged files exceed the 544 MB selection budget.",
+                            )
                     }
-                    stagedFiles += StagedImportFile(
-                        name = name,
-                        file = target,
-                        lastModified = pickedLastModified(context, uri),
-                    )
                 }
                 StagedImport(
                     tempDir = dir,

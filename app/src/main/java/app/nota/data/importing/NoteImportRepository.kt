@@ -173,9 +173,12 @@ class NoteImportRepository(
                 )
             }
             // The per-source caps (5,000 per ZIP / per file list) do
-            // not bound the merged run on their own — enforce the cap
-            // across the whole selection here.
+            // not bound the merged run on their own — enforce the caps
+            // across the whole selection here (note count, then the
+            // aggregate text budget, which several already-budgeted
+            // sources can still exceed in sum).
             merged.enforceNoteCap()
+            merged.enforceContentBudget()
             val run = importNotes(merged.notes, onProgress)
             ImportOutcome(merged, run.report, run.imageSaveFailures)
         } finally {
@@ -214,8 +217,6 @@ class NoteImportRepository(
             return db
         }
         try {
-            val noteDao = db.noteDao()
-
             var importedCount = 0
             var duplicates = 0
             var failed = 0
@@ -223,13 +224,26 @@ class NoteImportRepository(
             val failedNames = mutableListOf<String>()
 
             val seen = HashSet<String>()
-            for (note in noteDao.getAll()) seen += dedupeKey(note.title, note.createdAt)
 
             // Folder resolution mirrors 1.x resolveFolderId (seeded map,
             // case-insensitive trimmed names, create on demand).
             val folderByName = HashMap<String, String>()
-            for (folder in db.folderDao().getAll()) {
-                folderByName[folder.name.trim().lowercase()] = folder.id
+            // Seed reads resolve through dbForWrite() under the switch
+            // lock (R6-F3): the captured DAOs would belong to the closed
+            // instance after a switch, and a switch between the capture
+            // above and the read would close the handle mid-seed.
+            val tagByExact = HashMap<String, TagEntity>()
+            val tagByLower = HashMap<String, TagEntity>()
+            provider.withSwitchHeldOff {
+                val seedDb = dbForWrite()
+                for (note in seedDb.noteDao().getAll()) seen += dedupeKey(note.title, note.createdAt)
+                for (folder in seedDb.folderDao().getAll()) {
+                    folderByName[folder.name.trim().lowercase()] = folder.id
+                }
+                for (tag in seedDb.tagDao().getAllTags()) {
+                    tagByExact.putIfAbsent(tag.name, tag)
+                    tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
+                }
             }
             suspend fun resolveFolderId(folderName: String?): String? {
                 val trimmed = folderName?.trim().orEmpty()
@@ -253,12 +267,6 @@ class NoteImportRepository(
             // Tag resolution mirrors NoteRepository.setNoteTags' lookup
             // spirit: exact name first, then a case-insensitive match, then
             // create (first-typed form is what gets stored).
-            val tagByExact = HashMap<String, TagEntity>()
-            val tagByLower = HashMap<String, TagEntity>()
-            for (tag in db.tagDao().getAllTags()) {
-                tagByExact.putIfAbsent(tag.name, tag)
-                tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
-            }
             suspend fun resolveTag(rawName: String): TagEntity {
                 val name = rawName.trim()
                 tagByExact[name]?.let { return it }
@@ -285,20 +293,31 @@ class NoteImportRepository(
             var done = 0
             for (item in capped) {
                 try {
-                    val key = dedupeKey(item.title, item.createdAt)
-                    if (key in seen) {
-                        duplicates++
-                    } else {
-                        val folderId = resolveFolderId(item.folderName)
-                        val tags = item.tagNames
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() }
-                            .distinct()
-                            .map { resolveTag(it) }
-                            .distinctBy { it.id }
-                        imageSaveFailures += writeImportedNote(dbForWrite(), item, folderId, tags)
-                        seen += key
-                        importedCount++
+                    // One note write, one critical section (R6-F3):
+                    // the switch lock is held from the pin check
+                    // through the last transaction, so a switch can
+                    // only happen between notes, never mid-note —
+                    // neither a closed-handle failure nor a partial
+                    // note in the wrong account. Progress is reported
+                    // OUTSIDE the lock: a switch from the progress
+                    // callback must never wait on a lock this thread
+                    // holds.
+                    provider.withSwitchHeldOff {
+                        val key = dedupeKey(item.title, item.createdAt)
+                        if (key in seen) {
+                            duplicates++
+                        } else {
+                            val folderId = resolveFolderId(item.folderName)
+                            val tags = item.tagNames
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() }
+                                .distinct()
+                                .map { resolveTag(it) }
+                                .distinctBy { it.id }
+                            imageSaveFailures += writeImportedNote(dbForWrite(), item, folderId, tags)
+                            seen += key
+                            importedCount++
+                        }
                     }
                 } catch (e: Exception) {
                     failed++
@@ -314,13 +333,15 @@ class NoteImportRepository(
             }
 
             if (importedCount > 0 || failed > 0) {
-                val finishDb = dbForWrite()
-                rebuildLibraryIndexes(finishDb)
-                attachmentStore.reconcile(
-                    allProvider = { finishDb.attachmentDao().getAll() },
-                    extraKnownPaths = { provider.allAttachmentLocalPaths() },
-                    db = finishDb,
-                )
+                provider.withSwitchHeldOff {
+                    val finishDb = dbForWrite()
+                    rebuildLibraryIndexes(finishDb)
+                    attachmentStore.reconcile(
+                        allProvider = { finishDb.attachmentDao().getAll() },
+                        extraKnownPaths = { provider.allAttachmentLocalPaths() },
+                        db = finishDb,
+                    )
+                }
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),

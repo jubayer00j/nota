@@ -14,6 +14,17 @@ import java.io.File
 object ImportCaps {
     const val MAX_IMPORT_NOTES = 5000
     const val MAX_IMPORT_FILE_BYTES = 100L * 1024 * 1024
+
+    /** Aggregate retained note text per run, in UTF-16 units
+     *  ([String.length]) — NOT a 1.x cap: 1.x holds every converted
+     *  note in memory, which on Nota's 1 GB target can OOM (5,000
+     *  notes × 100 KB bodies is ~500 MB of live strings; the 512 MiB
+     *  archive quota bounds ZIP bytes, not the expanded aggregate).
+     *  16 M chars ≈ 32 MiB of string storage. Notes past it are
+     *  reported as skipped, never silently dropped. */
+    const val MAX_AGGREGATE_TEXT_CHARS = 16L * 1024 * 1024
+    const val AGGREGATE_TEXT_BUDGET_REASON =
+        "Import limit reached (16 million characters of note text per run)."
 }
 
 class ImportedImage(
@@ -70,9 +81,51 @@ class ImportParseResult {
      *  can say so honestly. */
     var coloredNotes = 0
 
+    /** UTF-16 units of note text retained in [notes] — the run-wide
+     *  aggregate budget (Codex R6-F1): converted bodies stay live
+     *  from parse through the write phase, so the count cap and the
+     *  archive quota do not bound the live heap on their own. */
+    var retainedTextChars: Long = 0L
+        private set
+
+    /** Adds [note] when the aggregate text budget allows it;
+     *  otherwise records the skip and returns false. Callers that
+     *  can estimate the size before converting (the parsers) check
+     *  first and skip without converting, so this is the true,
+     *  defence-in-depth check on the converted body. */
+    fun addNote(note: ImportedNote): Boolean {
+        val chars = note.contentHtml.length.toLong()
+        if (retainedTextChars + chars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
+            skippedFiles += SkippedImportFile(
+                note.sourceName,
+                ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+            )
+            return false
+        }
+        notes += note
+        retainedTextChars += chars
+        return true
+    }
+
+    /** Drops tail notes past the aggregate text budget into
+     *  [skippedFiles] — the merge-time counterpart of [addNote],
+     *  for runs assembled from several already-budgeted sources
+     *  whose sum still exceeds the budget. */
+    fun enforceContentBudget() {
+        while (retainedTextChars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS && notes.isNotEmpty()) {
+            val dropped = notes.removeAt(notes.lastIndex)
+            retainedTextChars -= dropped.contentHtml.length
+            skippedFiles += SkippedImportFile(
+                dropped.sourceName,
+                ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+            )
+        }
+    }
+
     /** 1.x mergeParseResults: fold another source's parse into this one. */
     fun absorb(other: ImportParseResult) {
         notes += other.notes
+        retainedTextChars += other.retainedTextChars
         skippedFiles += other.skippedFiles
         attachmentsSkipped += other.attachmentsSkipped
         imagesUnresolved += other.imagesUnresolved
@@ -88,6 +141,7 @@ class ImportParseResult {
         val excess = notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).toList()
         notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).clear()
         for (note in excess) {
+            retainedTextChars -= note.contentHtml.length
             skippedFiles += SkippedImportFile(
                 note.sourceName,
                 "Import limit reached (5,000 notes per run).",

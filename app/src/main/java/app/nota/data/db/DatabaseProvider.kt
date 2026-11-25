@@ -4,6 +4,8 @@ import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Owns the ACTIVE account's [NotaDatabase] (Phase 3a).
@@ -52,19 +54,46 @@ class DatabaseProvider(
     val isGuest: Boolean get() = _accountId.value == NotaDatabase.GUEST_ACCOUNT
 
     /**
+     * Serialises account switches against short atomic units of work
+     * that must not straddle a swap (Codex R6-F3): the import engine
+     * holds this around one note write, so [switchTo] can never close
+     * the handle between the pin check and the write. A coroutine
+     * Mutex, not a Java lock: the holder suspends inside Room
+     * transactions, and a Java lock is thread-bound — the coroutine
+     * may resume on another IO thread and unlock from the wrong
+     * thread. [switchTo] is a plain function, so it acquires the same
+     * mutex with a brief tryLock spin instead of suspending. Held
+     * only around one note write, never a whole run, so a switch tap
+     * waits at most one note write — and the holder never waits on
+     * the UI thread, so the spin always terminates.
+     */
+    private val switchMutex = Mutex()
+
+    /** Runs [block] with account switching held off. */
+    suspend fun <T> withSwitchHeldOff(block: suspend () -> T): T =
+        switchMutex.withLock { block() }
+
+    /**
      * Switches the active database to [accountId]'s. Returns false when
      * already there (no rebuild, no close). Synchronised so two rapid
      * sign-in/sign-out taps can never interleave a half-swapped state.
      */
     @Synchronized
     fun switchTo(accountId: String): Boolean {
-        if (accountId == _accountId.value) return false
-        val next = NotaDatabase.build(appContext, accountId)
-        val previous = current
-        current = next
-        _accountId.value = accountId
-        previous.close()
-        return true
+        while (!switchMutex.tryLock()) {
+            Thread.sleep(1)
+        }
+        try {
+            if (accountId == _accountId.value) return false
+            val next = NotaDatabase.build(appContext, accountId)
+            val previous = current
+            current = next
+            _accountId.value = accountId
+            previous.close()
+            return true
+        } finally {
+            switchMutex.unlock()
+        }
     }
 
     /**

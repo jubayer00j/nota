@@ -444,4 +444,59 @@ class MarkdownImportTest {
         assertEquals(0L, target.length())
         target.delete()
     }
+
+    @Test
+    fun aggregateTextBudgetSkipsOverBudgetNotes() {
+        // R6-F1: nine 2M-char files total ~18M chars — past the 16M
+        // aggregate budget. Eight parse; the ninth is reported as
+        // skipped, never silently dropped.
+        val files = (0 until 9).map { i ->
+            MarkdownFileInput(
+                "big-$i.md",
+                "big-$i.md",
+                "# Big$i\n\n" + "x".repeat(2_000_000),
+                1_700_000_000_000L + i,
+            )
+        }
+        val result = MarkdownImporter.parseMarkdownFiles(files, null)
+        assertEquals(8, result.notes.size)
+        assertEquals((0 until 8).map { "Big$it" }, result.notes.map { it.title })
+        assertEquals(
+            listOf(SkippedImportFile("big-8.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun stagingBudgetCapsTotalAcrossFiles() {
+        // R6-F2: copyCapped bounds each file, but a selection's total
+        // needs its own budget — a second file past the remaining
+        // total is rejected (nothing staged) while a smaller one
+        // still fits.
+        val budget = PickedFileStaging.StagingBudget(totalBytes = 100)
+        val dir = File.createTempFile("staging-budget", ".dir")
+            .apply { delete(); mkdir() }
+        try {
+            val first = File(dir, "a.bin")
+            assertEquals(
+                PickedFileStaging.StagedPick.Ok(60),
+                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(60)), first, budget),
+            )
+            assertEquals(40L, budget.remaining())
+            val second = File(dir, "b.bin")
+            assertEquals(
+                PickedFileStaging.StagedPick.OverBudget,
+                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(60)), second, budget),
+            )
+            assertFalse(second.exists())
+            val third = File(dir, "c.bin")
+            assertEquals(
+                PickedFileStaging.StagedPick.Ok(40),
+                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(40)), third, budget),
+            )
+            assertEquals(0L, budget.remaining())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

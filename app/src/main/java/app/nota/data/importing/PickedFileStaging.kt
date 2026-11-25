@@ -22,10 +22,66 @@ import java.io.InputStream
  *   the backup pipeline allows for a decrypted ZIP.
  * - [copyCapped] is the streaming copy that enforces the cap and
  *   deletes the partial target when it trips.
+ * - [StagingBudget] bounds a whole multi-file selection (Codex
+ *   R6-F2): the per-file cap alone lets several large picks stage
+ *   gigabytes into one cache directory before parsing starts.
+ *   [stageOne] stages one pick under both caps at once.
  */
 object PickedFileStaging {
 
     val MAX_STAGED_PICK_BYTES: Long = BackupQuota.MAX_DECRYPTED_ZIP_BYTES
+
+    /** Total bytes one multi-file selection may stage — one
+     *  per-file cap's worth across all picks. A selection of several
+     *  large files is the pathological case this bounds; ordinary
+     *  Markdown/text selections are kilobytes. */
+    val MAX_TOTAL_STAGED_BYTES: Long = MAX_STAGED_PICK_BYTES
+
+    /** Running total for one multi-file staging pass (Codex R6-F2):
+     *  [copyCapped] bounds each file, but several large picks in one
+     *  selection could still stage gigabytes into cache. */
+    class StagingBudget(private val totalBytes: Long = MAX_TOTAL_STAGED_BYTES) {
+        private var usedBytes = 0L
+
+        fun remaining(): Long = (totalBytes - usedBytes).coerceAtLeast(0)
+
+        fun record(bytes: Long) {
+            usedBytes += bytes
+        }
+    }
+
+    sealed interface StagedPick {
+        /** Staged, holding [bytes] of the selection budget. */
+        data class Ok(val bytes: Long) : StagedPick
+
+        /** The file alone exceeds the per-file cap. */
+        object TooBig : StagedPick
+
+        /** The selection budget is exhausted (or this file would
+         *  exceed what remains of it). */
+        object OverBudget : StagedPick
+    }
+
+    /** Stages one picked file under the per-file cap AND the
+     *  selection [budget]: copies at most the smaller of the two.
+     *  A rejected copy leaves no file behind, and the input is
+     *  always closed. */
+    fun stageOne(input: InputStream, target: File, budget: StagingBudget): StagedPick {
+        val remaining = budget.remaining()
+        if (remaining <= 0) {
+            input.close()
+            return StagedPick.OverBudget
+        }
+        val cap = minOf(MAX_STAGED_PICK_BYTES, remaining)
+        if (!copyCapped(input, target, cap)) {
+            // The cap passed was the binding one: the per-file cap
+            // when the budget still had room, the budget otherwise.
+            return if (remaining < MAX_STAGED_PICK_BYTES) StagedPick.OverBudget else StagedPick.TooBig
+        }
+        val bytes = target.length()
+        budget.record(bytes)
+        return StagedPick.Ok(bytes)
+    }
 
     fun isSupportedPick(name: String): Boolean {
         val lower = name.lowercase()

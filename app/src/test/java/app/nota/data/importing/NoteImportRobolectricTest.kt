@@ -6,10 +6,15 @@ import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlin.concurrent.thread
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -694,5 +699,144 @@ class NoteImportRobolectricTest {
         }
         assertTrue(store.state.value is PendingImportState.Failed)
         assertFalse(dir.exists())
+    }
+
+    @Test
+    fun keepAggregateTextBudgetSkipsOverBudgetNotes() {
+        // R6-F1: three 6M-char Keep notes total ~18M chars — past
+        // the 16M aggregate budget. The third is reported as
+        // skipped, never silently dropped; the first two keep their
+        // content intact.
+        val body = "y".repeat(6_000_000)
+        val entries = linkedMapOf<String, String>()
+        repeat(3) { i ->
+            entries["Takeout/Keep/big-$i.json"] =
+                """{"title":"Big$i","textContent":"$body","createdTimestampUsec":${1_700_000_000_000L + i}}"""
+        }
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(2, result.notes.size)
+        assertEquals(listOf("Big0", "Big1"), result.notes.map { it.title })
+        assertTrue(result.notes.all { it.contentHtml.length > 6_000_000 })
+        assertEquals(
+            listOf(SkippedImportFile("big-2.json", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun markdownSelectionEnforcesAggregateTextBudget() = runBlocking {
+        // R6-F1 (merge path): nine 2M-char loose files total ~18M
+        // chars — past the 16M budget. Eight import; the ninth is
+        // reported as skipped.
+        val stack = newStack()
+        val dir = stagingDir()
+        val staged = (0 until 9).map { i ->
+            val file = File(dir, "big-$i.md").apply { writeText("# Big$i\n\n" + "x".repeat(2_000_000)) }
+            StagedImportFile("big-$i.md", file, 1_700_000_000_000L + i)
+        }
+        val outcome = stack.repo.importMarkdownSelection(staged)
+        assertEquals(8, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(
+            listOf(SkippedImportFile("big-8.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            outcome.parse.skippedFiles,
+        )
+        assertEquals(8, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun accountSwitchWaitsForHeldOffWrite() = runBlocking {
+        // R6-F3: switchTo must block while a write holds the switch
+        // off, and proceed once the write finishes — the
+        // serialization the pinned-handle race needs.
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-lock-a-$seq"
+        val otherId = "import-lock-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        try {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val job = launch(Dispatchers.IO) {
+                provider.withSwitchHeldOff {
+                    entered.complete(Unit)
+                    release.await()
+                }
+            }
+            entered.await()
+            var switchReturned = false
+            val switchThread = thread {
+                provider.switchTo(otherId)
+                switchReturned = true
+            }
+            delay(300)
+            assertFalse(switchReturned) // still blocked on the held-off write
+            release.complete(Unit)
+            job.join()
+            switchThread.join(5_000)
+            assertTrue(switchReturned)
+            assertEquals(otherId, provider.accountId.value)
+        } finally {
+            provider.current.close()
+        }
+    }
+
+    @Test
+    fun importSurvivesRapidAccountSwitchesMidRun() = runBlocking {
+        // R6-F3 (stress): switches hammering the run from another
+        // thread must not fail or split a single note — every write
+        // lands whole in the account the import started in.
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-storm-a-$seq"
+        val otherId = "import-storm-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        val store = AttachmentStore(context, provider)
+        val repo = NoteImportRepository(context, provider, store)
+        try {
+            val notes = (0 until 30).map { i ->
+                ImportedNote(
+                    "Storm$i", "<p>x</p>",
+                    1_700_000_000_000L + i, 1_700_000_000_000L + i,
+                    false, false, null, emptyList(), null, emptyList(), "storm-$i.md",
+                )
+            }
+            val stop = AtomicBoolean(false)
+            val storm = thread {
+                var toOther = true
+                while (!stop.get()) {
+                    provider.switchTo(if (toOther) otherId else startId)
+                    toOther = !toOther
+                }
+            }
+            val result = try {
+                repo.importNotes(notes)
+            } finally {
+                stop.set(true)
+                storm.join(10_000)
+            }
+            assertEquals(30, result.report.imported)
+            assertEquals(0, result.report.failed)
+            // Nothing leaked into the account switched to mid-run.
+            val otherDb = provider.openAdditional(otherId)
+            try {
+                assertEquals(0, otherDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(otherDb)
+            }
+            // Everything landed in the account the import started in.
+            val startDb = provider.openAdditional(startId)
+            try {
+                assertEquals(30, startDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(startDb)
+            }
+        } finally {
+            provider.current.close()
+        }
     }
 }

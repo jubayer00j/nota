@@ -89,7 +89,14 @@ object KeepTakeoutParser {
         // holds hundreds of MiB alive while parsing. Attachment
         // resolution uses the complete name list from pass 1, so it
         // works no matter where an attachment sits in the archive.
+        // The aggregate text budget (Codex R6-F1) is estimated here
+        // from the raw JSON length — a conservative upper bound on
+        // the converted body, checked BEFORE conversion so an
+        // over-budget note costs no parse work and leaves no counts
+        // behind. The true check runs when the draft becomes a note
+        // (addNote below).
         val drafts = mutableListOf<KeepDraft>()
+        var estimatedTextChars = 0L
         try {
             reader.walk { entry ->
                 if (entry.name !in candidateSet) return@walk
@@ -106,6 +113,13 @@ object KeepTakeoutParser {
                     result.skippedFiles += SkippedImportFile(base, "File is larger than 100 MB.")
                     return@walk
                 }
+                if (estimatedTextChars + raw.length > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
+                    result.skippedFiles += SkippedImportFile(
+                        base,
+                        ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+                    )
+                    return@walk
+                }
                 val json = try {
                     JSONObject(raw)
                 } catch (e: Exception) {
@@ -113,7 +127,10 @@ object KeepTakeoutParser {
                     return@walk
                 }
                 val draft = keepJsonToDraft(json, base, reader.entryNames, result)
-                if (draft != null) drafts += draft
+                if (draft != null) {
+                    drafts += draft
+                    estimatedTextChars += raw.length
+                }
             }
         } catch (e: ImportZipException) {
             // Pass 1 already counted the same bytes under the quota, so
@@ -172,18 +189,23 @@ object KeepTakeoutParser {
                     deleteAfterUse = false, // shared by every referencing note
                 )
             }
-            result.notes += ImportedNote(
-                title = draft.title,
-                contentHtml = draft.contentHtml,
-                createdAt = draft.createdAt,
-                updatedAt = draft.updatedAt,
-                pinned = draft.pinned,
-                archived = draft.archived,
-                trashedAt = draft.trashedAt,
-                tagNames = draft.tagNames,
-                folderName = null, // Keep imports get no folder — labels carry the organisation.
-                images = images,
-                sourceName = draft.sourceName,
+            // addNote is the true aggregate-budget check on the
+            // converted body (the pass-2 estimate above is the raw
+            // JSON length, which overstates it).
+            result.addNote(
+                ImportedNote(
+                    title = draft.title,
+                    contentHtml = draft.contentHtml,
+                    createdAt = draft.createdAt,
+                    updatedAt = draft.updatedAt,
+                    pinned = draft.pinned,
+                    archived = draft.archived,
+                    trashedAt = draft.trashedAt,
+                    tagNames = draft.tagNames,
+                    folderName = null, // Keep imports get no folder — labels carry the organisation.
+                    images = images,
+                    sourceName = draft.sourceName,
+                ),
             )
         }
         return result
