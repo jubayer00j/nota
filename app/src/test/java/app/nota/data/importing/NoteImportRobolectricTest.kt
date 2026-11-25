@@ -1078,6 +1078,7 @@ class NoteImportRobolectricTest {
                 // would see the note either way, so the two emissions
                 // from ONE collector are the point.
                 settleUntil { emissions.size >= 2 }
+                assertEquals(2, emissions.size)
                 assertEquals(listOf("FlowNote"), emissions[1].map { it.title })
                 assertEquals(1, withTimeout(15_000) { importJob.await() }.report.imported)
             } finally {
