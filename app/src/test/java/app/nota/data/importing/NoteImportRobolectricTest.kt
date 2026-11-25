@@ -23,7 +23,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Ignore
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -253,12 +252,6 @@ class NoteImportRobolectricTest {
         )
     }
 
-    // BISECT (do not merge disabled): test-fast-b wedged with the
-    // R17-F1 refresh disabled AND with the F1 test ignored, so the
-    // F2 test is the last round-17 test still running. If the gate
-    // greens with it ignored, this test is the wedge; if b still
-    // wedges, no round-17 test is the cause and this comes back.
-    @Ignore("BISECT: test-fast-b wedge suspect")
     @Test
     fun overlongImageBasenameStillImports() = runBlocking {
         // (Codex R17-F2): a referenced image whose basename exceeds
@@ -1025,14 +1018,6 @@ class NoteImportRobolectricTest {
         }
     }
 
-    // BISECT (do not merge disabled): test-fast-b wedged on every
-    // gate run since this test landed, while the R17-F1 production
-    // refresh was already exonerated (b wedged with it disabled
-    // too, run 45649915046). If the gate greens with this test
-    // ignored, the test shape itself is the wedge and it needs a
-    // rework; if b still wedges, the cause is elsewhere and this
-    // comes back.
-    @Ignore("BISECT: test-fast-b wedge suspect")
     @Test
     fun importRunRefreshesLiveLibraryFlow() = runBlocking {
         // (Codex R17-F1): the engine writes through a dedicated

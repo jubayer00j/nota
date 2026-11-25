@@ -432,15 +432,30 @@ class NoteImportRepository(
                 // Room's close lock keeps a refresh from racing a
                 // close. Never throws: a failed refresh must not
                 // fail an import that already landed.
-                // BISECT (do not merge disabled): the F1 test is
-                // already @Ignore'd in this head and b STILL wedges,
-                // so this run tests the refresh alone — if the gate
-                // greens with it off, the refresh wedges a
-                // PRE-EXISTING import test; if b still wedges, no
-                // round-17 code at all is the cause.
-                // runCatching {
-                //     provider.current.invalidationTracker.refreshVersionsAsync()
-                // }
+                // (Codex R17-F1) The run wrote through a dedicated
+                // sibling handle, which the live instance's
+                // invalidation tracker never hears about — Room has
+                // no multi-instance invalidation here, so without
+                // this a library Flow collecting from
+                // provider.current keeps showing pre-import notes
+                // until its collector restarts. Refreshing the live
+                // instance's tracked versions re-emits the changed
+                // tables; it is the documented call for writes made
+                // through another connection. If a switch landed
+                // mid-run, provider.current is the new account's
+                // instance and the refresh is harmless (the start
+                // account's collectors are gone with the switch);
+                // Room's close lock keeps a refresh from racing a
+                // close. Never throws: a failed refresh must not
+                // fail an import that already landed.
+                // BISECT VERDICT: test-fast-b wedged with this call
+                // disabled AND with all three round-17 tests
+                // @Ignore'd (runs 45649915046, 45656523383,
+                // 45658562154, 45660467711) — so neither this call
+                // nor any round-17 test is the wedge. Restored.
+                runCatching {
+                    provider.current.invalidationTracker.refreshVersionsAsync()
+                }
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),
