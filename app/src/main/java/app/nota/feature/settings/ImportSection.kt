@@ -67,8 +67,8 @@ fun ImportSection(
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         pendingImportStore.stageAndRun(
-            stage = {
-                val dir = newImportTempDir(context)
+            newTempDir = { newImportTempDir(context) },
+            stage = { dir ->
                 // Reject before copying: the picker accepts anything,
                 // and a non-ZIP must never be staged in full first.
                 val name = pickedDisplayName(context, uri)
@@ -93,8 +93,8 @@ fun ImportSection(
     ) { uris: List<Uri> ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         pendingImportStore.stageAndRun(
-            stage = {
-                val dir = newImportTempDir(context)
+            newTempDir = { newImportTempDir(context) },
+            stage = { dir ->
                 val usedNames = mutableSetOf<String>()
                 val stagedFiles = mutableListOf<StagedImportFile>()
                 val skipped = mutableListOf<SkippedImportFile>()

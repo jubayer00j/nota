@@ -56,9 +56,17 @@ class PendingImportStore(
      * + engine) on the store's scope. A second call while one import is
      * staging/running is ignored — the UI disables its buttons then
      * anyway; this is the belt-and-braces guard.
+     *
+     * The store owns the staging directory: it creates it via
+     * [newTempDir] and passes it to [stage], so a stage that throws
+     * after creating it (a non-ZIP pick, an unreadable file) still
+     * has its directory deleted — the old shape left the directory
+     * behind whenever stage failed, because the finally below only
+     * ran once [input] existed.
      */
     fun stageAndRun(
-        stage: () -> StagedImport,
+        newTempDir: () -> File,
+        stage: (File) -> StagedImport,
         run: suspend (StagedImport, (Int, Int) -> Unit) -> ImportSummary,
     ) {
         scope.launch {
@@ -71,9 +79,11 @@ class PendingImportStore(
                 }
             }
             if (!accepted) return@launch
+            val tempDir = newTempDir()
             val input = try {
-                stage()
+                stage(tempDir)
             } catch (e: Exception) {
+                tempDir.deleteRecursively()
                 lock.withLock {
                     _state.value = PendingImportState.Failed(
                         "Couldn't read the file you picked." +

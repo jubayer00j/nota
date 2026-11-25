@@ -727,10 +727,12 @@ private fun renderMarkdownBlocks(markdown: String, images: InlineImageSink): Str
     return blocks.joinToString("")
 }
 
-/** Splits a list block into top-level lists and renders each. A kind
+/** Splits a list block into kind-runs and renders each. A kind
  *  change only starts a new list at the run's base indent: a
  *  deeper-indented item of another kind is a nested child of the item
- *  above it, not a sibling list. */
+ *  above it, not a sibling list. Also used for nested levels (from
+ *  [renderListRun]): a nested run mixing markers renders each kind
+ *  under its own list type instead of taking the first child's. */
 private fun renderList(items: List<ListItem>, images: InlineImageSink): String {
     val out = StringBuilder()
     var run = mutableListOf<ListItem>()
@@ -801,7 +803,10 @@ private fun renderListRun(items: List<ListItem>, images: InlineImageSink): Strin
                 next++
             }
             val textHtml = renderInline(item.text, images)
-            val childHtml = if (children.isNotEmpty()) renderItems(children) else ""
+            // Children split into kind-runs at their own level, like
+            // the top level does: a nested bullet-then-numbered run
+            // renders each kind under its own list type.
+            val childHtml = if (children.isNotEmpty()) renderList(children, images) else ""
             if (levelTasks) {
                 out.append("<li data-type=\"taskItem\" data-checked=\"")
                     .append(if (item.checked) "true" else "false")

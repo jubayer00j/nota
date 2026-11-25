@@ -8,6 +8,7 @@ import java.io.File
 import java.util.Base64
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -596,5 +597,102 @@ class NoteImportRobolectricTest {
         assertEquals(first.stagedFile, second.stagedFile)
         assertFalse(first.deleteAfterUse)
         assertFalse(second.deleteAfterUse)
+    }
+
+    @Test
+    fun importSurvivesAccountSwitchMidRun() = runBlocking {
+        // R5-F1: an account switch mid-import must not split the run
+        // across accounts or write into the closed instance — the run
+        // stays pinned to the account it started in. The third note
+        // carries an image, so its attachment row is pinned too. The
+        // production constructor is used deliberately: the forDatabase
+        // seam hands over a database built for a mismatched account
+        // id, so openAdditional would target the wrong file.
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-switch-a-$seq"
+        val otherId = "import-switch-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        val store = AttachmentStore(context, provider)
+        val repo = NoteImportRepository(context, provider, store)
+        try {
+            fun plain(title: String, at: Long) = ImportedNote(
+                title, "<p>x</p>", at, at, false, false, null,
+                emptyList(), null, emptyList(), "$title.md",
+            )
+            val imageFile = File.createTempFile("switch-pic", ".png")
+                .apply { writeBytes(pngBytes) }
+            val notes = listOf(
+                plain("SwitchA", 1_700_000_000_000L),
+                plain("SwitchB", 1_700_000_010_000L),
+                ImportedNote(
+                    "SwitchPic", "<p>%%NOMA_IMPORT_IMAGE_0%%</p>",
+                    1_700_000_020_000L, 1_700_000_020_000L,
+                    false, false, null, emptyList(), null,
+                    listOf(
+                        ImportedImage(
+                            "pic.png", "image/png", imageFile,
+                            pngBytes.size.toLong(), "pic",
+                            "%%NOMA_IMPORT_IMAGE_0%%",
+                        ),
+                    ),
+                    "SwitchPic.md",
+                ),
+                plain("SwitchC", 1_700_000_030_000L),
+                plain("SwitchD", 1_700_000_040_000L),
+            )
+            var switched = false
+            val result = repo.importNotes(notes) { done, _ ->
+                if (done == 2 && !switched) {
+                    switched = true
+                    assertTrue(provider.switchTo(otherId))
+                }
+            }
+            assertTrue(switched)
+            assertEquals(5, result.report.imported)
+            assertEquals(0, result.report.failed)
+            assertEquals(otherId, provider.accountId.value)
+            // Nothing leaked into the account switched to mid-run.
+            assertEquals(0, provider.current.noteDao().getAll().size)
+            assertEquals(0, provider.current.attachmentDao().getAll().size)
+            // Everything landed in the account the import started in.
+            val startDb = provider.openAdditional(startId)
+            try {
+                assertEquals(5, startDb.noteDao().getAll().size)
+                assertEquals(1, startDb.attachmentDao().getAll().size)
+            } finally {
+                provider.closeAdditional(startDb)
+            }
+        } finally {
+            provider.current.close()
+        }
+    }
+
+    @Test
+    fun failedStagingDeletesItsTempDir() = runBlocking {
+        // R5-F2: a stage that throws after creating its directory
+        // must not leak the directory — the store owns it, not the
+        // stage.
+        val store = PendingImportStore()
+        val dir = File.createTempFile("import-stage", ".dir")
+            .apply { delete(); mkdir() }
+        store.stageAndRun(
+            newTempDir = { dir },
+            stage = { staged ->
+                File(staged, "partial.bin").writeBytes(byteArrayOf(1, 2, 3))
+                error("boom")
+            },
+            run = { _, _ -> error("must not run") },
+        )
+        val deadline = System.currentTimeMillis() + 10_000
+        while (store.state.value !is PendingImportState.Failed &&
+            System.currentTimeMillis() < deadline
+        ) {
+            delay(50)
+        }
+        assertTrue(store.state.value is PendingImportState.Failed)
+        assertFalse(dir.exists())
     }
 }

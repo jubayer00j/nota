@@ -214,6 +214,31 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun nestedMixedRunsSplitByKind() {
+        // R5-F3: nested children mixing markers split into kind-runs
+        // at their own level — the numbered child is NOT pulled into
+        // the bullet run the first child started.
+        val result = parseOne("mixed6.md", "- Parent\n  - a\n  1. b")
+        assertEquals(
+            "<ul><li><p>Parent</p><ul><li><p>a</p></li></ul>" +
+                "<ol><li><p>b</p></li></ol></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun nestedMixedRunsSplitByKindReversed() {
+        // R5-F3: the mirror case — a numbered child first, then a
+        // bullet child, each under its own list type.
+        val result = parseOne("mixed7.md", "- Parent\n  1. a\n  - b")
+        assertEquals(
+            "<ul><li><p>Parent</p><ol><li><p>a</p></li></ol>" +
+                "<ul><li><p>b</p></li></ul></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
     fun rawHtmlIsEscapedNeverPassedThrough() {
         val result = parseOne("raw.md", "<script>alert(1)</script>")
         assertEquals(

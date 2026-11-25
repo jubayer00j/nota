@@ -11,6 +11,7 @@ import android.provider.OpenableColumns
 import app.nota.data.db.AttachmentDao
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.NotaDatabase
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -68,9 +69,16 @@ class AttachmentStore(
      * file access, which is exactly the confused-deputy shape the
      * URI guard exists to close.
      */
-    suspend fun importImageFile(noteId: String, file: File): AttachmentEntity =
+    /**
+     * [db] pins the metadata row to a specific database instance
+     * (the import engine passes the database it wrote the note row
+     * to): without it the row resolves through [provider.current],
+     * which a mid-run account switch would have moved. Null keeps the
+     * default provider-resolved behaviour for every other caller.
+     */
+    suspend fun importImageFile(noteId: String, file: File, db: NotaDatabase? = null): AttachmentEntity =
         fileMutex.withLock {
-            importImageStreamLocked(noteId, file.name) { file.inputStream() }
+            importImageStreamLocked(noteId, file.name, db) { file.inputStream() }
         }
 
     private suspend fun importImageLocked(noteId: String, uri: Uri): AttachmentEntity =
@@ -85,6 +93,7 @@ class AttachmentStore(
     private suspend fun importImageStreamLocked(
         noteId: String,
         sourceName: String?,
+        db: NotaDatabase? = null,
         openStream: () -> java.io.InputStream?,
     ): AttachmentEntity = withContext(Dispatchers.IO) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -146,7 +155,7 @@ class AttachmentStore(
             heightPx = scaledH,
             createdAt = System.currentTimeMillis(),
         )
-        attachmentDao.upsert(entity)
+        (db?.attachmentDao() ?: attachmentDao).upsert(entity)
         entity
     }
 
@@ -383,15 +392,22 @@ class AttachmentStore(
      * remained. Fetching under the same lock that serialises imports
      * closes that window.
      */
+    /**
+     * [db] pins row deletions to a specific database instance (the
+     * import engine passes the database it wrote the rows to); null
+     * keeps the default provider-resolved behaviour.
+     */
     suspend fun reconcile(
         allProvider: suspend () -> List<AttachmentEntity>,
         extraKnownPaths: suspend () -> Set<String> = { emptySet() },
+        db: NotaDatabase? = null,
     ): Pair<Int, Int> =
-        fileMutex.withLock { reconcileLocked(allProvider(), extraKnownPaths()) }
+        fileMutex.withLock { reconcileLocked(allProvider(), extraKnownPaths(), db) }
 
     private suspend fun reconcileLocked(
         all: List<AttachmentEntity>,
         extraKnownPaths: Set<String>,
+        db: NotaDatabase? = null,
     ): Pair<Int, Int> = withContext(Dispatchers.IO) {
         var filesRemoved = 0
         var rowsRemoved = 0
@@ -415,7 +431,7 @@ class AttachmentStore(
         }
         for (attachment in all) {
             if (!fileFor(attachment).exists()) {
-                attachmentDao.delete(attachment)
+                (db?.attachmentDao() ?: attachmentDao).delete(attachment)
                 rowsRemoved++
             }
         }

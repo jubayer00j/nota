@@ -191,117 +191,146 @@ class NoteImportRepository(
         imported: List<ImportedNote>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): ImportRunResult = withContext(Dispatchers.IO) {
-        val db = provider.current
-        val noteDao = db.noteDao()
-        val tagDao = db.tagDao()
-        val folderDao = db.folderDao()
-
-        var importedCount = 0
-        var duplicates = 0
-        var failed = 0
-        var imageSaveFailures = 0
-        val failedNames = mutableListOf<String>()
-
-        val seen = HashSet<String>()
-        for (note in noteDao.getAll()) seen += dedupeKey(note.title, note.createdAt)
-
-        // Folder resolution mirrors 1.x resolveFolderId (seeded map,
-        // case-insensitive trimmed names, create on demand).
-        val folderByName = HashMap<String, String>()
-        for (folder in folderDao.getAll()) {
-            folderByName[folder.name.trim().lowercase()] = folder.id
-        }
-        suspend fun resolveFolderId(folderName: String?): String? {
-            val trimmed = folderName?.trim().orEmpty()
-            if (trimmed.isEmpty()) return null
-            val key = trimmed.lowercase()
-            folderByName[key]?.let { return it }
-            val now = System.currentTimeMillis()
-            val folder = FolderEntity(
-                id = UUID.randomUUID().toString(),
-                name = trimmed,
-                createdAt = now,
-                updatedAt = now,
-            )
-            folderDao.upsert(folder)
-            folderByName[key] = folder.id
-            return folder.id
-        }
-
-        // Tag resolution mirrors NoteRepository.setNoteTags' lookup
-        // spirit: exact name first, then a case-insensitive match, then
-        // create (first-typed form is what gets stored).
-        val tagByExact = HashMap<String, TagEntity>()
-        val tagByLower = HashMap<String, TagEntity>()
-        for (tag in tagDao.getAllTags()) {
-            tagByExact.putIfAbsent(tag.name, tag)
-            tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
-        }
-        suspend fun resolveTag(rawName: String): TagEntity {
-            val name = rawName.trim()
-            tagByExact[name]?.let { return it }
-            tagByLower[name.lowercase()]?.let { return it }
-            val tag = TagEntity(
-                id = UUID.randomUUID().toString(),
-                name = name,
-                createdAt = System.currentTimeMillis(),
-            )
-            tagDao.upsert(tag)
-            tagByExact[name] = tag
-            tagByLower.putIfAbsent(name.lowercase(), tag)
-            return tag
-        }
-
-        // Defence in depth: the run-level cap (enforced at the merge
-        // by every selection path) is re-checked here so no caller can
-        // push more than 5,000 notes through the engine. Excess notes
-        // are reported as failed, never silently dropped.
-        val overCap = imported.drop(ImportCaps.MAX_IMPORT_NOTES)
-        val capped = imported.take(ImportCaps.MAX_IMPORT_NOTES)
-
-        val total = capped.size
-        var done = 0
-        for (item in capped) {
-            try {
-                val key = dedupeKey(item.title, item.createdAt)
-                if (key in seen) {
-                    duplicates++
-                } else {
-                    val folderId = resolveFolderId(item.folderName)
-                    val tags = item.tagNames
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() }
-                        .distinct()
-                        .map { resolveTag(it) }
-                        .distinctBy { it.id }
-                    imageSaveFailures += writeImportedNote(db, item, folderId, tags)
-                    seen += key
-                    importedCount++
-                }
-            } catch (e: Exception) {
-                failed++
-                failedNames += item.sourceName
+        val startAccountId = provider.accountId.value
+        // The run is pinned to the account it started in. Resolving
+        // the database once and holding it would write into a closed
+        // instance after a switch (DatabaseProvider closes the previous
+        // instance in switchTo); resolving per note would split the run
+        // across two accounts. So the handle follows a switch back to
+        // the starting account's file: normally the live instance
+        // itself, and a separately-opened handle only once a switch has
+        // happened (openAdditional/closeAdditional is the documented
+        // protocol for exactly this — the guest→account copy uses it).
+        // The folder/tag caches seeded below stay valid across the
+        // pin: the pinned handle opens the same database file.
+        var db = provider.current
+        var pinnedDb: NotaDatabase? = null
+        fun dbForWrite(): NotaDatabase {
+            if (provider.accountId.value == startAccountId) return db
+            if (pinnedDb == null) {
+                pinnedDb = provider.openAdditional(startAccountId)
+                db = pinnedDb!!
             }
-            done++
-            onProgress(done, total)
+            return db
         }
+        try {
+            val noteDao = db.noteDao()
 
-        if (overCap.isNotEmpty()) {
-            failed += overCap.size
-            failedNames += overCap.map { it.sourceName }
-        }
+            var importedCount = 0
+            var duplicates = 0
+            var failed = 0
+            var imageSaveFailures = 0
+            val failedNames = mutableListOf<String>()
 
-        if (importedCount > 0 || failed > 0) {
-            rebuildLibraryIndexes(db)
-            attachmentStore.reconcile(
-                allProvider = { db.attachmentDao().getAll() },
-                extraKnownPaths = { provider.allAttachmentLocalPaths() },
+            val seen = HashSet<String>()
+            for (note in noteDao.getAll()) seen += dedupeKey(note.title, note.createdAt)
+
+            // Folder resolution mirrors 1.x resolveFolderId (seeded map,
+            // case-insensitive trimmed names, create on demand).
+            val folderByName = HashMap<String, String>()
+            for (folder in db.folderDao().getAll()) {
+                folderByName[folder.name.trim().lowercase()] = folder.id
+            }
+            suspend fun resolveFolderId(folderName: String?): String? {
+                val trimmed = folderName?.trim().orEmpty()
+                if (trimmed.isEmpty()) return null
+                val key = trimmed.lowercase()
+                folderByName[key]?.let { return it }
+                val now = System.currentTimeMillis()
+                val folder = FolderEntity(
+                    id = UUID.randomUUID().toString(),
+                    name = trimmed,
+                    createdAt = now,
+                    updatedAt = now,
+                )
+                // Resolved per call: after a switch the captured DAO
+                // belongs to the closed instance.
+                dbForWrite().folderDao().upsert(folder)
+                folderByName[key] = folder.id
+                return folder.id
+            }
+
+            // Tag resolution mirrors NoteRepository.setNoteTags' lookup
+            // spirit: exact name first, then a case-insensitive match, then
+            // create (first-typed form is what gets stored).
+            val tagByExact = HashMap<String, TagEntity>()
+            val tagByLower = HashMap<String, TagEntity>()
+            for (tag in db.tagDao().getAllTags()) {
+                tagByExact.putIfAbsent(tag.name, tag)
+                tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
+            }
+            suspend fun resolveTag(rawName: String): TagEntity {
+                val name = rawName.trim()
+                tagByExact[name]?.let { return it }
+                tagByLower[name.lowercase()]?.let { return it }
+                val tag = TagEntity(
+                    id = UUID.randomUUID().toString(),
+                    name = name,
+                    createdAt = System.currentTimeMillis(),
+                )
+                dbForWrite().tagDao().upsert(tag)
+                tagByExact[name] = tag
+                tagByLower.putIfAbsent(name.lowercase(), tag)
+                return tag
+            }
+
+            // Defence in depth: the run-level cap (enforced at the merge
+            // by every selection path) is re-checked here so no caller can
+            // push more than 5,000 notes through the engine. Excess notes
+            // are reported as failed, never silently dropped.
+            val overCap = imported.drop(ImportCaps.MAX_IMPORT_NOTES)
+            val capped = imported.take(ImportCaps.MAX_IMPORT_NOTES)
+
+            val total = capped.size
+            var done = 0
+            for (item in capped) {
+                try {
+                    val key = dedupeKey(item.title, item.createdAt)
+                    if (key in seen) {
+                        duplicates++
+                    } else {
+                        val folderId = resolveFolderId(item.folderName)
+                        val tags = item.tagNames
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                            .distinct()
+                            .map { resolveTag(it) }
+                            .distinctBy { it.id }
+                        imageSaveFailures += writeImportedNote(dbForWrite(), item, folderId, tags)
+                        seen += key
+                        importedCount++
+                    }
+                } catch (e: Exception) {
+                    failed++
+                    failedNames += item.sourceName
+                }
+                done++
+                onProgress(done, total)
+            }
+
+            if (overCap.isNotEmpty()) {
+                failed += overCap.size
+                failedNames += overCap.map { it.sourceName }
+            }
+
+            if (importedCount > 0 || failed > 0) {
+                val finishDb = dbForWrite()
+                rebuildLibraryIndexes(finishDb)
+                attachmentStore.reconcile(
+                    allProvider = { finishDb.attachmentDao().getAll() },
+                    extraKnownPaths = { provider.allAttachmentLocalPaths() },
+                    db = finishDb,
+                )
+            }
+            ImportRunResult(
+                report = ImportReport(importedCount, duplicates, failed, failedNames),
+                imageSaveFailures = imageSaveFailures,
             )
+        } finally {
+            // closeAdditional is a no-op when the pinned handle IS the
+            // live instance, so this only ever closes the extra one.
+            pinnedDb?.let { provider.closeAdditional(it) }
         }
-        ImportRunResult(
-            report = ImportReport(importedCount, duplicates, failed, failedNames),
-            imageSaveFailures = imageSaveFailures,
-        )
     }
 
     /**
@@ -338,7 +367,10 @@ class NoteImportRepository(
             var content = item.contentHtml
             for (image in item.images) {
                 try {
-                    val saved = attachmentStore.importImageFile(noteId, image.stagedFile)
+                    // The image row must land in the same database as
+                    // the note row: AttachmentStore resolves its DAO
+                    // from provider.current, which may have moved.
+                    val saved = attachmentStore.importImageFile(noteId, image.stagedFile, db)
                     val embed = "<img src=\"nota-attachment://${saved.id}\" " +
                         "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
                     content = if (image.token != null) {
