@@ -1153,4 +1153,77 @@ class NoteImportRobolectricTest {
             provider.current.close()
         }
     }
+
+    @Test
+    fun looseFileOverRemainingBudgetIsSkippedBeforeParsing() = runBlocking {
+        // R9-F1: a loose file past the REMAINING run budget is
+        // skipped before it is materialized or parsed. Eighty-three
+        // 200K-char fillers leave ~176K chars of budget; a 500K-char
+        // file with an unresolvable image reference is over what
+        // remains. Before the fix it was read in full and parsed —
+        // the image count leaked into the report even though the
+        // note was then dropped by the merge-time budget check.
+        val stack = newStack()
+        val dir = stagingDir()
+        val staged = (0 until 83).map { i ->
+            val file = File(dir, "big-$i.md").apply { writeText("# Big$i\n\n" + "x".repeat(200_000)) }
+            StagedImportFile("big-$i.md", file, 1_700_000_000_000L + i)
+        } + listOf(
+            StagedImportFile(
+                "over.md",
+                File(dir, "over.md").apply {
+                    writeText("# Over\n\n" + "x".repeat(500_000) + "\n\n![ghost](missing.png)")
+                },
+                1_700_000_100_000L,
+            ),
+        )
+        val outcome = stack.repo.importMarkdownSelection(staged)
+        assertEquals(83, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(
+            listOf(SkippedImportFile("over.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            outcome.parse.skippedFiles,
+        )
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        assertEquals(83, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun ambiguousKeepAttachmentMatchesStayUnresolved() {
+        // R9-F2: two entries sharing a suffix or basename are
+        // ambiguous — the note embeds neither, the attachment is
+        // counted, and the file name stays in the note (alt kept).
+        // A uniquely matched fallback still resolves.
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/dup-suffix.json" to """{"title":"DupSuffix","textContent":"see","attachments":[{"filePath":"photo.jpg","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+                "Takeout/Keep/dup-base.json" to """{"title":"DupBase","textContent":"see2","attachments":[{"filePath":"sub/photo.jpg","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}""",
+                "Takeout/Keep/unique.json" to """{"title":"Unique","textContent":"see3","attachments":[{"filePath":"unique.jpg","mimetype":"image/png"}],"createdTimestampUsec":1700000200000000}""",
+            ),
+            mapOf(
+                "Takeout/Keep/photo.jpg" to pngBytes,
+                "Takeout/Other/photo.jpg" to pngBytes,
+                "Takeout/Other/unique.jpg" to pngBytes,
+            ),
+        )
+        val dir = stagingDir()
+        val result = KeepTakeoutParser.parse(zip, dir)
+        assertEquals(3, result.notes.size)
+        assertEquals(2, result.attachmentsSkipped)
+
+        val dupSuffix = result.notes.first { it.title == "DupSuffix" }
+        assertEquals(0, dupSuffix.images.size)
+        assertEquals("<p>see</p><p>photo.jpg</p>", dupSuffix.contentHtml)
+
+        val dupBase = result.notes.first { it.title == "DupBase" }
+        assertEquals(0, dupBase.images.size)
+        assertEquals("<p>see2</p><p>photo.jpg</p>", dupBase.contentHtml)
+
+        val unique = result.notes.first { it.title == "Unique" }
+        assertEquals(1, unique.images.size)
+        assertEquals("unique.jpg", unique.images[0].name)
+
+        // Only the uniquely matched attachment was staged.
+        assertEquals(listOf("unique.jpg"), dir.listFiles()?.map { it.name }.orEmpty())
+    }
 }

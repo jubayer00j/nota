@@ -531,6 +531,32 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun fileReadTextUpToCharsBoundsBothDimensions() {
+        // R9-F1 seam: the loose-file read stops retaining past the
+        // char bound, and the byte bound wins when both trip.
+        val small = File.createTempFile("bounded-small", ".txt").apply { writeText("hello") }
+        val big = File.createTempFile("bounded-big", ".txt").apply { writeText("x".repeat(100)) }
+        try {
+            assertEquals(CharBoundedText.Ok("hello"), small.readTextUpToChars(10, 100))
+            assertEquals(CharBoundedText.OverChars, big.readTextUpToChars(10, 100))
+            assertEquals(CharBoundedText.OverBytes, big.readTextUpToChars(200, 10))
+            assertEquals(CharBoundedText.OverBytes, big.readTextUpToChars(10, 10))
+            // Multibyte: 10 CJK chars are 30 UTF-8 bytes.
+            val cjk = File.createTempFile("bounded-cjk", ".txt").apply { writeText("あ".repeat(10)) }
+            try {
+                assertEquals(CharBoundedText.OverChars, cjk.readTextUpToChars(5, 100))
+                assertEquals(CharBoundedText.OverBytes, cjk.readTextUpToChars(100, 20))
+                assertEquals(CharBoundedText.Ok("あ".repeat(10)), cjk.readTextUpToChars(10, 30))
+            } finally {
+                cjk.delete()
+            }
+        } finally {
+            small.delete()
+            big.delete()
+        }
+    }
+
+    @Test
     fun stagingBudgetCapsTotalAcrossFiles() {
         // R6-F2: copyCapped bounds each file, but a selection's total
         // needs its own budget — a second file past the remaining

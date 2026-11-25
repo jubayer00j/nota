@@ -25,6 +25,52 @@ sealed interface CharBoundedText {
 class ImportZipException(message: String) : Exception(message)
 
 /**
+ * Char-bounded text read of a plain file — the loose-file counterpart
+ * of [ZipImportReader.Entry.readTextUpToChars] (Codex R9-F1): a caller
+ * checking an aggregate text budget must not have to materialize a
+ * file that budget would reject. Same contract: once the decoded text
+ * exceeds [maxChars] the characters are discarded instead of
+ * retained, but the stream is read to the end so the byte total is
+ * exact — a file past BOTH bounds reports [CharBoundedText.OverBytes],
+ * preserving the per-file reason.
+ */
+internal fun File.readTextUpToChars(maxChars: Long, maxBytes: Long): CharBoundedText {
+    var bytesRead = 0L
+    val counting = object : FilterInputStream(inputStream().buffered()) {
+        override fun read(): Int {
+            val b = super.read()
+            if (b >= 0) bytesRead++
+            return b
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val n = super.read(b, off, len)
+            if (n > 0) bytesRead += n
+            return n
+        }
+    }
+    val out = StringBuilder()
+    var overChars = false
+    counting.use { stream ->
+        val reader = InputStreamReader(stream, Charsets.UTF_8)
+        val buf = CharArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val n = reader.read(buf)
+            if (n < 0) break
+            if (!overChars) {
+                out.append(buf, 0, n)
+                if (out.length > maxChars) overChars = true
+            }
+        }
+    }
+    return when {
+        bytesRead > maxBytes -> CharBoundedText.OverBytes
+        overChars -> CharBoundedText.OverChars
+        else -> CharBoundedText.Ok(out.toString())
+    }
+}
+
+/**
  * Streaming ZIP walker for import archives, enforcing the same ceilings
  * as the backup reader ([BackupQuota]): at most [BackupQuota.MAX_ENTRIES]
  * entries, at most [BackupQuota.MAX_UNCOMPRESSED_BYTES] cumulative

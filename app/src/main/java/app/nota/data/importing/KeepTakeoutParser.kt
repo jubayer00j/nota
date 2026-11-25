@@ -248,14 +248,33 @@ object KeepTakeoutParser {
         return result
     }
 
-    /** ZIP entry lookup by full path, then by "ends with", then by basename. */
-    private fun findEntry(names: List<String>, ref: String): String? {
+    /** ZIP entry lookup by full path, then by "ends with", then by basename.
+     *  A fallback match resolves only when it is UNIQUE (Codex R9-F2):
+     *  two entries sharing a suffix or basename — e.g. duplicate
+     *  `photo.jpg` in separate folders — are ambiguous, and silently
+     *  embedding the first would put the wrong photo in the note. The
+     *  full-path match is exact and always unique (the reader dedupes
+     *  names). A suffix ambiguity is never rescued by the basename
+     *  arm: basename matches are a superset of suffix matches, so an
+     *  ambiguous suffix is at least as ambiguous by basename. */
+    private sealed interface EntryLookup {
+        data class Found(val entryName: String) : EntryLookup
+        object Missing : EntryLookup
+        object Ambiguous : EntryLookup
+    }
+
+    private fun findEntry(names: List<String>, ref: String): EntryLookup {
         val wanted = ref.replace('\\', '/')
-        if (wanted in names) return wanted
+        if (wanted in names) return EntryLookup.Found(wanted)
         val suffix = "/$wanted"
-        names.firstOrNull { it.endsWith(suffix) }?.let { return it }
+        val suffixMatches = names.filter { it.endsWith(suffix) }
+        if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
+        if (suffixMatches.size > 1) return EntryLookup.Ambiguous
         val base = importBaseName(wanted).lowercase()
-        return names.firstOrNull { importBaseName(it).lowercase() == base }
+        val baseMatches = names.filter { importBaseName(it).lowercase() == base }
+        if (baseMatches.size == 1) return EntryLookup.Found(baseMatches[0])
+        if (baseMatches.size > 1) return EntryLookup.Ambiguous
+        return EntryLookup.Missing
     }
 
     private fun usecToMs(value: Any?): Long? {
@@ -327,10 +346,23 @@ object KeepTakeoutParser {
                 result.attachmentsSkipped += 1
                 continue
             }
-            val entryName = findEntry(entryNames, filePath)
-            if (entryName == null) {
-                result.attachmentsSkipped += 1
-                continue
+            val entryName = when (val found = findEntry(entryNames, filePath)) {
+                is EntryLookup.Found -> found.entryName
+                EntryLookup.Missing -> {
+                    result.attachmentsSkipped += 1
+                    continue
+                }
+                EntryLookup.Ambiguous -> {
+                    // Two entries share the fallback name: embedding
+                    // either could put the wrong photo in the note
+                    // (Codex R9-F2). Leave it unresolved — counted —
+                    // and keep the file name in the note, like the
+                    // Markdown resolver keeps an unresolved
+                    // reference's alt text.
+                    result.attachmentsSkipped += 1
+                    contentHtml += "<p>${escapeImportHtml(importBaseName(filePath))}</p>"
+                    continue
+                }
             }
             specs += AttachmentSpec(entryName, filePath, mimeType)
         }

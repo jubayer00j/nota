@@ -142,14 +142,45 @@ class NoteImportRepository(
                             // Converted immediately and the text dropped:
                             // a loose-file selection never holds every
                             // file's text at once (the R2 ZIP-path fix,
-                            // same shape).
-                            val input = MarkdownFileInput(
-                                name = file.name,
-                                path = file.name,
-                                text = withContext(Dispatchers.IO) { file.file.readText() },
-                                lastModified = file.lastModified,
-                            )
-                            merged.absorb(MarkdownImporter.parseMarkdownFile(input, resolver))
+                            // same shape). The aggregate text budget is
+                            // checked BEFORE the file is materialized
+                            // (Codex R9-F1, same shape as the ZIP walk 3
+                            // and the Keep pass 2): a loose file under
+                            // the 100 MB per-file cap but past the
+                            // remaining run budget must not be read in
+                            // full first — an ASCII file near the cap
+                            // would allocate ~200 MB as a UTF-16 String
+                            // on a 1 GB device. Over-budget files are
+                            // reported as skipped, never silently
+                            // dropped — and never parsed, so no image
+                            // counts leak from a note that never imports.
+                            val remaining =
+                                (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - merged.retainedTextChars)
+                                    .coerceAtLeast(0L)
+                            when (val read = withContext(Dispatchers.IO) {
+                                file.file.readTextUpToChars(
+                                    remaining,
+                                    ImportCaps.MAX_IMPORT_FILE_BYTES,
+                                )
+                            }) {
+                                is CharBoundedText.OverBytes -> merged.skippedFiles += SkippedImportFile(
+                                    file.name,
+                                    "File is larger than 100 MB.",
+                                )
+                                is CharBoundedText.OverChars -> merged.skippedFiles += SkippedImportFile(
+                                    file.name,
+                                    ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+                                )
+                                is CharBoundedText.Ok -> {
+                                    val input = MarkdownFileInput(
+                                        name = file.name,
+                                        path = file.name,
+                                        text = read.text,
+                                        lastModified = file.lastModified,
+                                    )
+                                    merged.absorb(MarkdownImporter.parseMarkdownFile(input, resolver))
+                                }
+                            }
                         }
                     }
                     importMimeFromName(file.name) != null -> {
