@@ -51,6 +51,44 @@ object ImportCaps {
     const val MAX_RAW_ENTRY_CHARS = MAX_AGGREGATE_TEXT_CHARS
     const val RAW_ENTRY_TOO_LARGE_REASON =
         "That note's data is too large to import (over 16 million characters)."
+
+    /** Aggregate ceiling for image bytes extracted from ZIPs during
+     *  one import selection — NOT a 1.x cap: 1.x extracts per archive
+     *  with no cross-archive bound. 512 MiB, the same ceiling as the
+     *  per-archive uncompressed quota (BackupQuota): one ZIP's image
+     *  walk is already bounded to 512 MiB by that quota, so the
+     *  aggregate only bites across ZIPs in one selection. */
+    const val MAX_EXTRACTED_IMAGE_BYTES = 512L * 1024 * 1024
+}
+
+/**
+ * Running total for image bytes extracted from ZIPs during one import
+ * selection (Codex R11-F1): the per-image copy cap bounds each image,
+ * but several highly compressible ZIPs in one selection could still
+ * expand into gigabytes of staged images in the shared staging
+ * directory. One instance is shared by every parseImportZip call in
+ * the selection; an image that would exceed what remains is not
+ * staged at all, so its references stay unresolved (counted at the
+ * reference) instead. Mirrors [PickedFileStaging.StagingBudget],
+ * which bounds staged picks the same way.
+ */
+class ExtractedImageBudget(
+    private val totalBytes: Long = ImportCaps.MAX_EXTRACTED_IMAGE_BYTES,
+) {
+    private var usedBytes = 0L
+
+    fun remaining(): Long = (totalBytes - usedBytes).coerceAtLeast(0L)
+
+    /** The per-image cap for the next extraction: the smaller of the
+     *  100 MiB per-file cap and what the budget still allows. */
+    fun nextImageCapBytes(): Long =
+        minOf(ImportCaps.MAX_IMPORT_FILE_BYTES, remaining())
+
+    /** Records [bytes] of staged image bytes; call only after a
+     *  successful extraction. */
+    fun record(bytes: Long) {
+        usedBytes += bytes
+    }
 }
 
 /** UTF-8 byte length of [text], without allocating a copy. */

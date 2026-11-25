@@ -641,6 +641,58 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun corruptZipWithPkPrefixIsReportedUnreadable() {
+        // R11-F2: a file starting with "PK" but with no valid ZIP
+        // structure used to yield zero entries silently — a normal
+        // "Imported 0 notes" summary. It is now reported as
+        // unreadable, whether the junk follows the prefix or the
+        // local-file header itself is truncated.
+        val corrupt = File.createTempFile("corrupt-zip", ".zip")
+            .apply { writeBytes("PKgarbagegarbage".toByteArray(Charsets.UTF_8)) }
+        val truncated = File.createTempFile("truncated-zip", ".zip").apply {
+            writeBytes(byteArrayOf('P'.code.toByte(), 'K'.code.toByte(), 0x03, 0x04, 0, 0))
+        }
+        val dir = File.createTempFile("corrupt-staging", ".dir").apply { delete(); mkdir() }
+        try {
+            for (file in listOf(corrupt, truncated)) {
+                val result = MarkdownImporter.parseImportZip(file, dir)
+                assertEquals(0, result.notes.size)
+                assertEquals(
+                    listOf(
+                        SkippedImportFile(
+                            "ZIP archive",
+                            "That file couldn't be read as a ZIP archive.",
+                        ),
+                    ),
+                    result.skippedFiles,
+                )
+            }
+        } finally {
+            corrupt.delete()
+            truncated.delete()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun validEmptyZipImportsAsEmptyWithoutError() {
+        // R11-F2: a valid empty archive (end-of-central-directory
+        // record only) still imports as an empty selection — no
+        // unreadable-file reason.
+        val empty = File.createTempFile("empty-zip", ".zip")
+        ZipOutputStream(empty.outputStream().buffered()).use { }
+        val dir = File.createTempFile("empty-staging", ".dir").apply { delete(); mkdir() }
+        try {
+            val result = MarkdownImporter.parseImportZip(empty, dir)
+            assertEquals(0, result.notes.size)
+            assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+        } finally {
+            empty.delete()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun stagingBudgetCapsTotalAcrossFiles() {
         // R6-F2: copyCapped bounds each file, but a selection's total
         // needs its own budget — a second file past the remaining

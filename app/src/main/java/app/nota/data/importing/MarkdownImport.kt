@@ -1512,8 +1512,20 @@ object MarkdownImporter {
      *  converts one text member at a time and drops its string right
      *  after. The old shape kept every decoded string in a list until
      *  the whole archive was read — up to ~1 GiB of UTF-16 for a
-     *  512 MiB archive — before the note cap applied. */
-    fun parseImportZip(zipFile: File, stagingDir: File): ImportParseResult {
+     *  512 MiB archive — before the note cap applied.
+     *
+     *  [imageBudget] is the aggregate extracted-image budget for the
+     *  whole selection (Codex R11-F1): callers parsing several ZIPs
+     *  share one instance, so the staged images across all of them
+     *  stay under [ImportCaps.MAX_EXTRACTED_IMAGE_BYTES]. A single
+     *  ZIP parsed on its own gets a fresh budget, which changes
+     *  nothing for it — one archive's image walk is already bounded
+     *  to 512 MiB by its own uncompressed quota. */
+    fun parseImportZip(
+        zipFile: File,
+        stagingDir: File,
+        imageBudget: ExtractedImageBudget = ExtractedImageBudget(),
+    ): ImportParseResult {
         val result = ImportParseResult()
         if (!isZipFile(zipFile)) {
             result.skippedFiles += SkippedImportFile(
@@ -1537,8 +1549,10 @@ object MarkdownImporter {
         // skipped, later names are still tried.
         var textMemberNameBytes = 0L
         var inventoryTruncated = false
+        var entriesSeen = 0
         try {
             reader.walk { entry ->
+                entriesSeen++
                 if (entry.name.endsWith("/")) return@walk
                 if (isMarkdownTextEntry(entry.name)) {
                     val nameBytes = entry.name.toByteArray(Charsets.UTF_8).size.toLong()
@@ -1553,16 +1567,38 @@ object MarkdownImporter {
                     )
                 }
             }
+            // A file with a valid local-header signature that yields
+            // no entries at all is truncated or corrupt, not an empty
+            // archive (Codex R11-F2): ZipInputStream returns null for
+            // the first entry without throwing, so without this the
+            // run would report a normal "Imported 0 notes". A valid
+            // empty archive (end-of-central-directory record only)
+            // legitimately yields no entries.
+            if (entriesSeen == 0 && !isEmptyZipArchive(zipFile)) {
+                result.skippedFiles += SkippedImportFile(
+                    "ZIP archive",
+                    "That file couldn't be read as a ZIP archive.",
+                )
+                return result
+            }
             reader.walk { entry ->
                 if (entry.name.endsWith("/")) return@walk
                 if (isMarkdownTextEntry(entry.name)) return@walk
                 if (importMimeFromName(entry.name) == null) return@walk
                 val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
-                if (entry.copyToUpTo(staged, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
+                // The copy cap is the smaller of the 100 MiB per-file
+                // cap and what the selection's aggregate extracted-
+                // image budget still allows (Codex R11-F1): several
+                // highly compressible ZIPs must not expand into GiB
+                // of staged images in the shared staging directory.
+                if (entry.copyToUpTo(staged, imageBudget.nextImageCapBytes())) {
+                    imageBudget.record(staged.length())
                     imageFiles[entry.name] = staged
                 }
                 // An unreadable/oversize image just leaves its
-                // references unresolved (counted at the reference).
+                // references unresolved (counted at the reference) —
+                // and one past the run's aggregate extracted-image
+                // budget is not staged at all.
             }
             val resolver = createImportImageResolver(imageFiles.toList())
             reader.walk { entry ->
@@ -1635,13 +1671,52 @@ object MarkdownImporter {
     }
 }
 
-/** ZIP magic check: ZipInputStream silently yields zero entries for a
- *  non-ZIP file, which would otherwise look like an empty archive. */
-internal fun isZipFile(file: File): Boolean {
-    if (!file.exists() || file.length() < 2) return false
-    return file.inputStream().use { input ->
-        val first = input.read()
-        val second = input.read()
-        first == 'P'.code && second == 'K'.code
+/** The first four bytes of [file] as a little-endian int, or null
+ *  when the file is shorter than four bytes or unreadable. */
+private fun zipMagic(file: File): Int? {
+    if (!file.exists()) return null
+    return try {
+        file.inputStream().use { input ->
+            val sig = ByteArray(4)
+            var read = 0
+            while (read < 4) {
+                val n = input.read(sig, read, 4 - read)
+                if (n < 0) break
+                read += n
+            }
+            if (read < 4) {
+                null
+            } else {
+                (sig[0].toInt() and 0xFF) or
+                    ((sig[1].toInt() and 0xFF) shl 8) or
+                    ((sig[2].toInt() and 0xFF) shl 16) or
+                    ((sig[3].toInt() and 0xFF) shl 24)
+            }
+        }
+    } catch (e: Exception) {
+        null
     }
+}
+
+/** ZIP magic check: ZipInputStream silently yields zero entries for a
+ *  non-ZIP file, which would otherwise look like an empty archive.
+ *  A bare "PK" prefix is not enough (Codex R11-F2): a corrupt or
+ *  truncated file starting with PK but with no valid ZIP structure
+ *  passes a two-byte check and then yields zero entries with no
+ *  unreadable-file reason. Require a complete supported signature at
+ *  offset 0 — the local-file header PK\x03\x04 that every non-empty
+ *  ZIP starts with, or the end-of-central-directory record PK\x05\x06
+ *  that a valid empty archive consists of. */
+internal fun isZipFile(file: File): Boolean {
+    return when (zipMagic(file)) {
+        0x04034b50, 0x06054b50 -> true
+        else -> false
+    }
+}
+
+/** A valid empty archive is just its end-of-central-directory record
+ *  (PK\x05\x06 …); anything else that yields zero entries is not a
+ *  readable archive at all (Codex R11-F2). */
+internal fun isEmptyZipArchive(file: File): Boolean {
+    return zipMagic(file) == 0x06054b50
 }

@@ -1274,4 +1274,36 @@ class NoteImportRobolectricTest {
             result.skippedFiles,
         )
     }
+
+    @Test
+    fun extractedImageBudgetCapsAcrossZipsInOneSelection() = runBlocking {
+        // R11-F1: the extracted-image budget is shared across the
+        // ZIPs of one selection — the second ZIP's image past the
+        // remaining budget is not staged, so its reference stays
+        // unresolved (counted) instead of expanding the shared
+        // staging directory. Each 1x1 PNG is 70 bytes; a 100-byte
+        // budget fits the first and leaves 30 for the second.
+        val stack = newStack()
+        val zipA = zipOf(
+            linkedMapOf("a.md" to "# A\n\n![a](a.png)"),
+            mapOf("a.png" to pngBytes),
+        )
+        val zipB = zipOf(
+            linkedMapOf("b.md" to "# B\n\n![b](b.png)"),
+            mapOf("b.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 1_700_000_000_000L),
+                StagedImportFile("b.zip", zipB, 1_700_000_000_001L),
+            ),
+            imageBudget = ExtractedImageBudget(totalBytes = 100),
+        )
+        assertEquals(2, outcome.report.imported)
+        assertEquals(1, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "A" }.contentHtml.contains("nota-attachment://"))
+        assertEquals("<p>b</p>", notes.first { it.title == "B" }.contentHtml)
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
 }

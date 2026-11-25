@@ -99,10 +99,20 @@ class NoteImportRepository(
         staged: List<StagedImportFile>,
         preselectedSkipped: List<SkippedImportFile> = emptyList(),
         onProgress: (Int, Int) -> Unit = { _, _ -> },
+        imageBudget: ExtractedImageBudget = ExtractedImageBudget(),
     ): ImportOutcome {
         val stagingDir = File(context.cacheDir, "import-mdsel-${UUID.randomUUID()}")
         return try {
             val merged = ImportParseResult()
+            // One extracted-image budget for the whole selection
+            // (Codex R11-F1): each ZIP's own 512 MiB archive quota
+            // bounds that archive alone, so without a shared budget
+            // several highly compressible ZIPs could expand into GiB
+            // of staged images in this directory. The budget is
+            // consumed as images are staged; an image past it is not
+            // staged, so its references stay unresolved (counted)
+            // instead. The parameter exists for tests, which pass a
+            // small budget; production callers use the default.
             // Picks the UI already rejected before copying (unsupported
             // type, or over the staging cap) still belong in the
             // report — never silently dropped.
@@ -120,7 +130,9 @@ class NoteImportRepository(
                 when {
                     lower.endsWith(".zip") -> {
                         val subDir = File(stagingDir, "zip-${zipIndex++}")
-                        merged.absorb(MarkdownImporter.parseImportZip(file.file, subDir))
+                        merged.absorb(
+                            MarkdownImporter.parseImportZip(file.file, subDir, imageBudget),
+                        )
                     }
                     lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".txt") -> {
                         if (file.file.length() > ImportCaps.MAX_IMPORT_FILE_BYTES) {
