@@ -1073,6 +1073,15 @@ class NoteImportRobolectricTest {
             assertEquals(0, emissions[0].size)
             val importJob = async(Dispatchers.IO) { stack.repo.importNotes(notes) }
             try {
+                // Await the import FIRST: if it throws or reports
+                // nothing imported, the run-end refresh gate
+                // (imported > 0 || failed > 0) skips the refresh and
+                // no second emission can ever come — and waiting for
+                // the emission first would hide that failure behind
+                // a bare timeout. Failing here surfaces the real
+                // error; passing here proves the refresh ran.
+                val result = withTimeout(15_000) { importJob.await() }
+                assertEquals(1, result.report.imported)
                 // The second emission arrives only once the run
                 // refreshes the live instance — a fresh collection
                 // would see the note either way, so the two emissions
@@ -1080,7 +1089,6 @@ class NoteImportRobolectricTest {
                 settleUntil { emissions.size >= 2 }
                 assertEquals(2, emissions.size)
                 assertEquals(listOf("FlowNote"), emissions[1].map { it.title })
-                assertEquals(1, withTimeout(15_000) { importJob.await() }.report.imported)
             } finally {
                 importJob.cancel()
             }
