@@ -110,13 +110,18 @@ class ImportParseResult {
     /** Drops tail notes past the aggregate text budget into
      *  [skippedFiles] — the merge-time counterpart of [addNote],
      *  for runs assembled from several already-budgeted sources
-     *  whose sum still exceeds the budget. */
+     *  whose sum still exceeds the budget. Dropped notes are
+     *  reported in parse order, like [enforceNoteCap] does. */
     fun enforceContentBudget() {
+        val dropped = mutableListOf<ImportedNote>()
         while (retainedTextChars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS && notes.isNotEmpty()) {
-            val dropped = notes.removeAt(notes.lastIndex)
-            retainedTextChars -= dropped.contentHtml.length
+            val note = notes.removeAt(notes.lastIndex)
+            retainedTextChars -= note.contentHtml.length
+            dropped += note
+        }
+        for (note in dropped.asReversed()) {
             skippedFiles += SkippedImportFile(
-                dropped.sourceName,
+                note.sourceName,
                 ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
             )
         }
