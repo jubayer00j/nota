@@ -1308,6 +1308,93 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun unreferencedZipImagesDoNotConsumeSharedBudget() = runBlocking {
+        // R14-F1: walk 2 used to stage EVERY image entry and charge
+        // it against the shared budget before any note was parsed —
+        // an earlier ZIP full of unreferenced images could exhaust
+        // the budget and leave a later ZIP's referenced images
+        // unstaged. Each 1x1 PNG is 70 bytes; a 100-byte budget fits
+        // one image. ZIP A holds two images no note references; ZIP
+        // B references its image. Only B's image may consume the
+        // budget — under the old shape A's first image took 70 of
+        // the 100 bytes and B's reference stayed unresolved.
+        val stack = newStack()
+        val zipA = zipOf(
+            linkedMapOf("a.md" to "# A\n\nno images here"),
+            mapOf("a1.png" to pngBytes, "a2.png" to pngBytes),
+        )
+        val zipB = zipOf(
+            linkedMapOf("b.md" to "# B\n\n![b](b.png)"),
+            mapOf("b.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 1_700_000_000_000L),
+                StagedImportFile("b.zip", zipB, 1_700_000_000_001L),
+            ),
+            imageBudget = ExtractedImageBudget(totalBytes = 100),
+        )
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "B" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun referencedImageFoundByBasenameFallbackIsStaged() = runBlocking {
+        // R14-F1: the pre-scan collects basenames as well as exact
+        // targets — a reference to `pic.png` from `notes/a.md` must
+        // still stage `images/pic.png`, which the resolver finds by
+        // its unique-basename fallback. A pre-scan that collected
+        // exact targets only would leave this reference unresolved.
+        val stack = newStack()
+        val zip = zipOf(
+            linkedMapOf("notes/a.md" to "# A\n\n![a](pic.png)"),
+            mapOf("images/pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("a.zip", zip, 1_700_000_000_000L)),
+            imageBudget = ExtractedImageBudget(totalBytes = 100),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "A" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun txtImageSyntaxDoesNotConsumeSharedBudget() = runBlocking {
+        // R14-F1: a `.txt` member goes through PlainTextCodec, which
+        // never resolves images — so the pre-scan must not stage the
+        // image its text merely mentions. With a 100-byte budget, an
+        // image staged for the .txt note would leave the .md note's
+        // referenced image unstaged.
+        val stack = newStack()
+        val zipA = zipOf(
+            linkedMapOf("a.txt" to "![a](a.png)"),
+            mapOf("a.png" to pngBytes),
+        )
+        val zipB = zipOf(
+            linkedMapOf("b.md" to "# B\n\n![b](b.png)"),
+            mapOf("b.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 1_700_000_000_000L),
+                StagedImportFile("b.zip", zipB, 1_700_000_000_001L),
+            ),
+            imageBudget = ExtractedImageBudget(totalBytes = 100),
+        )
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "B" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
     fun markdownSelectionEnforcesAggregateBudgetAcrossZips() = runBlocking {
         // R12-F1: each ZIP's own 16M-char budget starts fresh, so
         // several small ZIPs in one selection could accumulate far

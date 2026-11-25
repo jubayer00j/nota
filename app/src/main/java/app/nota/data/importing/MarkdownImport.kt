@@ -67,6 +67,11 @@ internal fun importBaseName(path: String): String {
 internal fun isMarkdownTextEntry(name: String): Boolean =
     Regex("\\.(md|markdown|txt)$", RegexOption.IGNORE_CASE).containsMatchIn(name)
 
+/** A plain-text note: it goes through PlainTextCodec, which only
+ *  escapes — it never resolves image references. */
+internal fun isPlainTextEntry(name: String): Boolean =
+    Regex("\\.txt$", RegexOption.IGNORE_CASE).containsMatchIn(name)
+
 /** Filesystem-safe staging name from an entry/pick name (basename
  *  only; only path separators and control characters are replaced, so
  *  the staged name stays as close to the original as possible). */
@@ -329,6 +334,39 @@ private class InlineImageSink(
 private val CODE_SPAN = Regex("(`[^`]+`)")
 private val INLINE_IMAGE =
     Regex("""!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\s*\)""")
+
+/**
+ * Image references in raw (unescaped) Markdown text, for the
+ * reference pre-scan in [MarkdownImporter.parseImportZip] (Codex
+ * R14-F1). Deliberately more permissive than [INLINE_IMAGE], which
+ * runs on escaped text (its title is `&quot;…&quot;`): the pre-scan
+ * must never MISS a reference the converter would use — an extra
+ * staged image costs a little budget, a missed one loses the embed.
+ * Code spans are not carved out here, so a reference inside backticks
+ * may stage an image that is never embedded — harmless.
+ */
+private val RAW_IMAGE_REF =
+    Regex("""!\[([^\]]*)\]\(\s*([^)\s]+)""")
+
+/** Collects the image targets referenced by one Markdown member:
+ *  exact normalised paths plus their basenames (the resolver falls
+ *  back to a unique basename match). Remote references are never
+ *  resolved, so they are not collected. */
+private fun collectImageRefs(
+    fromPath: String,
+    text: String,
+    targets: MutableSet<String>,
+    basenames: MutableSet<String>,
+) {
+    for (match in RAW_IMAGE_REF.findAll(text)) {
+        val ref = match.groupValues[2]
+        if (Regex("^(https?:|data:)", RegexOption.IGNORE_CASE).containsMatchIn(ref)) continue
+        val target = resolveRef(fromPath, ref)
+        if (target.isEmpty()) continue
+        targets += target
+        basenames += importBaseName(target).lowercase()
+    }
+}
 private val INLINE_LINK =
     Regex("""\[([^\]]+)\]\(\s*([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\s*\)""")
 private val SAFE_LINK = Regex("^(https?:|mailto:)", RegexOption.IGNORE_CASE)
@@ -1460,7 +1498,7 @@ object MarkdownImporter {
         // the oldest — honest, since its date really is unknown.
         val fallbackStamp = if (file.lastModified > 0) file.lastModified else 0L
 
-        if (Regex("\\.txt$", RegexOption.IGNORE_CASE).containsMatchIn(file.name)) {
+        if (isPlainTextEntry(file.name)) {
             return ImportedNote(
                 title = titleFromFileName(file.name),
                 contentHtml = PlainTextCodec.textToHtml(file.text),
@@ -1510,15 +1548,17 @@ object MarkdownImporter {
     /** Parses a ZIP of Markdown/text files (the folder-in-a-ZIP case).
      *  Image entries are staged into [stagingDir] for the resolver.
      *
-     *  Three walks, each streaming the archive once, so at most one
+     *  Four walks, each streaming the archive once, so at most one
      *  member's text is ever in memory: walk 1 inventories the text
      *  members (names + times only, bounded by the same retained-name
      *  budget as the reader — names past it are dropped and the
-     *  truncation is reported), walk 2 stages the images, walk 3
-     *  converts one text member at a time and drops its string right
-     *  after. The old shape kept every decoded string in a list until
-     *  the whole archive was read — up to ~1 GiB of UTF-16 for a
-     *  512 MiB archive — before the note cap applied.
+     *  truncation is reported), walk 2 pre-scans the text members
+     *  for image references, walk 3 stages only the referenced
+     *  images, walk 4 converts one text member at a time and drops
+     *  its string right after. The old shape kept every decoded
+     *  string in a list until the whole archive was read — up to
+     *  ~1 GiB of UTF-16 for a 512 MiB archive — before the note
+     *  cap applied.
      *
      *  [imageBudget] is the aggregate extracted-image budget for the
      *  whole selection (Codex R11-F1): callers parsing several ZIPs
@@ -1587,6 +1627,43 @@ object MarkdownImporter {
                 )
                 return result
             }
+            // Reference pre-scan (Codex R14-F1): walk 3 used to stage
+            // EVERY image entry and charge it against the shared
+            // budget before walk 4 discovered which images any note
+            // actually references — an earlier ZIP full of
+            // unreferenced images could exhaust the budget and leave
+            // a later ZIP's referenced images unstaged. Collect the
+            // referenced paths first and stage only those. Both the
+            // exact normalised targets and their basenames are kept:
+            // the resolver falls back to a unique basename match, so
+            // a reference to `pic.png` can resolve to
+            // `images/pic.png`. A member past the char bound is
+            // skipped by walk 4 anyway, so its references don't
+            // matter; a `.txt` member goes through PlainTextCodec,
+            // which never resolves images, so it is not scanned. An
+            // image no note mentions is never staged and never
+            // counted — there is nothing to report about it.
+            val referencedTargets = HashSet<String>()
+            val referencedBasenames = HashSet<String>()
+            val scannedText = HashSet<String>()
+            reader.walk { entry ->
+                if (entry.name !in textMembers) return@walk
+                if (!scannedText.add(entry.name)) return@walk
+                if (isPlainTextEntry(entry.name)) return@walk
+                when (val read = entry.readTextUpToChars(
+                    ImportCaps.MAX_AGGREGATE_TEXT_CHARS,
+                    ImportCaps.MAX_IMPORT_FILE_BYTES,
+                )) {
+                    is CharBoundedText.Ok ->
+                        collectImageRefs(
+                            entry.name,
+                            read.text,
+                            referencedTargets,
+                            referencedBasenames,
+                        )
+                    else -> { /* walk 4 skips this member too */ }
+                }
+            }
             reader.walk { entry ->
                 if (entry.name.endsWith("/")) return@walk
                 if (isMarkdownTextEntry(entry.name)) return@walk
@@ -1597,6 +1674,14 @@ object MarkdownImporter {
                 // at all — references to it stay unresolved (counted
                 // at the reference) instead.
                 if (entry.name in reader.duplicateEntryNames) return@walk
+                // Only stage images a note references (Codex R14-F1):
+                // the pre-scan collected the exact targets and the
+                // basenames the resolver can fall back to. Anything
+                // else is never staged — it would only consume the
+                // shared budget for a file no note mentions.
+                if (normaliseImportPath(entry.name) !in referencedTargets &&
+                    importBaseName(entry.name.replace('\\', '/')).lowercase() !in referencedBasenames
+                ) return@walk
                 val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
                 // The copy cap is the smaller of the 100 MiB per-file
                 // cap and what the selection's aggregate extracted-
