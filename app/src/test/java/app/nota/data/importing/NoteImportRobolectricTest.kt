@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -1040,22 +1041,43 @@ class NoteImportRobolectricTest {
                 "FlowNote.md",
             ),
         )
-        val importJob = async(Dispatchers.IO) { stack.repo.importNotes(notes) }
-        try {
-            // The first emission is the pre-import library (empty);
-            // the second arrives only once the run refreshes the live
-            // instance — a fresh collection would see the note either
-            // way, so the two emissions from ONE collector are the
-            // point. Bounded: a missing refresh fails this test in
-            // seconds instead of hanging the shard.
-            val emissions = withTimeout(15_000) {
-                stack.db.noteDao().observeAll().take(2).toList()
+        // Subscribe FIRST and await the pre-import (empty) emission
+        // before launching the import. The old shape launched the
+        // import first, so a one-note import could land before the
+        // collector's first emission — the first item then already
+        // contained the note and take(2) waited forever for a second
+        // emission that never came (TimeoutCancellationException at
+        // 15.070 s on the diagnostic run). The collector is a single
+        // async on this thread's scope (no blocking latch — a
+        // CountDownLatch.await here would park runBlocking's thread
+        // and deadlock the collector); the import stays on IO.
+        val firstEmission = CompletableDeferred<Unit>()
+        val emissions = mutableListOf<List<NoteEntity>>()
+        val collector = async {
+            stack.db.noteDao().observeAll().take(2).collect { batch ->
+                emissions += batch
+                if (emissions.size == 1) firstEmission.complete(Unit)
             }
+        }
+        try {
+            withTimeout(15_000) { firstEmission.await() }
             assertEquals(0, emissions[0].size)
-            assertEquals(listOf("FlowNote"), emissions[1].map { it.title })
-            assertEquals(1, importJob.await().report.imported)
+            val importJob = async(Dispatchers.IO) { stack.repo.importNotes(notes) }
+            try {
+                // The second emission arrives only once the run
+                // refreshes the live instance — a fresh collection
+                // would see the note either way, so the two emissions
+                // from ONE collector are the point. Bounded: a missing
+                // refresh fails this test in seconds instead of hanging
+                // the shard.
+                withTimeout(15_000) { collector.await() }
+                assertEquals(listOf("FlowNote"), emissions[1].map { it.title })
+                assertEquals(1, importJob.await().report.imported)
+            } finally {
+                importJob.cancel()
+            }
         } finally {
-            importJob.cancel()
+            collector.cancel()
         }
     }
 
