@@ -85,7 +85,7 @@ internal const val MAX_STAGED_NAME_BYTES = 255
  *  name stages under a shortened name instead of failing the run. */
 internal fun stagingFileName(rawName: String, usedNames: MutableSet<String>): String {
     val base = importBaseName(rawName.replace('\\', '/'))
-        .replace(Regex("[\u0000-\u001f/\\]"), "_")
+        .replace(Regex("[\u0000-\u001f/\\\\]"), "_")
         .ifBlank { "file" }
     val dot = base.lastIndexOf('.')
     val stem = if (dot > 0) base.substring(0, dot) else base
