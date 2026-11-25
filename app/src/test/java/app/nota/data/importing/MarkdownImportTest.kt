@@ -14,6 +14,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Ignore
 import org.junit.Test
 
 /**
@@ -815,6 +816,11 @@ class MarkdownImportTest {
             dir.deleteRecursively()
         }
     }
+    // BISECT (do not merge disabled): same wedge hunt as the F2
+    // test — this is the last round-17 test in this class. The
+    // helpers it calls provably terminate, so it is not expected to
+    // be the wedge; it is ignored only to complete the elimination.
+    @Ignore("BISECT: test-fast-b wedge suspect")
     @Test
     fun stagingFileNameBoundsLongNamesTo255Bytes() {
         // (Codex R17-F2): an overlong basename used to make

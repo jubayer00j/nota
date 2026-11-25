@@ -253,6 +253,12 @@ class NoteImportRobolectricTest {
         )
     }
 
+    // BISECT (do not merge disabled): test-fast-b wedged with the
+    // R17-F1 refresh disabled AND with the F1 test ignored, so the
+    // F2 test is the last round-17 test still running. If the gate
+    // greens with it ignored, this test is the wedge; if b still
+    // wedges, no round-17 test is the cause and this comes back.
+    @Ignore("BISECT: test-fast-b wedge suspect")
     @Test
     fun overlongImageBasenameStillImports() = runBlocking {
         // (Codex R17-F2): a referenced image whose basename exceeds
