@@ -1097,6 +1097,179 @@ class NoteImportRobolectricTest {
         }
     }
 
+    // Fix-19 diagnostic (Codex R17-F1): three steps that separate
+    // "the sibling-handle gap is real" from "the observer path is a
+    // Robolectric artifact". Each test is independent (own stack) and
+    // bounded at 15 s, so a failure fails fast instead of wedging
+    // the shard. The F1 test is NOT touched. diagRefresh is EXPECTED
+    // TO FAIL while F1 is open (same mechanism); a PASS there would
+    // mean the explicit refresh works for a raw sibling write and
+    // F1's failure is import-specific.
+    @Test
+    fun diagLiveWriteReemitsLibraryFlow() = runBlocking {
+        // CONTROL: a write through the LIVE instance itself. If this
+        // does not re-emit either, the observer/notification path is
+        // broken under this harness and the F1 expectation is a
+        // harness artifact, not a sibling-handle gap.
+        val stack = newStack()
+        val emissions = CopyOnWriteArrayList<List<NoteEntity>>()
+        val collector = async(Dispatchers.Default) {
+            stack.db.noteDao().observeAll().take(2).collect { batch ->
+                emissions += batch
+            }
+        }
+        try {
+            settleUntil { emissions.size >= 1 }
+            assertTrue(emissions.isNotEmpty())
+            assertEquals(0, emissions[0].size)
+            val writeJob = async(Dispatchers.IO) {
+                stack.db.noteDao().upsert(
+                    NoteEntity(
+                        id = "diag-live-1",
+                        title = "DiagLive",
+                        contentHtml = "<p>live</p>",
+                        plainText = "live",
+                        createdAt = 1_700_000_000_000L,
+                        updatedAt = 1_700_000_000_000L,
+                    ),
+                )
+            }
+            withTimeout(15_000) { writeJob.await() }
+            settleUntil { emissions.size >= 2 }
+            println("DIAG control: emissions=${emissions.size} titles=${emissions.flatten().map { it.title }}")
+            assertEquals(2, emissions.size)
+            assertEquals(listOf("DiagLive"), emissions[1].map { it.title })
+        } finally {
+            collector.cancel()
+        }
+    }
+
+    @Test
+    fun diagSiblingWriteBumpsModificationLog() = runBlocking {
+        // LOG CHECK: Room's invalidation triggers are DB-level, so a
+        // write through ANY connection on the file should bump the
+        // notes row of room_table_modification_log. Read the log from
+        // the LIVE instance before and after a raw sibling write
+        // (NOT importNotes — its run-end refresh may consume the log
+        // entry before we read it).
+        val stack = newStack()
+        val notesId = notesTableId(stack.db)
+        println("DIAG log: notes table_id=$notesId")
+        val before = modificationLog(stack.db)
+        println("DIAG log: before=$before")
+        val sibling = stack.provider.openDedicatedOnSameFileAs(stack.db)
+        try {
+            sibling.noteDao().upsert(
+                NoteEntity(
+                    id = "diag-sibling-1",
+                    title = "DiagSibling",
+                    contentHtml = "<p>sibling</p>",
+                    plainText = "sibling",
+                    createdAt = 1_700_000_000_000L,
+                    updatedAt = 1_700_000_000_000L,
+                ),
+            )
+        } finally {
+            stack.provider.closeAdditional(sibling)
+        }
+        // The write landed in the shared file (fresh read sees it).
+        assertEquals(listOf("DiagSibling"), stack.db.noteDao().getAll().map { it.title })
+        val after = modificationLog(stack.db)
+        println("DIAG log: after=$after")
+        val id = requireNotNull(notesId) {
+            "no notes trigger found — without the trigger no cross-connection write can bump the log"
+        }
+        assertEquals(1, after[id])
+    }
+
+    @Test
+    fun diagSiblingWriteRefreshReemits() = runBlocking {
+        // REFRESH CHECK: a raw sibling write (the same handle shape
+        // the import uses, but WITHOUT importNotes' own refresh
+        // calls), then an explicit refreshVersionsAsync() on the LIVE
+        // instance, then the main looper pumped on the test thread
+        // while awaiting the second emission. Round 18 proved
+        // refreshVersionsAsync() + refreshAsync() inside importNotes
+        // do not re-emit; this isolates the refresh call itself.
+        // EXPECTED TO FAIL while F1 is open — a pass would mean the
+        // refresh works for a raw sibling write and F1's failure is
+        // import-specific.
+        val stack = newStack()
+        val emissions = CopyOnWriteArrayList<List<NoteEntity>>()
+        val collector = async(Dispatchers.Default) {
+            stack.db.noteDao().observeAll().take(2).collect { batch ->
+                emissions += batch
+            }
+        }
+        try {
+            settleUntil { emissions.size >= 1 }
+            assertTrue(emissions.isNotEmpty())
+            assertEquals(0, emissions[0].size)
+            val writeJob = async(Dispatchers.IO) {
+                val sibling = stack.provider.openDedicatedOnSameFileAs(stack.db)
+                try {
+                    sibling.noteDao().upsert(
+                        NoteEntity(
+                            id = "diag-refresh-1",
+                            title = "DiagRefresh",
+                            contentHtml = "<p>refresh</p>",
+                            plainText = "refresh",
+                            createdAt = 1_700_000_000_000L,
+                            updatedAt = 1_700_000_000_000L,
+                        ),
+                    )
+                } finally {
+                    stack.provider.closeAdditional(sibling)
+                }
+            }
+            withTimeout(15_000) { writeJob.await() }
+            assertEquals(listOf("DiagRefresh"), stack.db.noteDao().getAll().map { it.title })
+            stack.db.invalidationTracker.refreshVersionsAsync()
+            settleUntil { emissions.size >= 2 }
+            println("DIAG refresh: emissions=${emissions.size} titles=${emissions.flatten().map { it.title }}")
+            assertEquals(2, emissions.size)
+            assertEquals(listOf("DiagRefresh"), emissions[1].map { it.title })
+        } finally {
+            collector.cancel()
+        }
+    }
+
+    /** Full contents of Room's invalidation log, table_id -> invalidated. */
+    private fun modificationLog(db: NotaDatabase): Map<Int, Int> {
+        val cursor = db.openHelper.writableDatabase.query(
+            "SELECT table_id, invalidated FROM room_table_modification_log",
+        )
+        cursor.use {
+            val out = mutableMapOf<Int, Int>()
+            while (it.moveToNext()) out[it.getInt(0)] = it.getInt(1)
+            return out
+        }
+    }
+
+    /** The notes table's id in the invalidation log, parsed from the
+     *  trigger Room generated for it (the trigger SQL carries
+     *  `table_id = N`). Lists every trigger on stdout so a missing
+     *  or differently-named trigger is visible in the report instead
+     *  of silently returning null. Null when no notes trigger exists
+     *  — itself a finding, since without the trigger no
+     *  cross-connection write can ever bump the log. */
+    private fun notesTableId(db: NotaDatabase): Int? {
+        val cursor = db.openHelper.writableDatabase.query(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'",
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                val name = it.getString(0) ?: continue
+                val sql = it.getString(1) ?: continue
+                println("DIAG log: trigger name=$name sql=$sql")
+                if (!name.contains("notes")) continue
+                val match = Regex("""table_id\s*=\s*(\d+)""").find(sql)
+                if (match != null) return match.groupValues[1].toInt()
+            }
+        }
+        return null
+    }
+
     /** Poll [condition] while idling Robolectric's paused main looper,
      *  so main-thread-dispatched work (e.g. Room's invalidation
      *  notification) can run. Bounded: gives up after [deadlineMs]
