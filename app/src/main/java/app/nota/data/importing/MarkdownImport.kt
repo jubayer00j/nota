@@ -125,7 +125,7 @@ private fun truncateUtf8Bytes(value: String, maxBytes: Int): String {
     var end = maxBytes
     // Back off over continuation bytes (10xxxxxx), then over the lead
     // byte of the sequence they belong to if it no longer fits whole.
-    while (end > 0 && bytes[end - 1] and 0xC0.toByte() == 0x80.toByte()) end--
+    while (end > 0 && (bytes[end - 1].toInt() and 0xC0) == 0x80) end--
     if (end > 0) {
         val lead = bytes[end - 1].toInt() and 0xFF
         val seqLen = when {
