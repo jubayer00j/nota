@@ -14,8 +14,9 @@ import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
@@ -34,6 +35,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLooper
 
 /**
  * Keep Takeout parsing + the import engine end to end (Robolectric):
@@ -1059,6 +1061,21 @@ class NoteImportRobolectricTest {
                 if (emissions.size == 1) firstEmission.complete(Unit)
             }
         }
+        // Robolectric leaves the main looper PAUSED, and Room
+        // dispatches its invalidation notification on the main
+        // thread — so the refresh's re-emission sits queued until
+        // the looper is idled (the HTML report's suppressed
+        // UnExecutedRunnablesException says exactly this). Pump it
+        // from a background coroutine while the collector waits;
+        // the collector itself stays on this thread (see the note
+        // above — a background collector wedged the shard twice).
+        val looperPump = launch(Dispatchers.Default) {
+            while (collector.isActive) {
+                ShadowLooper.idleMainLooper()
+                delay(10)
+            }
+            ShadowLooper.idleMainLooper()
+        }
         try {
             withTimeout(15_000) { firstEmission.await() }
             assertEquals(0, emissions[0].size)
@@ -1077,6 +1094,7 @@ class NoteImportRobolectricTest {
                 importJob.cancel()
             }
         } finally {
+            looperPump.cancel()
             collector.cancel()
         }
     }
