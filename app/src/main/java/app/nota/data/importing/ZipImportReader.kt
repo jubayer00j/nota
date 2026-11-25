@@ -5,7 +5,21 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FilterInputStream
 import java.io.InputStream
+import java.io.InputStreamReader
 import java.util.zip.ZipInputStream
+
+/** Result of a char-bounded text read ([Entry.readTextUpToChars]). */
+sealed interface CharBoundedText {
+    /** Read whole, within both bounds. */
+    data class Ok(val text: String) : CharBoundedText
+
+    /** The decoded text exceeded [maxChars] (raw bytes stayed within
+     *  [maxBytes]). */
+    object OverChars : CharBoundedText
+
+    /** The raw bytes exceeded [maxBytes]. */
+    object OverBytes : CharBoundedText
+}
 
 /** A ZIP archive tripped an import quota (too many entries / too large). */
 class ImportZipException(message: String) : Exception(message)
@@ -77,6 +91,46 @@ class ZipImportReader(private val zipFile: File) {
 
         fun readTextUpTo(capBytes: Long): String? =
             readBytesUpTo(capBytes)?.toString(Charsets.UTF_8)
+
+        /**
+         * Reads the entry as UTF-8 text, retaining at most [maxChars]
+         * decoded characters — a caller checking an aggregate text
+         * budget must not have to materialize an entry that budget
+         * would reject (Codex R7-F3: `readTextUpTo` buffers up to
+         * 100 MiB first). The read still streams the whole entry:
+         * once the decoded text exceeds [maxChars] the characters
+         * are discarded instead of retained, but the stream is read
+         * to the end so the byte total is exact — an entry past BOTH
+         * bounds reports [CharBoundedText.OverBytes], preserving the
+         * per-file reason for a >100 MiB entry (the char bound trips
+         * first for text, since 16 M chars are at most ~48 MiB).
+         * The walker drains whatever is left either way, so the
+         * archive quota still counts every byte.
+         */
+        fun readTextUpToChars(maxChars: Long, maxBytes: Long): CharBoundedText {
+            val bytesBefore = totalBytes
+            val reader = InputStreamReader(stream, Charsets.UTF_8)
+            val out = StringBuilder()
+            val buf = CharArray(DEFAULT_BUFFER_SIZE)
+            var overChars = false
+            while (true) {
+                val n = reader.read(buf)
+                if (n < 0) break
+                if (!overChars) {
+                    out.append(buf, 0, n)
+                    if (out.length > maxChars) overChars = true
+                }
+                // Past the char bound the decoded characters are
+                // discarded — but the stream is still read to the
+                // end, so the byte total below is exact.
+            }
+            val bytesRead = totalBytes - bytesBefore
+            return when {
+                bytesRead > maxBytes -> CharBoundedText.OverBytes
+                overChars -> CharBoundedText.OverChars
+                else -> CharBoundedText.Ok(out.toString())
+            }
+        }
 
         /** Streams the entry into [target]; false (and no file left
          *  behind) when it exceeds [capBytes]. */

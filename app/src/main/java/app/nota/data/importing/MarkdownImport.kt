@@ -1043,28 +1043,45 @@ object MarkdownImporter {
                     )
                     return@walk
                 }
-                // The per-file cap is enforced in BYTES before the
-                // member is retained: readBytesUpTo returns null
-                // past 100 MiB without buffering the whole member
-                // (the old code buffered under the 512 MiB archive
-                // cap, then checked String.length — a multibyte file
-                // could pass the character count while far exceeding
-                // 100 MiB on disk).
-                val bytes = entry.readBytesUpTo(ImportCaps.MAX_IMPORT_FILE_BYTES)
-                if (bytes == null) {
-                    result.skippedFiles += SkippedImportFile(
-                        base,
-                        "File is larger than 100 MB.",
-                    )
-                    return@walk
+                // The per-file cap (100 MiB) and the aggregate text
+                // budget are both checked BEFORE the member is
+                // materialized (Codex R7-F3, same shape as the Keep
+                // parser): readTextUpToChars stops retaining as soon
+                // as the decoded text exceeds the remaining budget,
+                // and a >100 MiB member still reports the per-file
+                // reason. (The old code buffered the member under
+                // the 100 MiB byte cap, then checked String.length —
+                // a multibyte file could pass the character count
+                // while far exceeding 100 MiB on disk — and an
+                // over-budget member was buffered in full before
+                // the budget check rejected it.)
+                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - result.retainedTextChars)
+                    .coerceAtLeast(0L)
+                when (val read = entry.readTextUpToChars(remaining, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
+                    is CharBoundedText.OverBytes -> {
+                        result.skippedFiles += SkippedImportFile(
+                            base,
+                            "File is larger than 100 MB.",
+                        )
+                        return@walk
+                    }
+                    is CharBoundedText.OverChars -> {
+                        result.skippedFiles += SkippedImportFile(
+                            base,
+                            ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+                        )
+                        return@walk
+                    }
+                    is CharBoundedText.Ok -> {
+                        val input = MarkdownFileInput(
+                            name = base,
+                            path = entry.name,
+                            text = read.text,
+                            lastModified = textMembers[entry.name] ?: 0L,
+                        )
+                        appendParsedFile(result, input, resolver)
+                    }
                 }
-                val input = MarkdownFileInput(
-                    name = base,
-                    path = entry.name,
-                    text = bytes.toString(Charsets.UTF_8),
-                    lastModified = textMembers[entry.name] ?: 0L,
-                )
-                appendParsedFile(result, input, resolver)
             }
         } catch (e: ImportZipException) {
             // A quota trip aborts the whole archive: nothing partial

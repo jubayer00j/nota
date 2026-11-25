@@ -4,6 +4,8 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -447,24 +449,85 @@ class MarkdownImportTest {
 
     @Test
     fun aggregateTextBudgetSkipsOverBudgetNotes() {
-        // R6-F1: nine 2M-char files total ~18M chars — past the 16M
-        // aggregate budget. Eight parse; the ninth is reported as
-        // skipped, never silently dropped.
-        val files = (0 until 9).map { i ->
+        // R6-F1: twenty-one 800K-char files total ~16.8M chars —
+        // past the 16M aggregate budget. Twenty parse; the last is
+        // reported as skipped, never silently dropped. Files stay at
+        // 800K chars on purpose: a single note past the ~1 MB
+        // per-note bound is refused for its own size (R7-F1), so the
+        // aggregate test must use individually legal notes.
+        val files = (0 until 21).map { i ->
             MarkdownFileInput(
                 "big-$i.md",
                 "big-$i.md",
-                "# Big$i\n\n" + "x".repeat(2_000_000),
+                "# Big$i\n\n" + "x".repeat(800_000),
                 1_700_000_000_000L + i,
             )
         }
         val result = MarkdownImporter.parseMarkdownFiles(files, null)
-        assertEquals(8, result.notes.size)
-        assertEquals((0 until 8).map { "Big$it" }, result.notes.map { it.title })
+        assertEquals(20, result.notes.size)
+        assertEquals((0 until 20).map { "Big$it" }, result.notes.map { it.title })
         assertEquals(
-            listOf(SkippedImportFile("big-8.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            listOf(SkippedImportFile("big-20.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
             result.skippedFiles,
         )
+    }
+
+    @Test
+    fun noteOverPerNoteCapIsSkipped() {
+        // R7-F1: a single note over ~1 MB of text would write fine
+        // and then break the run-end rebuild (getAll() cannot read a
+        // row past Android's ~2 MiB CursorWindow) — it is refused at
+        // parse time with its own reason, while a note just under the
+        // cap still imports.
+        val big = MarkdownFileInput(
+            "big.md", "big.md", "# Big\n\n" + "x".repeat(1_100_000), 1_700_000_000_000L,
+        )
+        val result = MarkdownImporter.parseMarkdownFile(big, null)
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("big.md", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+        val ok = MarkdownFileInput(
+            "ok.md", "ok.md", "# Ok\n\n" + "x".repeat(900_000), 1_700_000_000_000L,
+        )
+        val okResult = MarkdownImporter.parseMarkdownFile(ok, null)
+        assertEquals(1, okResult.notes.size)
+        assertTrue(okResult.skippedFiles.isEmpty())
+    }
+
+    @Test
+    fun charBoundedReadReportsAllThreeOutcomes() {
+        // R7-F3: the char-bounded read stops retaining past the
+        // budget, and still tells a >100 MiB entry apart — an entry
+        // past BOTH bounds reports the per-file reason, not the
+        // budget's.
+        val zip = File.createTempFile("char-bounded", ".zip")
+        ZipOutputStream(zip.outputStream().buffered()).use { out ->
+            for ((name, body) in linkedMapOf(
+                "small.md" to "x".repeat(100),
+                "mid.md" to "y".repeat(200),
+                "huge.md" to "z".repeat(200),
+            )) {
+                out.putNextEntry(ZipEntry(name))
+                out.write(body.toByteArray(Charsets.UTF_8))
+                out.closeEntry()
+            }
+        }
+        val reader = ZipImportReader(zip)
+        val results = LinkedHashMap<String, CharBoundedText>()
+        reader.walk { entry ->
+            val (maxChars, maxBytes) = when (entry.name) {
+                "small.md" -> 150L to 100L
+                "mid.md" -> 150L to 1_000L
+                else -> 150L to 100L
+            }
+            results[entry.name] = entry.readTextUpToChars(maxChars, maxBytes)
+        }
+        assertEquals(CharBoundedText.Ok("x".repeat(100)), results["small.md"])
+        assertEquals(CharBoundedText.OverChars, results["mid.md"])
+        assertEquals(CharBoundedText.OverBytes, results["huge.md"])
+        zip.delete()
     }
 
     @Test

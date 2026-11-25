@@ -392,11 +392,12 @@ class NoteImportRobolectricTest {
         // R2-F1: a multi-entry ZIP converts incrementally — every
         // entry lands in archive order with its content intact, and
         // the image resolves even though the text is dropped after
-        // each conversion. One member carries ~1 MiB of text.
+        // each conversion. One member carries ~0.9 MiB of text
+        // (staying under the ~1 MB per-note bound, R7-F1).
         val zip = zipOf(
             linkedMapOf(
                 "notes/one.md" to "# One\n\nfirst",
-                "notes/two.md" to "# Two\n\n" + "x".repeat(1_000_000),
+                "notes/two.md" to "# Two\n\n" + "x".repeat(900_000),
                 "notes/three.md" to "# Three\n\n![p](pic.png)",
             ),
             mapOf("notes/pic.png" to pngBytes),
@@ -405,7 +406,7 @@ class NoteImportRobolectricTest {
         assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
         assertEquals(listOf("One", "Two", "Three"), result.notes.map { it.title })
         assertEquals("<p>first</p>", result.notes[0].contentHtml)
-        assertTrue(result.notes[1].contentHtml.length > 1_000_000)
+        assertTrue(result.notes[1].contentHtml.length > 900_000)
         assertTrue(result.notes[1].contentHtml.startsWith("<p>"))
         val three = result.notes[2]
         assertEquals(1, three.images.size)
@@ -703,24 +704,173 @@ class NoteImportRobolectricTest {
 
     @Test
     fun keepAggregateTextBudgetSkipsOverBudgetNotes() {
-        // R6-F1: three 6M-char Keep notes total ~18M chars — past
-        // the 16M aggregate budget. The third is reported as
-        // skipped, never silently dropped; the first two keep their
-        // content intact.
-        val body = "y".repeat(6_000_000)
+        // R6-F1: nineteen 900K-char Keep notes total ~17.1M chars —
+        // past the 16M aggregate budget. Eighteen parse; the last is
+        // reported as skipped, never silently dropped. Notes stay at
+        // 900K chars on purpose: a single note past the ~1 MB
+        // per-note bound is refused for its own size (R7-F1), so the
+        // aggregate test must use individually legal notes.
+        val body = "y".repeat(900_000)
         val entries = linkedMapOf<String, String>()
-        repeat(3) { i ->
+        repeat(19) { i ->
             entries["Takeout/Keep/big-$i.json"] =
                 """{"title":"Big$i","textContent":"$body","createdTimestampUsec":${1_700_000_000_000L + i}}"""
         }
         val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
-        assertEquals(2, result.notes.size)
-        assertEquals(listOf("Big0", "Big1"), result.notes.map { it.title })
-        assertTrue(result.notes.all { it.contentHtml.length > 6_000_000 })
+        assertEquals(18, result.notes.size)
+        assertEquals((0 until 18).map { "Big$it" }, result.notes.map { it.title })
+        assertTrue(result.notes.all { it.contentHtml.length > 900_000 })
         assertEquals(
-            listOf(SkippedImportFile("big-2.json", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            listOf(SkippedImportFile("big-18.json", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
             result.skippedFiles,
         )
+    }
+
+    @Test
+    fun keepHtmlExpansionCountsAgainstBudget() {
+        // R7-F3: HTML expansion (& → &amp;) grows the converted body
+        // past the raw JSON length — a note whose raw JSON fits the
+        // remaining budget but whose converted HTML exceeds it is
+        // dropped at conversion time, not retained until the final
+        // addNote loop. Eighteen 900K-char fillers leave ~577K chars
+        // of budget; a 190K-amp note reads within it (~190K raw) but
+        // converts to ~950K chars of HTML, past what remains.
+        val filler = "y".repeat(900_000)
+        val amps = "&".repeat(190_000)
+        val entries = linkedMapOf<String, String>()
+        repeat(18) { i ->
+            entries["Takeout/Keep/big-$i.json"] =
+                """{"title":"Big$i","textContent":"$filler","createdTimestampUsec":${1_700_000_000_000L + i}}"""
+        }
+        entries["Takeout/Keep/amps.json"] =
+            """{"title":"Amps","textContent":"$amps","createdTimestampUsec":1700000200000000}"""
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(18, result.notes.size)
+        assertEquals((0 until 18).map { "Big$it" }, result.notes.map { it.title })
+        assertEquals(
+            listOf(SkippedImportFile("amps.json", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun overLimitNoteIsRefusedByEngine() = runBlocking {
+        // R7-F1 (defence in depth): a note handed to the engine past
+        // the per-note bound is refused, never written — so the
+        // run-end rebuild cannot fail on its row. The parsers refuse
+        // it earlier with the specific reason (addNote); the engine
+        // reports it as failed, and the small note still imports.
+        val stack = newStack()
+        val big = ImportedNote(
+            title = "Big", contentHtml = "<p>" + "x".repeat(1_100_000) + "</p>",
+            createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = null, images = emptyList(),
+            sourceName = "big.md",
+        )
+        val small = ImportedNote(
+            title = "Small", contentHtml = "<p>small</p>",
+            createdAt = 1_700_000_010_000L, updatedAt = 1_700_000_010_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = null, images = emptyList(),
+            sourceName = "small.md",
+        )
+        val result = stack.repo.importNotes(listOf(big, small))
+        assertEquals(1, result.report.imported)
+        assertEquals(0, result.report.duplicates)
+        assertEquals(1, result.report.failed)
+        assertEquals(listOf("big.md"), result.report.failedNames)
+        assertEquals(listOf("Small"), stack.db.noteDao().getAll().map { it.title })
+    }
+
+    @Test
+    fun dedicatedHandleSurvivesAccountSwitch() = runBlocking {
+        // R7-F2: the import finish runs on a dedicated handle so a
+        // switch can never close it mid-rebuild — the handle must
+        // stay usable after the account switches away (switchTo only
+        // ever closes the live instance).
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-dedicated-a-$seq"
+        val otherId = "import-dedicated-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        try {
+            val dedicated = provider.openDedicated(startId)
+            try {
+                dedicated.noteDao().upsert(
+                    NoteEntity(
+                        id = "d1", title = "Dedicated",
+                        createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+                    ),
+                )
+                assertTrue(provider.switchTo(otherId))
+                assertEquals(otherId, provider.accountId.value)
+                assertEquals(1, dedicated.noteDao().getAll().size)
+                assertEquals("Dedicated", dedicated.noteDao().getAll().single().title)
+                assertEquals(0, provider.current.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(dedicated)
+            }
+        } finally {
+            provider.current.close()
+        }
+    }
+
+    @Test
+    fun importSurvivesSwitchDuringFinish() = runBlocking {
+        // R7-F2: the finish (rebuild + reconcile) runs on a dedicated
+        // handle, not under the switch lock — a switch overlapping
+        // the finish must neither break the run nor split it: every
+        // note lands whole in the account the import started in. The
+        // switch fires from the last progress callback, so it races
+        // the finish itself.
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-finish-a-$seq"
+        val otherId = "import-finish-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        val store = AttachmentStore(context, provider)
+        val repo = NoteImportRepository(context, provider, store)
+        try {
+            val notes = (0 until 300).map { i ->
+                ImportedNote(
+                    "Finish$i", "<p>x</p>",
+                    1_700_000_000_000L + i, 1_700_000_000_000L + i,
+                    false, false, null, emptyList(), null, emptyList(), "finish-$i.md",
+                )
+            }
+            var switched = false
+            var switchThread: Thread? = null
+            val result = repo.importNotes(notes) { done, total ->
+                if (done == total && !switched) {
+                    switched = true
+                    switchThread = thread { provider.switchTo(otherId) }
+                }
+            }
+            switchThread?.join(5_000)
+            assertTrue(switched)
+            assertEquals(otherId, provider.accountId.value)
+            assertEquals(300, result.report.imported)
+            assertEquals(0, result.report.failed)
+            val startDb = provider.openAdditional(startId)
+            try {
+                assertEquals(300, startDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(startDb)
+            }
+            val otherDb = provider.openAdditional(otherId)
+            try {
+                assertEquals(0, otherDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(otherDb)
+            }
+        } finally {
+            provider.current.close()
+        }
     }
 
     @Test

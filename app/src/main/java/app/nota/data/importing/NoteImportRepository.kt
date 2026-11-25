@@ -292,6 +292,21 @@ class NoteImportRepository(
             val total = capped.size
             var done = 0
             for (item in capped) {
+                if (noteRowBytes(item.title, item.contentHtml) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
+                    // Defence in depth for direct callers: the
+                    // parsers refuse an over-limit note in addNote,
+                    // so one never reaches the engine through them —
+                    // but a note written past the bound would break
+                    // the run-end rebuild (getAll() cannot read a row
+                    // past Android's ~2 MiB CursorWindow). Reported
+                    // as failed, never silently dropped, and never
+                    // written.
+                    failed++
+                    failedNames += item.sourceName
+                    done++
+                    onProgress(done, total)
+                    continue
+                }
                 try {
                     // One note write, one critical section (R6-F3):
                     // the switch lock is held from the pin check
@@ -333,14 +348,27 @@ class NoteImportRepository(
             }
 
             if (importedCount > 0 || failed > 0) {
-                provider.withSwitchHeldOff {
-                    val finishDb = dbForWrite()
+                // The finish runs on a DEDICATED handle, NOT under
+                // the switch lock (Codex R7-F2): the rebuild +
+                // reconcile span the whole library, and holding the
+                // lock across them blocks sign-in/out — switchTo()
+                // spins on the calling (main) thread — long enough
+                // to ANR. The dedicated handle is a fresh instance
+                // on the run's pinned account file, so a switch can
+                // never close it mid-rebuild; the per-note writes
+                // above stay under the lock (R6-F3). The provider
+                // doc's promise — the mutex is held only around one
+                // note write — is true again.
+                val finishDb = provider.openDedicated(startAccountId)
+                try {
                     rebuildLibraryIndexes(finishDb)
                     attachmentStore.reconcile(
                         allProvider = { finishDb.attachmentDao().getAll() },
                         extraKnownPaths = { provider.allAttachmentLocalPaths() },
                         db = finishDb,
                     )
+                } finally {
+                    provider.closeAdditional(finishDb)
                 }
             }
             ImportRunResult(

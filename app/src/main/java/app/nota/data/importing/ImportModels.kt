@@ -25,7 +25,49 @@ object ImportCaps {
     const val MAX_AGGREGATE_TEXT_CHARS = 16L * 1024 * 1024
     const val AGGREGATE_TEXT_BUDGET_REASON =
         "Import limit reached (16 million characters of note text per run)."
+
+    /** Largest single note the import will write, in UTF-8 bytes of
+     *  title + contentHtml — NOT a 1.x cap either: 1.x's 100 MiB
+     *  per-file cap lets a single note through that Android cannot
+     *  read back. A row must fit the ~2 MiB CursorWindow, and the
+     *  stored row holds contentHtml AND plainText (derived from the
+     *  body by stripping markup, never materially longer), so the
+     *  bound keeps title + body + its plain-text projection + the
+     *  small fixed columns under it: at most ~2 × 1,000,000 bytes
+     *  against a 2,097,152-byte window. Over-limit notes are
+     *  reported as skipped, never silently dropped. */
+    const val MAX_NOTE_CONTENT_BYTES = 1_000_000L
+    const val NOTE_TOO_LARGE_REASON =
+        "That note is too large to import (over 1 MB of text)."
 }
+
+/** UTF-8 byte length of [text], without allocating a copy. */
+internal fun utf8ByteLength(text: String): Long {
+    var bytes = 0L
+    var i = 0
+    while (i < text.length) {
+        val c = text[i]
+        bytes += when {
+            c < '\u0080' -> 1L
+            c < '\u0800' -> 2L
+            c.isHighSurrogate() && i + 1 < text.length &&
+                text[i + 1].isLowSurrogate() -> {
+                i++
+                4L
+            }
+            else -> 3L
+        }
+        i++
+    }
+    return bytes
+}
+
+/** The row-heavy bytes of a note (title + body), measured against
+ *  [ImportCaps.MAX_NOTE_CONTENT_BYTES]. plainText is derived from
+ *  the body and never materially longer, so the stored row is at
+ *  most ~2× this plus small fixed columns. */
+internal fun noteRowBytes(title: String, contentHtml: String): Long =
+    utf8ByteLength(title) + utf8ByteLength(contentHtml)
 
 class ImportedImage(
     val name: String,
@@ -92,8 +134,20 @@ class ImportParseResult {
      *  otherwise records the skip and returns false. Callers that
      *  can estimate the size before converting (the parsers) check
      *  first and skip without converting, so this is the true,
-     *  defence-in-depth check on the converted body. */
+     *  defence-in-depth check on the converted body. A note past
+     *  the per-note bound is refused first (Codex R7-F1): it would
+     *  write fine and then break the run-end rebuild, whose
+     *  `noteDao.getAll()` cannot read a row past Android's ~2 MiB
+     *  CursorWindow — the UI would report failure while the note
+     *  sat in the database. */
     fun addNote(note: ImportedNote): Boolean {
+        if (noteRowBytes(note.title, note.contentHtml) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
+            skippedFiles += SkippedImportFile(
+                note.sourceName,
+                ImportCaps.NOTE_TOO_LARGE_REASON,
+            )
+            return false
+        }
         val chars = note.contentHtml.length.toLong()
         if (retainedTextChars + chars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
             skippedFiles += SkippedImportFile(

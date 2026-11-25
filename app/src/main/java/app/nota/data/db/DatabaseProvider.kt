@@ -107,6 +107,24 @@ class DatabaseProvider(
         if (accountId == _accountId.value) current
         else NotaDatabase.build(appContext, accountId)
 
+    /**
+     * Opens a DEDICATED handle on [accountId]'s database file —
+     * always a fresh instance, even for the active account (unlike
+     * [openAdditional], which returns [current] for the active
+     * account). The caller owns it and must close it via
+     * [closeAdditional]. Used by the import engine's finish (Codex
+     * R7-F2): the whole-library rebuild + reconcile must run on the
+     * run's pinned account without holding the switch mutex — holding
+     * it across a rebuild blocks sign-in/out on the main thread long
+     * enough to ANR — and a dedicated handle survives a switch,
+     * because [switchTo] only ever closes [current]. SQLite
+     * serializes the two connections on the same file, and the
+     * finish is the only writer of that account's file while it
+     * runs (a switch moves the UI to the other account's file).
+     */
+    fun openDedicated(accountId: String): NotaDatabase =
+        NotaDatabase.build(appContext, accountId)
+
     /** Closes [db] only when it is an additional instance from
      *  [openAdditional] — closing [current] would break the app. */
     fun closeAdditional(db: NotaDatabase) {
