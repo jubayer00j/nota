@@ -17,6 +17,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -977,18 +978,21 @@ class NoteImportRobolectricTest {
         }
     }
 
-    // DIAGNOSTIC (fix round 8): @Test removed temporarily to bisect the fast-b hang.
+    @Test
     fun accountSwitchDoesNotWaitForImageConversion() = runBlocking {
         // R8-F2: image conversion (decode/scale/JPEG-encode) inside
         // a note write must not stall an account switch — the old
         // shape held the switch mutex across the whole note write,
         // so a switch arriving mid-conversion busy-spun on its
         // caller (the main thread for an auth change) until the
-        // image finished. The staged image here is a FIFO: the
-        // writer serves the pipeline's three stream opens one at a
-        // time and pauses 2.5s before the second, so the import is
-        // provably parked INSIDE the image phase while the switch
-        // is attempted — the switch must still return at once.
+        // image finished. The staged image here is a FIFO whose
+        // writer parks INSIDE the first stream open — bytes
+        // written, stream held open — so the import is provably
+        // stalled in the image phase (waiting for EOF on the first
+        // read, or for a writer on the next open) until the test
+        // releases it, while the switch is attempted. Every wait
+        // is bounded, so a broken rendezvous fails this test in
+        // seconds rather than hanging.
         val context = RuntimeEnvironment.getApplication()
         val seq = ++stackSeq
         val startId = "import-fifo-a-$seq"
@@ -1002,13 +1006,30 @@ class NoteImportRobolectricTest {
         val mkfifo = ProcessBuilder("mkfifo", fifo.absolutePath)
             .redirectErrorStream(true).start()
         assertEquals(0, mkfifo.waitFor())
-        val firstOpenServed = CountDownLatch(1)
+        val firstOpenParked = CountDownLatch(1)
+        val releaseFirstOpen = CountDownLatch(1)
+        val stopWriter = AtomicBoolean(false)
         val writer = thread(isDaemon = true) {
-            repeat(3) { i ->
-                FileOutputStream(fifo).use { out -> out.write(pngBytes) }
-                if (i == 0) {
-                    firstOpenServed.countDown()
-                    Thread.sleep(2_500)
+            var first = true
+            while (!stopWriter.get()) {
+                try {
+                    FileOutputStream(fifo).use { out ->
+                        out.write(pngBytes)
+                        out.flush()
+                        if (first) {
+                            first = false
+                            firstOpenParked.countDown()
+                            // Park with the stream OPEN: the
+                            // pipeline cannot finish the image
+                            // until this is released.
+                            releaseFirstOpen.await(
+                                15,
+                                java.util.concurrent.TimeUnit.SECONDS,
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    break
                 }
             }
         }
@@ -1027,10 +1048,13 @@ class NoteImportRobolectricTest {
                 "FifoPic.md",
             )
             val importJob = async(Dispatchers.IO) { repo.importNotes(listOf(note)) }
-            // The pipeline has opened the staged file once and is
-            // parked waiting for the second open — conversion is
-            // under way and cannot finish for ~2.5s.
-            assertTrue(firstOpenServed.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            // The pipeline has opened the staged file and the
+            // writer is parked holding that stream open —
+            // conversion is under way and cannot complete until
+            // the release below.
+            assertTrue(
+                firstOpenParked.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            )
             var switchReturned = false
             val switchThread = thread {
                 provider.switchTo(otherId)
@@ -1043,7 +1067,13 @@ class NoteImportRobolectricTest {
             )
             assertTrue(switchReturned)
             assertEquals(otherId, provider.accountId.value)
-            val result = importJob.await()
+            releaseFirstOpen.countDown()
+            val result = withTimeoutOrNull(30_000) { importJob.await() }
+            assertNotNull(
+                "import did not finish after the image was released",
+                result,
+            )
+            result!!
             assertEquals(1, result.report.imported)
             assertEquals(0, result.report.failed)
             assertEquals(0, result.imageSaveFailures)
@@ -1059,7 +1089,10 @@ class NoteImportRobolectricTest {
                 provider.closeAdditional(startDb)
             }
         } finally {
-            writer.join(10_000)
+            stopWriter.set(true)
+            releaseFirstOpen.countDown()
+            runCatching { fifo.delete() }
+            writer.join(2_000)
             provider.current.close()
         }
     }

@@ -167,13 +167,19 @@ class DatabaseProvider(
     /**
      * The union of attachment localPaths across EVERY account database
      * on the device — the keep-set for the shared attachments/ file
-     * sweep. The active database is read through [current]; the others
-     * are opened read-and-close for this call only.
+     * sweep. EVERY database, the active one included, is read through
+     * a dedicated handle opened for this call only: reading through
+     * [current] would race an account switch — [switchTo] closes the
+     * previous [current] and Room cancels its in-flight DAO
+     * coroutines, which aborted the import run's finish when a switch
+     * landed mid-scan (Codex R8 loop, storm regression). A dedicated
+     * handle is never closed by a switch, so the scan always runs to
+     * completion.
      */
     suspend fun allAttachmentLocalPaths(): Set<String> {
         val paths = mutableSetOf<String>()
         for (account in existingAccountIds()) {
-            val db = openAdditional(account)
+            val db = openDedicated(account)
             try {
                 paths += db.attachmentDao().getAll().map { it.localPath }
             } finally {
