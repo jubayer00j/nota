@@ -94,6 +94,14 @@ internal fun File.readTextUpToChars(maxChars: Long, maxBytes: Long): CharBounded
  * parser's .json list) must check the flag, or a truncated inventory
  * silently skips notes. Walks that read entry names straight from the
  * archive (the Markdown ZIP path's inventory) are unaffected.
+ *
+ * A path that occurs more than once in the archive is recorded in
+ * [duplicateEntryNames]: the inventory keeps only the first
+ * occurrence, but `walk` still visits both, and the parsers stage
+ * images keyed by path — the second entry would silently overwrite
+ * the first and embed whichever payload appears last. Parsers must
+ * not stage an image or attachment under a duplicated path; the
+ * reference stays unresolved and counted instead.
  */
 class ZipImportReader(private val zipFile: File) {
 
@@ -108,6 +116,18 @@ class ZipImportReader(private val zipFile: File) {
      *  walks) — a later walk cannot un-truncate the inventory. */
     var namesTruncated = false
         private set
+
+    /** Paths that occur more than once in the archive (Codex R13-F2).
+     *  Sticky for the reader's lifetime, like [namesTruncated]: a path
+     *  duplicated in any single walk is a duplicate path in the
+     *  archive. The per-walk seen set is what makes this exact — the
+     *  reader is walked several times over the same archive (the Keep
+     *  parser walks twice), so a name legitimately reappears once per
+     *  walk and only a second occurrence WITHIN one walk counts. */
+    private val duplicateNames = mutableSetOf<String>()
+
+    /** Every path that occurs more than once in the archive. */
+    val duplicateEntryNames: Set<String> get() = duplicateNames
 
     /** Every entry name seen so far (best-effort under the name budget). */
     val entryNames: List<String> get() = retainedNames
@@ -234,6 +254,11 @@ class ZipImportReader(private val zipFile: File) {
         // the attachments they reference) and each pass is its own read.
         entryCount = 0
         totalBytes = 0L
+        // Duplicate detection is per walk, not per reader lifetime:
+        // the same name legitimately appears once in every walk, so
+        // only a second occurrence within THIS walk is a duplicate
+        // path in the archive (Codex R13-F2).
+        val namesThisWalk = HashSet<String>()
         ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
             while (true) {
                 val ze = zin.nextEntry ?: break
@@ -241,6 +266,7 @@ class ZipImportReader(private val zipFile: File) {
                 if (entryCount > BackupQuota.MAX_ENTRIES) {
                     throw ImportZipException("That ZIP has too many entries to import safely.")
                 }
+                if (!namesThisWalk.add(ze.name)) duplicateNames += ze.name
                 retainName(ze.name)
                 val entry = Entry(ze.name, ze.time, CountingStream(zin))
                 handler(entry)

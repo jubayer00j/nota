@@ -1452,7 +1452,13 @@ object MarkdownImporter {
     ): ImportedNote {
         val images = mutableListOf<ImportedImage>()
         val sink = InlineImageSink(result, resolver, file.path, images)
-        val fallbackStamp = if (file.lastModified > 0) file.lastModified else System.currentTimeMillis()
+        // Unknown timestamps are a stable 0, not the wall clock
+        // (Codex R13-F1): the dedupe key is (title, createdAt), so a
+        // wall-clock fallback gives the same source a different key on
+        // every import and reimporting it duplicates the note. 0 is
+        // stable across runs, and a note with no known date sorts as
+        // the oldest — honest, since its date really is unknown.
+        val fallbackStamp = if (file.lastModified > 0) file.lastModified else 0L
 
         if (Regex("\\.txt$", RegexOption.IGNORE_CASE).containsMatchIn(file.name)) {
             return ImportedNote(
@@ -1585,6 +1591,12 @@ object MarkdownImporter {
                 if (entry.name.endsWith("/")) return@walk
                 if (isMarkdownTextEntry(entry.name)) return@walk
                 if (importMimeFromName(entry.name) == null) return@walk
+                // A path that occurs twice in the archive is ambiguous
+                // (Codex R13-F2): staging it would silently embed
+                // whichever payload appears last, so it is not staged
+                // at all — references to it stay unresolved (counted
+                // at the reference) instead.
+                if (entry.name in reader.duplicateEntryNames) return@walk
                 val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
                 // The copy cap is the smaller of the 100 MiB per-file
                 // cap and what the selection's aggregate extracted-
@@ -1601,8 +1613,13 @@ object MarkdownImporter {
                 // budget is not staged at all.
             }
             val resolver = createImportImageResolver(imageFiles.toList())
+            // A text member that occurs twice is the same logical file
+            // (Codex R13-F2): the first occurrence wins, so the walk
+            // never converts — and double-counts — the same path.
+            val convertedText = HashSet<String>()
             reader.walk { entry ->
                 if (entry.name !in textMembers) return@walk
+                if (!convertedText.add(entry.name)) return@walk
                 val base = importBaseName(entry.name)
                 if (result.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
                     result.skippedFiles += SkippedImportFile(

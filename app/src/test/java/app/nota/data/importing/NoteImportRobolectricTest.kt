@@ -1386,4 +1386,137 @@ class NoteImportRobolectricTest {
         assertEquals(listOf("Small"), stack.db.noteDao().getAll().map { it.title })
         assertEquals(0, stack.db.attachmentDao().getAll().size)
     }
+
+    @Test
+    fun timestampLessLooseFileReimportDedupes() = runBlocking {
+        // R13-F1 end to end: a loose file with no timestamp (the
+        // document provider omits COLUMN_LAST_MODIFIED) used to get a
+        // fresh wall clock on every import, so reimporting it
+        // duplicated the note. The fallback stamp is now a stable 0,
+        // so the second import dedupes — while a timestamped file
+        // still keeps its real stamp.
+        val stack = newStack()
+        val dir = stagingDir()
+        val timeless = File(dir, "timeless.md").apply { writeText("# Timeless\n\nbody") }
+        val stamped = File(dir, "stamped.md").apply { writeText("# Stamped\n\nbody") }
+        val staged = listOf(
+            StagedImportFile("timeless.md", timeless, 0L),
+            StagedImportFile("stamped.md", stamped, 1_700_000_000_000L),
+        )
+        val first = stack.repo.importMarkdownSelection(staged)
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals(0L, notes.first { it.title == "Timeless" }.createdAt)
+        assertEquals(1_700_000_000_000L, notes.first { it.title == "Stamped" }.createdAt)
+
+        val second = stack.repo.importMarkdownSelection(staged)
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun timestampLessKeepNoteReimportDedupes() = runBlocking {
+        // R13-F1, Keep shape: a Keep JSON with neither timestamp used
+        // to get the wall clock, so reimporting it duplicated the
+        // note. The fallback stamp is now a stable 0.
+        val stack = newStack()
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/timeless.json" to """{"title":"Timeless","textContent":"body"}""",
+            ),
+        )
+        val first = stack.repo.importKeepZip(zip)
+        assertEquals(1, first.report.imported)
+        assertEquals(0L, stack.db.noteDao().getAll().single().createdAt)
+        val second = stack.repo.importKeepZip(zip)
+        assertEquals(0, second.report.imported)
+        assertEquals(1, second.report.duplicates)
+        assertEquals(1, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun duplicateZipImagePathsStayUnresolved() = runBlocking {
+        // R13-F2: two entries sharing one image path are ambiguous —
+        // the note embeds neither payload, the reference is counted,
+        // and a uniquely pathed image in the same ZIP still embeds.
+        // Before the fix the second entry silently overwrote the
+        // first in the staging map and the note embedded whichever
+        // payload came last.
+        val stack = newStack()
+        val zip = File.createTempFile("dup-path", ".zip")
+        ZipOutputStream(zip.outputStream().buffered()).use { out ->
+            fun entry(name: String, body: ByteArray) {
+                out.putNextEntry(ZipEntry(name))
+                out.write(body)
+                out.closeEntry()
+            }
+            entry(
+                "note.md",
+                "# Pic\n\n![dup](img/dup.png)\n\n![ok](img/ok.png)".toByteArray(Charsets.UTF_8),
+            )
+            entry("img/dup.png", pngBytes)
+            entry("img/dup.png", byteArrayOf(9, 9, 9))
+            entry("img/ok.png", pngBytes)
+        }
+        try {
+            val outcome = stack.repo.importMarkdownSelection(
+                listOf(StagedImportFile("dup.zip", zip, 1_700_000_000_000L)),
+            )
+            assertEquals(1, outcome.report.imported)
+            assertEquals(1, outcome.parse.imagesUnresolved)
+            val note = stack.db.noteDao().getAll().single()
+            assertTrue(note.contentHtml.contains("nota-attachment://")) // the ok image
+            assertTrue(note.contentHtml.contains("dup")) // alt kept, not embedded
+            assertEquals(1, stack.db.attachmentDao().getAll().size)
+        } finally {
+            zip.delete()
+        }
+    }
+
+    @Test
+    fun duplicateKeepAttachmentPathsStayUnresolved() {
+        // R13-F2, Keep shape: two entries sharing one attachment path
+        // are ambiguous — the note embeds neither payload, the
+        // attachment is counted, and a uniquely pathed attachment in
+        // the same archive still resolves.
+        val zip = File.createTempFile("dup-keep-path", ".zip")
+        ZipOutputStream(zip.outputStream().buffered()).use { out ->
+            fun text(name: String, body: String) {
+                out.putNextEntry(ZipEntry(name))
+                out.write(body.toByteArray(Charsets.UTF_8))
+                out.closeEntry()
+            }
+            fun bytes(name: String, body: ByteArray) {
+                out.putNextEntry(ZipEntry(name))
+                out.write(body)
+                out.closeEntry()
+            }
+            text(
+                "Takeout/Keep/dup.json",
+                """{"title":"Dup","textContent":"see","attachments":[{"filePath":"Takeout/Keep/pic.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            )
+            text(
+                "Takeout/Keep/unique.json",
+                """{"title":"Unique","textContent":"see2","attachments":[{"filePath":"Takeout/Keep/unique.png","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}""",
+            )
+            bytes("Takeout/Keep/pic.png", pngBytes)
+            bytes("Takeout/Keep/pic.png", byteArrayOf(9, 9, 9))
+            bytes("Takeout/Keep/unique.png", pngBytes)
+        }
+        try {
+            val result = KeepTakeoutParser.parse(zip, stagingDir())
+            assertEquals(2, result.notes.size)
+            assertEquals(1, result.attachmentsSkipped)
+            val dup = result.notes.first { it.title == "Dup" }
+            assertEquals(0, dup.images.size)
+            assertEquals("<p>see</p><p>pic.png</p>", dup.contentHtml)
+            val unique = result.notes.first { it.title == "Unique" }
+            assertEquals(1, unique.images.size)
+            assertEquals("unique.png", unique.images[0].name)
+        } finally {
+            zip.delete()
+        }
+    }
 }

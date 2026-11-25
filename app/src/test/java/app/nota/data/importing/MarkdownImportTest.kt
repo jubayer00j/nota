@@ -46,6 +46,23 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun unknownTimestampIsAStableZero() {
+        // R13-F1: a source with no timestamp used to get the wall
+        // clock, so reimporting it produced a different (title,
+        // createdAt) key and duplicated the note. The fallback is now
+        // a stable 0 — the same source parses to the same stamp every
+        // time — while a timestamped source still keeps its real stamp.
+        val first = parseOne("note.txt", "body", lastModified = 0L)
+        val second = parseOne("note.txt", "body", lastModified = 0L)
+        assertEquals(1, first.notes.size)
+        assertEquals(0L, first.notes[0].createdAt)
+        assertEquals(0L, first.notes[0].updatedAt)
+        assertEquals(first.notes[0].createdAt, second.notes[0].createdAt)
+        val stamped = parseOne("note.txt", "body", lastModified = 1_700_000_000_000L)
+        assertEquals(1_700_000_000_000L, stamped.notes[0].createdAt)
+    }
+
+    @Test
     fun textFileFolderComesFromPath() {
         val result = parseOne("note.txt", "body", path = "docs/note.txt")
         assertEquals("docs", result.notes[0].folderName)
@@ -688,6 +705,31 @@ class MarkdownImportTest {
             assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
         } finally {
             empty.delete()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun duplicateZipTextPathsConvertOnce() {
+        // R13-F2: two entries sharing one text path are the same
+        // logical file — the first occurrence wins, so the ZIP yields
+        // one note, not two.
+        val zip = File.createTempFile("dup-text", ".zip")
+        ZipOutputStream(zip.outputStream().buffered()).use { out ->
+            for ((name, body) in listOf("a.md" to "# First\n\none", "a.md" to "# Second\n\ntwo")) {
+                out.putNextEntry(ZipEntry(name))
+                out.write(body.toByteArray(Charsets.UTF_8))
+                out.closeEntry()
+            }
+        }
+        val dir = File.createTempFile("dup-text-staging", ".dir").apply { delete(); mkdir() }
+        try {
+            val result = MarkdownImporter.parseImportZip(zip, dir)
+            assertEquals(1, result.notes.size)
+            assertEquals("First", result.notes[0].title)
+            assertTrue(result.skippedFiles.isEmpty())
+        } finally {
+            zip.delete()
             dir.deleteRecursively()
         }
     }

@@ -105,9 +105,14 @@ object KeepTakeoutParser {
         // the draft becomes a note.
         val drafts = mutableListOf<KeepDraft>()
         var retainedConvertedChars = 0L
+        // A .json that occurs twice is the same logical note (Codex
+        // R13-F2): the first occurrence wins, so the walk never
+        // parses — and double-counts — the same path.
+        val parsedJson = HashSet<String>()
         try {
             reader.walk { entry ->
                 if (entry.name !in candidateSet) return@walk
+                if (!parsedJson.add(entry.name)) return@walk
                 val base = importBaseName(entry.name)
                 if (drafts.size >= ImportCaps.MAX_IMPORT_NOTES) {
                     result.skippedFiles += SkippedImportFile(
@@ -196,6 +201,12 @@ object KeepTakeoutParser {
             try {
                 reader.walk { entry ->
                     if (entry.name in wanted) {
+                        // A path that occurs twice in the archive is
+                        // ambiguous (Codex R13-F2): staging it would
+                        // silently embed whichever payload appears
+                        // last, so it is not staged at all — the
+                        // attachment is counted as skipped below.
+                        if (entry.name in reader.duplicateEntryNames) return@walk
                         val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
                         val ok = entry.copyToUpTo(staged, ImportCaps.MAX_IMPORT_FILE_BYTES)
                         // copyToUpTo deletes the target when over the cap.
@@ -254,8 +265,10 @@ object KeepTakeoutParser {
      *  two entries sharing a suffix or basename — e.g. duplicate
      *  `photo.jpg` in separate folders — are ambiguous, and silently
      *  embedding the first would put the wrong photo in the note. The
-     *  full-path match is exact and always unique (the reader dedupes
-     *  names). A suffix ambiguity is never rescued by the basename
+     *  full-path match is exact; when the path itself occurs twice in
+     *  the archive the entry is refused at staging instead (Codex
+     *  R13-F2), so no payload is embedded at all. A suffix ambiguity
+     *  is never rescued by the basename
      *  arm: basename matches are a superset of suffix matches, so an
      *  ambiguous suffix is at least as ambiguous by basename. */
     private sealed interface EntryLookup {
@@ -305,9 +318,14 @@ object KeepTakeoutParser {
             return null
         }
 
+        // Unknown timestamps are a stable 0, not the wall clock
+        // (Codex R13-F1 — same defect as the Markdown fallback):
+        // the dedupe key is (title, createdAt), so a wall-clock
+        // fallback gives the same note a different key on every
+        // import and reimporting it duplicates the note.
         val createdAt = usecToMs(json.opt("createdTimestampUsec"))
             ?: usecToMs(json.opt("userEditedTimestampUsec"))
-            ?: System.currentTimeMillis()
+            ?: 0L
         val updatedAt = usecToMs(json.opt("userEditedTimestampUsec")) ?: createdAt
         val trashed = json.opt("isTrashed") as? Boolean == true
 
