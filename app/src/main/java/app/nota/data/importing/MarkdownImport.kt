@@ -392,19 +392,88 @@ private val INLINE_IMAGE =
  * runs on escaped text (its title is `&quot;…&quot;`): the pre-scan
  * must never MISS a reference the converter would use — an extra
  * staged image costs a little budget, a missed one loses the embed.
- * Code spans are not carved out here, so a reference inside backticks
- * may stage an image that is never embedded — harmless.
+ *
+ * Code is carved out before this regex runs (Codex R18-F2, see
+ * [collectImageRefs]): a reference inside a fenced block or a code
+ * span is never embedded, so it must not consume the shared
+ * extracted-image budget. The earlier "harmless" reading — that an
+ * unrendered reference merely stages an extra image — was refuted
+ * in the budget sense: in a multi-ZIP selection it can starve a
+ * later ZIP's real images.
  */
 private val RAW_IMAGE_REF =
     Regex("""!\[([^\]]*)\]\(\s*([^)\s]+)""")
 
+/**
+ * Splits raw Markdown text into the prose regions the converter
+ * treats as renderable: fenced code blocks are excised whole (their
+ * contents are literal — [renderMarkdownBlocks] consumes a fence
+ * line through its closing fence, or to EOF when unclosed), and
+ * each region keeps its newlines so a reference spanning lines
+ * inside one paragraph still scans. A fence line is recognised
+ * exactly as the converter recognises it ([FENCE]).
+ */
+private fun proseSegments(text: String): List<String> {
+    val normalized = text.replace(Regex("\r\n?"), "\n")
+    val lines = normalized.split("\n")
+    val segments = mutableListOf<String>()
+    val current = StringBuilder()
+    var i = 0
+    while (i < lines.size) {
+        if (FENCE.containsMatchIn(lines[i])) {
+            if (current.isNotEmpty()) {
+                segments += current.toString()
+                current.clear()
+            }
+            i++
+            while (i < lines.size && !FENCE.containsMatchIn(lines[i])) i++
+            if (i < lines.size) i++ // closing fence
+            continue
+        }
+        current.append(lines[i]).append('\n')
+        i++
+    }
+    if (current.isNotEmpty()) segments += current.toString()
+    return segments
+}
+
 /** Collects the image targets referenced by one Markdown member:
  *  exact normalised paths plus their basenames (the resolver falls
  *  back to a unique basename match). Remote references are never
- *  resolved, so they are not collected. */
+ *  resolved, so they are not collected.
+ *
+ *  Code awareness (Codex R18-F2): the scan runs per prose segment
+ *  with inline code spans carved out exactly as [renderInline]
+ *  carves them ([CODE_SPAN]), so a reference inside backticks or
+ *  inside a fenced block is never collected — and a reference whose
+ *  syntax is split by a code span is never collected either,
+ *  because the segments either side are scanned separately and
+ *  never re-joined (a text-substitution strip would join them into
+ *  a false reference, or break a real reference adjacent to a
+ *  span). A reference the converter would render is always inside
+ *  one scanned segment, so it is never missed. */
 private fun collectImageRefs(
     fromPath: String,
     text: String,
+    targets: MutableSet<String>,
+    basenames: MutableSet<String>,
+) {
+    for (segment in proseSegments(text)) {
+        // Carve code spans out first (renderInline's shape): the
+        // prose between spans is scanned, the spans themselves
+        // never are.
+        var lastIndex = 0
+        for (span in CODE_SPAN.findAll(segment)) {
+            collectRefsFrom(segment.substring(lastIndex, span.range.first), fromPath, targets, basenames)
+            lastIndex = span.range.last + 1
+        }
+        collectRefsFrom(segment.substring(lastIndex), fromPath, targets, basenames)
+    }
+}
+
+private fun collectRefsFrom(
+    text: String,
+    fromPath: String,
     targets: MutableSet<String>,
     basenames: MutableSet<String>,
 ) {

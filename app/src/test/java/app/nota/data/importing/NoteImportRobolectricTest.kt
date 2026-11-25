@@ -1327,6 +1327,70 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun importKeepZipCapturesAccountBeforeParsing() = runBlocking {
+        // R18-F1: the target account is captured BEFORE parsing, not
+        // when importNotes opens its handle after parsing — a switch
+        // during parsing must not move the run to the other account.
+        // This is the fix-13 storm-test capture race, now raised by
+        // Codex: the old shape captured provider.current after the
+        // parse, so with the storm hammering switches the import
+        // landed in whichever account was current then. Ten 900K-
+        // char notes make the parse window long enough that the
+        // storm is guaranteed to switch inside it; the run must
+        // still land whole in the account it started in.
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-parse-a-$seq"
+        val otherId = "import-parse-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        val store = AttachmentStore(context, provider)
+        val repo = NoteImportRepository(context, provider, store)
+        try {
+            val body = "y".repeat(900_000)
+            val entries = linkedMapOf<String, String>()
+            repeat(10) { i ->
+                entries["Takeout/Keep/parse-$i.json"] =
+                    """{"title":"Parse$i","textContent":"$body","createdTimestampUsec":${1_700_000_000_000L + i}}"""
+            }
+            val zip = zipOf(entries)
+            val stop = AtomicBoolean(false)
+            val storm = thread {
+                var toOther = true
+                while (!stop.get()) {
+                    provider.switchTo(if (toOther) otherId else startId)
+                    toOther = !toOther
+                }
+            }
+            val outcome = try {
+                repo.importKeepZip(zip)
+            } finally {
+                stop.set(true)
+                storm.join(10_000)
+            }
+            assertEquals(10, outcome.report.imported)
+            assertEquals(0, outcome.report.failed)
+            // Nothing leaked into the account switched to mid-parse.
+            val otherDb = provider.openAdditional(otherId)
+            try {
+                assertEquals(0, otherDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(otherDb)
+            }
+            // Everything landed in the account the import started in.
+            val startDb = provider.openAdditional(startId)
+            try {
+                assertEquals(10, startDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(startDb)
+            }
+        } finally {
+            provider.current.close()
+        }
+    }
+
+    @Test
     fun looseFileOverRemainingBudgetIsSkippedBeforeParsing() = runBlocking {
         // R9-F1: a loose file past the REMAINING run budget is
         // skipped before it is materialized or parsed. Eighty-three
@@ -1563,6 +1627,49 @@ class NoteImportRobolectricTest {
         assertEquals(0, outcome.parse.imagesUnresolved)
         val notes = stack.db.noteDao().getAll()
         assertTrue(notes.first { it.title == "B" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun codeOnlyImageRefsDoNotConsumeSharedBudget() = runBlocking {
+        // R18-F2: an image reference inside a code span or a fenced
+        // block is never embedded — the converter carves code spans
+        // out and treats fenced blocks as literal — so the pre-scan
+        // must not stage it against the shared extracted-image
+        // budget. ZIP A references its images only from code (one
+        // code span, one fenced block); ZIP B references its image
+        // for real. Each 1x1 PNG is 70 bytes; a 100-byte budget fits
+        // one image. Under the old shape A's first code-only image
+        // took 70 bytes and B's real image stayed unresolved.
+        val stack = newStack()
+        val zipA = zipOf(
+            linkedMapOf(
+                "a.md" to "# A\n\n`![a](a1.png)`\n",
+                "b.md" to "# B\n\n```\n![b](a2.png)\n```\n",
+            ),
+            mapOf("a1.png" to pngBytes, "a2.png" to pngBytes),
+        )
+        val zipB = zipOf(
+            linkedMapOf("c.md" to "# C\n\n![c](c.png)"),
+            mapOf("c.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 1_700_000_000_000L),
+                StagedImportFile("b.zip", zipB, 1_700_000_000_001L),
+            ),
+            imageBudget = ExtractedImageBudget(totalBytes = 100),
+        )
+        assertEquals(3, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        // The code-only references stayed literal text, never embeds.
+        assertTrue(notes.first { it.title == "A" }.contentHtml.contains("![a](a1.png)"))
+        assertFalse(notes.first { it.title == "A" }.contentHtml.contains("nota-attachment://"))
+        assertTrue(notes.first { it.title == "B" }.contentHtml.contains("![b](a2.png)"))
+        assertFalse(notes.first { it.title == "B" }.contentHtml.contains("nota-attachment://"))
+        // And the budget was left whole for the real reference.
+        assertTrue(notes.first { it.title == "C" }.contentHtml.contains("nota-attachment://"))
         assertEquals(1, stack.db.attachmentDao().getAll().size)
     }
 

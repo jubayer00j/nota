@@ -63,10 +63,22 @@ class NoteImportRepository(
         zipFile: File,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): ImportOutcome {
+        // Capture the target account BEFORE parsing (Codex R18-F1):
+        // parsing a big Takeout takes a while, and a switch during
+        // it used to land the import in whichever account was
+        // current after parsing — the fix-13 storm-test capture
+        // race. The capture is the live instance at import start;
+        // importNotes opens its dedicated handle on that instance's
+        // file, so the run always lands where it started. Only the
+        // file name is read from the captured instance (a config
+        // string, valid even after a switch closes it) — no DAO
+        // call ever touches it, so the R8-F1 closed-handle race
+        // cannot reappear.
+        val targetDb = provider.current
         val stagingDir = File(context.cacheDir, "import-keep-${UUID.randomUUID()}")
         return try {
             val parse = KeepTakeoutParser.parse(zipFile, stagingDir)
-            val run = importNotes(parse.notes, onProgress)
+            val run = importNotes(parse.notes, onProgress, targetDb)
             ImportOutcome(parse, run.report, run.imageSaveFailures)
         } finally {
             stagingDir.deleteRecursively()
@@ -77,10 +89,12 @@ class NoteImportRepository(
         zipFile: File,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): ImportOutcome {
+        // Same capture-before-parse as importKeepZip (Codex R18-F1).
+        val targetDb = provider.current
         val stagingDir = File(context.cacheDir, "import-mdzip-${UUID.randomUUID()}")
         return try {
             val parse = MarkdownImporter.parseImportZip(zipFile, stagingDir)
-            val run = importNotes(parse.notes, onProgress)
+            val run = importNotes(parse.notes, onProgress, targetDb)
             ImportOutcome(parse, run.report, run.imageSaveFailures)
         } finally {
             stagingDir.deleteRecursively()
@@ -101,6 +115,11 @@ class NoteImportRepository(
         onProgress: (Int, Int) -> Unit = { _, _ -> },
         imageBudget: ExtractedImageBudget = ExtractedImageBudget(),
     ): ImportOutcome {
+        // Capture the target account BEFORE parsing (Codex R18-F1):
+        // a multi-file selection parses for a while, and a switch
+        // during it used to land the import in whichever account
+        // was current after parsing. Same anchor as importKeepZip.
+        val targetDb = provider.current
         val stagingDir = File(context.cacheDir, "import-mdsel-${UUID.randomUUID()}")
         return try {
             val merged = ImportParseResult()
@@ -244,7 +263,7 @@ class NoteImportRepository(
             // sources can still exceed in sum).
             merged.enforceNoteCap()
             merged.enforceContentBudget()
-            val run = importNotes(merged.notes, onProgress)
+            val run = importNotes(merged.notes, onProgress, targetDb)
             ImportOutcome(merged, run.report, run.imageSaveFailures)
         } finally {
             stagingDir.deleteRecursively()
@@ -255,15 +274,29 @@ class NoteImportRepository(
      *  so (title, createdAt) pairs are uniquely recoverable from the key. */
     private fun dedupeKey(title: String, createdAt: Long): String = "$title $createdAt"
 
+    /**
+     * Writes [imported] into the target account's library.
+     *
+     * @param targetDb the database instance captured at import
+     *  start by the entry points (Codex R18-F1): the dedicated
+     *  handle is opened on ITS file, so a switch during parsing
+     *  cannot move the run to another account. Null (direct
+     *  callers, which have no parse phase) captures at run start,
+     *  which is the same moment.
+     */
     suspend fun importNotes(
         imported: List<ImportedNote>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
+        targetDb: NotaDatabase? = null,
     ): ImportRunResult = withContext(Dispatchers.IO) {
         // The whole run — seed reads, note writes, image rows, and
         // the finish — runs on ONE dedicated handle on the starting
         // account's file: a sibling instance of the live database,
         // opened here and closed in the finally below
-        // (openDedicatedOnSameFileAs). A dedicated handle makes the
+        // (openDedicatedOnSameFileAs). The anchor is the instance
+        // captured at import start (Codex R18-F1), not the account
+        // current now: parsing happens before this call, and a
+        // switch during parsing must not move the run. A dedicated handle makes the
         // run switch-proof with no lock held at all (Codex R8-F1/F2,
         // retiring the R5/R6 account pinning and the switch mutex):
         //  - switchTo only ever closes the LIVE instance, so no
@@ -284,7 +317,14 @@ class NoteImportRepository(
         // SQLite serializes the two connections on the same file,
         // and the guest→account copy already writes through an
         // additional instance the same way.
-        val runDb = provider.openDedicatedOnSameFileAs(provider.current)
+        // The anchor may have been closed by a switch during parsing
+        // — that is the point of capturing it: only its file name
+        // is read (openDedicatedOnSameFileAs derives the account
+        // from the name), and the fresh dedicated handle built from
+        // it is never the closed instance, so the R8-F1 race (an
+        // account-id check handing back a closed handle) stays
+        // closed.
+        val runDb = provider.openDedicatedOnSameFileAs(targetDb ?: provider.current)
         try {
             var importedCount = 0
             var duplicates = 0
