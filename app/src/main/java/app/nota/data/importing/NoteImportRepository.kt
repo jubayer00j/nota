@@ -432,13 +432,15 @@ class NoteImportRepository(
                 // Room's close lock keeps a refresh from racing a
                 // close. Never throws: a failed refresh must not
                 // fail an import that already landed.
-                // BISECT NOTE: this call was temporarily disabled in
-                // f0442a53 and test-fast-b STILL wedged, with the F1
-                // test failing fast by design — so the refresh is NOT
-                // the wedge; it is restored here.
-                runCatching {
-                    provider.current.invalidationTracker.refreshVersionsAsync()
-                }
+                // BISECT (do not merge disabled): the F1 test is
+                // already @Ignore'd in this head and b STILL wedges,
+                // so this run tests the refresh alone — if the gate
+                // greens with it off, the refresh wedges a
+                // PRE-EXISTING import test; if b still wedges, no
+                // round-17 code at all is the cause.
+                // runCatching {
+                //     provider.current.invalidationTracker.refreshVersionsAsync()
+                // }
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),
