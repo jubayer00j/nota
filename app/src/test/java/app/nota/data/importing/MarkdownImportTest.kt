@@ -557,6 +557,90 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun ampHeavyTextFileIsSkippedBeforeConversion() {
+        // R10-F1: two million '&' chars convert to ~10 MB of HTML
+        // (& → &amp;) — past the 1 MB per-note bound — so the file
+        // is skipped with the per-note reason BEFORE conversion, not
+        // after building the expanded string. An ordinary file with
+        // a few escapable characters still imports.
+        val heavy = parseOne("amps.txt", "&".repeat(2_000_000))
+        assertEquals(0, heavy.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("amps.txt", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            heavy.skippedFiles,
+        )
+        val light = parseOne("amps.txt", "Fish & chips <delicious> \"yes\"")
+        assertEquals(1, light.notes.size)
+        assertEquals(
+            "<p>Fish &amp; chips &lt;delicious&gt; &quot;yes&quot;</p>",
+            light.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun ampHeavyMarkdownFileIsSkippedBeforeConversion() {
+        // R10-F1, .md shape: the same expansion inside a Markdown
+        // file — the heading is the title, the amp body would expand
+        // past the per-note bound.
+        val heavy = parseOne("amps.md", "# Amps\n\n" + "&".repeat(2_000_000))
+        assertEquals(0, heavy.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("amps.md", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            heavy.skippedFiles,
+        )
+    }
+
+    @Test
+    fun estimateNeverUnderstatesConvertedNote() {
+        // R10-F1: the estimator must be a true upper bound on the
+        // note the converter actually builds — checked here against
+        // the real converter on adversarial inputs (escaping,
+        // emphasis, code, links, images, every block shape, task
+        // levels, nesting, front matter, CRLF, lone markers). Each
+        // input converts small, so a correct estimator also lets it
+        // through: asserting the note lands pins tightness as well
+        // as soundness.
+        val inputs = listOf(
+            "plain.txt" to "Fish & chips <delicious> \"yes\"\nsecond & line",
+            "quote.txt" to "\"quoted\" & 'apos' <tag>",
+            "all-amps.md" to "# T\n\n" + "&".repeat(500),
+            "quotes.md" to "# T\n\n" + "\"".repeat(500),
+            "angles.md" to "# T\n\n" + "<>".repeat(500),
+            "emphasis.md" to "a **bold &** *it* `co&de` ~~strike~~ __strong__ _em_ end",
+            "emphasis-soup.md" to "**a** **b** *c* `d` `e` ~~f~~ [g](https://example.com) [h](mailto:a@b.c)",
+            "markers.md" to "* _ ` ~ [ ] ( ) ! * ** *** ````",
+            "headings.md" to "# H1 & \n\n## H2 <x>\n\n###### H6\n\n####### not a heading",
+            "hr.md" to "a\n\n---\n\n***\n\n___\n\n- - - not a rule",
+            "lists.md" to "- one & <two>\n- [ ] task <three>\n- [x] done\n\n1. first\n2. second\n\na. alpha\nb. beta\n\ni. roman\nii. roman2",
+            "nested.md" to "- parent\n  - child & <x>\n  - [ ] nested task\n- plain\n\n1. num\n   - bullet child\n   1. num child",
+            "mixed.md" to "- bullet\n1. number\n- bullet again\n\na. lettered\n2. number2",
+            "quote.md" to "> quoted & <line>\n> second line\n\n> new block",
+            "fence.md" to "```kotlin\nval x = a & b < c>\n```\n\nafter & text",
+            "front.md" to "---\ntitle: A & B \"quoted\"\ntags: [one, two]\n---\n\nBody & <text> with **bold**.",
+            "crlf.md" to "# T\r\n\r\nLine & one\r\nLine <two>\r\n\r\nEnd.",
+            "single-char-lines.md" to ("x\n".repeat(200)),
+            "all-backticks.md" to "`".repeat(100),
+            "long-line.md" to "word ".repeat(2000),
+        )
+        for ((name, text) in inputs) {
+            val input = MarkdownFileInput(name, name, text, 1_700_000_000_000L)
+            val estimate = MarkdownImporter.estimateConvertedNoteBytes(input)
+            val result = MarkdownImporter.parseMarkdownFiles(listOf(input), null)
+            assertEquals(
+                "input $name should import (estimator must not false-skip it)",
+                1,
+                result.notes.size,
+            )
+            val note = result.notes[0]
+            val actual = noteRowBytes(note.title, note.contentHtml)
+            assertTrue(
+                "estimate $estimate understates actual $actual for $name",
+                estimate >= actual,
+            )
+        }
+    }
+
+    @Test
     fun stagingBudgetCapsTotalAcrossFiles() {
         // R6-F2: copyCapped bounds each file, but a selection's total
         // needs its own budget — a second file past the remaining

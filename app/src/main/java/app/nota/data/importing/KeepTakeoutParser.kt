@@ -89,20 +89,20 @@ object KeepTakeoutParser {
         // holds hundreds of MiB alive while parsing. Attachment
         // resolution uses the complete name list from pass 1, so it
         // works no matter where an attachment sits in the archive.
-        // The aggregate text budget (Codex R6-F1) is checked here
-        // BEFORE an entry is materialized (Codex R7-F3):
-        // readTextUpToChars stops retaining as soon as the decoded
-        // text exceeds the remaining budget, so an over-budget note
-        // costs no parse work and leaves no counts behind — and a
-        // >100 MiB entry still reports the per-file reason. The
-        // budget is tracked in CONVERTED chars (the draft's
-        // contentHtml): the old estimate counted the raw JSON
-        // length, but HTML expansion (& → &amp;, paragraph markup)
-        // grows the converted body past the raw length, so the raw
-        // length is not the retained size — a draft that expands
-        // past the budget is dropped here, not retained until the
-        // final addNote loop. The true check still runs when the
-        // draft becomes a note (addNote below).
+        // The raw entry is read under its OWN bound (Codex R10-F2),
+        // not the remaining aggregate budget: the aggregate counts
+        // CONVERTED note text, but the raw JSON carries field names,
+        // timestamps and attachment metadata that are never retained
+        // as note text — bounding the read by what remains falsely
+        // skipped short notes late in a run. The raw bound is the
+        // 16M-char retained-text ceiling (the same safe ceiling the
+        // aggregate uses), so an entry past it costs no parse work
+        // and is skipped with its own reason — and a >100 MiB entry
+        // still reports the per-file reason. The aggregate budget is
+        // enforced on the DRAFT below (converted chars, so HTML
+        // expansion — & → &amp;, paragraph markup — counts against
+        // it) and again by addNote: the true check still runs when
+        // the draft becomes a note.
         val drafts = mutableListOf<KeepDraft>()
         var retainedConvertedChars = 0L
         try {
@@ -116,9 +116,10 @@ object KeepTakeoutParser {
                     )
                     return@walk
                 }
-                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - retainedConvertedChars)
-                    .coerceAtLeast(0L)
-                when (val read = entry.readTextUpToChars(remaining, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
+                when (val read = entry.readTextUpToChars(
+                    ImportCaps.MAX_RAW_ENTRY_CHARS,
+                    ImportCaps.MAX_IMPORT_FILE_BYTES,
+                )) {
                     is CharBoundedText.OverBytes -> {
                         result.skippedFiles += SkippedImportFile(base, "File is larger than 100 MB.")
                         return@walk
@@ -126,7 +127,7 @@ object KeepTakeoutParser {
                     is CharBoundedText.OverChars -> {
                         result.skippedFiles += SkippedImportFile(
                             base,
-                            ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+                            ImportCaps.RAW_ENTRY_TOO_LARGE_REASON,
                         )
                         return@walk
                     }

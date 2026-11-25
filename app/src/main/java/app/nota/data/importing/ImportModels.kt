@@ -39,6 +39,18 @@ object ImportCaps {
     const val MAX_NOTE_CONTENT_BYTES = 1_000_000L
     const val NOTE_TOO_LARGE_REASON =
         "That note is too large to import (over 1 MB of text)."
+
+    /** Largest single raw Keep entry the parser will read, in decoded
+     *  characters — NOT the aggregate budget: a Keep JSON carries field
+     *  names, timestamps and attachment metadata that are never
+     *  retained as note text, so the aggregate (which counts converted
+     *  note text) must not bound the raw read (Codex R10-F2). The value
+     *  is the same 16M-char safe-retained-text ceiling the aggregate
+     *  uses: a raw entry past it is skipped with its own reason rather
+     *  than materialized. */
+    const val MAX_RAW_ENTRY_CHARS = MAX_AGGREGATE_TEXT_CHARS
+    const val RAW_ENTRY_TOO_LARGE_REASON =
+        "That note's data is too large to import (over 16 million characters)."
 }
 
 /** UTF-8 byte length of [text], without allocating a copy. */

@@ -1226,4 +1226,52 @@ class NoteImportRobolectricTest {
         // Only the uniquely matched attachment was staged.
         assertEquals(listOf("unique.jpg"), dir.listFiles()?.map { it.name }.orEmpty())
     }
+
+    @Test
+    fun keepJsonLargerThanRemainingBudgetStillImportsWhenBodyFits() {
+        // R10-F2: the raw JSON is read under its own 16M-char bound,
+        // not the remaining aggregate budget. Eighteen 900K-char
+        // fillers leave ~577K chars of budget; a note whose body is
+        // four characters but whose JSON carries 700K chars of
+        // ignored metadata reads within the raw bound and imports,
+        // while a note whose BODY genuinely exceeds what remains is
+        // still skipped with the aggregate reason. Before the fix the
+        // short note was skipped at the read, with the aggregate
+        // reason, even though its body fit.
+        val filler = "y".repeat(900_000)
+        val entries = linkedMapOf<String, String>()
+        repeat(18) { i ->
+            entries["Takeout/Keep/big-$i.json"] =
+                """{"title":"Big$i","textContent":"$filler","createdTimestampUsec":${1_700_000_000_000L + i}}"""
+        }
+        entries["Takeout/Keep/small.json"] =
+            """{"title":"Small","textContent":"tiny","padding":"${"z".repeat(700_000)}","createdTimestampUsec":1700000000000000}"""
+        entries["Takeout/Keep/bigbody.json"] =
+            """{"title":"BigBody","textContent":"${"w".repeat(600_000)}","createdTimestampUsec":1700000100000000}"""
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(19, result.notes.size)
+        assertEquals((0 until 18).map { "Big$it" } + "Small", result.notes.map { it.title })
+        assertEquals(
+            listOf(SkippedImportFile("bigbody.json", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun keepEntryPastRawBoundIsSkippedWithItsOwnReason() {
+        // R10-F2: the raw-entry bound itself — a single JSON past
+        // 16M decoded characters is skipped with the raw-entry
+        // reason, not the aggregate reason (the aggregate budget was
+        // untouched: nothing else was imported).
+        val entries = linkedMapOf(
+            "Takeout/Keep/huge.json" to
+                """{"title":"Huge","textContent":"tiny","padding":"${"z".repeat(17_000_000)}","createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("huge.json", ImportCaps.RAW_ENTRY_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+    }
 }

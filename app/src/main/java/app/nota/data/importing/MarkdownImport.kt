@@ -874,6 +874,436 @@ object MarkdownImporter {
         return result
     }
 
+    /**
+     * Upper bound on the UTF-8 bytes of the note [markdownFileToImportedNote]
+     * would build from [file] (title + contentHtml), computed from the
+     * source WITHOUT converting it (Codex R10-F1). The 1 MB per-note cap
+     * is otherwise enforced only by [ImportParseResult.addNote] AFTER
+     * conversion, and a ~16M-char file of escapable characters converts
+     * into ~80M chars of HTML before it is rejected — hundreds of MiB
+     * on a 1 GB device.
+     *
+     * Every term is a provable over-estimate of what the converter can
+     * emit, so a file the estimator clears is always safe to convert;
+     * [ImportParseResult.addNote] remains the exact check, and a file
+     * the estimator rejects is skipped with the per-note reason before
+     * any conversion work. The bound is deliberately structured, not a
+     * flat per-line allowance: block markup is charged per construct
+     * (headings, lists by kind-run, quotes, fences), because a flat
+     * allowance would falsely skip line-heavy files that convert
+     * small. Soundness is pinned by the property test in
+     * MarkdownImportTest, which checks the estimate against the real
+     * converter on adversarial inputs.
+     *
+     * Per-construct bounds (all terms are UTF-8 bytes):
+     * - Escaped text: every `&` becomes `&amp;` (+4), `<`/`>` become
+     *   `&lt;`/`&gt;` (+3), `"` becomes `&quot;` in hrefs (+5). The
+     *   .txt codec escapes all four; the .md converter escapes the
+     *   first three in body text and `"` in hrefs — counting all four
+     *   everywhere is still an upper bound.
+     * - Inline markup (.md only): each inline construct's net tag
+     *   bytes per marker character is at most 7 (worst case a code
+     *   span: `` `&` `` → `<code>&amp;</code>`, 11 net bytes for 2
+     *   backticks). Markers are `` ` ``, `*`, `_`, `~`, `[`, `]`,
+     *   `(`, `)`, `!`. Markers that form nothing stay literal, so
+     *   counting them always over-counts, never under.
+     * - Block markup (.md only): headings +9, rules +4, fences +24
+     *   per block, quotes +27 per block and +7 per line (one inner
+     *   paragraph each, worst case), paragraphs +7 each, list items
+     *   +15 plain / +70 task, +35 per list kind-run, nested items
+     *   +105 (tags + their own kind-run wrapper). A list block's
+     *   task-ness is charged at block end, when the level is known:
+     *   one task item makes the whole level task items.
+     * - Title: a .txt title is the file name; a .md title is one
+     *   source line (front-matter value or H1) or the file name, so
+     *   the longest line bounds it. Front matter is not body text
+     *   (mirrors [parseFrontMatter]; .txt files never have it), so
+     *   its lines contribute nothing but the title bound.
+     */
+    internal fun estimateConvertedNoteBytes(file: MarkdownFileInput): Long {
+        val text = file.text
+        val isTxt = Regex("\\.txt$", RegexOption.IGNORE_CASE).containsMatchIn(file.name)
+
+        // Whitespace in the converter's regexes (\s): space, tab, CR,
+        // vertical tab, form feed. Lines never contain \n.
+        fun isWs(c: Char): Boolean =
+            c == ' ' || c == '\t' || c == '\r' || c == '\u000B' || c == '\u000C'
+
+        // A line's leading-whitespace indent the way listIndent
+        // computes it (tabs count double, then halved).
+        fun lineIndent(start: Int, end: Int): Int {
+            var w = 0
+            var i = start
+            while (i < end && isWs(text[i])) {
+                w += if (text[i] == '\t') 2 else 1
+                i++
+            }
+            return w / 2
+        }
+
+        // First non-whitespace index in [start, end), or end.
+        fun firstContent(start: Int, end: Int): Int {
+            var i = start
+            while (i < end && isWs(text[i])) i++
+            return i
+        }
+
+        fun isBlankLine(start: Int, end: Int): Boolean = firstContent(start, end) == end
+
+        // Closing front-matter fence (mirrors parseFrontMatter's
+        // ^---[ \t]*$): exactly three dashes, then only spaces/tabs.
+        fun isClosingFence(start: Int, end: Int): Boolean {
+            if (end - start < 3) return false
+            if (text[start] != '-' || text[start + 1] != '-' || text[start + 2] != '-') return false
+            for (i in start + 3 until end) {
+                if (text[i] != ' ' && text[i] != '\t') return false
+            }
+            return true
+        }
+
+        // Front matter (mirrors parseFrontMatter; .txt files never
+        // have it — the .txt path returns before front-matter
+        // parsing): an opening "---" line and the first later line
+        // that closes it. Lines inside it are not body text.
+        var fmEndLine = -1
+        if (!isTxt) {
+            val firstBreak = text.indexOf('\n')
+            val firstEnd = if (firstBreak < 0) text.length else firstBreak
+            if (text.startsWith("---") && text.substring(0, firstEnd).trim() == "---") {
+                var idx = if (firstBreak < 0) text.length else firstBreak + 1
+                var lineNo = 1
+                while (idx < text.length) {
+                    val end = text.indexOf('\n', idx).let { if (it < 0) text.length else it }
+                    if (isClosingFence(idx, end)) {
+                        fmEndLine = lineNo
+                        break
+                    }
+                    idx = end + 1
+                    lineNo++
+                }
+            }
+        }
+
+        var bodyUtf8 = 0L
+        var escapeExtra = 0L
+        var markers = 0L
+        var bodyNewlines = 0L
+        var longestLineBytes = 0L
+        var blockMarkup = 0L
+
+        // List-block accumulators (charged at block end, when the
+        // level's task-ness is known).
+        var inList = false
+        var topItems = 0
+        var topHasTask = false
+        var topRuns = 0
+        var curRunKind: String? = null
+        var runBaseIndent = 0
+        var nestedItems = 0
+
+        var inParagraph = false
+        var inQuote = false
+        var inFence = false
+
+        fun flushList() {
+            if (!inList) return
+            blockMarkup += topItems * (if (topHasTask) 70L else 15L) +
+                35L * topRuns + 105L * nestedItems
+            inList = false
+            topItems = 0
+            topHasTask = false
+            topRuns = 0
+            curRunKind = null
+            nestedItems = 0
+        }
+
+        // A list item's marker, hand-read from [start, end) — the
+        // same shapes LIST_LINE / LETTERED_LINE match. Returns null
+        // when the line is not a list item. Lettered candidates are
+        // always treated as items: the real parser only takes them
+        // when sequence-confirmed, so treating prose as an item only
+        // over-counts. Each lettered item is charged its own run
+        // (see handleListItem).
+        // kind: "ul" for bullets, "ol:1" for numeric, "lettered".
+        data class ListMarker(
+            val indent: Int,
+            val ordered: Boolean,
+            val kind: String,
+            val isLettered: Boolean,
+            val isTask: Boolean,
+        )
+
+        fun listMarker(start: Int, end: Int): ListMarker? {
+            val content = firstContent(start, end)
+            var i = content
+            val indent = lineIndent(start, end)
+            if (i >= end) return null
+            val ordered: Boolean
+            val isLettered: Boolean
+            when (val c = text[i]) {
+                '-', '*', '+' -> {
+                    if (i + 1 >= end || !isWs(text[i + 1])) return null
+                    ordered = false
+                    isLettered = false
+                    i++
+                }
+                in '0'..'9' -> {
+                    var j = i
+                    var digits = 0
+                    while (j < end && text[j] in '0'..'9' && digits < 9) {
+                        j++
+                        digits++
+                    }
+                    if (digits == 0 || digits > 9) return null
+                    if (j >= end || (text[j] != '.' && text[j] != ')')) return null
+                    if (j + 1 >= end || !isWs(text[j + 1])) return null
+                    ordered = true
+                    isLettered = false
+                    i = j + 1
+                }
+                in 'a'..'z', in 'A'..'Z' -> {
+                    var j = i
+                    while (j < end && (text[j] in 'a'..'z' || text[j] in 'A'..'Z')) j++
+                    if (j >= end || (text[j] != '.' && text[j] != ')')) return null
+                    if (j + 1 >= end || !isWs(text[j + 1])) return null
+                    ordered = true
+                    isLettered = true
+                    i = j + 1
+                }
+                else -> return null
+            }
+            // Item text starts after the whitespace following the marker.
+            while (i < end && isWs(text[i])) i++
+            val isTask = !ordered && i + 3 < end &&
+                text[i] == '[' && (text[i + 1] == ' ' || text[i + 1] == 'x' || text[i + 1] == 'X') &&
+                text[i + 2] == ']' && isWs(text[i + 3])
+            val kind = when {
+                isLettered -> "lettered"
+                ordered -> "ol:1"
+                else -> "ul"
+            }
+            return ListMarker(indent, ordered, kind, isLettered, isTask)
+        }
+
+        fun handleListItem(marker: ListMarker) {
+            if (!inList) {
+                inList = true
+                topItems = 0
+                topHasTask = false
+                topRuns = 0
+                curRunKind = null
+                runBaseIndent = marker.indent
+                nestedItems = 0
+                inParagraph = false
+                inQuote = false
+            }
+            // Deeper than the run's base indent: a child of an earlier
+            // item (renderItems groups every following deeper item as
+            // a child). It carries its own tags plus its own nested
+            // kind-run wrapper.
+            if (marker.indent > runBaseIndent) {
+                nestedItems++
+                return
+            }
+            if (marker.isLettered) {
+                // Each lettered item starts its own run: sequence
+                // confirmation may merge same-system neighbours, but
+                // over-counting runs is safe.
+                topRuns++
+                curRunKind = "lettered"
+                runBaseIndent = marker.indent
+            } else if (topItems == 0 || marker.kind != curRunKind) {
+                topRuns++
+                curRunKind = marker.kind
+                runBaseIndent = marker.indent
+            } else {
+                runBaseIndent = minOf(runBaseIndent, marker.indent)
+            }
+            topItems++
+            if (!marker.ordered && marker.isTask) topHasTask = true
+        }
+
+        // Heading (mirrors HEADING = ^(#{1,6})\s+(.*)$): 1–6 '#'
+        // at column 0, then whitespace. A line with 7+ '#' is prose.
+        fun isHeadingLine(start: Int, end: Int): Boolean {
+            var i = start
+            var hashes = 0
+            while (i < end && text[i] == '#' && hashes < 7) {
+                hashes++
+                i++
+            }
+            return hashes in 1..6 && i < end && isWs(text[i])
+        }
+
+        // Horizontal rule (mirrors HR = ^\s*(-{3,}|\*{3,}|_{3,})\s*$):
+        // leading whitespace, then 3+ of one of -, *, _ and nothing
+        // but whitespace after. A "- - -" line is a list item, not a
+        // rule — the run must be one repeated character.
+        fun isHrLine(start: Int, end: Int): Boolean {
+            var i = firstContent(start, end)
+            if (i >= end) return false
+            val c = text[i]
+            if (c != '-' && c != '*' && c != '_') return false
+            var count = 0
+            while (i < end && text[i] == c) {
+                count++
+                i++
+            }
+            if (count < 3) return false
+            while (i < end) {
+                if (!isWs(text[i])) return false
+                i++
+            }
+            return true
+        }
+
+        // Indented continuation of a list item (mirrors the
+        // collection loop's ^\s{2,}\S): at least two whitespace
+        // CHARACTERS (a tab is one character here, unlike indent),
+        // then non-whitespace. Block starts are checked before this,
+        // so a fence/heading/rule/quote/list line never counts.
+        fun isContinuation(start: Int, end: Int): Boolean {
+            var i = start
+            var ws = 0
+            while (i < end && isWs(text[i])) {
+                ws++
+                i++
+            }
+            return ws >= 2 && i < end
+        }
+
+        var idx = 0
+        var lineNo = 0
+        while (idx <= text.length) {
+            val end = text.indexOf('\n', idx).let { if (it < 0) text.length else it }
+            val inFrontMatter = lineNo <= fmEndLine
+            // Per-line byte counts. Front-matter lines count only
+            // toward the title bound.
+            var lineUtf8 = 0L
+            var i = idx
+            while (i < end) {
+                val c = text[i]
+                when (c) {
+                    '&' -> {
+                        lineUtf8 += 1
+                        if (!inFrontMatter) escapeExtra += 4
+                    }
+                    '<' -> {
+                        lineUtf8 += 1
+                        if (!inFrontMatter) escapeExtra += 3
+                    }
+                    '>' -> {
+                        lineUtf8 += 1
+                        if (!inFrontMatter) escapeExtra += 3
+                    }
+                    '"' -> {
+                        lineUtf8 += 1
+                        if (!inFrontMatter) escapeExtra += 5
+                    }
+                    '`', '*', '_', '~', '[', ']', '(', ')', '!' -> {
+                        lineUtf8 += 1
+                        if (!inFrontMatter) markers++
+                    }
+                    else -> {
+                        lineUtf8 += when {
+                            c < '\u0080' -> 1L
+                            c < '\u0800' -> 2L
+                            c.isHighSurrogate() && i + 1 < end && text[i + 1].isLowSurrogate() -> {
+                                i++
+                                4L
+                            }
+                            else -> 3L
+                        }
+                    }
+                }
+                i++
+            }
+            if (lineUtf8 > longestLineBytes) longestLineBytes = lineUtf8
+            if (!inFrontMatter) {
+                bodyUtf8 += lineUtf8
+                if (end < text.length) {
+                    // The newline itself: kept as a space (or a
+                    // newline in fenced code), so it costs a byte.
+                    bodyUtf8 += 1
+                    bodyNewlines++
+                }
+            }
+
+            // Block structure (.md only — .txt markup is a flat
+            // per-newline allowance, charged at the end).
+            if (!isTxt && !inFrontMatter) {
+                if (inFence) {
+                    if (end - idx >= 3 && text[idx] == '`' && text[idx + 1] == '`' && text[idx + 2] == '`') {
+                        inFence = false
+                    }
+                } else if (isBlankLine(idx, end)) {
+                    flushList()
+                    inParagraph = false
+                    inQuote = false
+                } else if (end - idx >= 3 && text[idx] == '`' && text[idx + 1] == '`' && text[idx + 2] == '`') {
+                    flushList()
+                    inParagraph = false
+                    inQuote = false
+                    blockMarkup += 24
+                    inFence = true
+                } else if (isHeadingLine(idx, end)) {
+                    flushList()
+                    inParagraph = false
+                    inQuote = false
+                    blockMarkup += 9
+                } else if (isHrLine(idx, end)) {
+                    flushList()
+                    inParagraph = false
+                    inQuote = false
+                    blockMarkup += 4
+                } else if (text[idx] == '>') {
+                    flushList()
+                    inParagraph = false
+                    if (!inQuote) {
+                        blockMarkup += 27
+                        inQuote = true
+                    }
+                    blockMarkup += 7
+                } else {
+                    val marker = listMarker(idx, end)
+                    if (marker != null) {
+                        handleListItem(marker)
+                    } else if (inList && isContinuation(idx, end)) {
+                        // Appended to the previous item's text: no markup.
+                    } else {
+                        flushList()
+                        inQuote = false
+                        if (!inParagraph) {
+                            blockMarkup += 7
+                            inParagraph = true
+                        }
+                    }
+                }
+            }
+
+            if (end >= text.length) break
+            idx = end + 1
+            lineNo++
+        }
+        flushList()
+
+        val titleBound = if (isTxt) {
+            utf8ByteLength(file.name)
+        } else {
+            maxOf(longestLineBytes, utf8ByteLength(file.name))
+        }
+        val markupBound = if (isTxt) {
+            // PlainTextCodec: each newline becomes <br> (+3) inside a
+            // paragraph and each paragraph adds <p></p> (7); a
+            // paragraph boundary needs two newlines, so 7 per newline
+            // plus one wrap covers both.
+            7L * bodyNewlines + 7L
+        } else {
+            blockMarkup + 7L * markers
+        }
+        return titleBound + bodyUtf8 + escapeExtra + markupBound
+    }
+
     /** One file's parse, shared by the list path and the ZIP path
      *  (which converts each member as it is read so no archive's text
      *  is ever retained in full). */
@@ -902,11 +1332,26 @@ object MarkdownImporter {
         // source length BEFORE conversion, so an over-budget file
         // costs no parse work and leaves no image counts behind.
         // The true check runs in addNote below (HTML can expand the
-        // source slightly).
+        // source — for Markdown the raw text IS the body, so the
+        // source length is a fair estimate here; the per-note
+        // expansion is bounded separately, see below).
         if (result.retainedTextChars + file.text.length > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
             result.skippedFiles += SkippedImportFile(
                 file.name,
                 ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+            )
+            return
+        }
+        // Per-note bound, estimated BEFORE conversion (Codex R10-F1):
+        // conversion escapes text (& → &amp;) and adds block markup,
+        // so a source that fits the aggregate budget can still
+        // convert into many megabytes of HTML that addNote would
+        // reject only after building it. A file the estimator
+        // rejects reports the same per-note reason addNote would.
+        if (estimateConvertedNoteBytes(file) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
+            result.skippedFiles += SkippedImportFile(
+                file.name,
+                ImportCaps.NOTE_TOO_LARGE_REASON,
             )
             return
         }
@@ -1045,16 +1490,19 @@ object MarkdownImporter {
                 }
                 // The per-file cap (100 MiB) and the aggregate text
                 // budget are both checked BEFORE the member is
-                // materialized (Codex R7-F3, same shape as the Keep
-                // parser): readTextUpToChars stops retaining as soon
-                // as the decoded text exceeds the remaining budget,
-                // and a >100 MiB member still reports the per-file
-                // reason. (The old code buffered the member under
-                // the 100 MiB byte cap, then checked String.length —
-                // a multibyte file could pass the character count
-                // while far exceeding 100 MiB on disk — and an
-                // over-budget member was buffered in full before
-                // the budget check rejected it.)
+                // materialized (Codex R7-F3): readTextUpToChars stops
+                // retaining as soon as the decoded text exceeds the
+                // remaining budget, and a >100 MiB member still
+                // reports the per-file reason. (The old code buffered
+                // the member under the 100 MiB byte cap, then checked
+                // String.length — a multibyte file could pass the
+                // character count while far exceeding 100 MiB on disk
+                // — and an over-budget member was buffered in full
+                // before the budget check rejected it.) The remaining
+                // budget is the right bound here, unlike the Keep
+                // parser (Codex R10-F2): for Markdown the raw text
+                // IS the body, so it fairly estimates the converted
+                // size — a Keep JSON's overhead is not body text.
                 val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - result.retainedTextChars)
                     .coerceAtLeast(0L)
                 when (val read = entry.readTextUpToChars(remaining, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
