@@ -85,22 +85,6 @@ abstract class NotaDatabase : RoomDatabase() {
                 databaseName(accountId),
             ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .addCallback(libraryMetaCallback)
-                // (Codex R17-F1, round 18) Multi-instance invalidation:
-                // Nota deliberately holds TWO live handles on the same
-                // file — provider.current (observed by the library
-                // Flows) and the import/sync/restore sibling handles
-                // (openDedicated / openDedicatedOnSameFileAs). Without
-                // this, a sibling's writes never reach the live
-                // instance's invalidation tracker, and no manual
-                // refresh re-emits its Flows: refreshVersionsAsync()
-                // plus refreshAsync() were both tried and the live
-                // Flow still stayed at one emission (runs 45681991679,
-                // 45686703979, 45688401280, 45689556382). With this,
-                // Room cross-notifies instances of the same file in
-                // the same process, so a sibling's writes re-emit the
-                // live Flows. All handles go through this builder, so
-                // the one call covers them.
-                .enableMultiInstanceInvalidation()
                 .build()
     }
 }
