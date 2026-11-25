@@ -78,7 +78,7 @@ class NoteImportRepository(
         val stagingDir = File(context.cacheDir, "import-keep-${UUID.randomUUID()}")
         return try {
             val parse = KeepTakeoutParser.parse(zipFile, stagingDir)
-            val run = importNotes(parse.notes, onProgress, targetDb)
+            val run = importNotes(parse.notes, targetDb = targetDb, onProgress = onProgress)
             ImportOutcome(parse, run.report, run.imageSaveFailures)
         } finally {
             stagingDir.deleteRecursively()
@@ -94,7 +94,7 @@ class NoteImportRepository(
         val stagingDir = File(context.cacheDir, "import-mdzip-${UUID.randomUUID()}")
         return try {
             val parse = MarkdownImporter.parseImportZip(zipFile, stagingDir)
-            val run = importNotes(parse.notes, onProgress, targetDb)
+            val run = importNotes(parse.notes, targetDb = targetDb, onProgress = onProgress)
             ImportOutcome(parse, run.report, run.imageSaveFailures)
         } finally {
             stagingDir.deleteRecursively()
@@ -263,7 +263,7 @@ class NoteImportRepository(
             // sources can still exceed in sum).
             merged.enforceNoteCap()
             merged.enforceContentBudget()
-            val run = importNotes(merged.notes, onProgress, targetDb)
+            val run = importNotes(merged.notes, targetDb = targetDb, onProgress = onProgress)
             ImportOutcome(merged, run.report, run.imageSaveFailures)
         } finally {
             stagingDir.deleteRecursively()
@@ -282,12 +282,13 @@ class NoteImportRepository(
      *  handle is opened on ITS file, so a switch during parsing
      *  cannot move the run to another account. Null (direct
      *  callers, which have no parse phase) captures at run start,
-     *  which is the same moment.
+     *  which is the same moment. It sits BEFORE [onProgress] so
+     *  the trailing-lambda call shape keeps working.
      */
     suspend fun importNotes(
         imported: List<ImportedNote>,
-        onProgress: (Int, Int) -> Unit = { _, _ -> },
         targetDb: NotaDatabase? = null,
+        onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): ImportRunResult = withContext(Dispatchers.IO) {
         // The whole run — seed reads, note writes, image rows, and
         // the finish — runs on ONE dedicated handle on the starting
