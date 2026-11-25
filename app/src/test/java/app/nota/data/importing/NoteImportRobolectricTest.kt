@@ -1306,4 +1306,84 @@ class NoteImportRobolectricTest {
         assertEquals("<p>b</p>", notes.first { it.title == "B" }.contentHtml)
         assertEquals(1, stack.db.attachmentDao().getAll().size)
     }
+
+    @Test
+    fun markdownSelectionEnforcesAggregateBudgetAcrossZips() = runBlocking {
+        // R12-F1: each ZIP's own 16M-char budget starts fresh, so
+        // several small ZIPs in one selection could accumulate far
+        // past the budget before the post-loop check trims them.
+        // Two ZIPs of sixty 200K-char notes each total ~24M chars;
+        // the merged result is trimmed after each absorb, so the
+        // second ZIP's tail notes are skipped with the budget reason
+        // and the merged result never holds more than the budget.
+        // 83 notes × ~200,007 chars ≈ 16.6M chars fit; the 37 tail
+        // notes of the second ZIP do not.
+        val stack = newStack()
+        val zipA = zipOf(
+            (0 until 60).associate { "a-$it.md" to "# A$it\n\n" + "x".repeat(200_000) },
+        )
+        val zipB = zipOf(
+            (0 until 60).associate { "b-$it.md" to "# B$it\n\n" + "x".repeat(200_000) },
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 1_700_000_000_000L),
+                StagedImportFile("b.zip", zipB, 1_700_000_000_001L),
+            ),
+        )
+        assertEquals(83, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertTrue(outcome.parse.retainedTextChars <= ImportCaps.MAX_AGGREGATE_TEXT_CHARS)
+        assertEquals(
+            (23 until 60).map {
+                SkippedImportFile("b-$it.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)
+            },
+            outcome.parse.skippedFiles,
+        )
+        assertEquals(83, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun expandedNotePastRowBoundIsRolledBack() = runBlocking {
+        // R12-F2: the 1 MB cap ran on the pre-expansion content,
+        // but the saved embed carries a 100K-char alt — the expanded
+        // row is past the bound (and past the ~2 MiB CursorWindow
+        // once its plain-text projection is counted). The note must
+        // be rolled back, reported as failed, and the run-end
+        // rebuild must still succeed — an oversize row left behind
+        // would fail getAll() and break the whole run. The small
+        // note proves the run itself is intact.
+        val stack = newStack()
+        val imageFile = File.createTempFile("expand-pic", ".png")
+            .apply { writeBytes(pngBytes) }
+        val big = ImportedNote(
+            title = "BigExpanded",
+            contentHtml = "<p>" + "a".repeat(990_000) + " %%NOMA_IMPORT_IMAGE_0%%</p>",
+            createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = null,
+            images = listOf(
+                ImportedImage(
+                    "pic.png", "image/png", imageFile,
+                    pngBytes.size.toLong(), "a".repeat(100_000),
+                    "%%NOMA_IMPORT_IMAGE_0%%",
+                ),
+            ),
+            sourceName = "big-expanded.md",
+        )
+        val small = ImportedNote(
+            title = "Small", contentHtml = "<p>small</p>",
+            createdAt = 1_700_000_010_000L, updatedAt = 1_700_000_010_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = null, images = emptyList(),
+            sourceName = "small.md",
+        )
+        val result = stack.repo.importNotes(listOf(big, small))
+        assertEquals(1, result.report.imported)
+        assertEquals(0, result.report.duplicates)
+        assertEquals(1, result.report.failed)
+        assertEquals(listOf("big-expanded.md"), result.report.failedNames)
+        assertEquals(listOf("Small"), stack.db.noteDao().getAll().map { it.title })
+        assertEquals(0, stack.db.attachmentDao().getAll().size)
+    }
 }

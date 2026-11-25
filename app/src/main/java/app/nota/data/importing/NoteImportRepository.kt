@@ -133,6 +133,19 @@ class NoteImportRepository(
                         merged.absorb(
                             MarkdownImporter.parseImportZip(file.file, subDir, imageBudget),
                         )
+                        // Enforce the shared caps as sources are
+                        // merged (Codex R12-F1): each ZIP's own
+                        // 16M-char budget starts fresh, so several
+                        // small ZIPs could otherwise accumulate
+                        // hundreds of MiB of retained note strings
+                        // before the post-loop check trims them.
+                        // Trimming after each absorb keeps the merged
+                        // result inside the budget at all times; the
+                        // post-loop calls below stay as defence in
+                        // depth. Dropped notes are the just-absorbed
+                        // tail, reported with the budget reason.
+                        merged.enforceNoteCap()
+                        merged.enforceContentBudget()
                     }
                     lower.endsWith(".md") || lower.endsWith(".markdown") || lower.endsWith(".txt") -> {
                         if (file.file.length() > ImportCaps.MAX_IMPORT_FILE_BYTES) {
@@ -191,6 +204,15 @@ class NoteImportRepository(
                                         lastModified = file.lastModified,
                                     )
                                     merged.absorb(MarkdownImporter.parseMarkdownFile(input, resolver))
+                                    // Same merge-time trim as the ZIP
+                                    // branch above (Codex R12-F1):
+                                    // conversion can expand the text
+                                    // past the pre-read source-length
+                                    // estimate, so the merged result is
+                                    // re-checked after every absorb,
+                                    // not just at the end of the loop.
+                                    merged.enforceNoteCap()
+                                    merged.enforceContentBudget()
                                 }
                             }
                         }
@@ -468,6 +490,23 @@ class NoteImportRepository(
                 } finally {
                     if (image.deleteAfterUse) runCatching { image.stagedFile.delete() }
                 }
+            }
+            // Recheck the row size after image expansion (Codex
+            // R12-F2): the 1 MB cap ran on the pre-expansion content,
+            // but each embed replaces a short token with a longer
+            // <img> tag — and Keep attachments append a whole
+            // paragraph each — so the final row can exceed the bound
+            // after the check already ran. A row past it breaks the
+            // run-end rebuild (getAll() cannot read past the ~2 MiB
+            // CursorWindow). Throwing here rolls the note back
+            // through the catch below: the first upsert + FTS entry
+            // are deleted and the note is reported as failed, never
+            // written oversize. Images are never dropped to fit —
+            // the note is refused whole, with its name in the report.
+            if (noteRowBytes(item.title, content) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
+                throw IllegalStateException(
+                    "Imported note exceeds the size limit after expanding its images.",
+                )
             }
             val finalEntity = entity.copy(
                 contentHtml = content,
