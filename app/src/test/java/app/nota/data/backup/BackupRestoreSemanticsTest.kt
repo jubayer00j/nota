@@ -55,18 +55,6 @@ class BackupRestoreSemanticsTest {
         val backup = BackupRepository(context, DatabaseProvider.forDatabase(context, db), TemplateRepository(context), store)
     }
 
-    // Unique per METHOD, not per instance (PR #59 fix round 18):
-    // JUnit creates a fresh class instance per test method, so an
-    // instance counter reset to 0 every time and all 27 methods
-    // reused account "semantics-1" — the same database file. A
-    // background opener (e.g. the app-startup orphan sweep, which
-    // opens every account database it finds) could then hold the
-    // file one method's open wanted. The prefix stays discoverable;
-    // only the suffix now differs per method.
-    companion object {
-        private var stackSeq = 0
-    }
-
     private fun newStack(): Stack {
         val context = RuntimeEnvironment.getApplication()
         // File-backed under a discoverable account name (see
@@ -732,6 +720,16 @@ class BackupRestoreSemanticsTest {
     }
 
     companion object {
+        // Unique per METHOD, not per instance (PR #59 fix round 18):
+        // JUnit creates a fresh class instance per test method, so an
+        // instance counter reset to 0 every time and all 27 methods
+        // reused account "semantics-1" — the same database file. A
+        // background opener (e.g. the app-startup orphan sweep, which
+        // opens every account database it finds) could then hold the
+        // file one method's open wanted. The prefix stays discoverable;
+        // only the suffix now differs per method.
+        private var stackSeq = 0
+
         private const val PRECOMPUTED_NOMAENC1 =
         "Tk9NQUVOQzEAAACdeyJ2IjoxLCJzYWx0IjoiWW1GamEzVndMWE5oYkhRdE1USXpOQT09IiwiaXRl" +
         "cmF0aW9ucyI6NjAwMDAwLCJ3cmFwcGVkS2V5Ijoid01IQ3c4VEZ4c2ZJeWNyTGo1YVBYN1RTWXVZ" +
