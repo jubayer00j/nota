@@ -1445,21 +1445,15 @@ class NoteImportRobolectricTest {
         // first in the staging map and the note embedded whichever
         // payload came last.
         val stack = newStack()
-        val zip = File.createTempFile("dup-path", ".zip")
-        ZipOutputStream(zip.outputStream().buffered()).use { out ->
-            fun entry(name: String, body: ByteArray) {
-                out.putNextEntry(ZipEntry(name))
-                out.write(body)
-                out.closeEntry()
-            }
-            entry(
-                "note.md",
-                "# Pic\n\n![dup](img/dup.png)\n\n![ok](img/ok.png)".toByteArray(Charsets.UTF_8),
-            )
-            entry("img/dup.png", pngBytes)
-            entry("img/dup.png", byteArrayOf(9, 9, 9))
-            entry("img/ok.png", pngBytes)
-        }
+        val zip = zipWithDuplicateEntries(
+            listOf(
+                "note.md" to "# Pic\n\n![dup](img/dup.png)\n\n![ok](img/ok.png)"
+                    .toByteArray(Charsets.UTF_8),
+                "img/dup.png" to pngBytes,
+                "img/dup.png" to byteArrayOf(9, 9, 9),
+                "img/ok.png" to pngBytes,
+            ),
+        )
         try {
             val outcome = stack.repo.importMarkdownSelection(
                 listOf(StagedImportFile("dup.zip", zip, 1_700_000_000_000L)),
@@ -1481,30 +1475,19 @@ class NoteImportRobolectricTest {
         // are ambiguous — the note embeds neither payload, the
         // attachment is counted, and a uniquely pathed attachment in
         // the same archive still resolves.
-        val zip = File.createTempFile("dup-keep-path", ".zip")
-        ZipOutputStream(zip.outputStream().buffered()).use { out ->
-            fun text(name: String, body: String) {
-                out.putNextEntry(ZipEntry(name))
-                out.write(body.toByteArray(Charsets.UTF_8))
-                out.closeEntry()
-            }
-            fun bytes(name: String, body: ByteArray) {
-                out.putNextEntry(ZipEntry(name))
-                out.write(body)
-                out.closeEntry()
-            }
-            text(
-                "Takeout/Keep/dup.json",
-                """{"title":"Dup","textContent":"see","attachments":[{"filePath":"Takeout/Keep/pic.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
-            )
-            text(
-                "Takeout/Keep/unique.json",
-                """{"title":"Unique","textContent":"see2","attachments":[{"filePath":"Takeout/Keep/unique.png","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}""",
-            )
-            bytes("Takeout/Keep/pic.png", pngBytes)
-            bytes("Takeout/Keep/pic.png", byteArrayOf(9, 9, 9))
-            bytes("Takeout/Keep/unique.png", pngBytes)
-        }
+        val zip = zipWithDuplicateEntries(
+            listOf(
+                "Takeout/Keep/dup.json" to
+                    """{"title":"Dup","textContent":"see","attachments":[{"filePath":"Takeout/Keep/pic.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}"""
+                        .toByteArray(Charsets.UTF_8),
+                "Takeout/Keep/unique.json" to
+                    """{"title":"Unique","textContent":"see2","attachments":[{"filePath":"Takeout/Keep/unique.png","mimetype":"image/png"}],"createdTimestampUsec":1700000100000000}"""
+                        .toByteArray(Charsets.UTF_8),
+                "Takeout/Keep/pic.png" to pngBytes,
+                "Takeout/Keep/pic.png" to byteArrayOf(9, 9, 9),
+                "Takeout/Keep/unique.png" to pngBytes,
+            ),
+        )
         try {
             val result = KeepTakeoutParser.parse(zip, stagingDir())
             assertEquals(2, result.notes.size)

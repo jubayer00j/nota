@@ -1,9 +1,12 @@
 package app.nota.data.importing
 
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.OutputStream
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.junit.Assert.assertEquals
@@ -714,14 +717,12 @@ class MarkdownImportTest {
         // R13-F2: two entries sharing one text path are the same
         // logical file — the first occurrence wins, so the ZIP yields
         // one note, not two.
-        val zip = File.createTempFile("dup-text", ".zip")
-        ZipOutputStream(zip.outputStream().buffered()).use { out ->
-            for ((name, body) in listOf("a.md" to "# First\n\none", "a.md" to "# Second\n\ntwo")) {
-                out.putNextEntry(ZipEntry(name))
-                out.write(body.toByteArray(Charsets.UTF_8))
-                out.closeEntry()
-            }
-        }
+        val zip = zipWithDuplicateEntries(
+            listOf(
+                "a.md" to "# First\n\none".toByteArray(Charsets.UTF_8),
+                "a.md" to "# Second\n\ntwo".toByteArray(Charsets.UTF_8),
+            ),
+        )
         val dir = File.createTempFile("dup-text-staging", ".dir").apply { delete(); mkdir() }
         try {
             val result = MarkdownImporter.parseImportZip(zip, dir)
@@ -766,4 +767,82 @@ class MarkdownImportTest {
             dir.deleteRecursively()
         }
     }
+}
+
+/**
+ * Writes a ZIP with STORED entries, allowing the same path twice —
+ * `ZipOutputStream` refuses duplicate names outright
+ * (`ZipException: duplicate entry`), so a raw writer is the only way
+ * to build a malformed archive for the duplicate-path tests (Codex
+ * R13-F2). Entry times are a fixed DOS timestamp (2020-06-15
+ * 12:00:00); times are not under test here. Shared with
+ * [NoteImportRobolectricTest] (same package, same test source set).
+ */
+internal fun zipWithDuplicateEntries(entries: List<Pair<String, ByteArray>>): File {
+    val file = File.createTempFile("dup-entries", ".zip")
+    val central = ByteArrayOutputStream()
+    var offset = 0
+    fun le16(out: OutputStream, v: Int) {
+        out.write(v and 0xFF)
+        out.write((v ushr 8) and 0xFF)
+    }
+    fun le32(out: OutputStream, v: Long) {
+        out.write((v and 0xFF).toInt())
+        out.write(((v ushr 8) and 0xFF).toInt())
+        out.write(((v ushr 16) and 0xFF).toInt())
+        out.write(((v ushr 24) and 0xFF).toInt())
+    }
+    // DOS date/time for 2020-06-15 12:00:00.
+    val dosTime = 0x6000
+    val dosDate = 0x50CF
+    file.outputStream().buffered().use { out ->
+        for ((name, data) in entries) {
+            val nameBytes = name.toByteArray(Charsets.UTF_8)
+            val crc = CRC32().apply { update(data) }.value
+            val headerOffset = offset
+            le32(out, 0x04034b50L)
+            le16(out, 20) // version needed
+            le16(out, 0) // flags
+            le16(out, 0) // method: STORED
+            le16(out, dosTime)
+            le16(out, dosDate)
+            le32(out, crc)
+            le32(out, data.size.toLong())
+            le32(out, data.size.toLong())
+            le16(out, nameBytes.size)
+            le16(out, 0) // extra length
+            out.write(nameBytes)
+            out.write(data)
+            offset += 30 + nameBytes.size + data.size
+            le32(central, 0x02014b50L)
+            le16(central, 20) // version made by
+            le16(central, 20) // version needed
+            le16(central, 0)
+            le16(central, 0)
+            le16(central, dosTime)
+            le16(central, dosDate)
+            le32(central, crc)
+            le32(central, data.size.toLong())
+            le32(central, data.size.toLong())
+            le16(central, nameBytes.size)
+            le16(central, 0)
+            le16(central, 0)
+            le16(central, 0)
+            le16(central, 0)
+            le32(central, 0)
+            le32(central, headerOffset.toLong())
+            central.write(nameBytes)
+        }
+        val centralOffset = offset
+        out.write(central.toByteArray())
+        le32(out, 0x06054b50L)
+        le16(out, 0)
+        le16(out, 0)
+        le16(out, entries.size)
+        le16(out, entries.size)
+        le32(out, central.size().toLong())
+        le32(out, centralOffset.toLong())
+        le16(out, 0)
+    }
+    return file
 }

@@ -144,7 +144,10 @@ object KeepTakeoutParser {
                             result.skippedFiles += SkippedImportFile(base, "Not valid JSON — skipped.")
                             return@walk
                         }
-                        val draft = keepJsonToDraft(json, base, reader.entryNames, result)
+                        val draft = keepJsonToDraft(
+                            json, base, reader.entryNames, result,
+                            reader.duplicateEntryNames,
+                        )
                         if (draft != null) {
                             // The per-note bound, mirrored from addNote
                             // so a doomed draft is not retained through
@@ -265,10 +268,11 @@ object KeepTakeoutParser {
      *  two entries sharing a suffix or basename — e.g. duplicate
      *  `photo.jpg` in separate folders — are ambiguous, and silently
      *  embedding the first would put the wrong photo in the note. The
-     *  full-path match is exact; when the path itself occurs twice in
-     *  the archive the entry is refused at staging instead (Codex
-     *  R13-F2), so no payload is embedded at all. A suffix ambiguity
-     *  is never rescued by the basename
+     *  same holds for the full path itself (Codex R13-F2): when the
+     *  path occurs twice in the archive, [duplicateNames] marks it and
+     *  the lookup is Ambiguous — the attachment is counted and its
+     *  file name kept in the note, never embedded from either payload.
+     *  A suffix ambiguity is never rescued by the basename
      *  arm: basename matches are a superset of suffix matches, so an
      *  ambiguous suffix is at least as ambiguous by basename. */
     private sealed interface EntryLookup {
@@ -277,9 +281,16 @@ object KeepTakeoutParser {
         object Ambiguous : EntryLookup
     }
 
-    private fun findEntry(names: List<String>, ref: String): EntryLookup {
+    private fun findEntry(
+        names: List<String>,
+        ref: String,
+        duplicateNames: Set<String> = emptySet(),
+    ): EntryLookup {
         val wanted = ref.replace('\\', '/')
-        if (wanted in names) return EntryLookup.Found(wanted)
+        if (wanted in names) {
+            if (wanted in duplicateNames) return EntryLookup.Ambiguous
+            return EntryLookup.Found(wanted)
+        }
         val suffix = "/$wanted"
         val suffixMatches = names.filter { it.endsWith(suffix) }
         if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
@@ -303,6 +314,7 @@ object KeepTakeoutParser {
         sourceName: String,
         entryNames: List<String>,
         result: ImportParseResult,
+        duplicateEntryNames: Set<String> = emptySet(),
     ): KeepDraft? {
         val title = json.opt("title") as? String ?: ""
         val textContent = json.opt("textContent") as? String ?: ""
@@ -365,7 +377,9 @@ object KeepTakeoutParser {
                 result.attachmentsSkipped += 1
                 continue
             }
-            val entryName = when (val found = findEntry(entryNames, filePath)) {
+            val entryName = when (
+                val found = findEntry(entryNames, filePath, duplicateEntryNames)
+            ) {
                 is EntryLookup.Found -> found.entryName
                 EntryLookup.Missing -> {
                     result.attachmentsSkipped += 1
