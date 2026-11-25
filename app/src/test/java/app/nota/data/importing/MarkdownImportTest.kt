@@ -815,6 +815,34 @@ class MarkdownImportTest {
             dir.deleteRecursively()
         }
     }
+    @Test
+    fun stagingFileNameBoundsLongNamesTo255Bytes() {
+        // (Codex R17-F2): an overlong basename used to make
+        // File.outputStream() throw (ENAMETOOLONG) and fail the whole
+        // import. The staged name is now truncated to 255 UTF-8 bytes
+        // with the extension kept.
+        val longName = "a".repeat(300) + ".png"
+        val staged = stagingFileName(longName, mutableSetOf())
+        assertEquals(255, staged.toByteArray(Charsets.UTF_8).size)
+        assertTrue(staged.endsWith(".png"))
+        assertEquals("a".repeat(251) + ".png", staged)
+        // Uniqueness still applies: a second identical name gets a
+        // suffix and stays within the bound.
+        val used = mutableSetOf(staged)
+        val second = stagingFileName(longName, used)
+        assertEquals(255, second.toByteArray(Charsets.UTF_8).size)
+        assertTrue(second.endsWith("-2.png"))
+        assertTrue(second != staged)
+        // Multi-byte characters are never split: a stem of 126 'é'
+        // (252 bytes) truncates to 125 whole characters (250 bytes)
+        // rather than a torn final character.
+        val multi = "é".repeat(126) + ".png"
+        val stagedMulti = stagingFileName(multi, mutableSetOf())
+        assertEquals("é".repeat(125) + ".png", stagedMulti)
+        assertEquals(254, stagedMulti.toByteArray(Charsets.UTF_8).size)
+        // A short name is untouched, extension and all.
+        assertEquals("pic.png", stagingFileName("pic.png", mutableSetOf()))
+    }
 }
 
 /**

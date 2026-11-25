@@ -7,6 +7,7 @@ import app.nota.data.db.NoteEntity
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
@@ -17,6 +18,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -247,6 +249,35 @@ class NoteImportRobolectricTest {
         assertTrue(
             notes.first { it.title == "withpic" }.contentHtml.contains("nota-attachment://"),
         )
+    }
+
+    @Test
+    fun overlongImageBasenameStillImports() = runBlocking {
+        // (Codex R17-F2): a referenced image whose basename exceeds
+        // Android's 255-byte filename limit used to make staging throw
+        // (ENAMETOOLONG) and fail the WHOLE import. The staged name
+        // is now truncated, so the image embeds under a shortened
+        // name and the rest of the run still lands.
+        val stack = newStack()
+        val longName = "a".repeat(260) + ".png"
+        val zip = zipOf(
+            linkedMapOf(
+                "notes/long.md" to "# Long\n\n![pic](images/$longName)",
+                "notes/other.md" to "# Other\n\nplain",
+            ),
+            mapOf("notes/images/$longName" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownZip(zip)
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(0, outcome.imageSaveFailures)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(
+            notes.first { it.title == "Long" }.contentHtml.contains("nota-attachment://"),
+        )
+        val attachments = stack.db.attachmentDao().getAll()
+        assertEquals(1, attachments.size)
+        assertTrue(attachments[0].fileName.toByteArray(Charsets.UTF_8).size <= 255)
     }
 
     @Test
@@ -983,6 +1014,47 @@ class NoteImportRobolectricTest {
             }
         } finally {
             provider.current.close()
+        }
+    }
+
+    @Test
+    fun importRunRefreshesLiveLibraryFlow() = runBlocking {
+        // (Codex R17-F1): the engine writes through a dedicated
+        // sibling handle, which the live instance's invalidation
+        // tracker never hears about — without the run-end refresh, a
+        // library Flow collecting from provider.current keeps showing
+        // pre-import notes until its collector restarts.
+        val stack = newStack()
+        val emissions = Collections.synchronizedList(mutableListOf<List<NoteEntity>>())
+        val collector = async(Dispatchers.IO) {
+            stack.db.noteDao().observeAll().collect { emissions += it }
+        }
+        try {
+            // The collector's initial (empty) emission proves it is
+            // live before the import starts.
+            withTimeout(10_000) {
+                while (emissions.isEmpty()) delay(50)
+            }
+            assertEquals(0, emissions.last().size)
+            val result = stack.repo.importNotes(
+                listOf(
+                    ImportedNote(
+                        "FlowNote", "<p>hello</p>",
+                        1_700_000_000_000L, 1_700_000_000_000L,
+                        false, false, null, emptyList(), null, emptyList(),
+                        "FlowNote.md",
+                    ),
+                ),
+            )
+            assertEquals(1, result.report.imported)
+            // The same collector — never restarted — delivers the
+            // imported note once the run refreshes the live instance.
+            withTimeout(10_000) {
+                while (emissions.none { list -> list.any { it.title == "FlowNote" } }) delay(50)
+            }
+            assertEquals(1, emissions.last().size)
+        } finally {
+            collector.cancel()
         }
     }
 

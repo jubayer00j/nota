@@ -416,6 +416,25 @@ class NoteImportRepository(
                     extraKnownPaths = { provider.allAttachmentLocalPaths() },
                     db = runDb,
                 )
+                // (Codex R17-F1) The run wrote through a dedicated
+                // sibling handle, which the live instance's
+                // invalidation tracker never hears about — Room has
+                // no multi-instance invalidation here, so without
+                // this a library Flow collecting from
+                // provider.current keeps showing pre-import notes
+                // until its collector restarts. Refreshing the live
+                // instance's tracked versions re-emits the changed
+                // tables; it is the documented call for writes made
+                // through another connection. If a switch landed
+                // mid-run, provider.current is the new account's
+                // instance and the refresh is harmless (the start
+                // account's collectors are gone with the switch);
+                // Room's close lock keeps a refresh from racing a
+                // close. Never throws: a failed refresh must not
+                // fail an import that already landed.
+                runCatching {
+                    provider.current.invalidationTracker.refreshVersionsAsync()
+                }
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),

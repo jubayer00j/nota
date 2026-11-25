@@ -72,21 +72,71 @@ internal fun isMarkdownTextEntry(name: String): Boolean =
 internal fun isPlainTextEntry(name: String): Boolean =
     Regex("\\.txt$", RegexOption.IGNORE_CASE).containsMatchIn(name)
 
+/** Android's per-component filename limit (255 bytes): a staged
+ *  name past it makes File.outputStream() throw (ENAMETOOLONG). */
+internal const val MAX_STAGED_NAME_BYTES = 255
+
 /** Filesystem-safe staging name from an entry/pick name (basename
  *  only; only path separators and control characters are replaced, so
- *  the staged name stays as close to the original as possible). */
+ *  the staged name stays as close to the original as possible).
+ *  Bounded to [MAX_STAGED_NAME_BYTES] UTF-8 bytes (Codex R17-F2):
+ *  the stem is truncated, the extension kept whole where it fits,
+ *  and the uniqueness suffix still applies — so an overlong image
+ *  name stages under a shortened name instead of failing the run. */
 internal fun stagingFileName(rawName: String, usedNames: MutableSet<String>): String {
     val base = importBaseName(rawName.replace('\\', '/'))
-        .replace(Regex("[\u0000-\u001f/\\\\]"), "_")
+        .replace(Regex("[\u0000-\u001f/\\]"), "_")
         .ifBlank { "file" }
-    var candidate = base
+    val dot = base.lastIndexOf('.')
+    val stem = if (dot > 0) base.substring(0, dot) else base
+    val ext = if (dot > 0) base.substring(dot) else ""
     var n = 2
+    var candidate = fitStagedName(stem, "", ext)
     while (!usedNames.add(candidate)) {
-        val dot = base.lastIndexOf('.')
-        candidate = if (dot > 0) "${base.substring(0, dot)}-$n${base.substring(dot)}" else "$base-$n"
+        candidate = fitStagedName(stem, "-$n", ext)
         n++
     }
     return candidate
+}
+
+/** [stem] + [suffix] + [ext] fitted to at most [MAX_STAGED_NAME_BYTES]
+ *  UTF-8 bytes, never splitting a multi-byte character. The extension
+ *  is kept whole unless it alone would overflow the component — then
+ *  it is truncated and the stem drops to a single character. */
+private fun fitStagedName(stem: String, suffix: String, ext: String): String {
+    val suffixBytes = suffix.toByteArray(Charsets.UTF_8).size
+    val extBytes = ext.toByteArray(Charsets.UTF_8).size
+    if (extBytes + suffixBytes + 1 > MAX_STAGED_NAME_BYTES) {
+        return "f" + suffix + truncateUtf8Bytes(ext, MAX_STAGED_NAME_BYTES - suffixBytes - 1)
+    }
+    val stemBudget = MAX_STAGED_NAME_BYTES - extBytes - suffixBytes
+    val fittedStem = truncateUtf8Bytes(stem, stemBudget).ifEmpty {
+        truncateUtf8Bytes("file", stemBudget)
+    }
+    return fittedStem + suffix + ext
+}
+
+/** Longest prefix of [value] fitting in [maxBytes] UTF-8 bytes, never
+ *  splitting a multi-byte character. */
+private fun truncateUtf8Bytes(value: String, maxBytes: Int): String {
+    if (maxBytes <= 0) return ""
+    val bytes = value.toByteArray(Charsets.UTF_8)
+    if (bytes.size <= maxBytes) return value
+    var end = maxBytes
+    // Back off over continuation bytes (10xxxxxx), then over the lead
+    // byte of the sequence they belong to if it no longer fits whole.
+    while (end > 0 && bytes[end - 1] and 0xC0.toByte() == 0x80.toByte()) end--
+    if (end > 0) {
+        val lead = bytes[end - 1].toInt() and 0xFF
+        val seqLen = when {
+            lead < 0x80 -> 1
+            lead < 0xE0 -> 2
+            lead < 0xF0 -> 3
+            else -> 4
+        }
+        if (end - 1 + seqLen > maxBytes) end--
+    }
+    return bytes.decodeToString(0, end)
 }
 
 /* ---------------- Paths + image resolver ---------------- */
@@ -1694,7 +1744,20 @@ object MarkdownImporter {
                 // image budget still allows (Codex R11-F1): several
                 // highly compressible ZIPs must not expand into GiB
                 // of staged images in the shared staging directory.
-                if (entry.copyToUpTo(staged, imageBudget.nextImageCapBytes())) {
+                // (Codex R17-F2, defence in depth): staging can still
+                // fail for a reason the name bound doesn't cover, so
+                // an IOException here leaves the reference unresolved
+                // (counted at the reference) instead of failing the
+                // whole import. Only IOException is caught: a quota
+                // trip (ImportZipException) must still abort the
+                // archive, as designed.
+                val stagedOk = try {
+                    entry.copyToUpTo(staged, imageBudget.nextImageCapBytes())
+                } catch (e: java.io.IOException) {
+                    runCatching { staged.delete() }
+                    false
+                }
+                if (stagedOk) {
                     imageBudget.record(staged.length())
                     imageFiles[entry.name] = staged
                 }

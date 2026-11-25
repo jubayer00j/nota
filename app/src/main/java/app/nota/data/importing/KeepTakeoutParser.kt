@@ -211,7 +211,19 @@ object KeepTakeoutParser {
                         // attachment is counted as skipped below.
                         if (entry.name in reader.duplicateEntryNames) return@walk
                         val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
-                        val ok = entry.copyToUpTo(staged, ImportCaps.MAX_IMPORT_FILE_BYTES)
+                        // (Codex R17-F2, defence in depth): staging can
+                        // still fail for a reason the name bound doesn't
+                        // cover — an IOException here counts the
+                        // attachment as skipped instead of failing the
+                        // whole import. Only IOException is caught: a
+                        // quota trip (ImportZipException) must still
+                        // abort the archive, as designed.
+                        val ok = try {
+                            entry.copyToUpTo(staged, ImportCaps.MAX_IMPORT_FILE_BYTES)
+                        } catch (e: java.io.IOException) {
+                            runCatching { staged.delete() }
+                            false
+                        }
                         // copyToUpTo deletes the target when over the cap.
                         stagedByEntry[entry.name] = if (ok) staged else null
                     }
