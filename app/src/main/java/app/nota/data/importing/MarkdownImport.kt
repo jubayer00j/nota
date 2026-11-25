@@ -914,11 +914,13 @@ object MarkdownImporter {
      *   +105 (tags + their own kind-run wrapper). A list block's
      *   task-ness is charged at block end, when the level is known:
      *   one task item makes the whole level task items.
-     * - Title: a .txt title is the file name; a .md title is one
-     *   source line (front-matter value or H1) or the file name, so
-     *   the longest line bounds it. Front matter is not body text
-     *   (mirrors [parseFrontMatter]; .txt files never have it), so
-     *   its lines contribute nothing but the title bound.
+     * - Title: a .txt title is the file name; a .md title is exactly
+     *   one of the front-matter title, the leading H1, or the file
+     *   name — the estimator reads the same one the converter
+     *   would, so a huge body line is never mistaken for the title.
+     *   Front matter is not body text (mirrors [parseFrontMatter];
+     *   .txt files never have it), so its lines contribute nothing
+     *   but the title.
      */
     internal fun estimateConvertedNoteBytes(file: MarkdownFileInput): Long {
         val text = file.text
@@ -961,26 +963,108 @@ object MarkdownImporter {
             return true
         }
 
+        // UTF-8 bytes of text[start, end) — utf8ByteLength over a range.
+        fun rangeUtf8(start: Int, end: Int): Long {
+            var bytes = 0L
+            var i = start
+            while (i < end) {
+                val c = text[i]
+                bytes += when {
+                    c < '\u0080' -> 1L
+                    c < '\u0800' -> 2L
+                    c.isHighSurrogate() && i + 1 < end && text[i + 1].isLowSurrogate() -> {
+                        i++
+                        4L
+                    }
+                    else -> 3L
+                }
+                i++
+            }
+            return bytes
+        }
+
+        // A front-matter `title:` value's UTF-8 bytes (mirrors
+        // parseFrontMatter's ^([A-Za-z][\w-]*)\s*:\s*(.*)$ with a
+        // "title" key), or null when the line is not a non-empty
+        // title. The value is kept WITH quotes (stripQuotes only
+        // shortens), so its trimmed bytes bound the title.
+        fun frontMatterTitleBytes(start: Int, end: Int): Long? {
+            var i = start
+            if (i >= end) return null
+            val first = text[i]
+            if (first !in 'A'..'Z' && first !in 'a'..'z') return null
+            i++
+            while (i < end) {
+                val c = text[i]
+                if (c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == '_' || c == '-') i++
+                else break
+            }
+            val keyEnd = i
+            while (i < end && isWs(text[i])) i++
+            if (i >= end || text[i] != ':') return null
+            i++
+            while (i < end && isWs(text[i])) i++
+            var valueEnd = end
+            while (valueEnd > i && isWs(text[valueEnd - 1])) valueEnd--
+            if (valueEnd <= i) return null
+            if (keyEnd - start != 5) return null
+            val key = "title"
+            for (k in key.indices) {
+                if (text[start + k].lowercaseChar() != key[k]) return null
+            }
+            return rangeUtf8(i, valueEnd)
+        }
+
         // Front matter (mirrors parseFrontMatter; .txt files never
         // have it — the .txt path returns before front-matter
         // parsing): an opening "---" line and the first later line
-        // that closes it. Lines inside it are not body text.
+        // that closes it. Lines inside it are not body text. The
+        // converter strips a leading BOM before parsing, so the
+        // detection starts past one. The last non-empty `title:` value
+        // in the block is the note's title (it wins over an H1).
         var fmEndLine = -1
+        var fmTitleBytes: Long? = null
+        var bodyStart = if (text.startsWith("\uFEFF")) 1 else 0
         if (!isTxt) {
-            val firstBreak = text.indexOf('\n')
+            val firstBreak = text.indexOf('\n', bodyStart)
             val firstEnd = if (firstBreak < 0) text.length else firstBreak
-            if (text.startsWith("---") && text.substring(0, firstEnd).trim() == "---") {
+            val firstIsFence = firstEnd - bodyStart >= 3 &&
+                text[bodyStart] == '-' && text[bodyStart + 1] == '-' && text[bodyStart + 2] == '-' &&
+                text.substring(bodyStart, firstEnd).trim() == "---"
+            if (firstIsFence) {
                 var idx = if (firstBreak < 0) text.length else firstBreak + 1
                 var lineNo = 1
                 while (idx < text.length) {
                     val end = text.indexOf('\n', idx).let { if (it < 0) text.length else it }
                     if (isClosingFence(idx, end)) {
                         fmEndLine = lineNo
+                        bodyStart = if (end < text.length) end + 1 else text.length
                         break
                     }
+                    frontMatterTitleBytes(idx, end)?.let { fmTitleBytes = it }
                     idx = end + 1
                     lineNo++
                 }
+            }
+        }
+
+        // The leading H1 becomes the title when front matter didn't
+        // provide one (mirrors markdownFileToImportedNote's
+        // ^\s*#\s+([^\n]+) on the body — exactly one '#', after any
+        // leading whitespace including blank lines). The captured text
+        // is trimmed (the trailing-hash strip only shortens), so its
+        // bytes bound the title.
+        var h1TitleBytes: Long? = null
+        if (!isTxt && fmTitleBytes == null) {
+            var i = bodyStart
+            while (i < text.length && (isWs(text[i]) || text[i] == '\n')) i++
+            if (i + 1 < text.length && text[i] == '#' && (isWs(text[i + 1]) || text[i + 1] == '\n')) {
+                var j = i + 1
+                while (j < text.length && (isWs(text[j]) || text[j] == '\n')) j++
+                val capStart = j
+                var capEnd = text.indexOf('\n', j).let { if (it < 0) text.length else it }
+                while (capEnd > capStart && isWs(text[capEnd - 1])) capEnd--
+                if (capEnd > capStart) h1TitleBytes = rangeUtf8(capStart, capEnd)
             }
         }
 
@@ -988,7 +1072,6 @@ object MarkdownImporter {
         var escapeExtra = 0L
         var markers = 0L
         var bodyNewlines = 0L
-        var longestLineBytes = 0L
         var blockMarkup = 0L
 
         // List-block accumulators (charged at block end, when the
@@ -1218,7 +1301,6 @@ object MarkdownImporter {
                 }
                 i++
             }
-            if (lineUtf8 > longestLineBytes) longestLineBytes = lineUtf8
             if (!inFrontMatter) {
                 bodyUtf8 += lineUtf8
                 if (end < text.length) {
@@ -1287,10 +1369,15 @@ object MarkdownImporter {
         }
         flushList()
 
+        // The title is exactly one of: the front-matter title, the
+        // leading H1, or the file name — never a body line. (An
+        // earlier version bounded it by the longest line, which
+        // double-counted a huge body line as the title and falsely
+        // skipped every large note.)
         val titleBound = if (isTxt) {
             utf8ByteLength(file.name)
         } else {
-            maxOf(longestLineBytes, utf8ByteLength(file.name))
+            fmTitleBytes ?: h1TitleBytes ?: utf8ByteLength(file.name)
         }
         val markupBound = if (isTxt) {
             // PlainTextCodec: each newline becomes <br> (+3) inside a
