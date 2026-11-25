@@ -122,8 +122,11 @@ class DatabaseProvider(
             appContext,
             // The inverse of NotaDatabase.databaseName's scheme:
             // "nota_guest" -> "guest" (GUEST_ACCOUNT), "nota_<uid>"
-            // -> "<uid>".
-            db.openHelper.databaseName.removePrefix("nota_"),
+            // -> "<uid>". Every database NotaDatabase.build makes is
+            // file-backed, so the name is never null in practice.
+            checkNotNull(db.openHelper.databaseName) {
+                "A dedicated sibling needs a named (file-backed) database."
+            }.removePrefix("nota_"),
         )
 
     /** Closes [db] only when it is an additional instance from
