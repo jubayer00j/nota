@@ -416,39 +416,22 @@ class NoteImportRepository(
                     extraKnownPaths = { provider.allAttachmentLocalPaths() },
                     db = runDb,
                 )
-                // (Codex R17-F1) The run wrote through a dedicated
-                // sibling handle, which the live instance's
-                // invalidation tracker never hears about — Room has
-                // no multi-instance invalidation here, so without
-                // this a library Flow collecting from
-                // provider.current keeps showing pre-import notes
-                // until its collector restarts. If a switch landed
-                // mid-run, provider.current is the new account's
-                // instance and the refresh is harmless (the start
-                // account's collectors are gone with the switch);
-                // Room's close lock keeps a refresh from racing a
-                // close. Never throws: a failed refresh must not
-                // fail an import that already landed.
-                // BISECT VERDICT: test-fast-b wedged with this call
-                // disabled AND with all three round-17 tests
-                // @Ignore'd (runs 45649915046, 45656523383,
-                // 45658562154, 45660467711) — so neither this call
-                // nor any round-17 test is the wedge. Restored.
-                // ROUND-18 VERDICT: refreshVersionsAsync() ALONE
-                // does not re-emit — the live Flow stayed at one
-                // emission for 15 s even with Robolectric's main
-                // looper pumped (runs 45681991679, 45686703979).
-                // It only re-reads the modified-tables list; the
-                // created Flows re-emit only when refreshAsync()
-                // is called, which is the documented call for
-                // writes made through another connection. Both
-                // are kept: the first syncs the tracker's version
-                // map from the log, the second emits to the Flows.
-                runCatching {
-                    val tracker = provider.current.invalidationTracker
-                    tracker.refreshVersionsAsync()
-                    tracker.refreshAsync()
-                }
+                // (Codex R17-F1, fix-20 decision — ACCEPT +
+                // DOCUMENT) No refresh here: the run writes through
+                // a dedicated sibling handle, and Room 2.8.5's
+                // invalidation log is a per-connection TEMP table —
+                // a sibling instance's writes can never be seen by
+                // the live instance's tracker, so
+                // refreshVersionsAsync()/refreshAsync() cannot
+                // surface them (fix-19 diagnostic proved it from
+                // Room's own source; round 18's multi-instance
+                // invalidation attempt was harness-incompatible
+                // and reverted). The calls were removed as dead
+                // code. Documented limitation: imported notes
+                // appear in the library when its collector restarts
+                // (e.g. navigating back from Settings) — the same
+                // as restore/sync, which use the same sibling-handle
+                // pattern.
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),
