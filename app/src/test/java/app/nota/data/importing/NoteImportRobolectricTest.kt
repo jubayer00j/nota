@@ -725,23 +725,29 @@ class NoteImportRobolectricTest {
 
     @Test
     fun markdownSelectionEnforcesAggregateTextBudget() = runBlocking {
-        // R6-F1 (merge path): nine 2M-char loose files total ~18M
-        // chars — past the 16M budget. Eight import; the ninth is
-        // reported as skipped.
+        // R6-F1 (merge path): ninety 200K-char loose files total
+        // ~18M chars — past the 16M budget. 83 import (83 × ~200K
+        // ≈ 16.6M chars); the rest are reported as skipped.
+        // Files stay at 200K chars on purpose: a single ~2M-char
+        // note cannot be read back — one row exceeds Android's 2 MB
+        // CursorWindow, so getAll() throws (a pre-existing product
+        // limit, not this round's scope).
         val stack = newStack()
         val dir = stagingDir()
-        val staged = (0 until 9).map { i ->
-            val file = File(dir, "big-$i.md").apply { writeText("# Big$i\n\n" + "x".repeat(2_000_000)) }
+        val staged = (0 until 90).map { i ->
+            val file = File(dir, "big-$i.md").apply { writeText("# Big$i\n\n" + "x".repeat(200_000)) }
             StagedImportFile("big-$i.md", file, 1_700_000_000_000L + i)
         }
         val outcome = stack.repo.importMarkdownSelection(staged)
-        assertEquals(8, outcome.report.imported)
+        assertEquals(83, outcome.report.imported)
         assertEquals(0, outcome.report.failed)
         assertEquals(
-            listOf(SkippedImportFile("big-8.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            (83 until 90).map {
+                SkippedImportFile("big-$it.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)
+            },
             outcome.parse.skippedFiles,
         )
-        assertEquals(8, stack.db.noteDao().getAll().size)
+        assertEquals(83, stack.db.noteDao().getAll().size)
     }
 
     @Test
