@@ -7,7 +7,6 @@ import app.nota.data.db.NoteEntity
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
-import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
@@ -17,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1023,38 +1024,38 @@ class NoteImportRobolectricTest {
         // sibling handle, which the live instance's invalidation
         // tracker never hears about — without the run-end refresh, a
         // library Flow collecting from provider.current keeps showing
-        // pre-import notes until its collector restarts.
+        // pre-import notes until its collector restarts. The import
+        // runs on a worker thread while THIS thread collects the
+        // Flow, so the collector is never restarted; the shape is
+        // deliberately this way round — a background collector plus a
+        // runBlocking join wedged test-fast-b twice (the collector's
+        // Flow never yielded under Robolectric), so the collection
+        // lives on the test thread and the import on the worker.
         val stack = newStack()
-        val emissions = Collections.synchronizedList(mutableListOf<List<NoteEntity>>())
-        val collector = async(Dispatchers.IO) {
-            stack.db.noteDao().observeAll().collect { emissions += it }
-        }
+        val notes = listOf(
+            ImportedNote(
+                "FlowNote", "<p>hello</p>",
+                1_700_000_000_000L, 1_700_000_000_000L,
+                false, false, null, emptyList(), null, emptyList(),
+                "FlowNote.md",
+            ),
+        )
+        val importJob = async(Dispatchers.IO) { stack.repo.importNotes(notes) }
         try {
-            // The collector's initial (empty) emission proves it is
-            // live before the import starts.
-            withTimeout(10_000) {
-                while (emissions.isEmpty()) delay(50)
+            // The first emission is the pre-import library (empty);
+            // the second arrives only once the run refreshes the live
+            // instance — a fresh collection would see the note either
+            // way, so the two emissions from ONE collector are the
+            // point. Bounded: a missing refresh fails this test in
+            // seconds instead of hanging the shard.
+            val emissions = withTimeout(15_000) {
+                stack.db.noteDao().observeAll().take(2).toList()
             }
-            assertEquals(0, emissions.last().size)
-            val result = stack.repo.importNotes(
-                listOf(
-                    ImportedNote(
-                        "FlowNote", "<p>hello</p>",
-                        1_700_000_000_000L, 1_700_000_000_000L,
-                        false, false, null, emptyList(), null, emptyList(),
-                        "FlowNote.md",
-                    ),
-                ),
-            )
-            assertEquals(1, result.report.imported)
-            // The same collector — never restarted — delivers the
-            // imported note once the run refreshes the live instance.
-            withTimeout(10_000) {
-                while (emissions.none { list -> list.any { it.title == "FlowNote" } }) delay(50)
-            }
-            assertEquals(1, emissions.last().size)
+            assertEquals(0, emissions[0].size)
+            assertEquals(listOf("FlowNote"), emissions[1].map { it.title })
+            assertEquals(1, importJob.await().report.imported)
         } finally {
-            collector.cancel()
+            importJob.cancel()
         }
     }
 
