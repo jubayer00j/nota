@@ -101,7 +101,8 @@ class DatabaseProviderSwitchingTest {
     // orphan sweep opens every account database it finds. With
     // SQLite's default busy timeout of 0 the loser failed instantly
     // with SQLiteDatabaseLockedException. The open now waits up to
-    // OPEN_BUSY_TIMEOUT_MS — this test proves it: a holder takes a
+    // 5 s (PRAGMA busy_timeout, set first in installLibraryMeta) —
+    // this test proves it: a holder takes a
     // write lock for 300 ms while a second handle opens the same
     // file. Without the timeout the open throws immediately; with
     // it, it waits out the hold and succeeds.
