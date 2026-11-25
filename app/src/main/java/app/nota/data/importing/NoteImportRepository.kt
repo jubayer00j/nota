@@ -416,18 +416,29 @@ class NoteImportRepository(
                     extraKnownPaths = { provider.allAttachmentLocalPaths() },
                     db = runDb,
                 )
-                // (Codex R17-F1) BISECT — the refresh below is
-                // TEMPORARILY disabled: test-fast-b wedged in its test
-                // step on four consecutive gate runs after this call
-                // was added, while every other shard greened, and
-                // this call runs in every import test in the shard.
-                // If the gate greens with it off, the refresh is the
-                // wedge and the fix shape must change; if the shard
-                // still wedges, the cause is elsewhere and this comes
-                // back. DO NOT MERGE WITH THIS DISABLED.
-                // runCatching {
-                //     provider.current.invalidationTracker.refreshVersionsAsync()
-                // }
+                // (Codex R17-F1) The run wrote through a dedicated
+                // sibling handle, which the live instance's
+                // invalidation tracker never hears about — Room has
+                // no multi-instance invalidation here, so without
+                // this a library Flow collecting from
+                // provider.current keeps showing pre-import notes
+                // until its collector restarts. Refreshing the live
+                // instance's tracked versions re-emits the changed
+                // tables; it is the documented call for writes made
+                // through another connection. If a switch landed
+                // mid-run, provider.current is the new account's
+                // instance and the refresh is harmless (the start
+                // account's collectors are gone with the switch);
+                // Room's close lock keeps a refresh from racing a
+                // close. Never throws: a failed refresh must not
+                // fail an import that already landed.
+                // BISECT NOTE: this call was temporarily disabled in
+                // f0442a53 and test-fast-b STILL wedged, with the F1
+                // test failing fast by design — so the refresh is NOT
+                // the wedge; it is restored here.
+                runCatching {
+                    provider.current.invalidationTracker.refreshVersionsAsync()
+                }
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),
