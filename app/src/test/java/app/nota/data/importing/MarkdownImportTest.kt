@@ -236,6 +236,54 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun nestedTaskDoesNotMakePlainParentATaskList() {
+        // R15-F1: a nested task under a plain parent used to make the
+        // parent level a task list, importing the parent as an unchecked
+        // task. Task-ness is decided per level, from that level's own
+        // items — the nested level stays a task list, the parent stays
+        // a plain list item.
+        val result = parseOne("nested-task.md", "- parent\n  - [x] child")
+        assertEquals(
+            "<ul><li><p>parent</p>" +
+                "<ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"true\"><div><p>child</p></div></li>" +
+                "</ul></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun taskParentWithPlainNestedChildStaysATaskList() {
+        // R15-F1 mirror: the parent level has its own task item, so it
+        // stays a task list even though the nested child is plain.
+        val result = parseOne("task-parent.md", "- [ ] parent\n  - child")
+        assertEquals(
+            "<ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>parent</p>" +
+                "<ul><li><p>child</p></li></ul></div></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
+    fun taskGrandchildDoesNotMakeTopParentATaskList() {
+        // R15-F1 one level down: a task grandchild must not make the
+        // top level a task list. Deeper indents clamp to the first
+        // nested level, so the grandchild renders as a sibling of the
+        // middle item — and that nested level, which genuinely
+        // contains a task item, is a task list.
+        val result = parseOne("grandchild.md", "- parent\n  - middle\n    - [x] grandchild")
+        assertEquals(
+            "<ul><li><p>parent</p>" +
+                "<ul data-type=\"taskList\">" +
+                "<li data-type=\"taskItem\" data-checked=\"false\"><div><p>middle</p></div></li>" +
+                "<li data-type=\"taskItem\" data-checked=\"true\"><div><p>grandchild</p></div></li>" +
+                "</ul></li></ul>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
     fun nestedMixedRunsSplitByKind() {
         // R5-F3: nested children mixing markers split into kind-runs
         // at their own level — the numbered child is NOT pulled into

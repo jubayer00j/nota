@@ -830,7 +830,13 @@ private fun renderListRun(items: List<ListItem>, images: InlineImageSink): Strin
 
     fun renderItems(list: List<ListItem>): String {
         val out = StringBuilder()
-        val levelTasks = !list[0].ordered && list.any { it.task }
+        // Task-ness is decided by the level's own items only: this
+        // flat list also carries the nested items, so a nested task
+        // must not make its plain parent a task list (Codex R15-F1).
+        // The level's own items are the ones at the list's minimum
+        // indent — children always sit deeper than their parent.
+        val levelIndent = list.minOf { it.indent }
+        val levelTasks = !list[0].ordered && list.any { it.indent == levelIndent && it.task }
         var idx = 0
         while (idx < list.size) {
             val item = list[idx]
