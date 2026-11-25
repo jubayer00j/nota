@@ -7,15 +7,14 @@ import app.nota.data.db.NoteEntity
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
@@ -1029,11 +1028,7 @@ class NoteImportRobolectricTest {
         // library Flow collecting from provider.current keeps showing
         // pre-import notes until its collector restarts. The import
         // runs on a worker thread while THIS thread collects the
-        // Flow, so the collector is never restarted; the shape is
-        // deliberately this way round — a background collector plus a
-        // runBlocking join wedged test-fast-b twice (the collector's
-        // Flow never yielded under Robolectric), so the collection
-        // lives on the test thread and the import on the worker.
+        // Flow, so the collector is never restarted.
         val stack = newStack()
         val notes = listOf(
             ImportedNote(
@@ -1049,54 +1044,63 @@ class NoteImportRobolectricTest {
         // collector's first emission — the first item then already
         // contained the note and take(2) waited forever for a second
         // emission that never came (TimeoutCancellationException at
-        // 15.070 s on the diagnostic run). The collector is a single
-        // async on this thread's scope (no blocking latch — a
-        // CountDownLatch.await here would park runBlocking's thread
-        // and deadlock the collector); the import stays on IO.
-        val firstEmission = CompletableDeferred<Unit>()
-        val emissions = mutableListOf<List<NoteEntity>>()
-        val collector = async {
+        // 15.070 s on the diagnostic run).
+        //
+        // Threading shape (deliberate, twice hard-won): the
+        // collector runs on Dispatchers.Default and THIS thread
+        // pumps Robolectric's paused main looper in a settle loop
+        // while waiting — Room dispatches its invalidation
+        // notification on the main thread, so the refresh's
+        // re-emission sits queued until the looper is idled (the
+        // HTML report's suppressed UnExecutedRunnablesException
+        // says exactly this). The pump MUST run on this thread:
+        // a background pump throws UnsupportedOperationException
+        // ("main looper can only be controlled from main thread",
+        // ShadowPausedLooper.java:761). A background collector plus
+        // a runBlocking join wedged test-fast-b twice before — but
+        // that shape parked the test thread in join/await WITHOUT
+        // pumping the looper; this shape pumps it. Every wait is
+        // bounded at 15 s, so a missing refresh fails this test in
+        // seconds instead of hanging the shard.
+        val emissions = CopyOnWriteArrayList<List<NoteEntity>>()
+        val collector = async(Dispatchers.Default) {
             stack.db.noteDao().observeAll().take(2).collect { batch ->
                 emissions += batch
-                if (emissions.size == 1) firstEmission.complete(Unit)
             }
-        }
-        // Robolectric leaves the main looper PAUSED, and Room
-        // dispatches its invalidation notification on the main
-        // thread — so the refresh's re-emission sits queued until
-        // the looper is idled (the HTML report's suppressed
-        // UnExecutedRunnablesException says exactly this). Pump it
-        // from a background coroutine while the collector waits;
-        // the collector itself stays on this thread (see the note
-        // above — a background collector wedged the shard twice).
-        val looperPump = launch(Dispatchers.Default) {
-            while (collector.isActive) {
-                ShadowLooper.idleMainLooper()
-                delay(10)
-            }
-            ShadowLooper.idleMainLooper()
         }
         try {
-            withTimeout(15_000) { firstEmission.await() }
+            settleUntil { emissions.size >= 1 }
             assertEquals(0, emissions[0].size)
             val importJob = async(Dispatchers.IO) { stack.repo.importNotes(notes) }
             try {
                 // The second emission arrives only once the run
                 // refreshes the live instance — a fresh collection
                 // would see the note either way, so the two emissions
-                // from ONE collector are the point. Bounded: a missing
-                // refresh fails this test in seconds instead of hanging
-                // the shard.
-                withTimeout(15_000) { collector.await() }
+                // from ONE collector are the point.
+                settleUntil { emissions.size >= 2 }
                 assertEquals(listOf("FlowNote"), emissions[1].map { it.title })
-                assertEquals(1, importJob.await().report.imported)
+                assertEquals(1, withTimeout(15_000) { importJob.await() }.report.imported)
             } finally {
                 importJob.cancel()
             }
         } finally {
-            looperPump.cancel()
             collector.cancel()
         }
+    }
+
+    /** Poll [condition] while idling Robolectric's paused main looper,
+     *  so main-thread-dispatched work (e.g. Room's invalidation
+     *  notification) can run. Bounded: gives up after [deadlineMs]
+     *  and lets the caller fail on the unmet condition instead of
+     *  hanging the shard. */
+    private fun settleUntil(deadlineMs: Long = 15_000, condition: () -> Boolean) {
+        val end = System.currentTimeMillis() + deadlineMs
+        while (!condition()) {
+            ShadowLooper.idleMainLooper()
+            if (System.currentTimeMillis() > end) break
+            Thread.sleep(10)
+        }
+        ShadowLooper.idleMainLooper()
     }
 
     @Test
