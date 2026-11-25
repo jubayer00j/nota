@@ -174,7 +174,14 @@ fun installLibraryMeta(db: SupportSQLiteDatabase) {
     // forDatabase's eager install, MIGRATION_8_9) — PRAGMA
     // busy_timeout is a per-connection setting, not a schema change,
     // so it is safe inside a migration transaction too.
-    db.execSQL("PRAGMA busy_timeout = 5000")
+    //
+    // It MUST run as a query, not execSQL: `PRAGMA busy_timeout =
+    // 5000` returns the new value as a row, and Android's execSQL
+    // rejects statements that return data ("Queries can be performed
+    // using SQLiteDatabase query or rawQuery methods only" —
+    // Migration67RobolectricTest proved it the hard way). Run it as
+    // a query and close the cursor.
+    db.query("PRAGMA busy_timeout = 5000").close()
     db.execSQL(
         "CREATE TABLE IF NOT EXISTS `library_meta` (`id` INTEGER NOT NULL, " +
             "`notesWriteGeneration` INTEGER NOT NULL, PRIMARY KEY(`id`))",
