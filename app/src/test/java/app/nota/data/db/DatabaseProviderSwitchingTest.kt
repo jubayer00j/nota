@@ -1,10 +1,15 @@
 package app.nota.data.db
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -87,5 +92,71 @@ class DatabaseProviderSwitchingTest {
         val accounts = provider.existingAccountIds()
         assertTrue(accounts.contains(NotaDatabase.GUEST_ACCOUNT))
         assertTrue(accounts.contains("uid-alpha"))
+    }
+
+    // (PR #59 fix round 18 — the BackupRestoreSemanticsTest
+    // SQLITE_BUSY flake, third recurrence): a database open's first
+    // write is installLibraryMeta's INSERT in onOpen, and another
+    // connection can hold the file at that moment — the app-startup
+    // orphan sweep opens every account database it finds. With
+    // SQLite's default busy timeout of 0 the loser failed instantly
+    // with SQLiteDatabaseLockedException. The open now waits up to
+    // OPEN_BUSY_TIMEOUT_MS — this test proves it: a holder takes a
+    // write lock for 300 ms while a second handle opens the same
+    // file. Without the timeout the open throws immediately; with
+    // it, it waits out the hold and succeeds.
+    @Test
+    fun dbOpenWaitsOutTransientWriteLock() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val accountId = "busy-timeout"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val holder = NotaDatabase.build(context, accountId)
+        val holderDb = holder.openHelper.writableDatabase
+        // The holder's transaction lives on ONE thread (SQLite
+        // transactions are thread-bound): begin + INSERT take the
+        // RESERVED lock, the latch signals it is held, the lock is
+        // released 300 ms later.
+        val lockHeld = CountDownLatch(1)
+        var holderError: Throwable? = null
+        val holderThread = thread(isDaemon = true) {
+            try {
+                holderDb.beginTransaction()
+                try {
+                    holderDb.execSQL(
+                        "INSERT OR IGNORE INTO library_meta " +
+                            "(id, notesWriteGeneration) VALUES (1, 0)",
+                    )
+                    lockHeld.countDown()
+                    Thread.sleep(300)
+                    holderDb.setTransactionSuccessful()
+                } finally {
+                    holderDb.endTransaction()
+                }
+            } catch (e: Throwable) {
+                holderError = e
+                lockHeld.countDown()
+            }
+        }
+        try {
+            // Do not start the opener until the lock is provably held
+            // — otherwise it could open first and the test would pass
+            // vacuously, with or without the fix.
+            assertTrue(lockHeld.await(10, TimeUnit.SECONDS))
+            assertNull(holderError)
+            val opener = NotaDatabase.build(context, accountId)
+            try {
+                // Bounded: if the timeout ever stopped applying, this
+                // fails the test in seconds instead of hanging the shard.
+                withTimeout(10_000) {
+                    assertTrue(opener.noteDao().getAll().isEmpty())
+                }
+            } finally {
+                opener.close()
+            }
+            holderThread.join(5_000)
+            assertNull(holderError)
+        } finally {
+            holder.close()
+        }
     }
 }

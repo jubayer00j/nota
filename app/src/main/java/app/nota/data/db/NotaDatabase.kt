@@ -65,8 +65,32 @@ abstract class NotaDatabase : RoomDatabase() {
          * library stamp's generation can never silently freeze.
          * Idempotent; a few IF NOT EXISTS statements per open.
          */
+        /**
+         * How long a connection waits on a locked database before
+         * failing with SQLITE_BUSY (PR #59 fix round 18). The open
+         * path's first write is installLibraryMeta's INSERT in
+         * onOpen, and another connection can legitimately hold the
+         * file at that moment — the app-startup orphan sweep opens
+         * every account database it finds, and a test (or a fresh
+         * install) can open the same file while the sweep is
+         * mid-write. SQLite's default busy timeout is 0, so the
+         * loser failed instantly: BackupRestoreSemanticsTest flaked
+         * three times (fix rounds 11, 14, 17) with
+         * SQLiteDatabaseLockedException at that INSERT. A 5 s wait
+         * lets the loser ride out a millisecond write instead; a
+         * genuinely stuck lock still fails, just 5 s later. Set in
+         * onConfigure so it applies to the connection before any
+         * statement runs, on every open.
+         */
+        private const val OPEN_BUSY_TIMEOUT_MS = 5_000
+
         private val libraryMetaCallback: RoomDatabase.Callback =
             object : RoomDatabase.Callback() {
+                override fun onConfigure(db: SupportSQLiteDatabase) {
+                    super.onConfigure(db)
+                    db.execSQL("PRAGMA busy_timeout = $OPEN_BUSY_TIMEOUT_MS")
+                }
+
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     super.onCreate(db)
                     installLibraryMeta(db)
