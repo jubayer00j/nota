@@ -23,6 +23,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Ignore
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -1018,6 +1019,14 @@ class NoteImportRobolectricTest {
         }
     }
 
+    // BISECT (do not merge disabled): test-fast-b wedged on every
+    // gate run since this test landed, while the R17-F1 production
+    // refresh was already exonerated (b wedged with it disabled
+    // too, run 45649915046). If the gate greens with this test
+    // ignored, the test shape itself is the wedge and it needs a
+    // rework; if b still wedges, the cause is elsewhere and this
+    // comes back.
+    @Ignore("BISECT: test-fast-b wedge suspect")
     @Test
     fun importRunRefreshesLiveLibraryFlow() = runBlocking {
         // (Codex R17-F1): the engine writes through a dedicated
