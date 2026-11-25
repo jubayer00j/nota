@@ -23,6 +23,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -500,12 +501,15 @@ class NoteImportRobolectricTest {
 
     @Test
     fun keepTakeoutWithTruncatedNameInventoryReportsIt() {
-        // R3-F3: entry names past the 8 MiB retained-name budget are
-        // dropped from the inventory, so a note whose name sits past
-        // the cut is never enumerated — the outcome must say so
-        // instead of silently importing nothing. (ZIP entry names top
-        // out at 64 KiB, so ~150 entries at ~60 KiB each clear the
-        // budget; the note JSON is written last, past the cut.)
+        // R3-F3 as re-decided by R16-F1: entry names past the 8 MiB
+        // retained-name budget used to be dropped from the inventory
+        // with a truncation warning and a partial import — but the
+        // per-walk name tracking that produced the inventory was
+        // itself unbounded, so the walk now trips the budget as a
+        // hard quota instead: the whole archive is refused with the
+        // quota reason, nothing partial is applied. (ZIP entry names
+        // top out at 64 KiB, so ~150 entries at ~60 KiB each clear
+        // the budget; the note JSON is written last, past the cut.)
         val entries = LinkedHashMap<String, String>()
         repeat(150) { i ->
             entries["Takeout/Keep/filler-$i-" + "x".repeat(59_900) + ".txt"] = ""
@@ -519,7 +523,7 @@ class NoteImportRobolectricTest {
             listOf(
                 SkippedImportFile(
                     "Takeout ZIP",
-                    "The archive's file-name list was truncated, so some notes may not have been imported.",
+                    "That ZIP has too many or too long entry names to import safely.",
                 ),
             ),
             result.skippedFiles,
@@ -528,9 +532,13 @@ class NoteImportRobolectricTest {
 
     @Test
     fun markdownZipInventoryBudgetTruncatesLongNames() {
-        // R4-F1: the walk-1 inventory is bounded by the same 8 MiB
-        // retained-name budget as the reader — names past it are
-        // dropped and the truncation is reported, never silent.
+        // R4-F1 as re-decided by R16-F1: the walk-1 inventory used to
+        // be bounded by the same 8 MiB retained-name budget as the
+        // reader, with names past it dropped and the truncation
+        // reported — but the per-walk name tracking that produced the
+        // inventory was itself unbounded, so the walk now trips the
+        // budget as a hard quota instead: the whole archive is
+        // refused with the quota reason, nothing partial is applied.
         // (~150 entries at ~60 KiB each clear the budget; the last
         // note sits past the cut.)
         val entries = LinkedHashMap<String, String>()
@@ -539,15 +547,15 @@ class NoteImportRobolectricTest {
         }
         entries["notes/" + "z".repeat(59_900) + ".md"] = "# Hidden\n\nnever listed"
         val result = MarkdownImporter.parseImportZip(zipOf(entries), stagingDir())
-        assertTrue(result.notes.size in 1 until 150)
-        assertTrue(result.notes.none { it.title == "Hidden" })
-        assertTrue(
-            result.skippedFiles.contains(
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(
                 SkippedImportFile(
                     "ZIP archive",
-                    "The archive's file-name list was truncated, so some notes may not have been imported.",
+                    "That ZIP has too many or too long entry names to import safely.",
                 ),
             ),
+            result.skippedFiles,
         )
     }
 
@@ -1538,6 +1546,66 @@ class NoteImportRobolectricTest {
                     .toByteArray(Charsets.UTF_8),
                 "img/dup.png" to pngBytes,
                 "img/dup.png" to byteArrayOf(9, 9, 9),
+                "img/ok.png" to pngBytes,
+            ),
+        )
+        try {
+            val outcome = stack.repo.importMarkdownSelection(
+                listOf(StagedImportFile("dup.zip", zip, 1_700_000_000_000L)),
+            )
+            assertEquals(1, outcome.report.imported)
+            assertEquals(1, outcome.parse.imagesUnresolved)
+            val note = stack.db.noteDao().getAll().single()
+            assertTrue(note.contentHtml.contains("nota-attachment://")) // the ok image
+            assertTrue(note.contentHtml.contains("dup")) // alt kept, not embedded
+            assertEquals(1, stack.db.attachmentDao().getAll().size)
+        } finally {
+            zip.delete()
+        }
+    }
+
+    @Test
+    fun walkTripsWhenEntryNamesExceedBudget() {
+        // R16-F1: per-walk name tracking was unbounded — a
+        // quota-compliant archive of long-named, small-payload entries
+        // could retain hundreds of MiB of names as Java strings before
+        // any truncation warning. The walk now trips the same 8 MiB
+        // budget as the inventory (a hard quota, like the entry-count
+        // and byte quotas) instead of retaining them.
+        // (~150 entries at ~60 KiB each clear the budget.)
+        val entries = LinkedHashMap<String, String>()
+        repeat(150) { i ->
+            entries["notes/filler-$i-" + "x".repeat(59_900) + ".md"] = "# Filler $i\n\nbody"
+        }
+        val zip = zipOf(entries)
+        try {
+            val thrown = assertThrows(ImportZipException::class.java) {
+                ZipImportReader(zip).walk { }
+            }
+            assertEquals(
+                "That ZIP has too many or too long entry names to import safely.",
+                thrown.message,
+            )
+        } finally {
+            zip.delete()
+        }
+    }
+
+    @Test
+    fun longNamedDuplicateImagePathStaysUnresolved() = runBlocking {
+        // R16-F1, R13-F2 contract under the new shape: a duplicated
+        // path is still detected — and never staged — even when the
+        // name itself is very long. The note embeds neither payload,
+        // the reference is counted, and a uniquely pathed image in
+        // the same ZIP still embeds.
+        val longName = "img/" + "d".repeat(59_900) + ".png"
+        val stack = newStack()
+        val zip = zipWithDuplicateEntries(
+            listOf(
+                "note.md" to "# Pic\n\n![dup]($longName)\n\n![ok](img/ok.png)"
+                    .toByteArray(Charsets.UTF_8),
+                longName to pngBytes,
+                longName to byteArrayOf(9, 9, 9),
                 "img/ok.png" to pngBytes,
             ),
         )

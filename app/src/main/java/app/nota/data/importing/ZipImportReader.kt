@@ -83,6 +83,17 @@ internal fun File.readTextUpToChars(maxChars: Long, maxBytes: Long): CharBounded
  * hole PR #57 closed in the backup reader; this reader does not
  * reopen it.
  *
+ * Entry NAMES are bounded the same way: each walk trips
+ * [ImportZipException] once the names it has seen pass
+ * [BackupQuota.MAX_RETAINED_NAME_BYTES] (Codex R16-F1). The per-walk
+ * seen set and the reader-lifetime duplicate set both hold full entry
+ * names, and neither was governed by [retainName]'s budget — a
+ * quota-compliant archive of long-named, small-payload entries could
+ * retain hundreds of MiB of names as Java strings before any
+ * truncation warning. The trip is hard, not silent truncation:
+ * stopping tracking past the budget would leave duplicates past it
+ * undetected.
+ *
  * A quota trip aborts the walk with [ImportZipException] and nothing
  * partial is applied from that archive (same contract as BackupReader).
  * Entry names are used only for matching; parsers derive staging file
@@ -259,12 +270,26 @@ class ZipImportReader(private val zipFile: File) {
         // only a second occurrence within THIS walk is a duplicate
         // path in the archive (Codex R13-F2).
         val namesThisWalk = HashSet<String>()
+        // Per-walk name bytes are bounded by the same 8 MiB budget as
+        // the retained-name inventory (Codex R16-F1): namesThisWalk
+        // and duplicateNames both hold full entry names, and without
+        // this the walk retains every name it sees — a quota-compliant
+        // archive of long-named, small-payload entries (names up to
+        // 64 KiB each) could hold hundreds of MiB of Java strings
+        // (UTF-16, ~2x bytes) before any truncation warning. The trip
+        // is hard: silently stopping tracking past the budget would
+        // leave duplicates past it undetected.
+        var walkNameBytes = 0L
         ZipInputStream(zipFile.inputStream().buffered()).use { zin ->
             while (true) {
                 val ze = zin.nextEntry ?: break
                 entryCount++
                 if (entryCount > BackupQuota.MAX_ENTRIES) {
                     throw ImportZipException("That ZIP has too many entries to import safely.")
+                }
+                walkNameBytes += ze.name.toByteArray(Charsets.UTF_8).size.toLong()
+                if (walkNameBytes > BackupQuota.MAX_RETAINED_NAME_BYTES) {
+                    throw ImportZipException("That ZIP has too many or too long entry names to import safely.")
                 }
                 if (!namesThisWalk.add(ze.name)) duplicateNames += ze.name
                 retainName(ze.name)
@@ -288,3 +313,4 @@ class ZipImportReader(private val zipFile: File) {
         retainedNameBytes += bytes
     }
 }
+
