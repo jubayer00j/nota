@@ -5,16 +5,17 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import java.io.File
+import java.io.FileOutputStream
 import java.util.Base64
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -901,40 +902,164 @@ class NoteImportRobolectricTest {
     }
 
     @Test
-    fun accountSwitchWaitsForHeldOffWrite() = runBlocking {
-        // R6-F3: switchTo must block while a write holds the switch
-        // off, and proceed once the write finishes — the
-        // serialization the pinned-handle race needs.
+    fun importSurvivesAwayAndBackSwitchMidRun() = runBlocking {
+        // R8-F1: an away-and-back switch (A→B→A) inside ONE
+        // inter-note gap defeated the old pinning: dbForWrite()
+        // checked only the account id, saw A again, and returned
+        // the handle captured at run start — which the A→B switch
+        // had closed (the B→A switch published a NEW instance).
+        // Every later note then failed on the closed handle. The
+        // run now writes on a dedicated sibling handle, so the
+        // double switch is a non-event: all five notes — the image
+        // note included — land in A, none in B, none failed. The
+        // production constructor is used for the same reason as
+        // R5-F1's test: the forDatabase seam's account id would not
+        // match the files switchTo builds.
         val context = RuntimeEnvironment.getApplication()
         val seq = ++stackSeq
-        val startId = "import-lock-a-$seq"
-        val otherId = "import-lock-b-$seq"
+        val startId = "import-aba-a-$seq"
+        val otherId = "import-aba-b-$seq"
         context.deleteDatabase(NotaDatabase.databaseName(startId))
         context.deleteDatabase(NotaDatabase.databaseName(otherId))
         val provider = DatabaseProvider(context, startId)
+        val store = AttachmentStore(context, provider)
+        val repo = NoteImportRepository(context, provider, store)
         try {
-            val entered = CompletableDeferred<Unit>()
-            val release = CompletableDeferred<Unit>()
-            val job = launch(Dispatchers.IO) {
-                provider.withSwitchHeldOff {
-                    entered.complete(Unit)
-                    release.await()
+            fun plain(title: String, at: Long) = ImportedNote(
+                title, "<p>x</p>", at, at, false, false, null,
+                emptyList(), null, emptyList(), "$title.md",
+            )
+            val imageFile = File.createTempFile("aba-pic", ".png")
+                .apply { writeBytes(pngBytes) }
+            val notes = listOf(
+                plain("AbaA", 1_700_000_000_000L),
+                plain("AbaB", 1_700_000_010_000L),
+                plain("AbaC", 1_700_000_020_000L),
+                ImportedNote(
+                    "AbaPic", "<p>%%NOMA_IMPORT_IMAGE_0%%</p>",
+                    1_700_000_030_000L, 1_700_000_030_000L,
+                    false, false, null, emptyList(), null,
+                    listOf(
+                        ImportedImage(
+                            "pic.png", "image/png", imageFile,
+                            pngBytes.size.toLong(), "pic",
+                            "%%NOMA_IMPORT_IMAGE_0%%",
+                        ),
+                    ),
+                    "AbaPic.md",
+                ),
+                plain("AbaD", 1_700_000_040_000L),
+            )
+            var switched = false
+            val result = repo.importNotes(notes) { done, _ ->
+                if (done == 2 && !switched) {
+                    switched = true
+                    // BOTH switches inside the same gap — no note
+                    // write runs while the account is B.
+                    assertTrue(provider.switchTo(otherId))
+                    assertTrue(provider.switchTo(startId))
                 }
             }
-            entered.await()
+            assertTrue(switched)
+            assertEquals(startId, provider.accountId.value)
+            assertEquals(5, result.report.imported)
+            assertEquals(0, result.report.failed)
+            assertEquals(5, provider.current.noteDao().getAll().size)
+            assertEquals(1, provider.current.attachmentDao().getAll().size)
+            val otherDb = provider.openAdditional(otherId)
+            try {
+                assertEquals(0, otherDb.noteDao().getAll().size)
+            } finally {
+                provider.closeAdditional(otherDb)
+            }
+        } finally {
+            provider.current.close()
+        }
+    }
+
+    @Test
+    fun accountSwitchDoesNotWaitForImageConversion() = runBlocking {
+        // R8-F2: image conversion (decode/scale/JPEG-encode) inside
+        // a note write must not stall an account switch — the old
+        // shape held the switch mutex across the whole note write,
+        // so a switch arriving mid-conversion busy-spun on its
+        // caller (the main thread for an auth change) until the
+        // image finished. The staged image here is a FIFO: the
+        // writer serves the pipeline's three stream opens one at a
+        // time and pauses 2.5s before the second, so the import is
+        // provably parked INSIDE the image phase while the switch
+        // is attempted — the switch must still return at once.
+        val context = RuntimeEnvironment.getApplication()
+        val seq = ++stackSeq
+        val startId = "import-fifo-a-$seq"
+        val otherId = "import-fifo-b-$seq"
+        context.deleteDatabase(NotaDatabase.databaseName(startId))
+        context.deleteDatabase(NotaDatabase.databaseName(otherId))
+        val provider = DatabaseProvider(context, startId)
+        val store = AttachmentStore(context, provider)
+        val repo = NoteImportRepository(context, provider, store)
+        val fifo = File(stagingDir(), "pic.png")
+        val mkfifo = ProcessBuilder("mkfifo", fifo.absolutePath)
+            .redirectErrorStream(true).start()
+        assertEquals(0, mkfifo.waitFor())
+        val firstOpenServed = CountDownLatch(1)
+        val writer = thread(isDaemon = true) {
+            repeat(3) { i ->
+                FileOutputStream(fifo).use { out -> out.write(pngBytes) }
+                if (i == 0) {
+                    firstOpenServed.countDown()
+                    Thread.sleep(2_500)
+                }
+            }
+        }
+        try {
+            val note = ImportedNote(
+                "FifoPic", "<p>%%NOMA_IMPORT_IMAGE_0%%</p>",
+                1_700_000_000_000L, 1_700_000_000_000L,
+                false, false, null, emptyList(), null,
+                listOf(
+                    ImportedImage(
+                        "pic.png", "image/png", fifo,
+                        pngBytes.size.toLong(), "pic",
+                        "%%NOMA_IMPORT_IMAGE_0%%",
+                    ),
+                ),
+                "FifoPic.md",
+            )
+            val importJob = async(Dispatchers.IO) { repo.importNotes(listOf(note)) }
+            // The pipeline has opened the staged file once and is
+            // parked waiting for the second open — conversion is
+            // under way and cannot finish for ~2.5s.
+            assertTrue(firstOpenServed.await(10, java.util.concurrent.TimeUnit.SECONDS))
             var switchReturned = false
             val switchThread = thread {
                 provider.switchTo(otherId)
                 switchReturned = true
             }
-            delay(300)
-            assertFalse(switchReturned) // still blocked on the held-off write
-            release.complete(Unit)
-            job.join()
-            switchThread.join(5_000)
+            switchThread.join(1_200)
+            assertFalse(
+                "switch waited on image conversion",
+                switchThread.isAlive,
+            )
             assertTrue(switchReturned)
             assertEquals(otherId, provider.accountId.value)
+            val result = importJob.await()
+            assertEquals(1, result.report.imported)
+            assertEquals(0, result.report.failed)
+            assertEquals(0, result.imageSaveFailures)
+            // The note and its image landed in the account the
+            // import started in, not the one switched to mid-image.
+            val startDb = provider.openAdditional(startId)
+            try {
+                val notes = startDb.noteDao().getAll()
+                assertEquals(1, notes.size)
+                assertTrue(notes.single().contentHtml.contains("nota-attachment://"))
+                assertEquals(1, startDb.attachmentDao().getAll().size)
+            } finally {
+                provider.closeAdditional(startDb)
+            }
         } finally {
+            writer.join(10_000)
             provider.current.close()
         }
     }

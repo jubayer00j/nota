@@ -194,28 +194,32 @@ class NoteImportRepository(
         imported: List<ImportedNote>,
         onProgress: (Int, Int) -> Unit = { _, _ -> },
     ): ImportRunResult = withContext(Dispatchers.IO) {
-        val startAccountId = provider.accountId.value
-        // The run is pinned to the account it started in. Resolving
-        // the database once and holding it would write into a closed
-        // instance after a switch (DatabaseProvider closes the previous
-        // instance in switchTo); resolving per note would split the run
-        // across two accounts. So the handle follows a switch back to
-        // the starting account's file: normally the live instance
-        // itself, and a separately-opened handle only once a switch has
-        // happened (openAdditional/closeAdditional is the documented
-        // protocol for exactly this — the guest→account copy uses it).
-        // The folder/tag caches seeded below stay valid across the
-        // pin: the pinned handle opens the same database file.
-        var db = provider.current
-        var pinnedDb: NotaDatabase? = null
-        fun dbForWrite(): NotaDatabase {
-            if (provider.accountId.value == startAccountId) return db
-            if (pinnedDb == null) {
-                pinnedDb = provider.openAdditional(startAccountId)
-                db = pinnedDb!!
-            }
-            return db
-        }
+        // The whole run — seed reads, note writes, image rows, and
+        // the finish — runs on ONE dedicated handle on the starting
+        // account's file: a sibling instance of the live database,
+        // opened here and closed in the finally below
+        // (openDedicatedOnSameFileAs). A dedicated handle makes the
+        // run switch-proof with no lock held at all (Codex R8-F1/F2,
+        // retiring the R5/R6 account pinning and the switch mutex):
+        //  - switchTo only ever closes the LIVE instance, so no
+        //    switch — away, back, or a storm of them — can close
+        //    this handle mid-note (the R6-F3 race stays closed);
+        //  - the handle never depends on the current account, so an
+        //    away-and-back switch (A→B→A) cannot hand back a closed
+        //    instance the way the old account-id check did: it
+        //    returned the captured handle whenever the id matched
+        //    again, even though the first switch had closed it and
+        //    the second had published a new instance (R8-F1);
+        //  - no switch lock is held across the write phase, so the
+        //    image pipeline's decode/scale/encode work inside a note
+        //    write can never stall a sign-in/out on the main thread
+        //    (R8-F2 — the R7-F2 ANR shape, one level down);
+        //  - the finish (whole-library rebuild + reconcile) runs on
+        //    the same handle, still outside any lock (R7-F2).
+        // SQLite serializes the two connections on the same file,
+        // and the guest→account copy already writes through an
+        // additional instance the same way.
+        val runDb = provider.openDedicatedOnSameFileAs(provider.current)
         try {
             var importedCount = 0
             var duplicates = 0
@@ -224,26 +228,15 @@ class NoteImportRepository(
             val failedNames = mutableListOf<String>()
 
             val seen = HashSet<String>()
+            for (note in runDb.noteDao().getAll()) {
+                seen += dedupeKey(note.title, note.createdAt)
+            }
 
             // Folder resolution mirrors 1.x resolveFolderId (seeded map,
             // case-insensitive trimmed names, create on demand).
             val folderByName = HashMap<String, String>()
-            // Seed reads resolve through dbForWrite() under the switch
-            // lock (R6-F3): the captured DAOs would belong to the closed
-            // instance after a switch, and a switch between the capture
-            // above and the read would close the handle mid-seed.
-            val tagByExact = HashMap<String, TagEntity>()
-            val tagByLower = HashMap<String, TagEntity>()
-            provider.withSwitchHeldOff {
-                val seedDb = dbForWrite()
-                for (note in seedDb.noteDao().getAll()) seen += dedupeKey(note.title, note.createdAt)
-                for (folder in seedDb.folderDao().getAll()) {
-                    folderByName[folder.name.trim().lowercase()] = folder.id
-                }
-                for (tag in seedDb.tagDao().getAllTags()) {
-                    tagByExact.putIfAbsent(tag.name, tag)
-                    tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
-                }
+            for (folder in runDb.folderDao().getAll()) {
+                folderByName[folder.name.trim().lowercase()] = folder.id
             }
             suspend fun resolveFolderId(folderName: String?): String? {
                 val trimmed = folderName?.trim().orEmpty()
@@ -257,9 +250,7 @@ class NoteImportRepository(
                     createdAt = now,
                     updatedAt = now,
                 )
-                // Resolved per call: after a switch the captured DAO
-                // belongs to the closed instance.
-                dbForWrite().folderDao().upsert(folder)
+                runDb.folderDao().upsert(folder)
                 folderByName[key] = folder.id
                 return folder.id
             }
@@ -267,6 +258,12 @@ class NoteImportRepository(
             // Tag resolution mirrors NoteRepository.setNoteTags' lookup
             // spirit: exact name first, then a case-insensitive match, then
             // create (first-typed form is what gets stored).
+            val tagByExact = HashMap<String, TagEntity>()
+            val tagByLower = HashMap<String, TagEntity>()
+            for (tag in runDb.tagDao().getAllTags()) {
+                tagByExact.putIfAbsent(tag.name, tag)
+                tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
+            }
             suspend fun resolveTag(rawName: String): TagEntity {
                 val name = rawName.trim()
                 tagByExact[name]?.let { return it }
@@ -276,7 +273,7 @@ class NoteImportRepository(
                     name = name,
                     createdAt = System.currentTimeMillis(),
                 )
-                dbForWrite().tagDao().upsert(tag)
+                runDb.tagDao().upsert(tag)
                 tagByExact[name] = tag
                 tagByLower.putIfAbsent(name.lowercase(), tag)
                 return tag
@@ -308,31 +305,25 @@ class NoteImportRepository(
                     continue
                 }
                 try {
-                    // One note write, one critical section (R6-F3):
-                    // the switch lock is held from the pin check
-                    // through the last transaction, so a switch can
-                    // only happen between notes, never mid-note —
-                    // neither a closed-handle failure nor a partial
-                    // note in the wrong account. Progress is reported
-                    // OUTSIDE the lock: a switch from the progress
-                    // callback must never wait on a lock this thread
-                    // holds.
-                    provider.withSwitchHeldOff {
-                        val key = dedupeKey(item.title, item.createdAt)
-                        if (key in seen) {
-                            duplicates++
-                        } else {
-                            val folderId = resolveFolderId(item.folderName)
-                            val tags = item.tagNames
-                                .map { it.trim() }
-                                .filter { it.isNotEmpty() }
-                                .distinct()
-                                .map { resolveTag(it) }
-                                .distinctBy { it.id }
-                            imageSaveFailures += writeImportedNote(dbForWrite(), item, folderId, tags)
-                            seen += key
-                            importedCount++
-                        }
+                    // No lock, no pin check (R8): the write runs on
+                    // the run's dedicated handle, which a switch can
+                    // never close — a switch between or during notes
+                    // can neither fail a note nor split the run across
+                    // accounts.
+                    val key = dedupeKey(item.title, item.createdAt)
+                    if (key in seen) {
+                        duplicates++
+                    } else {
+                        val folderId = resolveFolderId(item.folderName)
+                        val tags = item.tagNames
+                            .map { it.trim() }
+                            .filter { it.isNotEmpty() }
+                            .distinct()
+                            .map { resolveTag(it) }
+                            .distinctBy { it.id }
+                        imageSaveFailures += writeImportedNote(runDb, item, folderId, tags)
+                        seen += key
+                        importedCount++
                     }
                 } catch (e: Exception) {
                     failed++
@@ -348,37 +339,27 @@ class NoteImportRepository(
             }
 
             if (importedCount > 0 || failed > 0) {
-                // The finish runs on a DEDICATED handle, NOT under
-                // the switch lock (Codex R7-F2): the rebuild +
-                // reconcile span the whole library, and holding the
-                // lock across them blocks sign-in/out — switchTo()
-                // spins on the calling (main) thread — long enough
-                // to ANR. The dedicated handle is a fresh instance
-                // on the run's pinned account file, so a switch can
-                // never close it mid-rebuild; the per-note writes
-                // above stay under the lock (R6-F3). The provider
-                // doc's promise — the mutex is held only around one
-                // note write — is true again.
-                val finishDb = provider.openDedicated(startAccountId)
-                try {
-                    rebuildLibraryIndexes(finishDb)
-                    attachmentStore.reconcile(
-                        allProvider = { finishDb.attachmentDao().getAll() },
-                        extraKnownPaths = { provider.allAttachmentLocalPaths() },
-                        db = finishDb,
-                    )
-                } finally {
-                    provider.closeAdditional(finishDb)
-                }
+                // The finish (whole-library rebuild + reconcile)
+                // runs on the run's dedicated handle, not the live
+                // instance and not under any switch lock (Codex
+                // R7-F2, kept by R8): a switch can never close the
+                // handle mid-rebuild, and no sign-in/out is stalled
+                // for the length of a rebuild.
+                rebuildLibraryIndexes(runDb)
+                attachmentStore.reconcile(
+                    allProvider = { runDb.attachmentDao().getAll() },
+                    extraKnownPaths = { provider.allAttachmentLocalPaths() },
+                    db = runDb,
+                )
             }
             ImportRunResult(
                 report = ImportReport(importedCount, duplicates, failed, failedNames),
                 imageSaveFailures = imageSaveFailures,
             )
         } finally {
-            // closeAdditional is a no-op when the pinned handle IS the
-            // live instance, so this only ever closes the extra one.
-            pinnedDb?.let { provider.closeAdditional(it) }
+            // The run handle is a fresh instance, never the live
+            // one, so this always closes exactly it.
+            provider.closeAdditional(runDb)
         }
     }
 
