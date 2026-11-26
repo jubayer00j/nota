@@ -791,13 +791,23 @@ internal fun BxReminder.toEntity(): ReminderEntity = ReminderEntity(
  * no edges (the per-note-lock invariants). Shared by restore
  * ([BackupRepository.applyBackup]) and the Phase 3a guest→account
  * copy ([app.nota.data.auth.GuestLibraryTransfer]).
+ *
+ * The snapshot loads INSIDE the transaction (Codex R28-F1): loaded
+ * outside it, a live-library edit committing between the load and
+ * the transaction left the rebuild deleting every FTS/link row and
+ * rebuilding from the stale snapshot — the edited note indexed by
+ * its old content, a note created in the window with no FTS row at
+ * all. Inside one transaction the snapshot and the rebuild are
+ * atomic against live writes: an edit either commits before the
+ * transaction starts (and is in the snapshot) or after it ends
+ * (and its own FTS update survives the delete).
  */
 suspend fun rebuildLibraryIndexes(db: NotaDatabase) {
     val noteDao = db.noteDao()
     val ftsDao = db.noteFtsDao()
     val linkDao = db.noteLinkDao()
-    val allNotes = noteDao.getAll()
     db.withTransaction {
+        val allNotes = noteDao.getAll()
         ftsDao.deleteAll()
         linkDao.deleteAll()
         for (note in allNotes) {

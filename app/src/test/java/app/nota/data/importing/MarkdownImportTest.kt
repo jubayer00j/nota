@@ -345,6 +345,26 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun frontMatterWithVeryManyShortLinesParses() {
+        // R28-F3: parseFrontMatter used to split() the whole block,
+        // materialising one String + list entry per line — a crafted
+        // front-matter block of millions of short lines exhausts a
+        // low-memory heap in line-object overhead. Lines are now
+        // iterated by range, one at a time.
+        val junk = buildString {
+            repeat(50_000) { append("note-$it: x\n") }
+        }
+        val result = parseOne(
+            "fm.md",
+            "---\n$junk" + "title: Big Front Matter\ntags:\n  - one\n  - two\n---\nBody text.",
+        )
+        val note = result.notes[0]
+        assertEquals("Big Front Matter", note.title)
+        assertEquals(listOf("one", "two"), note.tagNames)
+        assertEquals("<p>Body text.</p>", note.contentHtml)
+    }
+
+    @Test
     fun localImageResolvesToTokenAndRemoteImageKeepsAlt() {
         val imageFile = File.createTempFile("pic", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val resolver = createImportImageResolver(listOf("pic.png" to imageFile))

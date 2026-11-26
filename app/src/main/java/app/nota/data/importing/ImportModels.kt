@@ -203,15 +203,15 @@ class ImportedNote(
     /** Original file/entry name — named in the report when the write fails. */
     val sourceName: String,
     /** Stable per-source identity for the run dedupe of
-     *  unknown-date notes (Codex R23-F1, R26-F2): null means the
-     *  source name plays that role, which is right for Keep notes
-     *  (their entry paths are identities within one archive). A
-     *  loose pick's display name is NOT one — two SAF picks from
-     *  different folders can share it — so the loose-file path
-     *  sets this to a content hash of the file instead; a ZIP
-     *  member's bare path is not one either — the same entry path
-     *  can appear in two archives of one selection — so the ZIP
-     *  path sets it to the full entry path plus the content hash.
+     *  unknown-date notes (Codex R23-F1, R26-F2, R28-F2): null means the
+     *  source name plays that role. A loose pick's display name is
+     *  NOT one — two SAF picks from different folders can share it —
+     *  so the loose-file path sets this to a content hash of the
+     *  file instead; a ZIP member's bare path is not one either —
+     *  the same entry path can appear in two archives of one
+     *  selection — so the ZIP path sets it to the full entry path
+     *  plus the content hash, and Keep notes carry the same shape
+     *  (their basename alone collapsed two nested JSONs sharing it).
      *  Never persisted; the run key is in-memory only. */
     val sourceIdentity: String? = null,
 )

@@ -41,6 +41,12 @@ object KeepTakeoutParser {
         val trashedAt: Long?,
         val tagNames: List<String>,
         val sourceName: String,
+        /** Full entry path plus a content hash (Codex R28-F2) — the
+         *  run identity for unknown-date dedupe; the basename alone
+         *  collapses two nested JSONs sharing it. Null means the
+         *  source name plays that role (never here: the caller
+         *  always sets it). */
+        val sourceIdentity: String? = null,
         val attachments: List<AttachmentSpec>,
     )
 
@@ -165,6 +171,15 @@ object KeepTakeoutParser {
                         val draft = keepJsonToDraft(
                             json, base, reader.entryNames, result,
                             reader.duplicateEntryNames,
+                            // (Codex R28-F2, R26-F2 shape): the run
+                            // dedupe identity for a dateless Keep note
+                            // is its full entry path plus a content
+                            // hash — the basename alone collapses two
+                            // nested JSONs sharing it, and the path
+                            // alone collapses the same entry path in
+                            // two archives of one selection. The text
+                            // is already in memory here.
+                            "${entry.name}\n${contentHashHex(raw)}",
                         )
                         if (draft != null) {
                             // The per-note bound, mirrored from addNote
@@ -298,6 +313,7 @@ object KeepTakeoutParser {
                     folderName = null, // Keep imports get no folder — labels carry the organisation.
                     images = images,
                     sourceName = draft.sourceName,
+                    sourceIdentity = draft.sourceIdentity,
                 ),
             )
         }
@@ -356,6 +372,7 @@ object KeepTakeoutParser {
         entryNames: List<String>,
         result: ImportParseResult,
         duplicateEntryNames: Set<String> = emptySet(),
+        sourceIdentity: String? = null,
     ): KeepDraft? {
         val title = json.opt("title") as? String ?: ""
         val textContent = json.opt("textContent") as? String ?: ""
@@ -522,6 +539,7 @@ object KeepTakeoutParser {
             trashedAt = if (trashed) updatedAt else null,
             tagNames = tagNames,
             sourceName = sourceName,
+            sourceIdentity = sourceIdentity,
             attachments = specs,
         )
     }

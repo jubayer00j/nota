@@ -165,13 +165,21 @@ class NoteImportRepository(
                             // earlier archives already contributed,
                             // so a later archive neither scans refs
                             // for members past the run cap nor
-                            // converts them.
+                            // converts them. The running text total
+                            // travels in as well (Codex R28-F4): the
+                            // pre-scan simulates the remaining
+                            // aggregate budget against the retained
+                            // chars earlier archives contributed, so
+                            // a later archive neither scans refs for
+                            // members the merge will refuse on the
+                            // budget nor stages their images.
                             MarkdownImporter.parseImportZip(
                                 file.file,
                                 subDir,
                                 imageBudget,
                                 resolver,
                                 merged.notes.size,
+                                merged.retainedTextChars,
                             ),
                         )
                         // Enforce the shared caps as sources are
@@ -487,11 +495,11 @@ class NoteImportRepository(
                         // while the run key adds the source identity,
                         // which is what keeps two same-title dateless
                         // notes in one run apart. The identity is the
-                        // source name for Keep notes, a content hash
-                        // for loose picks (Codex R23-F1 — a display
-                        // name is not an identity), and the full
-                        // entry path plus the content hash for ZIP
-                        // members (Codex R26-F2).
+                        // full entry path plus a content hash for ZIP
+                        // members (Codex R26-F2) and for Keep notes
+                        // (Codex R28-F2), and a content hash for loose
+                        // picks (Codex R23-F1 — a display name is not
+                        // an identity).
                         val seedKey = dedupeKeyUnknownDate(item.title, item.folderName, null)
                         val runKey = dedupeKeyUnknownDate(
                             item.title,

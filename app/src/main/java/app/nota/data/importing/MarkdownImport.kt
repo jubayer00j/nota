@@ -350,7 +350,23 @@ private fun parseFrontMatter(text: String): FrontMatter {
     if (body.startsWith("\r\n")) body = body.substring(2)
     else if (body.startsWith("\n")) body = body.substring(1)
 
-    val lines = block.split(Regex("\r?\n"))
+    // (Codex R28-F3): iterate the block's lines by range instead of
+    // splitting it: split() materialises one String + list entry per
+    // line, so a crafted front-matter block of millions of short
+    // lines exhausts a low-memory heap in line-object overhead
+    // before any cap applies. Only one line string is alive at a
+    // time here. A trailing line break yields no extra empty line,
+    // which the loop would skip anyway.
+    var cursor = 0
+    // The line starting at [start] (without its break) and the start
+    // of the next line, or null past the end of the block.
+    fun lineAt(start: Int): Pair<String, Int>? {
+        if (start >= block.length) return null
+        val nl = block.indexOf('\n', start)
+        val end = if (nl == -1) block.length else nl
+        val lineEnd = if (end > start && block[end - 1] == '\r') end - 1 else end
+        return block.substring(start, lineEnd) to if (nl == -1) block.length else nl + 1
+    }
     // Comma-separated tag values, scanned by hand (Codex R27-F2):
     // split(',') would materialize every tag of a crafted line
     // before any cap applies. Stops adding at the per-note cap;
@@ -374,14 +390,11 @@ private fun parseFrontMatter(text: String): FrontMatter {
             idx++
         }
     }
-    var i = 0
-    while (i < lines.size) {
-        val line = lines[i]
+    while (true) {
+        val (line, next) = lineAt(cursor) ?: break
+        cursor = next
         val kv = Regex("^([A-Za-z][\\w-]*)\\s*:\\s*(.*)$").find(line)
-        if (kv == null) {
-            i++
-            continue
-        }
+        if (kv == null) continue
         val key = kv.groupValues[1].lowercase()
         val value = kv.groupValues[2].trim()
         when (key) {
@@ -400,9 +413,10 @@ private fun parseFrontMatter(text: String): FrontMatter {
                     //   tags:
                     //     - one
                     //     - two
-                    var j = i + 1
-                    while (j < lines.size) {
-                        val item = Regex("^\\s*-\\s+(.*)$").find(lines[j]) ?: break
+                    var inner = cursor
+                    while (true) {
+                        val (itemLine, itemNext) = lineAt(inner) ?: break
+                        val item = Regex("^\\s*-\\s+(.*)$").find(itemLine) ?: break
                         val tag = stripQuotes(item.groupValues[1].trim())
                         if (tag.isNotEmpty() &&
                             tags.size < ImportCaps.MAX_TAGS_PER_NOTE &&
@@ -410,13 +424,12 @@ private fun parseFrontMatter(text: String): FrontMatter {
                         ) {
                             tags += tag
                         }
-                        i = j
-                        j++
+                        cursor = itemNext
+                        inner = itemNext
                     }
                 }
             }
         }
-        i++
     }
     return FrontMatter(title, createdAt, tags, body)
 }
@@ -1844,13 +1857,23 @@ object MarkdownImporter {
      *  selection already contributed. Walk 2's pre-scan and walk 4's
      *  note-cap check both count against it, so a later archive
      *  neither scans refs for members past the run cap nor converts
-     *  them. A single-ZIP parse passes nothing and is unchanged. */
+     *  them. A single-ZIP parse passes nothing and is unchanged.
+     *
+     *  [alreadyRetainedTextChars] is the selection-level running
+     *  total (Codex R28-F4): how many retained text chars earlier
+     *  archives of this selection already contributed (their
+     *  converted titles + bodies, as [ImportParseResult] counts
+     *  them). Walk 2's pre-scan simulates the remaining aggregate
+     *  budget against it, so a later archive neither scans refs for
+     *  members the merge will refuse on the budget nor stages their
+     *  images. A single-ZIP parse passes nothing and is unchanged. */
     fun parseImportZip(
         zipFile: File,
         stagingDir: File,
         imageBudget: ExtractedImageBudget = ExtractedImageBudget(),
         externalResolver: ImportImageResolver? = null,
         alreadyImportedNotes: Int = 0,
+        alreadyRetainedTextChars: Long = 0,
     ): ImportParseResult {
         val result = ImportParseResult()
         if (!isZipFile(zipFile)) {
@@ -1931,36 +1954,68 @@ object MarkdownImporter {
             val scannedText = HashSet<String>()
             // (Codex R27-F1): the pre-scan must apply the same
             // eligibility walk 4 applies, against the same running
-            // total — the note cap counts notes already imported
+            // totals — the note cap counts notes already imported
             // from earlier archives of this selection plus the
             // members this archive will convert. Without it, an
             // earlier archive with >5,000 members gets its
             // beyond-cap members' refs collected and their images
             // staged against the shared selection budget, starving
-            // a later ZIP's importable notes. A member counts once
-            // it passes the checks below; a .txt member consumes a
-            // cap slot too (it becomes a note) even though it has
-            // no refs to scan, so it is counted without being read
-            // — a .txt walk 4 refuses on the aggregate budget or
-            // the per-note bound is still counted, which can only
-            // under-scan later members' refs in that narrow regime
-            // (an unresolved reference, counted — never a lost
-            // note). The aggregate budget is likewise not simulated
-            // here: the read bound below already refuses a member
-            // past the full budget, exactly as walk 4 would.
+            // a later ZIP's importable notes.
+            // (Codex R28-F4): the aggregate budget is simulated the
+            // same way — the remaining budget is the full cap minus
+            // the selection-level total from earlier archives
+            // ([alreadyRetainedTextChars], converted titles + bodies
+            // as the engine counts them) minus what this archive's
+            // pre-scan already accepted, charged at raw source
+            // length plus the filename-title reservation — exactly
+            // the quantities walk 4's own aggregate check
+            // (appendParsedFile) uses. Without it, a member the
+            // merge will refuse on the remaining budget still got
+            // its refs collected and its images staged against the
+            // shared selection budget. The simulation is exact for
+            // the earlier archives' share (converted, counted by
+            // the engine) and for the read decision (raw length);
+            // within this archive it can drift by the conversion
+            // expansion of accepted members, so a member near the
+            // edge may still be over- or under-scanned by that
+            // delta — an unresolved reference, counted, never a
+            // lost note.
             var eligibleScanned = alreadyImportedNotes
+            var scannedTextChars = 0L
             reader.walk { entry ->
                 if (entry.name !in textMembers) return@walk
                 if (!scannedText.add(entry.name)) return@walk
                 if (eligibleScanned >= ImportCaps.MAX_IMPORT_NOTES) return@walk
+                val base = importBaseName(entry.name)
+                // The simulated remaining budget for this member —
+                // the same shape as walk 4's per-member remaining,
+                // with the selection-level total in place of the
+                // local result's.
+                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS -
+                    alreadyRetainedTextChars - scannedTextChars -
+                    titleFromFileName(base).length).coerceAtLeast(0L)
                 if (isPlainTextEntry(entry.name)) {
                     // No image refs to scan, but the member still
-                    // becomes a note — count the slot.
-                    eligibleScanned++
+                    // becomes a note and consumes aggregate budget —
+                    // read it against the same simulated remaining,
+                    // so a .txt member walk 4 refuses on the budget
+                    // doesn't leave the simulation overstated for
+                    // later members.
+                    when (val read = entry.readTextUpToChars(
+                        remaining,
+                        ImportCaps.MAX_IMPORT_FILE_BYTES,
+                    )) {
+                        is CharBoundedText.Ok -> {
+                            scannedTextChars += read.text.length +
+                                titleFromFileName(base).length
+                            eligibleScanned++
+                        }
+                        else -> { /* walk 4 refuses this member too */ }
+                    }
                     return@walk
                 }
                 when (val read = entry.readTextUpToChars(
-                    ImportCaps.MAX_AGGREGATE_TEXT_CHARS,
+                    remaining,
                     ImportCaps.MAX_IMPORT_FILE_BYTES,
                 )) {
                     is CharBoundedText.Ok -> {
@@ -1970,7 +2025,7 @@ object MarkdownImporter {
                         // would stage images for a note that never
                         // imports.
                         val input = MarkdownFileInput(
-                            name = importBaseName(entry.name),
+                            name = base,
                             path = entry.name,
                             text = read.text,
                             lastModified = textMembers[entry.name] ?: 0L,
@@ -1993,6 +2048,8 @@ object MarkdownImporter {
                             parseFrontMatter(read.text.removePrefix("\uFEFF")).body,
                             referenced,
                         )
+                        scannedTextChars += read.text.length +
+                            titleFromFileName(base).length
                         eligibleScanned++
                     }
                     else -> { /* walk 4 skips this member too */ }

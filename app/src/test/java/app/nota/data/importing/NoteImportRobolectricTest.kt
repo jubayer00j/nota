@@ -1,15 +1,19 @@
 package app.nota.data.importing
 
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.backup.rebuildLibraryIndexes
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.data.repository.refreshFtsEntry
+import androidx.room.withTransaction
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.CRC32
 import java.util.zip.Deflater
@@ -2897,4 +2901,184 @@ class NoteImportRobolectricTest {
         assertEquals(1, md.notes.size)
         assertEquals(listOf("kept"), md.notes[0].tagNames)
     }
+
+    @Test
+    fun rebuildLibraryIndexesSeesEditCommittedDuringRebuild() = runBlocking {
+        // R28-F1: rebuildLibraryIndexes used to load its snapshot
+        // OUTSIDE the rebuild transaction — an edit committing
+        // between the load and the transaction left the note indexed
+        // by its old content, and a note created in the window lost
+        // its FTS row entirely (deleted, never re-added). The
+        // snapshot now loads inside the transaction, so the rebuild
+        // sees exactly the committed state: the live handle holds a
+        // write transaction open with the edit + the new note inside
+        // it, and the sibling handle's rebuild cannot begin its
+        // transaction until that commits.
+        val context = RuntimeEnvironment.getApplication()
+        val accountId = "rebuild-race"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val dbLive = NotaDatabase.build(context, accountId)
+        dbs += dbLive
+        val dbSibling = NotaDatabase.build(context, accountId)
+        dbs += dbSibling
+        fun note(id: String, body: String) = NoteEntity(
+            id = id,
+            title = id,
+            contentHtml = "<p>$body</p>",
+            plainText = body,
+            createdAt = 1_700_000_000_000L,
+            updatedAt = 1_700_000_000_000L,
+        )
+        val alpha = note("a", "alpha")
+        dbLive.noteDao().upsert(alpha)
+        dbLive.refreshFtsEntry(alpha)
+        assertEquals("alpha", ftsRows(dbLive)["a"])
+
+        val txnOpen = CountDownLatch(1)
+        val releaseTxn = CountDownLatch(1)
+        val liveJob = async(Dispatchers.IO) {
+            dbLive.withTransaction {
+                dbLive.noteDao().upsert(note("a", "beta"))
+                dbLive.refreshFtsEntry(note("a", "beta"))
+                val gamma = note("c", "gamma")
+                dbLive.noteDao().upsert(gamma)
+                dbLive.refreshFtsEntry(gamma)
+                txnOpen.countDown()
+                releaseTxn.await(5, TimeUnit.SECONDS)
+            }
+        }
+        assertTrue(txnOpen.await(5, TimeUnit.SECONDS))
+        val rebuildJob = async(Dispatchers.IO) { rebuildLibraryIndexes(dbSibling) }
+        // Give the sibling time to reach its snapshot load (old
+        // shape) or block on the write lock (new shape), then
+        // release the live transaction and let both finish.
+        delay(500)
+        releaseTxn.countDown()
+        liveJob.await()
+        rebuildJob.await()
+        val fts = ftsRows(dbLive)
+        assertEquals("beta", fts["a"])
+        assertEquals("gamma", fts["c"])
+    }
+
+    private fun ftsRows(db: NotaDatabase): Map<String, String> {
+        val cursor = db.openHelper.writableDatabase.query("SELECT noteId, plainText FROM notes_fts")
+        cursor.use {
+            val out = mutableMapOf<String, String>()
+            val idIdx = it.getColumnIndexOrThrow("noteId")
+            val textIdx = it.getColumnIndexOrThrow("plainText")
+            while (it.moveToNext()) out[it.getString(idIdx)] = it.getString(textIdx)
+            return out
+        }
+    }
+
+    @Test
+    fun unknownDateKeepNotesWithSameBasenameInDifferentFoldersBothImport() = runBlocking {
+        // R28-F2: KeepDraft carried only the basename as its
+        // identity, so two nested Keep JSONs with the same basename
+        // + title and no usable timestamps collapsed to a duplicate
+        // despite different content. The run identity is now the
+        // full entry path plus a content hash (R26-F2 shape), so
+        // both land — and reimporting still dedupes to zero new
+        // notes (the seeded key has no source identity: the R21
+        // residual).
+        val stack = newStack()
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/a/note.json" to """{"title":"Shared","textContent":"alpha"}""",
+                "Takeout/Keep/b/note.json" to """{"title":"Shared","textContent":"beta"}""",
+            ),
+            dateless = true,
+        )
+        val first = stack.repo.importKeepZip(zip)
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals(2, notes.size)
+        assertEquals(setOf("<p>alpha</p>", "<p>beta</p>"), notes.map { it.contentHtml }.toSet())
+        val second = stack.repo.importKeepZip(zip)
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun preScanDoesNotStageImagesForMembersPastRemainingTextBudget() {
+        // R28-F4: the fix-30 pre-scan applied the note cap and the
+        // per-note bound but read each member against the FULL
+        // 16M-char cap — walk 4 + the merge refuse on the REMAINING
+        // budget. The pre-scan now simulates the remaining budget
+        // from the selection-level total, so a member past it never
+        // stages its images against the shared budget. Each 1x1 PNG
+        // is 70 bytes; a 100-byte budget fits one image.
+        val dir = stagingDir()
+        val bigBody = "word ".repeat(30_000) // 150,000 chars
+        val zip = zipOf(
+            linkedMapOf(
+                "big.md" to "$bigBody\n\n![big](big.png)",
+                "small.md" to "# Small\n\n![s](small.png)",
+            ),
+            mapOf("big.png" to pngBytes, "small.png" to pngBytes),
+        )
+        val budget = ExtractedImageBudget(totalBytes = 100)
+        val result = MarkdownImporter.parseImportZip(
+            zip, dir, budget,
+            alreadyRetainedTextChars = 16_700_000L,
+        )
+        // The small note's image staged (70 of 100 bytes); the big
+        // member's image never did — the budget proves it.
+        assertEquals(30L, budget.remaining())
+        assertEquals(setOf("small.png"), dir.listFiles()?.map { it.name }?.toSet())
+        assertEquals(1, result.imagesUnresolved) // big.md's ref, unstaged
+        val small = result.notes.first { it.title == "Small" }
+        assertEquals(1, small.images.size)
+        val big = result.notes.first { it.title == "big" }
+        assertEquals(0, big.images.size)
+    }
+
+    @Test
+    fun remainingTextBudgetSimulatedAcrossZipsInOneSelection() = runBlocking {
+        // R28-F4, selection level: the first ZIP consumes most of
+        // the aggregate budget; the second ZIP's over-budget member
+        // must not stage its image, and the third ZIP's importable
+        // note keeps its image. '&' expands 5x through the
+        // escape-first converter, so 17 near-1M notes cost ~3.2M
+        // raw chars to build; each 1x1 PNG is 70 bytes and the
+        // 100-byte shared budget fits one image.
+        val stack = newStack()
+        val ampNote = "&".repeat(190_000)
+        val zip1Entries = LinkedHashMap<String, String>()
+        repeat(17) { i -> zip1Entries["n%02d.md".format(i)] = ampNote }
+        val zip1 = zipOf(zip1Entries)
+        val zip2 = zipOf(
+            linkedMapOf("big.md" to "word ".repeat(170_000) + "\n\n![big](big.png)"),
+            mapOf("big.png" to pngBytes),
+        )
+        val zip3 = zipOf(
+            linkedMapOf("small.md" to "# Small\n\n![s](s.png)"),
+            mapOf("s.png" to pngBytes),
+        )
+        val budget = ExtractedImageBudget(totalBytes = 100)
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("one.zip", zip1, 1_700_000_000_000L),
+                StagedImportFile("two.zip", zip2, 1_700_000_000_001L),
+                StagedImportFile("three.zip", zip3, 1_700_000_000_002L),
+            ),
+            imageBudget = budget,
+        )
+        assertEquals(18, outcome.report.imported) // 17 + 0 + 1
+        assertEquals(1, outcome.parse.imagesUnresolved) // big.md's ref
+        assertEquals(30L, budget.remaining()) // only s.png staged
+        assertTrue(
+            outcome.parse.skippedFiles.any {
+                it.name == "big.md" && it.reason == ImportCaps.AGGREGATE_TEXT_BUDGET_REASON
+            },
+        )
+        val notes = stack.db.noteDao().getAll()
+        assertEquals(18, notes.size)
+        assertTrue(notes.first { it.title == "Small" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
 }
