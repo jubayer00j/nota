@@ -461,14 +461,24 @@ object KeepTakeoutParser {
     ) {
         private val exact: Set<String> = names.toSet()
 
-        private val bySuffix: Map<SuffixKey, List<String>> = run {
+        // (Codex R39-F1): whether every suffix of every name made it
+        // into [bySuffix]. The R35-F1 ceiling can stop the build
+        // mid-name (or between names), leaving the index partial —
+        // and a partial index cannot prove a lone suffix match
+        // unique: an unindexed twin may share the suffix. [find]
+        // therefore checks the basename-sharing candidates before
+        // trusting a single match whenever this is false.
+        private val bySuffix: Map<SuffixKey, List<String>>
+        private val suffixIndexComplete: Boolean
+
+        init {
             val map = HashMap<SuffixKey, MutableList<String>>()
             // (Codex R35-F1): bound the index expansion — every slash
             // in every name used to contribute a map key + backing
             // list, so 8 MiB of slash-heavy names could hold millions
             // of entries before any note was parsed. Past the ceiling
-            // a suffix is simply not indexed; its lookup falls
-            // through to the basename arm, which stays correct.
+            // a suffix is simply not indexed.
+            var complete = true
             var indexedSuffixes = 0
             for (name in names) {
                 // (Codex R34-F1): every suffix hash of this name in
@@ -492,8 +502,16 @@ object KeepTakeoutParser {
                     indexedSuffixes++
                     slash = name.indexOf('/', slash + 1)
                 }
+                if (slash >= 0) {
+                    // Stopped on the ceiling mid-name: this name's
+                    // remaining suffixes — and every later name's —
+                    // are unindexed, so the index is partial.
+                    complete = false
+                    break
+                }
             }
-            map
+            bySuffix = map
+            suffixIndexComplete = complete
         }
 
         private val byBasename: Map<String, List<String>> =
@@ -506,7 +524,50 @@ object KeepTakeoutParser {
                 return EntryLookup.Found(wanted)
             }
             val suffixMatches = bySuffix[SuffixKey(wanted, 0, wanted.hashCode())] ?: emptyList()
-            if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
+            if (suffixMatches.size == 1) {
+                if (!suffixIndexComplete) {
+                    // (Codex R39-F1): the index stopped at the R35-F1
+                    // ceiling, so this lone match may hide an
+                    // unindexed twin sharing the suffix — the old
+                    // code trusted it and could embed the wrong
+                    // image. Only an entry sharing the wanted
+                    // basename can share the suffix, and the
+                    // basename index is uncapped, so those
+                    // candidates decide it exactly: one match
+                    // resolves, more than one stays ambiguous.
+                    // The candidate scan is capped (see
+                    // MAX_SUFFIX_CANDIDATE_CHECKS): past it the
+                    // answer is ambiguous without scanning — safe,
+                    // the reference is counted as skipped. A plain
+                    // basename-count check would be wrong here: a
+                    // genuinely unique suffix may still share its
+                    // basename with an indexed twin (the R38
+                    // "Early" case), so the candidates are checked
+                    // for the suffix itself, not just counted.
+                    val base = importBaseName(wanted).lowercase()
+                    val baseMatches = byBasename[base] ?: emptyList()
+                    if (baseMatches.size > ImportCaps.MAX_SUFFIX_CANDIDATE_CHECKS) {
+                        return EntryLookup.Ambiguous
+                    }
+                    val suffixTail = "/$wanted"
+                    var sharing = 0
+                    var shared: String? = null
+                    for (candidate in baseMatches) {
+                        if (candidate.endsWith(suffixTail)) {
+                            sharing++
+                            shared = candidate
+                            if (sharing > 1) return EntryLookup.Ambiguous
+                        }
+                    }
+                    if (sharing == 1) return EntryLookup.Found(shared ?: suffixMatches[0])
+                    // Unreachable in practice: the suffix match
+                    // itself ends with "/$wanted" and shares the
+                    // basename, so it is always among the
+                    // candidates.
+                    return EntryLookup.Found(suffixMatches[0])
+                }
+                return EntryLookup.Found(suffixMatches[0])
+            }
             if (suffixMatches.size > 1) return EntryLookup.Ambiguous
             val base = importBaseName(wanted).lowercase()
             val baseMatches = byBasename[base] ?: emptyList()

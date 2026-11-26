@@ -163,12 +163,33 @@ object ImportCaps {
      *  archive with 12-segment paths contributes ~220,000, and a
      *  real Takeout's paths are 3–4 segments) and far below an OOM
      *  (~30 MB worst case, one key + list + reference per entry).
-     *  the ceiling, so their verdicts are unchanged.
-     *  Suffixes past the ceiling are simply not indexed: their
-     *  lookup falls through to the basename arm, which stays
-     *  correct — a unique basename still resolves, a shared one
-     *  still stays ambiguous — so the note still imports. */
+     *  Suffixes under the ceiling are indexed exactly as before,
+     *  so their verdicts are unchanged. Suffixes past the ceiling
+     *  are simply not indexed: when the lookup finds no suffix
+     *  match at all it falls through to the basename arm, which
+     *  stays correct — a unique basename still resolves, a shared
+     *  one still stays ambiguous. A single suffix match past a
+     *  tripped ceiling is NOT trusted blindly, though: it may hide
+     *  an unindexed twin sharing the suffix, so the lookup checks
+     *  the entries sharing the basename before accepting it
+     *  (Codex R39-F1) — see MAX_SUFFIX_CANDIDATE_CHECKS. */
     const val MAX_SUFFIX_INDEX_ENTRIES = 250_000
+
+    /** Largest number of basename-sharing entries one capped-index
+     *  suffix lookup may check (Codex R39-F1): when the suffix
+     *  index stopped at MAX_SUFFIX_INDEX_ENTRIES, a single suffix
+     *  match may hide an unindexed twin, so the lookup asks the
+     *  (uncapped) basename index for every entry sharing the
+     *  wanted basename and checks each for the suffix — exactly
+     *  one match resolves, more than one stays ambiguous. The
+     *  check runs only on a lone suffix match in a capped index,
+     *  and 100 candidates sit far above any real export (a
+     *  basename is shared by a handful of files at most) while
+     *  bounding the work per lookup. Past the cap the lookup
+     *  answers ambiguous without scanning: safe — the reference
+     *  is counted as skipped, never the wrong image — and the
+     *  note still imports. */
+    const val MAX_SUFFIX_CANDIDATE_CHECKS = 100
 }
 
 /**

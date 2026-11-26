@@ -2088,6 +2088,63 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun splitSuffixIndexCapStaysAmbiguous() {
+        // R39-F1: the suffix index stops at MAX_SUFFIX_INDEX_ENTRIES,
+        // so a suffix can be indexed for one entry sharing it and
+        // not for the other. The old code trusted the single indexed
+        // match and embedded the wrong image; the lookup now checks
+        // the entries sharing the basename before trusting a lone
+        // suffix match when the index is incomplete:
+        // - "SplitShared" references a suffix shared by an indexed
+        //   entry and one past the ceiling: ambiguous — counted,
+        //   never the wrong image.
+        // - "SplitUnique" references a suffix that is genuinely
+        //   unique, though its basename is shared with a later
+        //   entry: it still resolves through the suffix arm — no
+        //   false ambiguous from merely counting basenames (the
+        //   R38 "Early" shape, with the twin on the other side of
+        //   the ceiling).
+        // - "LateUnique" references a deep suffix of a late entry
+        //   with a unique basename: the suffix arm misses and the
+        //   basename arm still finds it.
+        // The early shared entry and the early unique-suffix entry
+        // are indexed first; 249 deep fillers consume 249,000 of
+        // the 250,000 suffix budget, and one more deep filler trips
+        // the ceiling mid-name, so everything after it — the late
+        // shared twin, the basename twin and the late unique entry
+        // — is unindexed.
+        val fillers = LinkedHashMap<String, ByteArray>()
+        fillers["p1/sub/shared.png"] = pngBytes
+        fillers["q1/deep/only.png"] = pngBytes
+        for (i in 0 until 249) {
+            fillers["s$i/".repeat(1000) + "filler$i.png"] = pngBytes
+        }
+        fillers["mid/".repeat(1000) + "mid.png"] = pngBytes
+        fillers["p2/sub/shared.png"] = pngBytes
+        fillers["q2/only.png"] = pngBytes
+        fillers["z8/".repeat(20) + "unique.png"] = pngBytes
+        val entries = linkedMapOf(
+            "Takeout/Keep/splitshared.json" to
+                """{"title":"SplitShared","textContent":"s","attachments":[{"filePath":"sub/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/splitunique.json" to
+                """{"title":"SplitUnique","textContent":"u","attachments":[{"filePath":"deep/only.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/lateunique.json" to
+                """{"title":"LateUnique","textContent":"l","attachments":[{"filePath":"z8/z8/z8/unique.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries, fillers), stagingDir())
+        assertEquals(3, result.notes.size)
+        val splitShared = result.notes.first { it.title == "SplitShared" }
+        assertEquals(0, splitShared.images.size)
+        val splitUnique = result.notes.first { it.title == "SplitUnique" }
+        assertEquals(1, splitUnique.images.size)
+        assertEquals("only.png", splitUnique.images[0].name)
+        val lateUnique = result.notes.first { it.title == "LateUnique" }
+        assertEquals(1, lateUnique.images.size)
+        assertEquals("unique.png", lateUnique.images[0].name)
+        assertEquals(1, result.attachmentsSkipped)
+    }
+
+    @Test
     fun keepNoteAttachmentsAreCappedPerNote() {
         // R31-F2: a note referencing 150 distinct images retains
         // only the per-note cap of specs; the rest are counted as
