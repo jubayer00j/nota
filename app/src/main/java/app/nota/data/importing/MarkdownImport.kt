@@ -203,9 +203,17 @@ class ResolvedImportImage(
  * Resolves a relative image reference from the importing file's path to
  * image bytes within the picked set / ZIP. Returns null when the
  * reference can't be resolved (the alt text is kept and counted).
+ *
+ * [isAmbiguous] reports whether a reference matches more than one
+ * DIFFERENT file in this resolver's set: a combiner needs to tell a
+ * reference with no match at all (fall through to the next resolver)
+ * from one that is ambiguous here (stay unresolved — Codex R22-F1).
+ * A reference with no match is not ambiguous.
  */
 fun interface ImportImageResolver {
     fun resolve(fromPath: String, ref: String): ResolvedImportImage?
+
+    fun isAmbiguous(fromPath: String, ref: String): Boolean = false
 }
 
 /**
@@ -231,17 +239,62 @@ fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResol
         stagedFile = file,
         sizeBytes = file.length(),
     )
-    return ImportImageResolver { fromPath, ref ->
-        val target = resolveRef(fromPath, ref)
-        val direct = byPath[target]
-        if (direct != null) {
-            if (direct.size == 1) pick(importBaseName(target), direct[0].third) else null
-        } else {
-            val base = importBaseName(target).lowercase()
-            val matches = entries.filter { it.second.lowercase() == base }
-            if (matches.size == 1) pick(matches[0].second, matches[0].third) else null
+    // The exact match test, shared by resolve and isAmbiguous so the
+    // two can never disagree about a reference: a direct-path match
+    // decides on its own (size 1 resolves, more is ambiguous), and
+    // only when there is no direct match does the basename count.
+    fun directMatches(target: String): List<Triple<String, String, File>>? = byPath[target]
+
+    fun basenameMatches(target: String): List<Triple<String, String, File>> {
+        val base = importBaseName(target).lowercase()
+        return entries.filter { it.second.lowercase() == base }
+    }
+    return object : ImportImageResolver {
+        override fun resolve(fromPath: String, ref: String): ResolvedImportImage? {
+            val target = resolveRef(fromPath, ref)
+            val direct = directMatches(target)
+            if (direct != null) {
+                return if (direct.size == 1) pick(importBaseName(target), direct[0].third) else null
+            }
+            val matches = basenameMatches(target)
+            return if (matches.size == 1) pick(matches[0].second, matches[0].third) else null
+        }
+
+        override fun isAmbiguous(fromPath: String, ref: String): Boolean {
+            val target = resolveRef(fromPath, ref)
+            val direct = directMatches(target)
+            if (direct != null) return direct.size > 1
+            return basenameMatches(target).size > 1
         }
     }
+}
+
+/**
+ * Combines an archive resolver with a selection (external) resolver
+ * (Codex R22-F1): the archive wins on conflict — a reference the
+ * archive resolves is never re-resolved externally — and the
+ * selection resolver is the fallback for references the archive does
+ * not hold at all. A reference that is AMBIGUOUS in the archive
+ * (two different archive files share the matched name) stays
+ * unresolved instead of falling through: the ambiguity rule is about
+ * the name, and silently embedding the picked file would be the
+ * guess the rule exists to prevent. The combined resolver is itself
+ * ambiguous exactly where the archive is, or where the archive has
+ * no candidate and the selection is ambiguous — so a further
+ * combination keeps the same guarantee.
+ */
+fun combineImportImageResolvers(
+    archive: ImportImageResolver,
+    external: ImportImageResolver,
+): ImportImageResolver = object : ImportImageResolver {
+    override fun resolve(fromPath: String, ref: String): ResolvedImportImage? =
+        archive.resolve(fromPath, ref)
+            ?: if (archive.isAmbiguous(fromPath, ref)) null
+            else external.resolve(fromPath, ref)
+
+    override fun isAmbiguous(fromPath: String, ref: String): Boolean =
+        archive.isAmbiguous(fromPath, ref) ||
+            (archive.resolve(fromPath, ref) == null && external.isAmbiguous(fromPath, ref))
 }
 
 /* ---------------- Front matter ---------------- */
@@ -1736,11 +1789,22 @@ object MarkdownImporter {
      *  stay under [ImportCaps.MAX_EXTRACTED_IMAGE_BYTES]. A single
      *  ZIP parsed on its own gets a fresh budget, which changes
      *  nothing for it — one archive's image walk is already bounded
-     *  to 512 MiB by its own uncompressed quota. */
+     *  to 512 MiB by its own uncompressed quota.
+     *
+     *  [externalResolver] is the selection-level resolver (Codex
+     *  R22-F1): a Markdown selection may also hold separately picked
+     *  images, and a ZIP note referencing one of those used to import
+     *  with the reference unresolved, because the ZIP built its
+     *  resolver from the archive alone. The selection resolver is the
+     *  fallback behind the archive resolver — the archive wins on
+     *  conflict, and a name ambiguous in the archive stays
+     *  unresolved (see [combineImportImageResolvers]). A ZIP parsed
+     *  on its own passes nothing, which changes nothing for it. */
     fun parseImportZip(
         zipFile: File,
         stagingDir: File,
         imageBudget: ExtractedImageBudget = ExtractedImageBudget(),
+        externalResolver: ImportImageResolver? = null,
     ): ImportParseResult {
         val result = ImportParseResult()
         if (!isZipFile(zipFile)) {
@@ -1882,7 +1946,18 @@ object MarkdownImporter {
                 // and one past the run's aggregate extracted-image
                 // budget is not staged at all.
             }
-            val resolver = createImportImageResolver(imageFiles.toList())
+            // A Markdown selection may also hold separately picked
+            // images (Codex R22-F1): the archive resolver alone
+            // cannot see them, so the selection resolver is the
+            // fallback behind it — archive wins on conflict, and a
+            // name ambiguous in the archive stays unresolved (see
+            // combineImportImageResolvers). The pre-scan above only
+            // stages archive images, which is unchanged: picked
+            // images are already staged files on disk.
+            val archiveResolver = createImportImageResolver(imageFiles.toList())
+            val resolver = externalResolver?.let {
+                combineImportImageResolvers(archiveResolver, it)
+            } ?: archiveResolver
             // A text member that occurs twice is the same logical file
             // (Codex R13-F2): the first occurrence wins, so the walk
             // never converts — and double-counts — the same path.

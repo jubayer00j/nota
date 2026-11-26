@@ -150,7 +150,13 @@ class NoteImportRepository(
                     lower.endsWith(".zip") -> {
                         val subDir = File(stagingDir, "zip-${zipIndex++}")
                         merged.absorb(
-                            MarkdownImporter.parseImportZip(file.file, subDir, imageBudget),
+                            // The selection resolver travels into the ZIP
+                            // (Codex R22-F1): a note in the archive may
+                            // reference a separately picked image, which
+                            // the archive-only resolver could never see.
+                            // The archive resolver stays primary — the
+                            // selection one is only its fallback.
+                            MarkdownImporter.parseImportZip(file.file, subDir, imageBudget, resolver),
                         )
                         // Enforce the shared caps as sources are
                         // merged (Codex R12-F1): each ZIP's own

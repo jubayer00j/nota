@@ -4,12 +4,15 @@ import app.nota.data.attachments.AttachmentStore
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.CRC32
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
@@ -2113,5 +2116,129 @@ class NoteImportRobolectricTest {
         } finally {
             zip.delete()
         }
+    }
+
+    @Test
+    fun markdownZipNoteEmbedsSeparatelyPickedImage() = runBlocking {
+        // R22-F1: a ZIP note referencing an image picked separately
+        // from the ZIP embeds it — before the fix the ZIP built its
+        // resolver from the archive alone, so the reference stayed
+        // unresolved (alt text, counted) even though the user picked
+        // the image for exactly that.
+        val stack = newStack()
+        val dir = stagingDir()
+        val photo = File(dir, "photo.png").apply { writeBytes(pngBytes) }
+        val zip = zipOf(
+            linkedMapOf("note.md" to "# Note\n\n![p](photo.png)"),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("notes.zip", zip, 1_700_000_000_000L),
+                StagedImportFile("photo.png", photo, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "Note" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun markdownZipNotePrefersInZipImageOverPickedImage() = runBlocking {
+        // R22-F1: when the same name exists both in the archive and
+        // among the picked images, the archive image wins. The two
+        // candidates differ in size — the archive holds the proven
+        // 1×1 PNG, the picked file a 2×2 red PNG built byte-by-byte —
+        // so the winner is observable in the stored attachment's
+        // dimensions. The picked file is never read when the archive
+        // wins, so the test does not depend on decoding it.
+        val stack = newStack()
+        val dir = stagingDir()
+        val picked = File(dir, "pic.png").apply { writeBytes(redPng2x2()) }
+        val zip = zipOf(
+            linkedMapOf("note.md" to "# Note\n\n![p](pic.png)"),
+            mapOf("pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("notes.zip", zip, 1_700_000_000_000L),
+                StagedImportFile("pic.png", picked, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val attachments = stack.db.attachmentDao().getAll()
+        assertEquals(1, attachments.size)
+        assertEquals(1, attachments[0].widthPx)
+        assertEquals(1, attachments[0].heightPx)
+    }
+
+    @Test
+    fun ambiguousZipImageNameStaysUnresolvedDespitePickedImage() = runBlocking {
+        // R22-F1: a name duplicated inside the archive stays
+        // unresolved even when the selection holds a uniquely named
+        // picked image — the ambiguity is about the name, and falling
+        // through to the picked file would silently embed a guess.
+        val stack = newStack()
+        val dir = stagingDir()
+        val picked = File(dir, "pic.png").apply { writeBytes(pngBytes) }
+        val zip = zipOf(
+            linkedMapOf("note.md" to "# Note\n\n![p](pic.png)"),
+            mapOf("a/pic.png" to pngBytes, "b/pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("notes.zip", zip, 1_700_000_000_000L),
+                StagedImportFile("pic.png", picked, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(1, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals("<p>p</p>", notes.first { it.title == "Note" }.contentHtml)
+        assertEquals(0, stack.db.attachmentDao().getAll().size)
+    }
+
+    /** A 2×2 red PNG, built byte-by-byte: Bitmap is unproven under
+     *  this Robolectric harness, and the test needs an image whose
+     *  dimensions differ from [pngBytes] (1×1) so the winner is
+     *  observable in the stored attachment's widthPx/heightPx. */
+    private fun redPng2x2(): ByteArray {
+        fun be32(value: Int): ByteArray = byteArrayOf(
+            (value ushr 24).toByte(),
+            (value ushr 16).toByte(),
+            (value ushr 8).toByte(),
+            value.toByte(),
+        )
+        fun chunk(type: String, data: ByteArray): ByteArray {
+            val typeBytes = type.toByteArray(Charsets.US_ASCII)
+            val crc = CRC32()
+            crc.update(typeBytes)
+            crc.update(data)
+            return be32(data.size) + typeBytes + data + be32(crc.value.toInt())
+        }
+        val raw = ByteArrayOutputStream().apply {
+            repeat(2) {
+                write(0) // filter: none
+                repeat(2) { write(byteArrayOf(0xFF.toByte(), 0, 0, 0xFF.toByte())) } // red RGBA
+            }
+        }.toByteArray()
+        val deflater = Deflater()
+        deflater.setInput(raw)
+        deflater.finish()
+        val compressed = ByteArray(64)
+        val compressedLen = deflater.deflate(compressed)
+        deflater.end()
+        val ihdr = ByteArrayOutputStream().apply {
+            write(be32(2))
+            write(be32(2))
+            write(byteArrayOf(8, 6, 0, 0, 0)) // 8-bit RGBA, no compression/filter/interlace
+        }.toByteArray()
+        val signature = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        )
+        return signature + chunk("IHDR", ihdr) +
+            chunk("IDAT", compressed.copyOf(compressedLen)) + chunk("IEND", ByteArray(0))
     }
 }
