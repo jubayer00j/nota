@@ -6,6 +6,8 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import app.nota.data.repository.refreshFtsEntry
+import app.nota.feature.settings.stageMarkdownPicks
+import android.net.Uri
 import androidx.room.withTransaction
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -40,6 +42,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowLooper
 
@@ -1777,6 +1780,107 @@ class NoteImportRobolectricTest {
         assertEquals("shared.png", suffix.images[0].name)
         val amb = result.notes.first { it.title == "Amb" }
         assertEquals(0, amb.images.size)
+    }
+
+    @Test
+    fun deepKeepPathsResolveThroughSuffixIndex() {
+        // R31-F1: the suffix index used to materialise one copied
+        // String per '/' boundary, so a slash-heavy entry name
+        // retained the sum of all its suffix lengths — quadratic.
+        // Keys now address (name, offset) pairs, so a 2,000-segment
+        // path indexes without copying, and lookup verdicts are
+        // unchanged: a unique deep suffix resolves, a shared one
+        // stays ambiguous.
+        val deep = "seg/".repeat(2000) + "deep.png"
+        val entries = linkedMapOf(
+            "Takeout/Keep/deep.json" to
+                """{"title":"Deep","textContent":"d","attachments":[{"filePath":"$deep","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/amb.json" to
+                """{"title":"Amb","textContent":"a","attachments":[{"filePath":"shared/deep.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+        )
+        val binaries = mapOf(
+            "Takeout/Keep/$deep" to pngBytes,
+            "Takeout/Other/shared/deep.png" to pngBytes,
+            "Takeout/Keep/shared/deep.png" to pngBytes,
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries, binaries), stagingDir())
+        assertEquals(2, result.notes.size)
+        val deepNote = result.notes.first { it.title == "Deep" }
+        assertEquals(1, deepNote.images.size)
+        assertEquals("deep.png", deepNote.images[0].name)
+        val amb = result.notes.first { it.title == "Amb" }
+        assertEquals(0, amb.images.size)
+        assertEquals(1, result.attachmentsSkipped)
+    }
+
+    @Test
+    fun keepNoteAttachmentsAreCappedPerNote() {
+        // R31-F2: a note referencing 150 distinct images retains
+        // only the per-note cap of specs; the rest are counted as
+        // skipped, never silently dropped, and the note still
+        // imports with the images that fit.
+        val attachments = (0 until 150).joinToString(",") { i ->
+            """{"filePath":"pic$i.png","mimetype":"image/png"}"""
+        }
+        val entries = linkedMapOf(
+            "Takeout/Keep/many.json" to
+                """{"title":"Many","textContent":"m","attachments":[$attachments],"createdTimestampUsec":1700000000000000}""",
+        )
+        val binaries = mutableMapOf<String, ByteArray>()
+        repeat(150) { i -> binaries["Takeout/Keep/pic$i.png"] = pngBytes }
+        val result = KeepTakeoutParser.parse(zipOf(entries, binaries), stagingDir())
+        assertEquals(1, result.notes.size)
+        assertEquals(ImportCaps.MAX_ATTACHMENTS_PER_NOTE, result.notes[0].images.size)
+        assertEquals(50, result.attachmentsSkipped)
+    }
+
+    @Test
+    fun keepAttachmentsAreCappedAcrossRun() {
+        // R31-F2: the per-note cap alone still permits 5,000 notes
+        // x 100 specs — millions of retained specs across a run.
+        // 51 notes of 100 distinct images each fill the 5,000-spec
+        // run cap exactly at the 50th note; the 51st note's images
+        // are all counted as skipped, and the run still completes.
+        val entries = linkedMapOf<String, String>()
+        val binaries = mutableMapOf<String, ByteArray>()
+        repeat(51) { n ->
+            val attachments = (0 until 100).joinToString(",") { i ->
+                """{"filePath":"n${n}_pic$i.png","mimetype":"image/png"}"""
+            }
+            entries["Takeout/Keep/note$n.json"] =
+                """{"title":"Note$n","textContent":"t$n","attachments":[$attachments],"createdTimestampUsec":${1_700_000_000_000L + n}}"""
+            repeat(100) { i -> binaries["Takeout/Keep/n${n}_pic$i.png"] = pngBytes }
+        }
+        val result = KeepTakeoutParser.parse(zipOf(entries, binaries), stagingDir())
+        assertEquals(51, result.notes.size)
+        assertEquals(ImportCaps.MAX_ATTACHMENTS_PER_RUN, result.notes.sumOf { it.images.size })
+        assertEquals(100, result.attachmentsSkipped)
+        assertEquals(0, result.notes.first { it.title == "Note50" }.images.size)
+    }
+
+    @Test
+    fun throwingUriDoesNotDiscardRestOfSelection() {
+        // R31-F4: a provider that throws from openInputStream used
+        // to fail the whole staging, discarding files already staged
+        // and later picks. A throwing URI is now one skipped pick:
+        // the files around it still stage, and the throw is
+        // reported, never silent.
+        val context = RuntimeEnvironment.getApplication()
+        val shadowResolver = Shadows.shadowOf(context.contentResolver)
+        val firstUri = Uri.parse("content://import.test/first.md")
+        val badUri = Uri.parse("content://import.test/bad.md")
+        val lastUri = Uri.parse("content://import.test/last.md")
+        shadowResolver.registerInputStreamSupplier(firstUri) { "# First\n".byteInputStream() }
+        shadowResolver.registerInputStreamSupplier(badUri) { throw RuntimeException("provider boom") }
+        shadowResolver.registerInputStreamSupplier(lastUri) { "# Last\n".byteInputStream() }
+        val dir = java.nio.file.Files.createTempDirectory("import-stage").toFile()
+        val staged = stageMarkdownPicks(context, listOf(firstUri, badUri, lastUri), dir)
+        assertEquals(listOf("first.md", "last.md"), staged.files.map { it.name })
+        assertEquals(
+            listOf(SkippedImportFile("bad.md", "Couldn't be read.")),
+            staged.skippedFiles,
+        )
+        assertTrue(staged.files.first { it.name == "first.md" }.file.readText().contains("First"))
     }
 
     @Test

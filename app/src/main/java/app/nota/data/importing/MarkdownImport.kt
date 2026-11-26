@@ -822,38 +822,40 @@ private fun letteredValue(candidate: LetteredCandidate, type: String): Int? = wh
  * falls through to alpha. A lone lettered line is never confirmed —
  * that false-positive guard is deliberate, so ordinary prose keeps its
  * paragraphs.
+ *
+ * The verdict is decided entirely by the first line that would END a
+ * forward scan — the first line at or above the candidate's indent,
+ * or a blank line — so the scan is answered from [stopAt], the
+ * next-stopping-line index renderMarkdownBlocks precomputes once per
+ * conversion (Codex R31-F3): the old loop rescanned from idx+1 for
+ * every candidate, re-parsing each following line, so N
+ * increasing-indent lettered lines cost O(N^2) regex work and a note
+ * under the size cap could look hung.
  */
 private fun confirmLetteredStart(
     lines: List<String>,
     idx: Int,
     candidate: LetteredCandidate,
+    stopAt: IntArray,
 ): String? {
     val types = mutableListOf<String>()
     if (candidate.roman != null) types += if (candidate.upper) "I" else "i"
     if (candidate.alpha != null) types += if (candidate.upper) "A" else "a"
-    for (j in idx + 1 until lines.size) {
-        val raw = lines[j]
-        if (raw.isBlank()) return null
-        if (LIST_LINE.containsMatchIn(raw)) {
-            // A bullet/numeric line: only a deeper-indented (nested)
-            // one can sit between a candidate and its successor.
-            if (lineIndent(raw) <= candidate.indent) return null
-            continue
-        }
-        val next = parseLetteredCandidate(raw)
-        if (next != null) {
-            if (next.indent < candidate.indent) return null
-            if (next.indent > candidate.indent) continue // nested content, keep scanning
-            for (type in types) {
-                val first = letteredValue(candidate, type)
-                val second = letteredValue(next, type)
-                if (first != null && second != null && second == first + 1) return type
-            }
-            return null
-        }
-        // Ordinary line: wrapped item text is indented deeper than the
-        // candidate; anything at or above its indent ends the search.
-        if (lineIndent(raw) <= candidate.indent) return null
+    // The first stopping line decides, exactly as the old forward scan
+    // did: a same-indent lettered candidate that continues the
+    // sequence confirms the list; a blank line, a bullet/numeric line
+    // at or above the indent, a shallower candidate, or ordinary text
+    // at or above the indent all end it — and a line deeper than the
+    // candidate can never be the stopping line, so it is skipped here
+    // the same way the scan skipped it.
+    val j = stopAt[idx]
+    if (j >= lines.size) return null
+    val next = parseLetteredCandidate(lines[j]) ?: return null
+    if (next.indent != candidate.indent) return null
+    for (type in types) {
+        val first = letteredValue(candidate, type)
+        val second = letteredValue(next, type)
+        if (first != null && second != null && second == first + 1) return type
     }
     return null
 }
@@ -878,6 +880,7 @@ private fun letteredItem(
     idx: Int,
     candidate: LetteredCandidate,
     items: List<ListItem>,
+    stopAt: IntArray,
 ): LetteredDecision {
     var prev: ListItem? = null
     for (k in items.indices.reversed()) {
@@ -896,7 +899,7 @@ private fun letteredItem(
             LetteredDecision.Break
         }
     }
-    val type = confirmLetteredStart(lines, idx, candidate) ?: return LetteredDecision.NotAnItem
+    val type = confirmLetteredStart(lines, idx, candidate, stopAt) ?: return LetteredDecision.NotAnItem
     return LetteredDecision.Item(
         ListItem(candidate.indent, true, type, letteredValue(candidate, type), false, false, candidate.text),
     )
@@ -909,6 +912,22 @@ private val HR = Regex("""^\s*(-{3,}|\*{3,}|_{3,})\s*$""")
 
 private fun renderMarkdownBlocks(markdown: String, images: InlineImageSink): String {
     val lines = markdown.replace(Regex("\r\n?"), "\n").split("\n")
+    // (Codex R31-F3): for each line, the next line that would END a
+    // lettered-sequence scan — the first line after it at or below
+    // its indent (blank lines count as indent -1, so they always end
+    // one), computed once per conversion with a monotone stack
+    // (next-smaller-or-equal, one reverse pass). confirmLetteredStart
+    // answers from this array in O(1) instead of rescanning.
+    val effIndents = IntArray(lines.size) { if (lines[it].isBlank()) -1 else lineIndent(lines[it]) }
+    val stopAt = IntArray(lines.size)
+    val stopStack = ArrayDeque<Int>()
+    for (idx in lines.size - 1 downTo 0) {
+        while (stopStack.isNotEmpty() && effIndents[stopStack.last()] > effIndents[idx]) {
+            stopStack.removeLast()
+        }
+        stopAt[idx] = stopStack.lastOrNull() ?: lines.size
+        stopStack.addLast(idx)
+    }
     val blocks = mutableListOf<String>()
     var i = 0
 
@@ -916,7 +935,7 @@ private fun renderMarkdownBlocks(markdown: String, images: InlineImageSink): Str
     // A lettered/roman line opens a list block only when sequence-confirmed.
     fun letteredStartAt(idx: Int): String? {
         val candidate = parseLetteredCandidate(lines[idx]) ?: return null
-        return confirmLetteredStart(lines, idx, candidate)
+        return confirmLetteredStart(lines, idx, candidate, stopAt)
     }
     fun startsBlock(line: String, idx: Int): Boolean =
         FENCE.containsMatchIn(line) ||
@@ -1014,7 +1033,7 @@ private fun renderMarkdownBlocks(markdown: String, images: InlineImageSink): Str
                 // Lettered/roman lines join only as confirmed sequences.
                 val candidate = parseLetteredCandidate(current)
                 if (candidate != null) {
-                    when (val decision = letteredItem(lines, i, candidate, items)) {
+                    when (val decision = letteredItem(lines, i, candidate, items, stopAt)) {
                         is LetteredDecision.Break -> break
                         is LetteredDecision.Item -> {
                             items += decision.item

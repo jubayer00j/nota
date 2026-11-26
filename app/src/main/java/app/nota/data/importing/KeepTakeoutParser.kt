@@ -134,6 +134,10 @@ object KeepTakeoutParser {
         // becomes a note.
         val drafts = mutableListOf<KeepDraft>()
         var retainedConvertedChars = 0L
+        // One budget for the whole parse (Codex R31-F2): every draft
+        // shares it, so the run's retained specs stay bounded even
+        // when each note is under its own per-note cap.
+        val attachmentBudget = AttachmentSpecBudget()
         // A .json that occurs twice is the same logical note (Codex
         // R13-F2): the first occurrence wins, so the walk never
         // parses — and double-counts — the same path.
@@ -189,7 +193,7 @@ object KeepTakeoutParser {
                             return@walk
                         }
                         val draft = keepJsonToDraft(
-                            json, base, entryIndex, result,
+                            json, base, entryIndex, result, attachmentBudget,
                             // (Codex R28-F2, R26-F2 shape): the run
                             // dedupe identity for a dateless Keep note
                             // is its full entry path plus a content
@@ -371,21 +375,67 @@ object KeepTakeoutParser {
      *  - [bySuffix] keys are the suffixes after each '/' boundary, so
      *    "a/b/c.jpg" contributes "b/c.jpg" and "c.jpg" — exactly the
      *    strings the old `endsWith("/$wanted")` matched — in name
-     *    order, so a unique/ambiguous verdict is the same;
+     *    order, so a unique/ambiguous verdict is the same. The keys
+     *    are [SuffixKey]s — (name, offset) pairs, not copied
+     *    strings: materialising every suffix (Codex R31-F1) retained
+     *    the sum of all suffix lengths per name, quadratic in the
+     *    name length, before any note was parsed;
      *  - [byBasename] groups by lowercase basename, as the old
      *    filter did. */
+    /** A suffix of an entry name, addressed as (name, start) so the
+     *  suffix index never copies a suffix string (Codex R31-F1):
+     *  the old map keyed on `substring` after every '/' boundary,
+     *  so a slash-heavy 65 KiB name retained the sum of all its
+     *  suffix lengths — quadratic — before any note was parsed. The
+     *  name itself is already retained in [EntryNameIndex]'s exact
+     *  set; a key holds only a reference + an offset, and
+     *  hash/equals compare the suffix characters in place. */
+    private class SuffixKey(val name: String, val start: Int) {
+        override fun hashCode(): Int {
+            var h = 0
+            for (i in start until name.length) h = 31 * h + name[i].code
+            return h
+        }
+
+        override fun equals(other: Any?): Boolean {
+            if (other !is SuffixKey) return false
+            if (name.length - start != other.name.length - other.start) return false
+            for (i in 0 until name.length - start) {
+                if (name[start + i] != other.name[other.start + i]) return false
+            }
+            return true
+        }
+    }
+
+    /** Run-level ceiling on retained attachment specs (Codex
+     *  R31-F2): one budget per parse, shared by every
+     *  [keepJsonToDraft] call, so the run's specs stay bounded even
+     *  when each note is under its own per-note cap. */
+    private class AttachmentSpecBudget(
+        private val maxSpecs: Int = ImportCaps.MAX_ATTACHMENTS_PER_RUN,
+    ) {
+        private var used = 0
+
+        /** True when another spec may be retained. */
+        fun take(): Boolean {
+            if (used >= maxSpecs) return false
+            used++
+            return true
+        }
+    }
+
     private class EntryNameIndex(
         names: List<String>,
         private val duplicateNames: Set<String>,
     ) {
         private val exact: Set<String> = names.toSet()
 
-        private val bySuffix: Map<String, List<String>> = run {
-            val map = HashMap<String, MutableList<String>>()
+        private val bySuffix: Map<SuffixKey, List<String>> = run {
+            val map = HashMap<SuffixKey, MutableList<String>>()
             for (name in names) {
                 var slash = name.indexOf('/')
                 while (slash >= 0) {
-                    map.getOrPut(name.substring(slash + 1)) { mutableListOf() } += name
+                    map.getOrPut(SuffixKey(name, slash + 1)) { mutableListOf() } += name
                     slash = name.indexOf('/', slash + 1)
                 }
             }
@@ -401,7 +451,7 @@ object KeepTakeoutParser {
                 if (wanted in duplicateNames) return EntryLookup.Ambiguous
                 return EntryLookup.Found(wanted)
             }
-            val suffixMatches = bySuffix[wanted] ?: emptyList()
+            val suffixMatches = bySuffix[SuffixKey(wanted, 0)] ?: emptyList()
             if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
             if (suffixMatches.size > 1) return EntryLookup.Ambiguous
             val base = importBaseName(wanted).lowercase()
@@ -503,6 +553,7 @@ object KeepTakeoutParser {
         sourceName: String,
         entryIndex: EntryNameIndex,
         result: ImportParseResult,
+        attachmentBudget: AttachmentSpecBudget,
         sourceIdentity: String? = null,
     ): KeepDraft? {
         val title = json.opt("title") as? String ?: ""
@@ -652,6 +703,18 @@ object KeepTakeoutParser {
                 }
             }
             if (!seenEntryNames.add(entryName)) continue
+            // (Codex R31-F2): bound the retained specs — the per-note
+            // ceiling and the run ceiling. Past either, the reference
+            // is counted as skipped, like a missing one: the note
+            // still imports with the images that fit. Repeats never
+            // reach here (the dedupe above skips them), so they
+            // consume neither cap.
+            if (specs.size >= ImportCaps.MAX_ATTACHMENTS_PER_NOTE ||
+                !attachmentBudget.take()
+            ) {
+                result.attachmentsSkipped += 1
+                continue
+            }
             specs += AttachmentSpec(entryName, filePath, mimeType)
         }
 

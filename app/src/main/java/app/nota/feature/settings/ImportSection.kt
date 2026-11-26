@@ -36,6 +36,7 @@ import app.nota.data.importing.StagedImportFile
 import app.nota.data.importing.stagingFileName
 import app.nota.ui.theme.NotaSpacing
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import org.koin.compose.koinInject
 
 /**
@@ -98,52 +99,7 @@ fun ImportSection(
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         pendingImportStore.stageAndRun(
             newTempDir = { newImportTempDir(context) },
-            stage = { dir ->
-                val usedNames = mutableSetOf<String>()
-                val stagedFiles = mutableListOf<StagedImportFile>()
-                val skipped = mutableListOf<SkippedImportFile>()
-                // One budget spans the whole selection (Codex R6-F2):
-                // the per-file cap alone lets several large picks
-                // stage gigabytes into cache before parsing starts.
-                val budget = PickedFileStaging.StagingBudget()
-                for (uri in uris) {
-                    val name = pickedDisplayName(context, uri)
-                    // Reject unsupported types BEFORE copying — the
-                    // picker accepts anything, and an unsupported file
-                    // must never be staged in full first. Rejected
-                    // picks are still reported, never silently dropped.
-                    if (!PickedFileStaging.isSupportedPick(name)) {
-                        skipped += SkippedImportFile(name, "Not a Markdown, text or ZIP file.")
-                        continue
-                    }
-                    val target = File(dir, stagingFileName(name, usedNames))
-                    val input = context.contentResolver.openInputStream(uri)
-                    if (input == null) {
-                        skipped += SkippedImportFile(name, "Couldn't be read.")
-                        continue
-                    }
-                    when (PickedFileStaging.stageOne(input, target, budget)) {
-                        is PickedFileStaging.StagedPick.Ok -> stagedFiles += StagedImportFile(
-                            name = name,
-                            file = target,
-                            lastModified = pickedLastModified(context, uri),
-                        )
-                        PickedFileStaging.StagedPick.TooBig ->
-                            skipped += SkippedImportFile(name, "File is larger than 544 MB.")
-                        PickedFileStaging.StagedPick.OverBudget ->
-                            skipped += SkippedImportFile(
-                                name,
-                                "Total staged files exceed the 544 MB selection budget.",
-                            )
-                    }
-                }
-                StagedImport(
-                    tempDir = dir,
-                    keepZip = null,
-                    files = stagedFiles,
-                    skippedFiles = skipped,
-                )
-            },
+            stage = { dir -> stageMarkdownPicks(context, uris, dir) },
             run = { input, onProgress ->
                 importRepository.importMarkdownSelection(
                     input.files,
@@ -278,6 +234,69 @@ fun ImportSection(
 
 private fun newImportTempDir(context: Context): File =
     File(context.cacheDir, "import-pick-${System.nanoTime()}").apply { mkdirs() }
+
+/** Stages one SAF multi-file selection for the Markdown/text
+ *  launcher. A provider that THROWS from openInputStream used to
+ *  escape the loop and fail the whole staging, discarding files
+ *  already staged and later picks (Codex R31-F4) — a throwing URI
+ *  is now one skipped pick, like a null stream. Cancellation is
+ *  rethrown, never swallowed: the store launches staging on its own
+ *  scope. */
+internal fun stageMarkdownPicks(
+    context: Context,
+    uris: List<Uri>,
+    dir: File,
+): StagedImport {
+    val usedNames = mutableSetOf<String>()
+    val stagedFiles = mutableListOf<StagedImportFile>()
+    val skipped = mutableListOf<SkippedImportFile>()
+    // One budget spans the whole selection (Codex R6-F2): the
+    // per-file cap alone lets several large picks stage gigabytes
+    // into cache before parsing starts.
+    val budget = PickedFileStaging.StagingBudget()
+    for (uri in uris) {
+        try {
+            val name = pickedDisplayName(context, uri)
+            // Reject unsupported types BEFORE copying — the picker
+            // accepts anything, and an unsupported file must never
+            // be staged in full first. Rejected picks are still
+            // reported, never silently dropped.
+            if (!PickedFileStaging.isSupportedPick(name)) {
+                skipped += SkippedImportFile(name, "Not a Markdown, text or ZIP file.")
+                continue
+            }
+            val target = File(dir, stagingFileName(name, usedNames))
+            val input = context.contentResolver.openInputStream(uri)
+            if (input == null) {
+                skipped += SkippedImportFile(name, "Couldn't be read.")
+                continue
+            }
+            when (PickedFileStaging.stageOne(input, target, budget)) {
+                is PickedFileStaging.StagedPick.Ok -> stagedFiles += StagedImportFile(
+                    name = name,
+                    file = target,
+                    lastModified = pickedLastModified(context, uri),
+                )
+                PickedFileStaging.StagedPick.TooBig ->
+                    skipped += SkippedImportFile(name, "File is larger than 544 MB.")
+                PickedFileStaging.StagedPick.OverBudget ->
+                    skipped += SkippedImportFile(
+                        name,
+                        "Total staged files exceed the 544 MB selection budget.",
+                    )
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            skipped += SkippedImportFile(pickedDisplayName(context, uri), "Couldn't be read.")
+        }
+    }
+    return StagedImport(
+        tempDir = dir,
+        keepZip = null,
+        files = stagedFiles,
+        skippedFiles = skipped,
+    )
+}
 
 /** Single-file staging for the Keep launcher: the copy is capped
  *  (see [PickedFileStaging]) — a file over the cap fails the stage

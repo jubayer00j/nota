@@ -112,6 +112,24 @@ object ImportCaps {
      *  note still imports with the labels that fit. */
     const val MAX_TAGS_PER_NOTE = 100
     const val MAX_TAG_NAME_BYTES = 1_000L
+
+    /** Largest number of image attachments one imported Keep note
+     *  may retain, and the largest number of attachment specs one
+     *  run may retain in total — NOT 1.x caps: 1.x retains a spec
+     *  per resolved attachment, and the R26-F3 dedupe only
+     *  suppresses repeats WITHIN one note. Pass 2 accumulates every
+     *  draft in one list (capped only at 5,000 notes), so a Takeout
+     *  whose notes reference thousands of distinct images each
+     *  retains millions of specs — three strings apiece, kept alive
+     *  until parsing finishes — before any later budget trips
+     *  (Codex R31-F2). 100 per note and 5,000 per run sit far above
+     *  any real export (a Keep note carries a handful of images)
+     *  and far below an OOM (~1.5 MB of specs at the run cap).
+     *  References past either cap are counted as skipped, never
+     *  silently dropped — the note still imports with the images
+     *  that fit. */
+    const val MAX_ATTACHMENTS_PER_NOTE = 100
+    const val MAX_ATTACHMENTS_PER_RUN = 5_000
 }
 
 /**

@@ -137,6 +137,29 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun manyIncreasingIndentLetteredLinesConvertInBoundedTime() {
+        // R31-F3: confirmLetteredStart used to rescan from every
+        // candidate, re-parsing each following line, so N
+        // increasing-indent lettered lines cost O(N^2) regex work
+        // and a note under the size cap could look hung. Every line
+        // here is a lettered candidate with no same-indent
+        // successor, so each confirmation used to scan to the end;
+        // the precomputed boundary answers each in O(1). None of
+        // them is a list — they stay one paragraph.
+        val text = buildString {
+            repeat(800) { i ->
+                append(" ".repeat(i * 2))
+                append(('a' + (i % 26)).toString())
+                append(". line $i\n")
+            }
+        }
+        val result = parseOne("many.md", text.trimEnd())
+        assertEquals(1, result.notes.size)
+        assertFalse(result.notes[0].contentHtml.contains("<ol"))
+        assertTrue(result.notes[0].contentHtml.startsWith("<p>a. line 0"))
+    }
+
+    @Test
     fun fencedCodeIsLiteralAndEscaped() {
         val result = parseOne("code.md", "```\nif (a < b) { **x** }\n```")
         assertEquals(
