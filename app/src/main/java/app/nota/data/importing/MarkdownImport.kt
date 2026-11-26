@@ -233,6 +233,13 @@ fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResol
         Triple(normaliseImportPath(path), importBaseName(path.replace('\\', '/')), file)
     }
     val byPath = entries.groupBy { it.first }
+    // (Codex R30-F2): the basename arm used to be a full linear scan
+    // (entries.filter, re-lowercasing every name per call) — with
+    // 20,000 entries and tens of thousands of references, hundreds of
+    // millions of comparisons. The index is built once here, alongside
+    // byPath; groupBy preserves the filter's order and duplicates, so
+    // the unique/ambiguous semantics are unchanged.
+    val byBasename = entries.groupBy { it.second.lowercase() }
     fun pick(name: String, file: File): ResolvedImportImage = ResolvedImportImage(
         name = name,
         mimeType = importMimeFromName(name) ?: "",
@@ -247,7 +254,7 @@ fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResol
 
     fun basenameMatches(target: String): List<Triple<String, String, File>> {
         val base = importBaseName(target).lowercase()
-        return entries.filter { it.second.lowercase() == base }
+        return byBasename[base] ?: emptyList()
     }
     return object : ImportImageResolver {
         override fun resolve(fromPath: String, ref: String): ResolvedImportImage? {
@@ -456,6 +463,18 @@ private class InlineImageSink(
 ) {
     private var imageSeq = 0
 
+    // (Codex R30-F1): one spec per DISTINCT staged file, not per
+    // occurrence — a note repeating one image thousands of times used
+    // to append a spec per copy, and the engine staged (decode +
+    // re-encode + file write) every one before the expanded-size
+    // check could refuse the note. A repeat returns the first
+    // occurrence's token, so every occurrence embeds the same single
+    // attachment (the engine replaces every occurrence of a token —
+    // safe because the token is salted per file, so literal text
+    // can't match it). Keyed on the staged file: the same file
+    // reached by two different spellings is still one attachment.
+    private val tokensByStagedFile = HashMap<File, String>()
+
     // Per-file random salt for the image placeholder (Codex R21-F2):
     // the old fixed token %%NOMA_IMPORT_IMAGE_0%% is guessable, and
     // the engine replaced EVERY occurrence — so a literal token in
@@ -479,7 +498,15 @@ private class InlineImageSink(
             result.imagesUnresolved += 1
             return escapeImportHtml(alt)
         }
+        // (Codex R30-F1): a repeat of an image already emitted in
+        // this note returns the first occurrence's token — one spec,
+        // one staged attachment, embedded at every occurrence — and
+        // adds no second spec, so the engine never stages the same
+        // file twice.
+        val existingToken = tokensByStagedFile[resolved.stagedFile]
+        if (existingToken != null) return existingToken
         val token = "%%NOMA_IMPORT_IMAGE_${tokenSalt}_${imageSeq++}%%"
+        tokensByStagedFile[resolved.stagedFile] = token
         images += ImportedImage(
             name = resolved.name,
             mimeType = resolved.mimeType,

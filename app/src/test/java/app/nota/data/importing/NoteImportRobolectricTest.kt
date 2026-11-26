@@ -1741,6 +1741,45 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun manyKeepAttachmentsResolveViaIndex() {
+        // R30-F3: attachment lookup used to scan the whole
+        // entry-name list per attachment. A Takeout with 100 notes
+        // resolving attachments by basename, plus one by suffix and
+        // one by exact path, must land every one through the index —
+        // and the one ambiguous basename must still stay unresolved.
+        val entries = linkedMapOf<String, String>()
+        val binaries = mutableMapOf<String, ByteArray>()
+        repeat(100) { i ->
+            entries["Takeout/Keep/note$i.json"] =
+                """{"title":"Note$i","textContent":"t$i","attachments":[{"filePath":"pic$i.png","mimetype":"image/png"}],"createdTimestampUsec":${1_700_000_000_000L + i}}"""
+            binaries["Takeout/Keep/pic$i.png"] = pngBytes
+        }
+        // Suffix fallback: "Keep/shared.png" matches the single
+        // entry ending with it.
+        entries["Takeout/Keep/suffix.json"] =
+            """{"title":"Suffix","textContent":"s","attachments":[{"filePath":"Keep/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}"""
+        binaries["Takeout/Keep/shared.png"] = pngBytes
+        // Exact path still wins outright.
+        entries["Takeout/Keep/exact.json"] =
+            """{"title":"Exact","textContent":"e","attachments":[{"filePath":"Takeout/Keep/exact.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}"""
+        binaries["Takeout/Keep/exact.png"] = pngBytes
+        // Ambiguous basename: two entries share "dup.png".
+        entries["Takeout/Keep/amb.json"] =
+            """{"title":"Amb","textContent":"a","attachments":[{"filePath":"dup.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}"""
+        binaries["Takeout/Keep/dup.png"] = pngBytes
+        binaries["Takeout/Other/dup.png"] = pngBytes
+        val result = KeepTakeoutParser.parse(zipOf(entries, binaries), stagingDir())
+        assertEquals(103, result.notes.size)
+        assertEquals(1, result.attachmentsSkipped)
+        assertEquals(102, result.notes.sumOf { it.images.size })
+        val suffix = result.notes.first { it.title == "Suffix" }
+        assertEquals(1, suffix.images.size)
+        assertEquals("shared.png", suffix.images[0].name)
+        val amb = result.notes.first { it.title == "Amb" }
+        assertEquals(0, amb.images.size)
+    }
+
+    @Test
     fun keepJsonLargerThanRemainingBudgetStillImportsWhenBodyFits() {
         // R10-F2: the raw JSON is read under its own 16M-char bound,
         // not the remaining aggregate budget. Eighteen 900K-char
@@ -1875,6 +1914,27 @@ class NoteImportRobolectricTest {
         val notes = stack.db.noteDao().getAll()
         assertTrue(notes.first { it.title == "A" }.contentHtml.contains("nota-attachment://"))
         assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun manyBasenameImageReferencesResolve() = runBlocking {
+        // R30-F2: basename lookup used to scan the whole entries
+        // list per reference. A ZIP with 500 image entries and a
+        // note referencing all of them by basename only must resolve
+        // every one — the index, not a scan, answers each lookup.
+        val stack = newStack()
+        val binaries = (0 until 500).associate { "images/img$it.png" to pngBytes }
+        val text = buildString {
+            append("# Bulk\n\n")
+            repeat(500) { i -> append("![p$i](img$i.png) ") }
+        }
+        val zip = zipOf(linkedMapOf("note.md" to text), binaries)
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("bulk.zip", zip, 1_700_000_000_000L)),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        assertEquals(500, stack.db.attachmentDao().getAll().size)
     }
 
     @Test
@@ -2761,6 +2821,35 @@ class NoteImportRobolectricTest {
         val notes = stack.db.noteDao().getAll()
         assertTrue(notes.first { it.title == "Note" }.contentHtml.contains("nota-attachment://"))
         assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun repeatedMarkdownImageReferenceEmbedsOnce() = runBlocking {
+        // R30-F1: a note repeating one valid image used to stage
+        // (decode + re-encode + write) a copy per occurrence before
+        // the size check could refuse the note. Now one spec stands
+        // for every occurrence: exactly one attachment row, the
+        // image embedded at every repeat, and no raw token left in
+        // the body.
+        val stack = newStack()
+        val repeats = 500
+        val text = buildString {
+            append("# Note\n\n")
+            repeat(repeats) { append("![p](pic.png) ") }
+        }
+        val zip = zipOf(
+            linkedMapOf("note.md" to text),
+            mapOf("pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("notes.zip", zip, 1_700_000_000_000L)),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+        val note = stack.db.noteDao().getAll().first { it.title == "Note" }
+        assertEquals(repeats, countOccurrences(note.contentHtml, "nota-attachment://"))
+        assertFalse(note.contentHtml.contains("%%NOMA_IMPORT_IMAGE"))
     }
 
     @Test

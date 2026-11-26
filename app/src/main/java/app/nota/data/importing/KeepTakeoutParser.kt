@@ -106,6 +106,11 @@ object KeepTakeoutParser {
         val candidates = if (inKeep.isNotEmpty()) inKeep else jsonNames
         val candidateSet = candidates.toSet()
 
+        // (Codex R30-F3): the entry-name index for attachment lookup,
+        // built ONCE per archive from pass 1's inventory — pass 2's
+        // per-attachment lookups are map probes, not linear scans.
+        val entryIndex = EntryNameIndex(reader.entryNames, reader.duplicateEntryNames)
+
         // Pass 2: convert one JSON at a time. Each raw string is
         // dropped as soon as its draft is built, so at most one JSON
         // is ever retained — a Takeout of many large notes no longer
@@ -184,8 +189,7 @@ object KeepTakeoutParser {
                             return@walk
                         }
                         val draft = keepJsonToDraft(
-                            json, base, reader.entryNames, result,
-                            reader.duplicateEntryNames,
+                            json, base, entryIndex, result,
                             // (Codex R28-F2, R26-F2 shape): the run
                             // dedupe identity for a dateless Keep note
                             // is its full entry path plus a content
@@ -353,25 +357,59 @@ object KeepTakeoutParser {
         object Ambiguous : EntryLookup
     }
 
-    private fun findEntry(
+    /**
+     * The pass-1 entry-name inventory, indexed once per archive
+     * (Codex R30-F3): the old lookup ran two full linear scans
+     * (suffix, then basename — recomputing basename + lowercase per
+     * entry per call) for every attachment in pass 2, so thousands of
+     * attachments × 20,000 entries ran into hundreds of millions of
+     * comparisons. Each lookup here is a map probe.
+     *
+     * The indexes preserve the old scan's semantics exactly:
+     *  - [exact] is the name set (the old `wanted in names` was a
+     *    linear contains);
+     *  - [bySuffix] keys are the suffixes after each '/' boundary, so
+     *    "a/b/c.jpg" contributes "b/c.jpg" and "c.jpg" — exactly the
+     *    strings the old `endsWith("/$wanted")` matched — in name
+     *    order, so a unique/ambiguous verdict is the same;
+     *  - [byBasename] groups by lowercase basename, as the old
+     *    filter did. */
+    private class EntryNameIndex(
         names: List<String>,
-        ref: String,
-        duplicateNames: Set<String> = emptySet(),
-    ): EntryLookup {
-        val wanted = ref.replace('\\', '/')
-        if (wanted in names) {
-            if (wanted in duplicateNames) return EntryLookup.Ambiguous
-            return EntryLookup.Found(wanted)
+        private val duplicateNames: Set<String>,
+    ) {
+        private val exact: Set<String> = names.toSet()
+
+        private val bySuffix: Map<String, List<String>> = run {
+            val map = HashMap<String, MutableList<String>>()
+            for (name in names) {
+                var slash = name.indexOf('/')
+                while (slash >= 0) {
+                    map.getOrPut(name.substring(slash + 1)) { mutableListOf() } += name
+                    slash = name.indexOf('/', slash + 1)
+                }
+            }
+            map
         }
-        val suffix = "/$wanted"
-        val suffixMatches = names.filter { it.endsWith(suffix) }
-        if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
-        if (suffixMatches.size > 1) return EntryLookup.Ambiguous
-        val base = importBaseName(wanted).lowercase()
-        val baseMatches = names.filter { importBaseName(it).lowercase() == base }
-        if (baseMatches.size == 1) return EntryLookup.Found(baseMatches[0])
-        if (baseMatches.size > 1) return EntryLookup.Ambiguous
-        return EntryLookup.Missing
+
+        private val byBasename: Map<String, List<String>> =
+            names.groupBy { importBaseName(it).lowercase() }
+
+        fun find(ref: String): EntryLookup {
+            val wanted = ref.replace('\\', '/')
+            if (wanted in exact) {
+                if (wanted in duplicateNames) return EntryLookup.Ambiguous
+                return EntryLookup.Found(wanted)
+            }
+            val suffixMatches = bySuffix[wanted] ?: emptyList()
+            if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
+            if (suffixMatches.size > 1) return EntryLookup.Ambiguous
+            val base = importBaseName(wanted).lowercase()
+            val baseMatches = byBasename[base] ?: emptyList()
+            if (baseMatches.size == 1) return EntryLookup.Found(baseMatches[0])
+            if (baseMatches.size > 1) return EntryLookup.Ambiguous
+            return EntryLookup.Missing
+        }
     }
 
     private fun usecToMs(value: Any?): Long? {
@@ -463,9 +501,8 @@ object KeepTakeoutParser {
     private fun keepJsonToDraft(
         json: JSONObject,
         sourceName: String,
-        entryNames: List<String>,
+        entryIndex: EntryNameIndex,
         result: ImportParseResult,
-        duplicateEntryNames: Set<String> = emptySet(),
         sourceIdentity: String? = null,
     ): KeepDraft? {
         val title = json.opt("title") as? String ?: ""
@@ -595,7 +632,7 @@ object KeepTakeoutParser {
                 continue
             }
             val entryName = when (
-                val found = findEntry(entryNames, filePath, duplicateEntryNames)
+                val found = entryIndex.find(filePath)
             ) {
                 is EntryLookup.Found -> found.entryName
                 EntryLookup.Missing -> {

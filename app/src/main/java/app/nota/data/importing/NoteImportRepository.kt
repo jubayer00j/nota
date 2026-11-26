@@ -708,14 +708,20 @@ class NoteImportRepository(
                         stagedAttachments += saved
                         val embed = "<img src=\"nota-attachment://${saved.id}\" " +
                             "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
-                        // replaceFirst, not replace (Codex R21-F2): the
-                        // token is emitted exactly once for this image, so
-                        // only its one occurrence is the embed — any other
-                        // occurrence is the user's literal text and must
-                        // survive. (The token is also salted per file, so
-                        // literal text can't match it in the first place.)
+                        // replace, not replaceFirst (Codex R30-F1 /
+                        // R21-F2): one image spec now stands for every
+                        // occurrence of the same image in the note, so
+                        // its token is emitted once per occurrence and
+                        // every occurrence is the embed. That is safe
+                        // because the token is salted per file — literal
+                        // text can't match it — so any occurrence in
+                        // the content is an emitted placeholder.
+                        // (R21-F2's replaceFirst was right when each
+                        // token was emitted exactly once; with the
+                        // R30-F1 dedupe it would leave raw tokens in
+                        // the persisted body.)
                         content = if (image.token != null) {
-                            content.replaceFirst(image.token, embed)
+                            content.replace(image.token, embed)
                         } else {
                             content + "<p>$embed</p>"
                         }
@@ -729,10 +735,10 @@ class NoteImportRepository(
                         // alt has nothing to preserve.
                         saveFailures++
                         if (image.token != null) {
-                            // Same replaceFirst rule as the success path
-                            // (Codex R21-F2): only the emitted occurrence
-                            // becomes the alt text.
-                            content = content.replaceFirst(image.token, escapeImportHtml(image.alt))
+                            // Same replace rule as the success path
+                            // (Codex R30-F1): every occurrence of the
+                            // token becomes the alt text.
+                            content = content.replace(image.token, escapeImportHtml(image.alt))
                         } else if (image.alt.isNotBlank()) {
                             content += "<p>${escapeImportHtml(image.alt)}</p>"
                         }

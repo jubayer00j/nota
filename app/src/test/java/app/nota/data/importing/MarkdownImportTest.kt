@@ -452,6 +452,52 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun repeatedImageReferenceEmbedsOnce() {
+        // R30-F1: a note repeating one valid image used to append one
+        // spec per occurrence, and the engine staged every copy
+        // before the size check could refuse the note. Now one spec
+        // stands for every occurrence: the single attachment embeds
+        // at each repeat, and the token appears once per repeat in
+        // the parsed content (the engine replaces every occurrence
+        // at write time).
+        val imageFile = File.createTempFile("pic", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val resolver = createImportImageResolver(listOf("pic.png" to imageFile))
+        val repeats = 200
+        val text = buildString {
+            repeat(repeats) { append("![p](pic.png) ") }
+        }
+        val result = parseOne("img.md", text, resolver = resolver)
+        val note = result.notes[0]
+        assertEquals(1, note.images.size)
+        assertEquals(0, result.imagesUnresolved)
+        val token = note.images[0].token
+        assertNotNull(token)
+        assertEquals(repeats, note.contentHtml.split(token!!).size - 1)
+        imageFile.delete()
+    }
+
+    @Test
+    fun resolverIndexesBasenamesAtScale() {
+        // R30-F2: basename lookup used to scan the whole entries
+        // list per reference. With 2,000 entries and 200 basename
+        // references the index must still resolve each to the right
+        // file — and an ambiguous basename must still stay
+        // unresolved.
+        val imageFile = File.createTempFile("bulk", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val files = (0 until 2_000).map { "folder/img$it.png" to imageFile } +
+            listOf("a/dup.png" to imageFile, "b/dup.png" to imageFile)
+        val resolver = createImportImageResolver(files)
+        repeat(200) { i ->
+            val resolved = resolver.resolve("note.md", "img$i.png")
+            assertNotNull(resolved, "img$i.png should resolve")
+            assertEquals("img$i.png", resolved!!.name)
+        }
+        assertNull(resolver.resolve("note.md", "dup.png"))
+        assertTrue(resolver.isAmbiguous("note.md", "dup.png"))
+        imageFile.delete()
+    }
+
+    @Test
     fun enforceNoteCapTruncatesMergedSourcesIntoSkippedFiles() {
         // Two capped sources merged into one run: 2,501 + 2,500 notes
         // must come out as exactly 5,000 notes, with the one excess
