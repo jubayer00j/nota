@@ -437,6 +437,38 @@ private fun proseSegments(text: String): List<String> {
     return segments
 }
 
+/** Bounded collector for the pre-scan's referenced image targets
+ *  (Codex R20-F1): the two sets live for the whole ZIP parse, and
+ *  the scan's inputs are bounded only by the archive quota and the
+ *  per-member text bound, so without a bound of their own a
+ *  crafted archive could grow them to millions of entries and OOM
+ *  before any later budget check runs. Past the bound a reference
+ *  is simply not collected — its image is not staged, the
+ *  reference stays unresolved (counted at the reference), and the
+ *  note still imports. */
+private class ReferencedImageCollector {
+    val targets = HashSet<String>()
+    val basenames = HashSet<String>()
+    private var retainedChars = 0L
+
+    /** Records [target] and its basename when the retained-reference
+     *  budget still allows; a target already collected costs
+     *  nothing more, and a basename already held is not charged
+     *  twice. */
+    fun add(target: String) {
+        if (target in targets) return
+        val basename = importBaseName(target).lowercase()
+        val cost = target.length.toLong() +
+            if (basename in basenames) 0L else basename.length.toLong()
+        if (targets.size >= ImportCaps.MAX_RETAINED_IMAGE_REFS ||
+            retainedChars + cost > ImportCaps.MAX_RETAINED_IMAGE_REF_CHARS
+        ) return
+        targets += target
+        basenames += basename
+        retainedChars += cost
+    }
+}
+
 /** Collects the image targets referenced by one Markdown member:
  *  exact normalised paths plus their basenames (the resolver falls
  *  back to a unique basename match). Remote references are never
@@ -455,8 +487,7 @@ private fun proseSegments(text: String): List<String> {
 private fun collectImageRefs(
     fromPath: String,
     text: String,
-    targets: MutableSet<String>,
-    basenames: MutableSet<String>,
+    collector: ReferencedImageCollector,
 ) {
     for (segment in proseSegments(text)) {
         // Carve code spans out first (renderInline's shape): the
@@ -464,26 +495,24 @@ private fun collectImageRefs(
         // never are.
         var lastIndex = 0
         for (span in CODE_SPAN.findAll(segment)) {
-            collectRefsFrom(segment.substring(lastIndex, span.range.first), fromPath, targets, basenames)
+            collectRefsFrom(segment.substring(lastIndex, span.range.first), fromPath, collector)
             lastIndex = span.range.last + 1
         }
-        collectRefsFrom(segment.substring(lastIndex), fromPath, targets, basenames)
+        collectRefsFrom(segment.substring(lastIndex), fromPath, collector)
     }
 }
 
 private fun collectRefsFrom(
     text: String,
     fromPath: String,
-    targets: MutableSet<String>,
-    basenames: MutableSet<String>,
+    collector: ReferencedImageCollector,
 ) {
     for (match in RAW_IMAGE_REF.findAll(text)) {
         val ref = match.groupValues[2]
         if (Regex("^(https?:|data:)", RegexOption.IGNORE_CASE).containsMatchIn(ref)) continue
         val target = resolveRef(fromPath, ref)
         if (target.isEmpty()) continue
-        targets += target
-        basenames += importBaseName(target).lowercase()
+        collector.add(target)
     }
 }
 private val INLINE_LINK =
@@ -1770,14 +1799,17 @@ object MarkdownImporter {
             // exact normalised targets and their basenames are kept:
             // the resolver falls back to a unique basename match, so
             // a reference to `pic.png` can resolve to
-            // `images/pic.png`. A member past the char bound is
+            // `images/pic.png`. The kept references are themselves
+            // bounded (Codex R20-F1, see ReferencedImageCollector):
+            // past the bound a reference is not collected, so its
+            // image is not staged and the reference stays unresolved.
+            // A member past the char bound is
             // skipped by walk 4 anyway, so its references don't
             // matter; a `.txt` member goes through PlainTextCodec,
             // which never resolves images, so it is not scanned. An
             // image no note mentions is never staged and never
             // counted — there is nothing to report about it.
-            val referencedTargets = HashSet<String>()
-            val referencedBasenames = HashSet<String>()
+            val referenced = ReferencedImageCollector()
             val scannedText = HashSet<String>()
             reader.walk { entry ->
                 if (entry.name !in textMembers) return@walk
@@ -1791,8 +1823,7 @@ object MarkdownImporter {
                         collectImageRefs(
                             entry.name,
                             read.text,
-                            referencedTargets,
-                            referencedBasenames,
+                            referenced,
                         )
                     else -> { /* walk 4 skips this member too */ }
                 }
@@ -1812,8 +1843,8 @@ object MarkdownImporter {
                 // basenames the resolver can fall back to. Anything
                 // else is never staged — it would only consume the
                 // shared budget for a file no note mentions.
-                if (normaliseImportPath(entry.name) !in referencedTargets &&
-                    importBaseName(entry.name.replace('\\', '/')).lowercase() !in referencedBasenames
+                if (normaliseImportPath(entry.name) !in referenced.targets &&
+                    importBaseName(entry.name.replace('\\', '/')).lowercase() !in referenced.basenames
                 ) return@walk
                 val staged = File(stagingDir, stagingFileName(entry.name, usedNames))
                 // The copy cap is the smaller of the 100 MiB per-file

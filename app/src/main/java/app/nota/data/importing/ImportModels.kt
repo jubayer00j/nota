@@ -59,6 +59,25 @@ object ImportCaps {
      *  walk is already bounded to 512 MiB by that quota, so the
      *  aggregate only bites across ZIPs in one selection. */
     const val MAX_EXTRACTED_IMAGE_BYTES = 512L * 1024 * 1024
+
+    /** Ceilings for the image references the Markdown pre-scan
+     *  retains during one ZIP parse — NOT 1.x caps: 1.x has no
+     *  pre-scan. The retained target/basename sets live for the
+     *  whole parse, and the scan's inputs are bounded only by the
+     *  512 MiB archive quota and the per-member text bound, while
+     *  distinct references are cheap to mint (`![](1.png)`,
+     *  `![](2.png)`, …) — uncapped, a crafted archive could grow
+     *  both sets to millions of entries and OOM before any later
+     *  budget check runs (Codex R20-F1). The count caps set-node
+     *  overhead for tiny references; the retained characters (the
+     *  target + basename strings, in UTF-16 units) cap string
+     *  storage for long ones. Both sit far above any real export's
+     *  references and far below an OOM. A reference past either
+     *  bound is simply not collected: its image is not staged, the
+     *  reference stays unresolved (counted at the reference), and
+     *  the note still imports. */
+    const val MAX_RETAINED_IMAGE_REFS = 50_000
+    const val MAX_RETAINED_IMAGE_REF_CHARS = 1024L * 1024
 }
 
 /**

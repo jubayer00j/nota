@@ -1699,6 +1699,61 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun imageRefPreScanBoundLeavesLateRefsUnresolved() = runBlocking {
+        // R20-F1: the pre-scan retained every distinct referenced
+        // target and basename in two uncapped HashSets. The scan's
+        // inputs are bounded only by the archive quota and the
+        // per-member text bound, and distinct references are cheap
+        // to mint, so a crafted archive could grow both sets to
+        // millions of entries and OOM before any later budget check
+        // runs. Past the retained-reference bound a reference is
+        // simply not collected: its image is not staged, the
+        // reference stays unresolved (counted), and the note still
+        // imports. 80 members × 1,000 distinct flood references ≈
+        // 80K references — past both the count bound and the
+        // retained-chars bound — spread across members so each note
+        // still converts. The first member's real reference is
+        // inside the bound and embeds; the last member's is outside
+        // it, so late.png (present in the archive) is never staged.
+        // Under the old shape late.png staged and embedded:
+        // 2 attachments and one fewer unresolved reference.
+        val stack = newStack()
+        val memberCount = 80
+        val refsPerMember = 1_000
+        val members = linkedMapOf<String, String>()
+        var refIndex = 0
+        for (m in 0 until memberCount) {
+            val body = StringBuilder()
+            if (m == 0) body.append("![real](real.png)\n\n")
+            if (m == memberCount - 1) body.append("![late](late.png)\n\n")
+            repeat(refsPerMember) {
+                body.append("![](f").append(refIndex++).append(".png) ")
+            }
+            members["m$m.md"] = "# M$m\n\n$body"
+        }
+        val zip = zipOf(
+            members,
+            mapOf("real.png" to pngBytes, "late.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("flood.zip", zip, 1_700_000_000_000L)),
+        )
+        assertEquals(memberCount, outcome.report.imported)
+        // Every flood reference is unresolved (its image does not
+        // exist) and the late reference is unresolved too — the
+        // bound kept it out of the pre-scan. Only real.png resolved.
+        val totalRefs = memberCount * refsPerMember + 2
+        assertEquals(totalRefs - 1, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(notes.first { it.title == "M0" }.contentHtml.contains("nota-attachment://"))
+        assertFalse(
+            notes.first { it.title == "M${memberCount - 1}" }.contentHtml
+                .contains("nota-attachment://"),
+        )
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
     fun markdownSelectionEnforcesAggregateBudgetAcrossZips() = runBlocking {
         // R12-F1: each ZIP's own 16M-char budget starts fresh, so
         // several small ZIPs in one selection could accumulate far
