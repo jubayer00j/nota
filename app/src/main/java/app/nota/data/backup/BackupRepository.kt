@@ -807,23 +807,48 @@ suspend fun rebuildLibraryIndexes(db: NotaDatabase) {
     val ftsDao = db.noteFtsDao()
     val linkDao = db.noteLinkDao()
     db.withTransaction {
-        val allNotes = noteDao.getAll()
+        // Codex R32-F1, follow-on: this used to load full entities
+        // with noteDao.getAll() — a single existing row past
+        // Android's ~2 MiB CursorWindow aborted the whole rebuild,
+        // and with it the import, restore or copy that called it,
+        // even though the rebuild reads only id, title, plainText,
+        // locked, trashedAt and folderId. The narrow projection
+        // below carries exactly those columns. The NoteEntity
+        // handed to refreshFtsEntry is built from the row and
+        // never persisted, so its placeholder dates are never
+        // read (buildFtsEntity reads id, folderId, title, locked,
+        // plainText and trashedAt only). The backlink loop's
+        // target lookup is projected the same way — id + locked
+        // are all it reads — so a link to an oversized note
+        // resolves without loading its row either.
+        val allNotes = noteDao.getAllIndexRows()
         ftsDao.deleteAll()
         linkDao.deleteAll()
-        for (note in allNotes) {
-            if (note.trashedAt != null) continue
+        for (row in allNotes) {
+            if (row.trashedAt != null) continue
             // Search Quality Pass: rows come from the one shared
             // builder (FtsSync) so a restore also indexes tag and
             // folder names, under the same lock discipline.
-            db.refreshFtsEntry(note)
+            db.refreshFtsEntry(
+                NoteEntity(
+                    id = row.id,
+                    folderId = row.folderId,
+                    title = row.title,
+                    plainText = row.plainText,
+                    locked = row.locked,
+                    trashedAt = row.trashedAt,
+                    createdAt = 0L,
+                    updatedAt = 0L,
+                ),
+            )
         }
-        for (note in allNotes) {
-            if (note.locked || note.trashedAt != null) continue
-            val titles = NoteDocument.backlinkTitles(note.plainText)
+        for (row in allNotes) {
+            if (row.locked || row.trashedAt != null) continue
+            val titles = NoteDocument.backlinkTitles(row.plainText)
             for (title in titles) {
-                val target = noteDao.getByTitle(title) ?: continue
-                if (target.id == note.id || target.locked) continue
-                linkDao.insertAll(listOf(NoteLinkEntity(sourceId = note.id, targetId = target.id)))
+                val target = noteDao.getLinkTargetByTitle(title) ?: continue
+                if (target.id == row.id || target.locked) continue
+                linkDao.insertAll(listOf(NoteLinkEntity(sourceId = row.id, targetId = target.id)))
             }
         }
     }

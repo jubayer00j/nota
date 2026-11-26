@@ -53,6 +53,22 @@ data class NoteDedupeRow(
     val folderId: String?,
 )
 
+/** Codex R32-F1, follow-on: the index rebuild's row — exactly the
+ *  columns [app.nota.data.backup.rebuildLibraryIndexes] reads
+ *  (id, title, plainText, locked, trashedAt, folderId). The
+ *  rebuild used to load full entities too, so the same oversized
+ *  row crashed the import at the finish even with the dedupe seed
+ *  fixed. This projection never touches the body column
+ *  (contentHtml). */
+data class NoteIndexRow(
+    val id: String,
+    val title: String,
+    val plainText: String,
+    val locked: Boolean,
+    val trashedAt: Long?,
+    val folderId: String?,
+)
+
 /** Performance chapter 2 (F3/F6): the library stamp — the
  *  invalidation key for the corpus cache and the semantic
  *  reconcile stamp gate, read on every search keystroke and
@@ -121,6 +137,15 @@ data class NoteLinkTarget(
     val title: String,
 )
 
+/** Codex R32-F1, follow-on: a [[ ]] link target at row weight —
+ *  the rebuild's backlink loop reads id + locked only (see
+ *  [app.nota.data.backup.rebuildLibraryIndexes]), so resolving a
+ *  link to an oversized note must not load its full row. */
+data class NoteLinkTargetRow(
+    val id: String,
+    val locked: Boolean,
+)
+
 @Dao
 interface NoteDao {
     /** Phase 5.1: every note incl. trashed/archived — the reminder
@@ -163,6 +188,12 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE title = :title LIMIT 1")
     suspend fun getByTitle(title: String): NoteEntity?
 
+    /** Codex R32-F1, follow-on: the rebuild's backlink loop at row
+     *  weight — id + locked are all it reads (see
+     *  [app.nota.data.backup.rebuildLibraryIndexes]). */
+    @Query("SELECT id, locked FROM notes WHERE title = :title LIMIT 1")
+    suspend fun getLinkTargetByTitle(title: String): NoteLinkTargetRow?
+
     @Query("SELECT * FROM notes WHERE id = :id")
     fun observeById(id: String): Flow<NoteEntity?>
 
@@ -182,6 +213,16 @@ interface NoteDao {
      *  processed. */
     @Query("SELECT title, createdAt, folderId FROM notes")
     suspend fun getAllDedupeRows(): List<NoteDedupeRow>
+
+    /** Codex R32-F1, follow-on: the index rebuild at row weight —
+     *  exactly the columns
+     *  [app.nota.data.backup.rebuildLibraryIndexes] reads. Same
+     *  rows as [getAll], no contentHtml: an oversized existing row
+     *  can exceed Android's CursorWindow (2 MB) and crash the
+     *  rebuild — and with it the import, restore or copy that
+     *  called it. */
+    @Query("SELECT id, title, plainText, locked, trashedAt, folderId FROM notes")
+    suspend fun getAllIndexRows(): List<NoteIndexRow>
 
     /** Every note, observed (Phase 4.4: the link graph's node metadata). */
     @Query("SELECT * FROM notes")

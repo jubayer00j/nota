@@ -234,6 +234,13 @@ class NoteImportRobolectricTest {
         // processed. The seed now reads a narrow projection
         // (title, createdAt, folderId), so the oversized row never
         // crosses the cursor and the import proceeds normally.
+        // The same hazard lived one call later, in the run-end
+        // rebuild (its getAll() + the backlink loop's getByTitle)
+        // — the rebuild is projected too, so a link to the
+        // oversized note resolves as well. Note the assertions
+        // below read through the projection themselves: a full
+        // getAll()/getById on the oversized row would throw
+        // SQLiteBlobTooBigException.
         val stack = newStack()
         stack.db.noteDao().upsert(
             NoteEntity(
@@ -242,6 +249,16 @@ class NoteImportRobolectricTest {
                 contentHtml = "x".repeat(3_000_000),
                 createdAt = 1_700_000_000_000L,
                 updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "linker",
+                title = "Linker",
+                contentHtml = "<p>see [[Huge]]</p>",
+                plainText = "see [[Huge]]",
+                createdAt = 1_700_000_000_002L,
+                updatedAt = 1_700_000_000_002L,
             ),
         )
         val outcome = stack.repo.importNotes(
@@ -263,8 +280,9 @@ class NoteImportRobolectricTest {
         )
         assertEquals(1, outcome.report.imported)
         assertEquals(0, outcome.report.duplicates)
-        assertEquals(2, stack.db.noteDao().getAll().size)
-        assertEquals(3_000_000, stack.db.noteDao().getById("oversized")?.contentHtml?.length)
+        assertEquals(3, stack.db.noteDao().getAllDedupeRows().size)
+        assertTrue(stack.db.noteDao().getAllDedupeRows().any { it.title == "Huge" })
+        assertEquals(1, stack.db.noteLinkDao().count())
     }
 
     @Test
@@ -327,7 +345,7 @@ class NoteImportRobolectricTest {
         )
         assertEquals(0, outcome.report.imported)
         assertEquals(1, outcome.report.duplicates)
-        assertEquals(1, stack.db.noteDao().getAll().size)
+        assertEquals(1, stack.db.noteDao().getAllDedupeRows().size)
     }
 
     @Test
