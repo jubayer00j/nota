@@ -3,6 +3,7 @@ package app.nota.data.importing
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.backup.rebuildLibraryIndexes
 import app.nota.data.db.DatabaseProvider
+import app.nota.data.db.FolderEntity
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import app.nota.data.repository.refreshFtsEntry
@@ -222,6 +223,111 @@ class NoteImportRobolectricTest {
         val outcome = stack.repo.importKeepZip(keepZip())
         assertEquals(4, outcome.report.imported)
         assertEquals(1, outcome.report.duplicates)
+    }
+
+    @Test
+    fun oversizedExistingNoteDoesNotBlockImport() = runBlocking {
+        // R32-F1: the dedupe seed used to run a full-entity
+        // getAll(), materialising every note's contentHtml — a
+        // single existing row above Android's 2 MB CursorWindow
+        // limit crashes the import before the first note is
+        // processed. The seed now reads a narrow projection
+        // (title, createdAt, folderId), so the oversized row never
+        // crosses the cursor and the import proceeds normally.
+        val stack = newStack()
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "oversized",
+                title = "Huge",
+                contentHtml = "x".repeat(3_000_000),
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        val outcome = stack.repo.importNotes(
+            listOf(
+                ImportedNote(
+                    title = "Small",
+                    contentHtml = "<p>small</p>",
+                    createdAt = 1_700_000_000_001L,
+                    updatedAt = 1_700_000_000_001L,
+                    pinned = false,
+                    archived = false,
+                    trashedAt = null,
+                    tagNames = emptyList(),
+                    folderName = null,
+                    images = emptyList(),
+                    sourceName = "small.md",
+                ),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+        assertEquals(3_000_000, stack.db.noteDao().getById("oversized")?.contentHtml?.length)
+    }
+
+    @Test
+    fun oversizedExistingNoteStillSeedsDedupe() = runBlocking {
+        // R32-F1, dated half: the projection must carry the exact
+        // fields the seed keys on — an oversized existing note with
+        // the same (title, createdAt) as an incoming Keep note
+        // still dedupes it.
+        val stack = newStack()
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "oversized-shopping",
+                title = "Shopping",
+                contentHtml = "x".repeat(3_000_000),
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        val outcome = stack.repo.importKeepZip(keepZip())
+        assertEquals(4, outcome.report.imported)
+        assertEquals(1, outcome.report.duplicates)
+    }
+
+    @Test
+    fun oversizedDatelessNoteStillSeedsFolderDedupe() = runBlocking {
+        // R32-F1, unknown-date half: the seeded key is (title,
+        // folder) — the projection must carry folderId, so an
+        // oversized dateless note in a folder still blocks a
+        // same-title dateless import into that folder.
+        val stack = newStack()
+        stack.db.folderDao().upsert(
+            FolderEntity(id = "folder-a", name = "A", createdAt = 0L, updatedAt = 0L),
+        )
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "oversized-meeting",
+                folderId = "folder-a",
+                title = "meeting",
+                contentHtml = "x".repeat(3_000_000),
+                createdAt = 0L,
+                updatedAt = 0L,
+            ),
+        )
+        val outcome = stack.repo.importNotes(
+            listOf(
+                ImportedNote(
+                    title = "meeting",
+                    contentHtml = "<p>again</p>",
+                    createdAt = 0L,
+                    updatedAt = 0L,
+                    pinned = false,
+                    archived = false,
+                    trashedAt = null,
+                    tagNames = emptyList(),
+                    folderName = "A",
+                    images = emptyList(),
+                    sourceName = "meeting.md",
+                ),
+            ),
+        )
+        assertEquals(0, outcome.report.imported)
+        assertEquals(1, outcome.report.duplicates)
+        assertEquals(1, stack.db.noteDao().getAll().size)
     }
 
     @Test

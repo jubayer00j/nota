@@ -433,12 +433,18 @@ class NoteImportRepository(
                 folderNameById[folder.id] = folder.name
             }
 
+            // The dedupe seed reads title, createdAt and folderId
+            // only — through the narrow projection (Codex R32-F1),
+            // never a full-entity getAll(): a single oversized
+            // existing row can exceed Android's CursorWindow (2 MB)
+            // and crash the import before the first note is
+            // processed.
             val seen = HashSet<String>()
-            for (note in runDb.noteDao().getAll()) {
-                seen += if (note.createdAt == 0L) {
-                    dedupeKeyUnknownDate(note.title, folderNameById[note.folderId], null)
+            for (row in runDb.noteDao().getAllDedupeRows()) {
+                seen += if (row.createdAt == 0L) {
+                    dedupeKeyUnknownDate(row.title, folderNameById[row.folderId], null)
                 } else {
-                    dedupeKey(note.title, note.createdAt)
+                    dedupeKey(row.title, row.createdAt)
                 }
             }
             // Keys of notes imported by this run. `seen` is seeded

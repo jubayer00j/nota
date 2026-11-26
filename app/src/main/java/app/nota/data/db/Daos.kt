@@ -40,6 +40,19 @@ data class NoteTextRow(
     val plainText: String,
 )
 
+/** Codex R32-F1: the import engine's dedupe seed — exactly the
+ *  columns the seed reads (title, createdAt, folderId). The seed
+ *  used to run a full-entity getAll(), materialising every note's
+ *  contentHtml and plainText; a single oversized existing row can
+ *  exceed Android's CursorWindow (2 MB) and crash the import before
+ *  the first note is processed. This projection never touches the
+ *  body columns. */
+data class NoteDedupeRow(
+    val title: String,
+    val createdAt: Long,
+    val folderId: String?,
+)
+
 /** Performance chapter 2 (F3/F6): the library stamp — the
  *  invalidation key for the corpus cache and the semantic
  *  reconcile stamp gate, read on every search keystroke and
@@ -159,6 +172,16 @@ interface NoteDao {
     /** Every note, for backlink re-resolution and the startup backfill. */
     @Query("SELECT * FROM notes")
     suspend fun getAll(): List<NoteEntity>
+
+    /** Codex R32-F1: the import dedupe seed at row weight — the
+     *  seed reads title, createdAt and folderId only (see
+     *  NoteImportRepository.importNotes), so it must not load full
+     *  entities. Same rows as [getAll], no body columns: an
+     *  oversized existing row can exceed Android's CursorWindow
+     *  (2 MB) and crash the import before the first note is
+     *  processed. */
+    @Query("SELECT title, createdAt, folderId FROM notes")
+    suspend fun getAllDedupeRows(): List<NoteDedupeRow>
 
     /** Every note, observed (Phase 4.4: the link graph's node metadata). */
     @Query("SELECT * FROM notes")
