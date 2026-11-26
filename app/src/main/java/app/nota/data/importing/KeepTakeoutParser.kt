@@ -71,6 +71,13 @@ object KeepTakeoutParser {
         } catch (e: ImportZipException) {
             result.skippedFiles += SkippedImportFile("Takeout ZIP", e.message ?: "That ZIP couldn't be read.")
             return result
+        } catch (e: java.io.IOException) {
+            // (Codex R43-F1): corrupt entry data (bad CRC, truncated
+            // stream) makes ZipInputStream throw mid-walk — the same
+            // escape the Markdown parser's matching catch closes. The
+            // archive is reported as a damaged file, not a quota trip.
+            result.skippedFiles += SkippedImportFile("Takeout ZIP", "That ZIP file is damaged and couldn't be read.")
+            return result
         }
 
         // A file with a valid local-header signature that yields no
@@ -263,6 +270,13 @@ object KeepTakeoutParser {
             // abandoned rather than partially applied.
             result.skippedFiles += SkippedImportFile("Takeout ZIP", e.message ?: "That ZIP couldn't be read.")
             return result
+        } catch (e: java.io.IOException) {
+            // (Codex R43-F1): corrupt entry data (bad CRC, truncated
+            // stream) — same escape as pass 1. The whole archive is
+            // abandoned rather than partially applied, reported as a
+            // damaged file.
+            result.skippedFiles += SkippedImportFile("Takeout ZIP", "That ZIP file is damaged and couldn't be read.")
+            return result
         }
 
         // Pass 3: stream each referenced attachment entry straight to
@@ -311,6 +325,10 @@ object KeepTakeoutParser {
                 // The archive was already counted twice under the quota,
                 // so this is unreachable in practice; anything
                 // unextracted is counted as skipped below.
+            } catch (e: java.io.IOException) {
+                // (Codex R43-F1): corrupt entry data mid-walk — the
+                // entries never reached are counted as skipped below,
+                // like a quota trip here.
             }
         }
 

@@ -480,16 +480,24 @@ private fun parseFrontMatter(text: String): FrontMatter {
 /* ---------------- Inline rendering (escape-first) ---------------- */
 
 /** Image references that are never resolved against local files:
- *  absolute http(s) URLs, data URIs, and protocol-relative URLs
- *  (`//host/path` — it carries no scheme of its own, but it names
- *  a remote host, not a local file; Codex R29-F2). A
- *  protocol-relative reference used to fall through to the
- *  resolver, whose unique-basename fallback could embed an
- *  unrelated local file that happened to share the name. Both the
- *  render path ([InlineImageSink.addImage]) and the reference
- *  pre-scan ([collectRefsFrom]) classify with this one pattern so
- *  the two can never disagree. */
-private val REMOTE_IMAGE_REF = Regex("^(https?:|data:|//)", RegexOption.IGNORE_CASE)
+ *  any URI scheme (`https:`, `ftp:`, `data:`, … — RFC 3986
+ *  `scheme:`), and protocol-relative URLs (`//host/path` — it
+ *  carries no scheme of its own, but it names a remote host, not
+ *  a local file; Codex R29-F2). A non-http(s) scheme used to fall
+ *  through to the resolver, whose unique-basename fallback could
+ *  embed an unrelated local file that happened to share the name
+ *  (Codex R43-F2). Both the render path ([InlineImageSink.addImage])
+ *  and the reference pre-scan ([collectRefsFrom]) classify with this
+ *  one pattern so the two can never disagree.
+ *
+ *  Edge: a relative filename containing a colon before any slash
+ *  (a literal `note:1.png`) also matches the scheme shape and is
+ *  treated as remote. That is accepted: a `scheme:` prefix in a
+ *  Markdown image reference is overwhelmingly a URI (`data:`
+ *  already proved scheme-prefixed refs are non-local), and colons
+ *  are illegal in Windows filenames, so such a file could only
+ *  come from a Unix export. */
+private val REMOTE_IMAGE_REF = Regex("^(//|[a-zA-Z][a-zA-Z0-9+.-]*:)", RegexOption.IGNORE_CASE)
 
 private class InlineImageSink(
     private val result: ImportParseResult,
@@ -522,8 +530,9 @@ private class InlineImageSink(
 
     fun addImage(alt: String, ref: String): String {
         // Remote images are never hot-linked into a note: Nota only
-        // embeds local attachments, so an http(s)/data/protocol-
-        // relative reference keeps its alt text and is counted.
+        // embeds local attachments, so a remote reference — any URI
+        // scheme, or protocol-relative — keeps its alt text and is
+        // counted.
         if (REMOTE_IMAGE_REF.containsMatchIn(ref) || resolver == null) {
             result.imagesUnresolved += 1
             return escapeImportHtml(alt)
@@ -2504,6 +2513,21 @@ object MarkdownImporter {
             // is applied from it (same contract as the backup reader).
             result.notes.clear()
             result.skippedFiles += SkippedImportFile("ZIP archive", e.message ?: "That ZIP couldn't be read.")
+            return result
+        } catch (e: java.io.IOException) {
+            // (Codex R43-F1): a ZIP with a valid header but corrupt
+            // entry data (bad CRC, truncated deflate stream) makes
+            // ZipInputStream throw mid-read. Only quota trips were
+            // translated, so the raw IOException escaped parseImportZip
+            // and failed the whole multi-file selection, losing its
+            // other valid picks. A read error abandons this archive
+            // like a quota trip does — nothing partial is applied —
+            // but it is reported as a damaged file, not a quota trip.
+            // ImportZipException is not an IOException, so the two
+            // catches cannot overlap: a quota trip still takes the
+            // branch above.
+            result.notes.clear()
+            result.skippedFiles += SkippedImportFile("ZIP archive", "That ZIP file is damaged and couldn't be read.")
             return result
         }
         if (inventoryTruncated) {

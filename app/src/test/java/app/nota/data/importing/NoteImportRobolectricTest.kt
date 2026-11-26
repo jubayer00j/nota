@@ -455,6 +455,160 @@ class NoteImportRobolectricTest {
         assertEquals(1, result.imagesUnresolved)
     }
 
+    /** A ZIP whose [corruptName] entry carries a deliberately wrong
+     *  CRC (Codex R43-F1): the header is valid, so the file passes
+     *  the magic check, but ZipInputStream throws ZipException when
+     *  the entry's data is read to the end. A STORED entry's CRC is
+     *  written as given — setting it to 0 forges the mismatch. */
+    private fun corruptCrcZipOf(
+        entries: Map<String, String>,
+        corruptName: String,
+    ): File {
+        val file = File.createTempFile("import-corrupt", ".zip")
+        ZipOutputStream(file.outputStream().buffered()).use { zip ->
+            for ((name, body) in entries) {
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                val entry = ZipEntry(name)
+                if (name == corruptName) {
+                    entry.method = ZipEntry.STORED
+                    entry.size = bytes.size.toLong()
+                    entry.compressedSize = bytes.size.toLong()
+                    entry.crc = 0L // deliberately wrong
+                }
+                zip.putNextEntry(entry)
+                zip.write(bytes)
+                zip.closeEntry()
+            }
+        }
+        return file
+    }
+
+    @Test
+    fun corruptMarkdownZipIsSkippedAndSelectionKeepsOtherPicks() = runBlocking {
+        // R43-F1: a ZIP with a valid header but corrupt entry data
+        // used to throw ZipException out of parseImportZip, failing
+        // the whole multi-file selection. The corrupt archive is now
+        // one skipped file and the selection's other picks import.
+        val stack = newStack()
+        val dir = stagingDir()
+        val good = File(dir, "good.md").apply { writeText("# Good\n\nbody") }
+        val corrupt = corruptCrcZipOf(
+            linkedMapOf(
+                "notes/a.md" to "# A\n\nbody a",
+                "notes/b.md" to "# B\n\nbody b",
+            ),
+            corruptName = "notes/b.md",
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("good.md", good, 1_700_000_000_000L),
+                StagedImportFile("bad.zip", corrupt, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(1, stack.db.noteDao().getAll().size)
+        assertEquals(
+            listOf(SkippedImportFile("ZIP archive", "That ZIP file is damaged and couldn't be read.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
+    fun corruptKeepZipIsReportedSkipped() = runBlocking {
+        // R43-F1, Keep path: a corrupt Takeout used to throw out of
+        // importKeepZip. It is now reported as one skipped file.
+        val stack = newStack()
+        val corrupt = corruptCrcZipOf(
+            linkedMapOf(
+                "Takeout/Keep/one.json" to """{"title":"One","textContent":"body","createdTimestampUsec":1700000000000000}""",
+            ),
+            corruptName = "Takeout/Keep/one.json",
+        )
+        val outcome = stack.repo.importKeepZip(corrupt)
+        assertEquals(0, outcome.report.imported)
+        assertEquals(
+            listOf(SkippedImportFile("Takeout ZIP", "That ZIP file is damaged and couldn't be read.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
+    fun quotaTrippingZipStillAbortsWithQuotaReason() = runBlocking {
+        // R43-F1 control: the new read-error catch must not swallow
+        // quota trips — a ZIP past the name budget still aborts with
+        // the quota reason, and the selection's other picks import.
+        val stack = newStack()
+        val dir = stagingDir()
+        val good = File(dir, "good.md").apply { writeText("# Good\n\nbody") }
+        val entries = LinkedHashMap<String, String>()
+        repeat(150) { i ->
+            entries["notes/filler-$i-" + "x".repeat(59_900) + ".md"] = "# Filler $i\n\nbody"
+        }
+        entries["notes/" + "z".repeat(59_900) + ".md"] = "# Hidden\n\nnever listed"
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("good.md", good, 1_700_000_000_000L),
+                StagedImportFile("big.zip", zipOf(entries), 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(
+            listOf(
+                SkippedImportFile(
+                    "ZIP archive",
+                    "That ZIP has too many or too long entry names to import safely.",
+                ),
+            ),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
+    fun otherSchemeImageRefsAreNotResolvedLocally() {
+        // R43-F2: REMOTE_IMAGE_REF only knew http(s)/data:// — an
+        // ftp:// or sftp:// ref flowed to the resolver, whose
+        // unique-basename fallback embedded the selection's unrelated
+        // local x.png. Any URI scheme is now remote in both the
+        // pre-scan and the render path: alt text kept, counted
+        // unresolved, nothing embedded.
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "notes/remote.md" to "# Remote\n\n![Remote pic](ftp://cdn.example.com/x.png)\n\n![Second](sftp://files.example.com/x.png)",
+                ),
+                mapOf("notes/x.png" to pngBytes),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, result.notes.size)
+        val note = result.notes[0]
+        assertTrue(note.images.isEmpty())
+        assertTrue(note.contentHtml.contains("Remote pic"))
+        assertTrue(note.contentHtml.contains("Second"))
+        assertEquals(2, result.imagesUnresolved)
+    }
+
+    @Test
+    fun relativeImageRefStillResolvesAndHttpsStaysRemote() {
+        // R43-F2 controls: a plain relative ref still resolves to
+        // the local file, and https: / protocol-relative refs are
+        // still classified remote, as before.
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "notes/mixed.md" to "# Mixed\n\n![Local](x.png)\n\n![Web](https://example.com/y.png)\n\n![Proto](//cdn.example.com/z.png)",
+                ),
+                mapOf("notes/x.png" to pngBytes),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, result.notes.size)
+        val note = result.notes[0]
+        assertEquals(1, note.images.size)
+        assertEquals("Local", note.images[0].alt)
+        assertEquals(2, result.imagesUnresolved)
+    }
+
     @Test
     fun markdownSelectionReportsUnrecognisedFiles() = runBlocking {
         val stack = newStack()
