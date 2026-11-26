@@ -31,6 +31,52 @@ data class ImportRunResult(
     val imageSaveFailures: Int,
 )
 
+/** The image-token prefix the Markdown converter emits
+ *  (MarkdownImport.kt: `%%NOMA_IMPORT_IMAGE_<salt>_<seq>%%`):
+ *  every token starts with it and ends with `%%`, with no `%%`
+ *  inside, so a single scan can find each token's span. */
+private const val IMAGE_TOKEN_PREFIX = "%%NOMA_IMPORT_IMAGE_"
+
+/**
+ * Replaces every %%NOMA_IMPORT_IMAGE_...%% token in [content]
+ * with its replacement in a single scan (Codex R36-F2). The old
+ * per-image `content.replace(token, embed)` scanned and copied
+ * the whole body once per DISTINCT image — quadratic for a note
+ * with thousands of images (the R30-F1 dedupe only collapses
+ * repeats of the same file). A token with no replacement is
+ * copied through unchanged, and text after a prefix with no
+ * closing `%%` is copied through too — the same as a replace
+ * that matches nothing. Replacements are applied left to right,
+ * so every occurrence of a token gets the same replacement
+ * (Codex R30-F1). A replacement is never re-scanned, so a
+ * token-like string inside an alt text stays literal.
+ */
+internal fun replaceImageTokensOnce(
+    content: String,
+    replacements: Map<String, String>,
+): String {
+    if (replacements.isEmpty()) return content
+    val out = StringBuilder(content.length)
+    var cursor = 0
+    while (true) {
+        val start = content.indexOf(IMAGE_TOKEN_PREFIX, cursor)
+        if (start == -1) {
+            out.append(content, cursor, content.length)
+            break
+        }
+        val end = content.indexOf("%%", start + IMAGE_TOKEN_PREFIX.length)
+        if (end == -1) {
+            out.append(content, cursor, content.length)
+            break
+        }
+        out.append(content, cursor, start)
+        val token = content.substring(start, end + 2)
+        out.append(replacements[token] ?: token)
+        cursor = end + 2
+    }
+    return out.toString()
+}
+
 /**
  * The import engine — 1.x `importNotes` rebuilt on Nota's bulk-write
  * discipline (the applyBackup pattern):
@@ -703,6 +749,21 @@ class NoteImportRepository(
             // keeps file and row together. The DB transaction below
             // runs inside the same hold.
             attachmentStore.withFileLock {
+                // (Codex R36-F2): the substitutions for every image
+                // token are collected here and applied in ONE pass
+                // over the body below. The old loop called
+                // content.replace(token, embed) once per image, and
+                // each call scanned and copied the whole body — a
+                // note with thousands of DISTINCT images paid a
+                // whole-body copy per image (the R30-F1 dedupe only
+                // collapses repeats of the same file). Staging still
+                // runs per image: each embed needs its staged id, and
+                // a failed save needs its alt text. Null-token images
+                // (Keep attachments) append their paragraph at the
+                // end, as before — collected here, appended after the
+                // pass, in image order.
+                val tokenReplacements = LinkedHashMap<String, String>()
+                val appendedParagraphs = StringBuilder()
                 for (image in item.images) {
                     try {
                         // Stage first, insert later: the image row is
@@ -715,22 +776,19 @@ class NoteImportRepository(
                         stagedAttachments += saved
                         val embed = "<img src=\"nota-attachment://${saved.id}\" " +
                             "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
-                        // replace, not replaceFirst (Codex R30-F1 /
-                        // R21-F2): one image spec now stands for every
-                        // occurrence of the same image in the note, so
-                        // its token is emitted once per occurrence and
-                        // every occurrence is the embed. That is safe
-                        // because the token is salted per file — literal
-                        // text can't match it — so any occurrence in
-                        // the content is an emitted placeholder.
-                        // (R21-F2's replaceFirst was right when each
-                        // token was emitted exactly once; with the
-                        // R30-F1 dedupe it would leave raw tokens in
-                        // the persisted body.)
-                        content = if (image.token != null) {
-                            content.replace(image.token, embed)
+                        // First spec wins for a repeated token (Codex
+                        // R30-F1 / R21-F2): one image spec stands for
+                        // every occurrence of the same image in the
+                        // note, so its token is emitted once per
+                        // occurrence and every occurrence is the embed.
+                        // That is safe because the token is salted per
+                        // file — literal text can't match it — so any
+                        // occurrence in the content is an emitted
+                        // placeholder.
+                        if (image.token != null) {
+                            tokenReplacements.putIfAbsent(image.token, embed)
                         } else {
-                            content + "<p>$embed</p>"
+                            appendedParagraphs.append("<p>$embed</p>")
                         }
                     } catch (e: Exception) {
                         // The image itself failed to save (a format the
@@ -745,14 +803,21 @@ class NoteImportRepository(
                             // Same replace rule as the success path
                             // (Codex R30-F1): every occurrence of the
                             // token becomes the alt text.
-                            content = content.replace(image.token, escapeImportHtml(image.alt))
+                            tokenReplacements.putIfAbsent(
+                                image.token,
+                                escapeImportHtml(image.alt),
+                            )
                         } else if (image.alt.isNotBlank()) {
-                            content += "<p>${escapeImportHtml(image.alt)}</p>"
+                            appendedParagraphs.append(
+                                "<p>${escapeImportHtml(image.alt)}</p>",
+                            )
                         }
                     } finally {
                         if (image.deleteAfterUse) runCatching { image.stagedFile.delete() }
                     }
                 }
+                content = replaceImageTokensOnce(content, tokenReplacements) +
+                    appendedParagraphs.toString()
                 // Recheck the row size after image expansion (Codex
                 // R12-F2): the 1 MB cap ran on the pre-expansion content,
                 // but each embed replaces a short token with a longer

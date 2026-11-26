@@ -3717,4 +3717,76 @@ class NoteImportRobolectricTest {
         assertEquals(listOf(existing.id), crossRefs.filter { it.noteId == note.id }.map { it.tagId })
     }
 
+    @Test
+    fun frontMatterHeavyMemberDoesNotStarveLaterImage() = runBlocking {
+        // (Codex R36-F1): the pre-scan used to advance its simulated
+        // aggregate budget by the RAW member length, so a member with
+        // huge front matter and a tiny body shrank the remaining
+        // budget for later members — the next member's image was never
+        // staged, though walk 4 imported the note with the image
+        // unresolved. The pre-scan now advances by the retained size
+        // (body after front-matter strip + title + tags). The two
+        // members total ~18M raw chars — past the 16M aggregate cap
+        // charged raw, but almost nothing retained — so only the
+        // retained accounting lets the second member's image resolve.
+        val stack = newStack()
+        val big1 = "---\nnote: " + "x".repeat(9_500_000) + "\n---\n# TinyOne\n\nbody"
+        val big2 = "---\nnote: " + "y".repeat(8_500_000) + "\n---\n# TinyTwo\n\n![p](pic.png)"
+        val zip = zipOf(
+            linkedMapOf(
+                "notes/big1.md" to big1,
+                "notes/big2.md" to big2,
+            ),
+            mapOf("notes/pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownZip(zip)
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        assertTrue(
+            notes.first { it.title == "TinyTwo" }.contentHtml.contains("nota-attachment://"),
+        )
+    }
+
+    @Test
+    fun manyDistinctImagesAllEmbedInOnePass() = runBlocking {
+        // (Codex R36-F2): the engine used to call content.replace
+        // once per image token — one whole-body scan+copy per
+        // DISTINCT image. The substitutions are now applied in a
+        // single pass, so a note with many distinct images embeds
+        // every one, with one attachment row each and no raw token
+        // left in the stored body.
+        val stack = newStack()
+        val imageFile = File.createTempFile("many-pic", ".png")
+            .apply { writeBytes(pngBytes) }
+        val count = 60
+        val tokens = (0 until count).map { "%%NOMA_IMPORT_IMAGE_$it%%" }
+        val note = ImportedNote(
+            title = "ManyImages",
+            contentHtml = "<p>" + tokens.joinToString(" ") + "</p>",
+            createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = null,
+            images = tokens.mapIndexed { i, token ->
+                ImportedImage(
+                    "pic$i.png", "image/png", imageFile,
+                    pngBytes.size.toLong(), "alt $i", token,
+                    deleteAfterUse = false,
+                )
+            },
+            sourceName = "many-images.md",
+        )
+        val result = stack.repo.importNotes(listOf(note))
+        assertEquals(1, result.report.imported)
+        assertEquals(0, result.imageSaveFailures)
+        val stored = stack.db.noteDao().getAll().single()
+        assertFalse(stored.contentHtml.contains("%%NOMA_IMPORT_IMAGE"))
+        assertEquals(
+            count,
+            "nota-attachment://".toRegex().findAll(stored.contentHtml).count(),
+        )
+        assertEquals(count, stack.db.attachmentDao().getAll().size)
+    }
+
 }

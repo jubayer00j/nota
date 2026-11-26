@@ -1162,6 +1162,45 @@ class MarkdownImportTest {
         // A short name is untouched, extension and all.
         assertEquals("pic.png", stagingFileName("pic.png", mutableSetOf()))
     }
+
+    @Test
+    fun replaceImageTokensOnceAppliesAllSubstitutionsInOnePass() {
+        // (Codex R36-F2): the engine used to call content.replace
+        // once per image token — one whole-body scan+copy per
+        // DISTINCT image. The substitutions are now applied in a
+        // single scan: every occurrence of a token gets the same
+        // replacement (Codex R30-F1), and an empty map returns the
+        // content untouched.
+        val content = "<p>%%NOMA_IMPORT_IMAGE_0%% and %%NOMA_IMPORT_IMAGE_1%% " +
+            "and %%NOMA_IMPORT_IMAGE_0%% again</p>"
+        assertEquals(
+            "<p><img a> and <img b> and <img a> again</p>",
+            replaceImageTokensOnce(
+                content,
+                mapOf(
+                    "%%NOMA_IMPORT_IMAGE_0%%" to "<img a>",
+                    "%%NOMA_IMPORT_IMAGE_1%%" to "<img b>",
+                ),
+            ),
+        )
+        assertEquals("plain", replaceImageTokensOnce("plain", emptyMap()))
+    }
+
+    @Test
+    fun replaceImageTokensOnceLeavesUnknownTokensAlone() {
+        // A token with no replacement is copied through unchanged,
+        // and text after a prefix with no closing %% is copied
+        // through too — the same as a replace that matches nothing.
+        val content = "<p>%%NOMA_IMPORT_IMAGE_9%% and %%NOMA_IMPORT_IMAGE_0%% " +
+            "and a dangling %%NOMA_IMPORT_IMAGE_"
+        assertEquals(
+            "<p>%%NOMA_IMPORT_IMAGE_9%% and <img a> and a dangling %%NOMA_IMPORT_IMAGE_",
+            replaceImageTokensOnce(
+                content,
+                mapOf("%%NOMA_IMPORT_IMAGE_0%%" to "<img a>"),
+            ),
+        )
+    }
 }
 
 /**

@@ -2024,10 +2024,12 @@ object MarkdownImporter {
             // the selection-level total from earlier archives
             // ([alreadyRetainedTextChars], converted titles + bodies
             // as the engine counts them) minus what this archive's
-            // pre-scan already accepted, charged at raw source
-            // length plus the filename-title reservation — exactly
-            // the quantities walk 4's own aggregate check
-            // (appendParsedFile) uses. Without it, a member the
+            // pre-scan already accepted. A member is charged what
+            // walk 4's addNote will charge for it: for Markdown,
+            // the retained body (after front matter is stripped —
+            // Codex R36-F1) plus the filename-title reservation
+            // plus its tags; for .txt, the raw source length,
+            // which IS its body. Without it, a member the
             // merge will refuse on the remaining budget still got
             // its refs collected and its images staged against the
             // shared selection budget. The simulation is exact for
@@ -2101,13 +2103,32 @@ object MarkdownImporter {
                         // (same BOM strip as markdownFileToImportedNote);
                         // a member with no front matter is unchanged,
                         // since parseFrontMatter returns its text whole.
+                        val frontMatter = parseFrontMatter(
+                            read.text.removePrefix("\uFEFF"),
+                        )
                         collectImageRefs(
                             entry.name,
-                            parseFrontMatter(read.text.removePrefix("\uFEFF")).body,
+                            frontMatter.body,
                             referenced,
                         )
-                        scannedTextChars += read.text.length +
-                            titleFromFileName(base).length
+                        // (Codex R36-F1): advance by the size walk 4's
+                        // addNote will charge — retained title + body
+                        // + tags — not the raw source length. Front
+                        // matter is stripped before rendering, so a
+                        // member with huge front matter and a tiny body
+                        // retains almost nothing; charging its raw
+                        // length would shrink the simulated remaining
+                        // budget for later members and leave their
+                        // images unstaged, though walk 4 imports them.
+                        // The body length is a lower bound on the
+                        // rendered body (escaping and block markup only
+                        // expand it, apart from the consumed H1 line),
+                        // so the simulation can only over-scan by the
+                        // expansion delta — an image staged for a note
+                        // walk 4 refuses, never the reverse.
+                        scannedTextChars += frontMatter.body.length +
+                            titleFromFileName(base).length +
+                            frontMatter.tags.sumOf { it.length.toLong() }
                         eligibleScanned++
                     }
                     else -> { /* walk 4 skips this member too */ }
