@@ -480,9 +480,13 @@ class MarkdownImportTest {
         // spec per occurrence, and the engine staged every copy
         // before the size check could refuse the note. Now one spec
         // stands for every occurrence: the single attachment embeds
-        // at each repeat, and the token appears once per repeat in
-        // the parsed content (the engine replaces every occurrence
-        // at write time).
+        // at each repeat.
+        // (Codex R38-F2): each repeat gets its OWN token carrying
+        // its own alt — the old shape returned the first
+        // occurrence's token, so the engine embedded the first alt
+        // at every occurrence. The spec still stands for every
+        // occurrence (one staged file), but the content holds one
+        // distinct token per repeat, each appearing exactly once.
         val imageFile = File.createTempFile("pic", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val resolver = createImportImageResolver(listOf("pic.png" to imageFile))
         val repeats = 200
@@ -493,9 +497,15 @@ class MarkdownImportTest {
         val note = result.notes[0]
         assertEquals(1, note.images.size)
         assertEquals(0, result.imagesUnresolved)
-        val token = note.images[0].token
-        assertNotNull(token)
-        assertEquals(repeats, note.contentHtml.split(token!!).size - 1)
+        val spec = note.images[0]
+        assertNotNull(spec.token)
+        assertEquals(repeats, spec.occurrences.size)
+        assertEquals(repeats, spec.occurrences.map { it.token }.distinct().size)
+        assertEquals(repeats, note.contentHtml.split("%%NOMA_IMPORT_IMAGE").size - 1)
+        for (occurrence in spec.occurrences) {
+            assertEquals(1, note.contentHtml.split(occurrence.token).size - 1)
+            assertEquals("p", occurrence.alt)
+        }
         imageFile.delete()
     }
 
