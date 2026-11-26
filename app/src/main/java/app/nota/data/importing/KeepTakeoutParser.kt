@@ -59,10 +59,27 @@ object KeepTakeoutParser {
         // Pass 1: entry names only. The walker retains names (8 MiB
         // budget) and counts every byte under the archive quota; no
         // file contents are buffered at all.
+        var entriesSeen = 0
         try {
-            reader.walk { /* names only; the walker drains + counts */ }
+            reader.walk { entriesSeen++ }
         } catch (e: ImportZipException) {
             result.skippedFiles += SkippedImportFile("Takeout ZIP", e.message ?: "That ZIP couldn't be read.")
+            return result
+        }
+
+        // A file with a valid local-header signature that yields no
+        // entries at all is truncated or corrupt, not an empty
+        // archive (Codex R23-F3 — the Markdown parser's R11-F2
+        // guard, same shape): ZipInputStream returns null for the
+        // first entry without throwing, so without this the run
+        // would report a normal "Imported 0 notes". A valid empty
+        // archive (end-of-central-directory record only)
+        // legitimately yields no entries.
+        if (entriesSeen == 0 && !isEmptyZipArchive(zipFile)) {
+            result.skippedFiles += SkippedImportFile(
+                "Takeout ZIP",
+                "That file couldn't be read as a ZIP archive.",
+            )
             return result
         }
 

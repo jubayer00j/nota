@@ -568,6 +568,51 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun truncatedKeepZipIsReportedUnreadable() {
+        // R23-F3: a file starting with the local-header signature
+        // that yields zero entries is truncated, not an empty
+        // archive — it used to report a normal "Imported 0 notes".
+        val truncated = File.createTempFile("truncated-keep", ".zip").apply {
+            writeBytes(byteArrayOf('P'.code.toByte(), 'K'.code.toByte(), 0x03, 0x04, 0, 0))
+        }
+        val dir = stagingDir()
+        try {
+            val result = KeepTakeoutParser.parse(truncated, dir)
+            assertEquals(0, result.notes.size)
+            assertEquals(
+                listOf(
+                    SkippedImportFile(
+                        "Takeout ZIP",
+                        "That file couldn't be read as a ZIP archive.",
+                    ),
+                ),
+                result.skippedFiles,
+            )
+        } finally {
+            truncated.delete()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun validEmptyKeepZipImportsAsEmptyWithoutError() {
+        // R23-F3: a valid empty archive (end-of-central-directory
+        // record only) still imports as an empty run — no
+        // unreadable-file reason.
+        val empty = File.createTempFile("empty-keep", ".zip")
+        ZipOutputStream(empty.outputStream().buffered()).use { }
+        val dir = stagingDir()
+        try {
+            val result = KeepTakeoutParser.parse(empty, dir)
+            assertEquals(0, result.notes.size)
+            assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+        } finally {
+            empty.delete()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun markdownZipInventoryBudgetTruncatesLongNames() {
         // R4-F1 as re-decided by R16-F1: the walk-1 inventory used to
         // be bounded by the same 8 MiB retained-name budget as the
@@ -1702,6 +1747,44 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun frontMatterImageRefsDoNotConsumeSharedBudget() = runBlocking {
+        // R23-F2: front matter is metadata — parseFrontMatter strips
+        // it before rendering — so an image reference inside a
+        // front-matter field is never embedded and must not be staged
+        // against the shared extracted-image budget. ZIP A references
+        // its image only from front matter; ZIP B references its
+        // image for real. Each 1x1 PNG is 70 bytes; a 100-byte budget
+        // fits one image. Under the old shape A's front-matter image
+        // took 70 bytes and B's real image stayed unresolved.
+        val stack = newStack()
+        val zipA = zipOf(
+            linkedMapOf("a.md" to "---\ntitle: A\ncover: ![a](a.png)\n---\n\nBody text.\n"),
+            mapOf("a.png" to pngBytes),
+        )
+        val zipB = zipOf(
+            linkedMapOf("b.md" to "# B\n\n![b](b.png)"),
+            mapOf("b.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 1_700_000_000_000L),
+                StagedImportFile("b.zip", zipB, 1_700_000_000_001L),
+            ),
+            imageBudget = ExtractedImageBudget(totalBytes = 100),
+        )
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        // The front-matter reference never rendered, so no embed and
+        // no unresolved count for it — and no trace of it in the note.
+        assertFalse(notes.first { it.title == "A" }.contentHtml.contains("nota-attachment://"))
+        assertFalse(notes.first { it.title == "A" }.contentHtml.contains("a.png"))
+        // And the budget was left whole for the real reference.
+        assertTrue(notes.first { it.title == "B" }.contentHtml.contains("nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
     fun imageRefPreScanBoundLeavesLateRefsUnresolved() = runBlocking {
         // R20-F1: the pre-scan retained every distinct referenced
         // target and basename in two uncapped HashSets. The scan's
@@ -1943,6 +2026,63 @@ class NoteImportRobolectricTest {
         assertEquals(0, second.report.imported)
         assertEquals(2, second.report.duplicates)
         assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun sameNameDatelessLooseFilesFromDifferentFoldersBothImport() = runBlocking {
+        // R23-F1: two SAF picks from different folders share a
+        // display name ("note.md") and a title, both dateless,
+        // different contents — the display name alone is not an
+        // identity, so the old (title, folder, sourceName) run key
+        // collapsed them and the second was reported as a duplicate.
+        // The run key now carries a content hash for loose picks,
+        // so both land — and reimporting the same two still dedupes
+        // to zero new notes (the seeded (title, folder) key matches
+        // both).
+        val stack = newStack()
+        val dirA = stagingDir()
+        val dirB = stagingDir()
+        val a = File(dirA, "note.md").apply { writeText("# Shared\n\nalpha") }
+        val b = File(dirB, "note.md").apply { writeText("# Shared\n\nbeta") }
+        val staged = listOf(
+            StagedImportFile("note.md", a, 0L),
+            StagedImportFile("note.md", b, 0L),
+        )
+        val first = stack.repo.importMarkdownSelection(staged)
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals(2, notes.size)
+        assertEquals(0L, notes[0].createdAt)
+        assertEquals(0L, notes[1].createdAt)
+        assertEquals(setOf("<p>alpha</p>", "<p>beta</p>"), notes.map { it.contentHtml }.toSet())
+
+        val second = stack.repo.importMarkdownSelection(staged)
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun sameNameDatelessLooseFilesWithIdenticalContentDedupe() = runBlocking {
+        // R23-F1, the other side of the hash identity: two picks
+        // with the same name, title and contents ARE the same note,
+        // so the second is a duplicate — the hash only keeps apart
+        // notes whose contents differ.
+        val stack = newStack()
+        val dirA = stagingDir()
+        val dirB = stagingDir()
+        val a = File(dirA, "note.md").apply { writeText("# Shared\n\nsame") }
+        val b = File(dirB, "note.md").apply { writeText("# Shared\n\nsame") }
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("note.md", a, 0L),
+                StagedImportFile("note.md", b, 0L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(1, outcome.report.duplicates)
+        assertEquals(1, stack.db.noteDao().getAll().size)
     }
 
     @Test

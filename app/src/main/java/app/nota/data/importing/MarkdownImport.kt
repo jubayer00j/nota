@@ -1089,6 +1089,12 @@ data class MarkdownFileInput(
     val path: String,
     val text: String,
     val lastModified: Long,
+    /** Stable per-source identity for the run dedupe of
+     *  unknown-date notes (Codex R23-F1) — see
+     *  [ImportedNote.sourceIdentity]. Null means the source name
+     *  plays that role. Only the loose-file path sets it (a
+     *  content hash); ZIP members keep their path identity. */
+    val sourceIdentity: String? = null,
 )
 
 private fun folderNameFromPath(path: String): String? {
@@ -1734,6 +1740,7 @@ object MarkdownImporter {
                 folderName = folderNameFromPath(file.path),
                 images = images,
                 sourceName = file.name,
+                sourceIdentity = file.sourceIdentity,
             )
         }
 
@@ -1765,6 +1772,7 @@ object MarkdownImporter {
             folderName = folderNameFromPath(file.path),
             images = images,
             sourceName = file.name,
+            sourceIdentity = file.sourceIdentity,
         )
     }
 
@@ -1892,9 +1900,19 @@ object MarkdownImporter {
                     ImportCaps.MAX_IMPORT_FILE_BYTES,
                 )) {
                     is CharBoundedText.Ok ->
+                        // Front matter is metadata, never body
+                        // (Codex R23-F2): parseFrontMatter strips it
+                        // before rendering, so an image reference
+                        // inside a front-matter field must not be
+                        // staged against the shared extracted-image
+                        // budget — it never appears in an imported
+                        // note. Scan the body the converter renders
+                        // (same BOM strip as markdownFileToImportedNote);
+                        // a member with no front matter is unchanged,
+                        // since parseFrontMatter returns its text whole.
                         collectImageRefs(
                             entry.name,
-                            read.text,
+                            parseFrontMatter(read.text.removePrefix("\uFEFF")).body,
                             referenced,
                         )
                     else -> { /* walk 4 skips this member too */ }

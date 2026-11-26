@@ -237,6 +237,20 @@ class NoteImportRepository(
                                         path = file.name,
                                         text = read.text,
                                         lastModified = file.lastModified,
+                                        // The display name is not an
+                                        // identity for a loose pick
+                                        // (Codex R23-F1): two SAF picks
+                                        // from different folders can
+                                        // share it, and the run dedupe
+                                        // key for dateless notes would
+                                        // collapse them. Carry the
+                                        // content hash as the note's
+                                        // source identity instead —
+                                        // different contents, different
+                                        // keys; identical contents are
+                                        // the same note and still
+                                        // dedupe.
+                                        sourceIdentity = contentHashHex(read.text),
                                     )
                                     merged.absorb(MarkdownImporter.parseMarkdownFile(input, resolver))
                                     // Same merge-time trim as the ZIP
@@ -290,15 +304,34 @@ class NoteImportRepository(
      *  so (title, createdAt) pairs are uniquely recoverable from the key. */
     private fun dedupeKey(title: String, createdAt: Long): String = "$title $createdAt"
 
+    /** SHA-256 of [text] as lowercase hex — the per-pick identity
+     *  for loose-file imports (Codex R23-F1): a picked file's
+     *  display name is not an identity (two SAF picks from
+     *  different folders can share it), so the run dedupe key for
+     *  dateless loose notes carries the content hash instead. The
+     *  decoded text is already in memory when this runs; two files
+     *  with the same decoded text convert to the same note, so the
+     *  same hash is the right identity for them. */
+    private fun contentHashHex(text: String): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val bytes = digest.digest(text.toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") {
+            (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+        }
+    }
+
     /**
      * Dedupe key for unknown-date notes (createdAt == 0, Codex R21-F1):
      * (title, folder, source). A dateless note's only stable identity
      * is where it came from, so the key carries the folder and — for
-     * notes imported in this run — the source file name. The seeded
+     * notes imported in this run — the source identity. The seeded
      * half passes sourceName = null: the library stores no per-source
      * identity for a note, so an existing note can only be matched on
-     * (title, folder); the run half adds the source name, which is
-     * what keeps two same-title dateless notes in one run apart.
+     * (title, folder); the run half adds the identity, which is what
+     * keeps two same-title dateless notes in one run apart. The
+     * identity is the source name for ZIP members and Keep notes
+     * (their paths are identities), and a content hash for loose
+     * picks (Codex R23-F1 — a display name is not an identity).
      * Components are length-prefixed: titles and folder names are free
      * text, so a plain separator could collide ("x 0 y" + "z" vs "x" +
      * "y 0 z"). Dated notes keep the plain (title, createdAt) key.
@@ -306,7 +339,7 @@ class NoteImportRepository(
      * Residual, by design: two dateless notes with the same title in
      * the SAME folder, imported in separate runs, still collapse
      * against the seeded key — nothing in the stored row tells them
-     * apart. Within one run the source name keeps them apart.
+     * apart. Within one run the source identity keeps them apart.
      */
     private fun dedupeKeyUnknownDate(
         title: String,
@@ -483,11 +516,18 @@ class NoteImportRepository(
                         // (Codex R21-F1): the seeded key has no source
                         // name — it only says a dateless note with
                         // this title already sits in this folder —
-                        // while the run key adds the source file,
+                        // while the run key adds the source identity,
                         // which is what keeps two same-title dateless
-                        // notes in one run apart.
+                        // notes in one run apart. The identity is the
+                        // source name for ZIP members and Keep notes,
+                        // and a content hash for loose picks (Codex
+                        // R23-F1 — a display name is not an identity).
                         val seedKey = dedupeKeyUnknownDate(item.title, item.folderName, null)
-                        val runKey = dedupeKeyUnknownDate(item.title, item.folderName, item.sourceName)
+                        val runKey = dedupeKeyUnknownDate(
+                            item.title,
+                            item.folderName,
+                            item.sourceIdentity ?: item.sourceName,
+                        )
                         seedKey in seen || runKey in seenRun
                     } else {
                         val key = dedupeKey(item.title, item.createdAt)
@@ -505,7 +545,11 @@ class NoteImportRepository(
                             .distinctBy { it.id }
                         imageSaveFailures += writeImportedNote(runDb, item, folderId, tags)
                         if (isUnknownDate) {
-                            seenRun += dedupeKeyUnknownDate(item.title, item.folderName, item.sourceName)
+                            seenRun += dedupeKeyUnknownDate(
+                                item.title,
+                                item.folderName,
+                                item.sourceIdentity ?: item.sourceName,
+                            )
                         } else {
                             seenRun += dedupeKey(item.title, item.createdAt)
                         }

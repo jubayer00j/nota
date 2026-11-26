@@ -173,6 +173,15 @@ class ImportedNote(
     val images: List<ImportedImage>,
     /** Original file/entry name — named in the report when the write fails. */
     val sourceName: String,
+    /** Stable per-source identity for the run dedupe of
+     *  unknown-date notes (Codex R23-F1): null means the source
+     *  name plays that role, which is right for ZIP members and
+     *  Keep notes (their paths are identities). A loose pick's
+     *  display name is NOT one — two SAF picks from different
+     *  folders can share it — so the loose-file path sets this to
+     *  a content hash of the file instead. Never persisted; the
+     *  run key is in-memory only. */
+    val sourceIdentity: String? = null,
 )
 
 data class SkippedImportFile(val name: String, val reason: String)
