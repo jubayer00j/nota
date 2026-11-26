@@ -3944,6 +3944,84 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun consumedH1ImageRefDoesNotConsumeImageBudget() = runBlocking {
+        // (Codex R41-F1): the ZIP pre-scan collected image refs from
+        // the body AFTER the front-matter strip but BEFORE the
+        // leading-H1 consumption, so an image inside the H1 was
+        // staged and charged against the shared image budget even
+        // though the converter drops the H1 line and the image is
+        // never embedded. The budget fits exactly one image: before
+        // the fix the H1 image stages first and the second member's
+        // real image is left unresolved; after the fix the H1 ref is
+        // never collected, so the real image stages and nothing is
+        // left unresolved — and the H1 note carries no image at all.
+        val budget = ExtractedImageBudget(totalBytes = pngBytes.size.toLong())
+        val parse = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "a.md" to "# Title ![h1](h1.png)\n\nBody text",
+                    "b.md" to "# Bee\n\n![p](pic.png)",
+                ),
+                mapOf("h1.png" to pngBytes, "pic.png" to pngBytes),
+            ),
+            stagingDir(), budget,
+        )
+        assertEquals(2, parse.notes.size)
+        assertEquals(0, parse.imagesUnresolved)
+        val h1Note = parse.notes.first { it.title.startsWith("Title") }
+        assertTrue(h1Note.images.isEmpty())
+        val bodyNote = parse.notes.first { it.title == "Bee" }
+        assertEquals(1, bodyNote.images.size)
+        assertEquals(0L, budget.remaining())
+    }
+
+    @Test
+    fun frontMatterTitleKeepsH1ImageRef() = runBlocking {
+        // (Codex R41-F1, control): with a front-matter title the H1
+        // is NOT consumed — it stays in the body — so its image
+        // reference is real and must still resolve. The strip fires
+        // only when front matter provided no title.
+        val budget = ExtractedImageBudget(totalBytes = 2L * pngBytes.size)
+        val parse = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "fm.md" to "---\ntitle: FM Title\n---\n# Head ![h](h1.png)\n\nBody ![b](pic.png)",
+                ),
+                mapOf("h1.png" to pngBytes, "pic.png" to pngBytes),
+            ),
+            stagingDir(), budget,
+        )
+        assertEquals(1, parse.notes.size)
+        assertEquals("FM Title", parse.notes[0].title)
+        assertEquals(2, parse.notes[0].images.size)
+        assertEquals(0, parse.imagesUnresolved)
+        assertEquals(0L, budget.remaining())
+    }
+
+    @Test
+    fun nonLeadingH1ImageRefStillResolves() = runBlocking {
+        // (Codex R41-F1, control): an H1 after a paragraph is not
+        // leading, so the converter does not consume it — its image
+        // reference is real and must still resolve. Only the
+        // leading H1 is stripped from the pre-scan.
+        val budget = ExtractedImageBudget(totalBytes = pngBytes.size.toLong())
+        val parse = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "mid.md" to "Intro paragraph.\n\n# Head ![h](pic.png)\n\nMore body",
+                ),
+                mapOf("pic.png" to pngBytes),
+            ),
+            stagingDir(), budget,
+        )
+        assertEquals(1, parse.notes.size)
+        assertEquals("mid", parse.notes[0].title)
+        assertEquals(1, parse.notes[0].images.size)
+        assertEquals(0, parse.imagesUnresolved)
+        assertEquals(0L, budget.remaining())
+    }
+
+    @Test
     fun unmatchedImageOpenersParseWithoutStall() = runBlocking {
         // (Codex R38-F1): both image patterns contained `([^\]]*)`,
         // so an unmatched `![` opener made the regex engine scan

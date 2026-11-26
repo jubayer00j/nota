@@ -804,6 +804,20 @@ private fun collectRefsFrom(
 private val SAFE_LINK = Regex("^(https?:|mailto:)", RegexOption.IGNORE_CASE)
 
 /**
+ * The leading H1 the converter consumes as the note title
+ * (MarkdownImporter.markdownFileToImportedNote): exactly one '#',
+ * after any leading whitespace including blank lines, followed by
+ * the title text on the same line. Shared with the ZIP pre-scan
+ * (Codex R41-F1), which must strip exactly the line the converter
+ * consumes before collecting image refs — a reference inside it is
+ * never embedded, so it must never be staged or charged against
+ * the shared image budget. One constant, so the two can never
+ * drift apart; MarkdownImporter.estimateConvertedNoteBytes
+ * keeps its own byte-count mirror of the same rule.
+ */
+private val LEADING_H1 = Regex("^\\s*#\\s+([^\\n]+)")
+
+/**
  * Renders inline Markdown to editor HTML. Raw source HTML is escaped,
  * never passed through. Code spans are carved out first so their
  * contents are never formatted or mistaken for images/links.
@@ -2000,7 +2014,7 @@ object MarkdownImporter {
         // A leading H1 becomes the title when front matter didn't
         // provide one — and is consumed, not duplicated in the body.
         if (title == null) {
-            val h1 = Regex("^\\s*#\\s+([^\\n]+)").find(body)
+            val h1 = LEADING_H1.find(body)
             if (h1 != null) {
                 title = h1.groupValues[1].trim().replace(Regex("\\s#+\\s*$"), "")
                 body = body.substring(h1.range.last + 1)
@@ -2254,9 +2268,30 @@ object MarkdownImporter {
                         val frontMatter = parseFrontMatter(
                             read.text.removePrefix("\uFEFF"),
                         )
+                        // The consumed H1 is a title, never body
+                        // (Codex R41-F1): the converter drops the
+                        // leading H1 line when front matter didn't
+                        // provide a title, so an image reference
+                        // inside it is never embedded — but the
+                        // pre-scan used to collect it anyway and
+                        // charge its staging against the shared
+                        // image budget, starving later members'
+                        // real images. Strip exactly the line the
+                        // converter consumes ([LEADING_H1], shared
+                        // so the two can never drift apart), and
+                        // only when it consumes one: with a
+                        // front-matter title the H1 stays in the
+                        // body and its references are real.
+                        val scanBody = if (frontMatter.title == null) {
+                            LEADING_H1.find(frontMatter.body)?.let {
+                                frontMatter.body.substring(it.range.last + 1)
+                            } ?: frontMatter.body
+                        } else {
+                            frontMatter.body
+                        }
                         collectImageRefs(
                             entry.name,
-                            frontMatter.body,
+                            scanBody,
                             referenced,
                         )
                         // (Codex R36-F1): advance by the size walk 4's
