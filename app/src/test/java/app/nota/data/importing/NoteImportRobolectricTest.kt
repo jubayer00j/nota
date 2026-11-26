@@ -6,6 +6,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.TagEntity
 import app.nota.data.repository.refreshFtsEntry
 import app.nota.feature.settings.stageMarkdownPicks
 import android.net.Uri
@@ -14,6 +15,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -3515,6 +3517,56 @@ class NoteImportRobolectricTest {
         assertEquals(18, notes.size)
         assertTrue(notes.first { it.title == "Small" }.contentHtml.contains("nota-attachment://"))
         assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    @Test
+    fun importedTagsDedupeCaseInsensitively() = runBlocking {
+        // Codex R33-F1: `Foo`, `foo` and `FOO` on one note used to
+        // create three tag rows (`.distinct()` only removed exact
+        // duplicates, and the new tag only joins the run cache after
+        // the transaction commits). Only the first spelling survives.
+        val stack = newStack()
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/case.json" to """{"title":"Case","textContent":"body","labels":[{"name":"Foo"},{"name":"foo"},{"name":"FOO"},{"name":"Bar"}],"createdTimestampUsec":1700000000000000}""",
+            ),
+        )
+        val outcome = stack.repo.importKeepZip(zip)
+        assertEquals(1, outcome.report.imported)
+
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(listOf("Bar", "Foo"), tags.map { it.name }.sorted())
+        val note = stack.db.noteDao().getAll().first { it.title == "Case" }
+        val crossRefs = stack.db.tagDao().observeAllCrossRefs().first()
+        assertEquals(2, crossRefs.count { it.noteId == note.id })
+    }
+
+    @Test
+    fun importedTagReusesExistingTagCaseInsensitively() = runBlocking {
+        // Codex R33-F1: a `foo` tag already in the library must not
+        // gain a `Foo` sibling when an imported note carries the
+        // other spelling — the note links to the existing tag.
+        val stack = newStack()
+        val existing = TagEntity(
+            id = UUID.randomUUID().toString(),
+            name = "foo",
+            createdAt = 1_700_000_000_000L,
+        )
+        stack.db.tagDao().upsert(existing)
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/case.json" to """{"title":"Case","textContent":"body","labels":[{"name":"Foo"}],"createdTimestampUsec":1700000000000000}""",
+            ),
+        )
+        val outcome = stack.repo.importKeepZip(zip)
+        assertEquals(1, outcome.report.imported)
+
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(1, tags.size)
+        assertEquals("foo", tags.single().name)
+        val note = stack.db.noteDao().getAll().first { it.title == "Case" }
+        val crossRefs = stack.db.tagDao().observeAllCrossRefs().first()
+        assertEquals(listOf(existing.id), crossRefs.filter { it.noteId == note.id }.map { it.tagId })
     }
 
 }

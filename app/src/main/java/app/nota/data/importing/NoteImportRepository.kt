@@ -598,8 +598,9 @@ class NoteImportRepository(
      * never persisted (a later note resolving the same name would
      * otherwise upsert a note pointing at a folder row that does
      * not exist). Within one note the caller dedupes tag names
-     * before resolving, so the deferred cache update can never
-     * create the same new tag twice in one note.
+     * case-insensitively (first spelling wins) before resolving,
+     * so the deferred cache update can never create the same new
+     * tag twice in one note.
      */
     private class RunMetadata(private val db: NotaDatabase) {
         private val folderByName = HashMap<String, String>()
@@ -778,7 +779,15 @@ class NoteImportRepository(
                     val tagResolutions = item.tagNames
                         .map { it.trim() }
                         .filter { it.isNotEmpty() }
-                        .distinct()
+                        // Case-insensitive dedupe, first spelling wins
+                        // (Codex R33-F1, mirroring
+                        // NoteRepository.setNoteTags): `.distinct()`
+                        // only removed exact duplicates, so `Foo` and
+                        // `foo` both reached resolveTag and each
+                        // created its own tag row, because the new tag
+                        // only joins the run cache after the
+                        // transaction commits.
+                        .distinctBy { it.lowercase() }
                         .map { meta.resolveTag(it) }
                     val tags = tagResolutions.map { it.tag }.distinctBy { it.id }
                     val entity = NoteEntity(
