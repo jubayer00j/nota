@@ -596,8 +596,8 @@ class MarkdownImportTest {
             ),
         )
         assertTrue(added)
-        // Title 1 + body 7 + tags 3 + 2.
-        assertEquals(13L, result.retainedTextChars)
+        // Title 1 + body 8 + tags 3 + 2.
+        assertEquals(14L, result.retainedTextChars)
     }
 
     @Test
