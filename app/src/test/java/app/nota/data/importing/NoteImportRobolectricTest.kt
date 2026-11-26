@@ -1870,6 +1870,68 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun repeatedAmbiguousKeepReferenceAppendsOnce() {
+        // R34-F2: the Ambiguous branch used to append one basename
+        // paragraph per occurrence, before the dedupe and caps that
+        // only cover resolved entries — a note repeating one
+        // ambiguous reference copied the whole growing body each
+        // time. Repeats now append nothing (still counted as
+        // skipped), and the note still imports with the file name
+        // kept once.
+        val attachments = (0 until 500).joinToString(",") {
+            """{"filePath":"photo.jpg","mimetype":"image/png"}"""
+        }
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/repeat.json" to
+                    """{"title":"Repeat","textContent":"see","attachments":[$attachments],"createdTimestampUsec":1700000000000000}""",
+            ),
+            mapOf(
+                "Takeout/Keep/photo.jpg" to pngBytes,
+                "Takeout/Other/photo.jpg" to pngBytes,
+            ),
+        )
+        val result = KeepTakeoutParser.parse(zip, stagingDir())
+        assertEquals(1, result.notes.size)
+        assertEquals(500, result.attachmentsSkipped)
+        val note = result.notes.single()
+        assertEquals(0, note.images.size)
+        assertEquals("<p>see</p><p>photo.jpg</p>", note.contentHtml)
+    }
+
+    @Test
+    fun ambiguousKeepParagraphsAreCappedPerNote() {
+        // R34-F2: distinct ambiguous references each appended a
+        // paragraph too, so a note with thousands of them could
+        // still grow past the per-note limit before the engine's
+        // size check. Paragraphs are capped per note (same ceiling
+        // as retained attachments); past-cap references are still
+        // counted as skipped, never silently dropped.
+        val attachments = (0 until 150).joinToString(",") { i ->
+            """{"filePath":"pic$i.png","mimetype":"image/png"}"""
+        }
+        val binaries = mutableMapOf<String, ByteArray>()
+        repeat(150) { i ->
+            binaries["Takeout/Keep/pic$i.png"] = pngBytes
+            binaries["Takeout/Other/pic$i.png"] = pngBytes
+        }
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/many.json" to
+                    """{"title":"Many","textContent":"m","attachments":[$attachments],"createdTimestampUsec":1700000000000000}""",
+            ),
+            binaries,
+        )
+        val result = KeepTakeoutParser.parse(zip, stagingDir())
+        assertEquals(1, result.notes.size)
+        assertEquals(150, result.attachmentsSkipped)
+        val note = result.notes.single()
+        assertEquals(0, note.images.size)
+        val paragraphs = "<p>pic".toRegex().findAll(note.contentHtml).count()
+        assertEquals(ImportCaps.MAX_AMBIGUOUS_ATTACHMENT_PARAGRAPHS, paragraphs)
+    }
+
+    @Test
     fun manyKeepAttachmentsResolveViaIndex() {
         // R30-F3: attachment lookup used to scan the whole
         // entry-name list per attachment. A Takeout with 100 notes
@@ -1921,6 +1983,38 @@ class NoteImportRobolectricTest {
         val entries = linkedMapOf(
             "Takeout/Keep/deep.json" to
                 """{"title":"Deep","textContent":"d","attachments":[{"filePath":"$deep","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/amb.json" to
+                """{"title":"Amb","textContent":"a","attachments":[{"filePath":"shared/deep.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+        )
+        val binaries = mapOf(
+            "Takeout/Keep/$deep" to pngBytes,
+            "Takeout/Other/shared/deep.png" to pngBytes,
+            "Takeout/Keep/shared/deep.png" to pngBytes,
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries, binaries), stagingDir())
+        assertEquals(2, result.notes.size)
+        val deepNote = result.notes.first { it.title == "Deep" }
+        assertEquals(1, deepNote.images.size)
+        assertEquals("deep.png", deepNote.images[0].name)
+        val amb = result.notes.first { it.title == "Amb" }
+        assertEquals(0, amb.images.size)
+        assertEquals(1, result.attachmentsSkipped)
+    }
+
+    @Test
+    fun slashHeavyKeepPathHashesLinearly() {
+        // R34-F1: SuffixKey.hashCode() used to rescan the whole
+        // suffix for every key, so building the index for a
+        // slash-heavy name paid the sum of all its suffix lengths
+        // — quadratic. Suffix hashes are now computed in one
+        // reverse pass per name, so a 20,000-segment path indexes
+        // linearly, and lookup verdicts are unchanged: a unique
+        // deep suffix resolves, a shared one stays ambiguous.
+        val deep = "a/".repeat(20000) + "deep.png"
+        val suffixRef = "a/".repeat(19990) + "deep.png"
+        val entries = linkedMapOf(
+            "Takeout/Keep/deep.json" to
+                """{"title":"Deep","textContent":"d","attachments":[{"filePath":"$suffixRef","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
             "Takeout/Keep/amb.json" to
                 """{"title":"Amb","textContent":"a","attachments":[{"filePath":"shared/deep.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
         )

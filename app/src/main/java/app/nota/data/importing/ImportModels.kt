@@ -130,6 +130,24 @@ object ImportCaps {
      *  that fit. */
     const val MAX_ATTACHMENTS_PER_NOTE = 100
     const val MAX_ATTACHMENTS_PER_RUN = 5_000
+
+    /** Largest number of unresolved-attachment paragraphs one
+     *  imported Keep note may carry (Codex R34-F2): an ambiguous
+     *  reference keeps its file name in the note as a `<p>` — but
+     *  the append happens in the attachment loop, before the
+     *  R26-F3 dedupe and the R31-F2 spec caps, which only cover
+     *  resolved entries. A note repeating one ambiguous reference
+     *  tens of thousands of times therefore appended once per
+     *  occurrence, and `contentHtml` is an immutable String, so
+     *  each append copied the whole growing body — quadratic —
+     *  and the HTML could grow well past the per-note limit before
+     *  the engine's size check refused it. 100 paragraphs sits far
+     *  above any real export (a Keep note carries a handful of
+     *  images) and matches the per-note attachment ceiling above.
+     *  References past the cap are still counted as skipped, never
+     *  silently dropped — the note still imports with the file
+     *  names that fit. */
+    const val MAX_AMBIGUOUS_ATTACHMENT_PARAGRAPHS = 100
 }
 
 /**

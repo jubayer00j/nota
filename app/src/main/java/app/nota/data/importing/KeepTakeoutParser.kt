@@ -389,16 +389,23 @@ object KeepTakeoutParser {
      *  suffix lengths — quadratic — before any note was parsed. The
      *  name itself is already retained in [EntryNameIndex]'s exact
      *  set; a key holds only a reference + an offset, and
-     *  hash/equals compare the suffix characters in place. */
-    private class SuffixKey(val name: String, val start: Int) {
-        override fun hashCode(): Int {
-            var h = 0
-            for (i in start until name.length) h = 31 * h + name[i].code
-            return h
-        }
+     *  hash/equals compare the suffix characters in place. The hash
+     *  is precomputed once per key (Codex R34-F1): hashCode() used
+     *  to rescan the whole suffix for every key, so building the
+     *  index for a slash-heavy name paid the sum of all its suffix
+     *  lengths — quadratic again, in character work instead of
+     *  retained bytes — before any note was parsed. The build
+     *  computes every suffix hash of a name in one reverse pass
+     *  (each suffix hash is the hash of the suffix after it times
+     *  31 plus its first character — the same 31-polynomial
+     *  String.hashCode() uses, so the values match); a lookup key
+     *  hashes its single string once. */
+    private class SuffixKey(val name: String, val start: Int, private val hash: Int) {
+        override fun hashCode(): Int = hash
 
         override fun equals(other: Any?): Boolean {
             if (other !is SuffixKey) return false
+            if (hash != other.hash) return false
             if (name.length - start != other.name.length - other.start) return false
             for (i in 0 until name.length - start) {
                 if (name[start + i] != other.name[other.start + i]) return false
@@ -433,9 +440,24 @@ object KeepTakeoutParser {
         private val bySuffix: Map<SuffixKey, List<String>> = run {
             val map = HashMap<SuffixKey, MutableList<String>>()
             for (name in names) {
+                // (Codex R34-F1): every suffix hash of this name in
+                // one reverse pass — suffixHashes[i] is the standard
+                // 31-polynomial hash of the suffix starting at i —
+                // so each key below costs O(1) instead of rescanning
+                // its whole suffix. All arithmetic wraps mod 2^32,
+                // exactly as String.hashCode() does, so the values
+                // match the lookup key's.
+                val suffixHashes = IntArray(name.length + 1)
+                var h = 0
+                var pow = 1
+                for (i in name.length - 1 downTo 0) {
+                    h += name[i].code * pow
+                    suffixHashes[i] = h
+                    pow *= 31
+                }
                 var slash = name.indexOf('/')
                 while (slash >= 0) {
-                    map.getOrPut(SuffixKey(name, slash + 1)) { mutableListOf() } += name
+                    map.getOrPut(SuffixKey(name, slash + 1, suffixHashes[slash + 1])) { mutableListOf() } += name
                     slash = name.indexOf('/', slash + 1)
                 }
             }
@@ -451,7 +473,7 @@ object KeepTakeoutParser {
                 if (wanted in duplicateNames) return EntryLookup.Ambiguous
                 return EntryLookup.Found(wanted)
             }
-            val suffixMatches = bySuffix[SuffixKey(wanted, 0)] ?: emptyList()
+            val suffixMatches = bySuffix[SuffixKey(wanted, 0, wanted.hashCode())] ?: emptyList()
             if (suffixMatches.size == 1) return EntryLookup.Found(suffixMatches[0])
             if (suffixMatches.size > 1) return EntryLookup.Ambiguous
             val base = importBaseName(wanted).lowercase()
@@ -670,6 +692,11 @@ object KeepTakeoutParser {
         // time and disk for nothing. Pass 3 already stages one
         // file per entry name; the specs match it.
         val seenEntryNames = HashSet<String>()
+        // (Codex R34-F2): basenames already kept for ambiguous
+        // references, and how many such paragraphs have been
+        // appended — see the Ambiguous branch below.
+        val seenAmbiguousBasenames = HashSet<String>()
+        var ambiguousParagraphs = 0
         for (i in 0 until attachments.length()) {
             val attachment = attachments.optJSONObject(i)
             val filePath = attachment?.opt("filePath") as? String ?: ""
@@ -696,9 +723,23 @@ object KeepTakeoutParser {
                     // (Codex R9-F2). Leave it unresolved — counted —
                     // and keep the file name in the note, like the
                     // Markdown resolver keeps an unresolved
-                    // reference's alt text.
+                    // reference's alt text. (Codex R34-F2): the
+                    // append used to run once per occurrence, before
+                    // the R26-F3 dedupe and R31-F2 caps — which only
+                    // cover resolved entries — so a repeated
+                    // ambiguous reference copied the whole growing
+                    // body each time. A repeat appends nothing, and
+                    // the paragraphs are capped per note: repeats
+                    // and past-cap references are still counted as
+                    // skipped, never silently dropped.
                     result.attachmentsSkipped += 1
-                    contentHtml += "<p>${escapeImportHtml(importBaseName(filePath))}</p>"
+                    val baseName = importBaseName(filePath)
+                    if (seenAmbiguousBasenames.add(baseName) &&
+                        ambiguousParagraphs < ImportCaps.MAX_AMBIGUOUS_ATTACHMENT_PARAGRAPHS
+                    ) {
+                        ambiguousParagraphs += 1
+                        contentHtml += "<p>${escapeImportHtml(baseName)}</p>"
+                    }
                     continue
                 }
             }
