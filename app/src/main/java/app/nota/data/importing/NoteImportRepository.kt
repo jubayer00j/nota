@@ -648,7 +648,9 @@ class NoteImportRepository(
      * so the deferred cache update can never create the same new
      * tag twice in one note.
      */
-    private class RunMetadata(private val db: NotaDatabase) {
+    // Internal, not private, so tests can drive one note's write
+    // directly (Codex R37-F1 — see writeImportedNote).
+    internal class RunMetadata(private val db: NotaDatabase) {
         private val folderByName = HashMap<String, String>()
         private val tagByExact = HashMap<String, TagEntity>()
         private val tagByLower = HashMap<String, TagEntity>()
@@ -730,8 +732,13 @@ class NoteImportRepository(
      * row at all — never a committed body full of placeholder tokens
      * — and staged files with no rows are swept by the run-end
      * reconcile.
+     *
+     * Internal, not private, so tests can assert on one note's write
+     * without the run-end rebuild (Codex R37-F1): the rebuild would
+     * mask a stale FTS row, so the ordering fix is only observable
+     * before it runs.
      */
-    private suspend fun writeImportedNote(
+    internal suspend fun writeImportedNote(
         db: NotaDatabase,
         item: ImportedNote,
         meta: RunMetadata,
@@ -868,12 +875,22 @@ class NoteImportRepository(
                         trashedAt = item.trashedAt,
                     )
                     noteDao.upsert(entity)
-                    db.refreshFtsEntry(entity)
                     for (attachment in stagedAttachments) {
                         db.attachmentDao().upsert(attachment)
                     }
                     val tagDao = db.tagDao()
                     for (tag in tags) tagDao.link(NoteTagCrossRef(noteId, tag.id))
+                    // (Codex R37-F1): the FTS row must be built AFTER
+                    // the tag links land — buildFtsEntity denormalises
+                    // tag names from the cross-ref table, so refreshing
+                    // first persists a row without the imported tags,
+                    // and the run-end rebuild is the only backstop: a
+                    // process killed before it runs leaves the
+                    // committed note unsearchable by tag. setNoteTags
+                    // links first and refreshes second, for the same
+                    // reason ("a tag assignment is a search-index
+                    // write too").
+                    db.refreshFtsEntry(entity)
                     folderResolution.created to tagResolutions.mapNotNull { it.created }
                 }
                 // Only now — the transaction committed — do the created

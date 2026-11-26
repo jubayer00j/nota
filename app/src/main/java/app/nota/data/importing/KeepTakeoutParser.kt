@@ -213,6 +213,13 @@ object KeepTakeoutParser {
                             if (noteRowBytes(draft.title, draft.contentHtml) >
                                 ImportCaps.MAX_NOTE_CONTENT_BYTES
                             ) {
+                                // (Codex R37-F2): the draft's specs
+                                // already took run-budget slots inside
+                                // keepJsonToDraft — refund them, or the
+                                // discarded draft keeps them and later
+                                // retained notes lose their images to
+                                // an exhausted budget.
+                                attachmentBudget.refund(draft.attachments.size)
                                 result.skippedFiles += SkippedImportFile(
                                     base,
                                     ImportCaps.NOTE_TOO_LARGE_REASON,
@@ -232,6 +239,11 @@ object KeepTakeoutParser {
                                 draft.tagNames.sumOf { it.length.toLong() } >
                                 ImportCaps.MAX_AGGREGATE_TEXT_CHARS
                             ) {
+                                // (Codex R37-F2): refund the reserved
+                                // slots, as above — a draft refused on
+                                // the aggregate budget must consume
+                                // nothing either.
+                                attachmentBudget.refund(draft.attachments.size)
                                 result.skippedFiles += SkippedImportFile(
                                     base,
                                     ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
@@ -428,6 +440,18 @@ object KeepTakeoutParser {
             if (used >= maxSpecs) return false
             used++
             return true
+        }
+
+        /** Returns [count] previously taken slots to the budget
+         *  (Codex R37-F2): a draft discarded after its specs were
+         *  reserved must not consume the run budget — the slots
+         *  belong to notes that are actually retained. Callers
+         *  refund exactly what the discarded draft took (its
+         *  retained spec count); clamped at zero, so a stray call
+         *  can never over-credit the budget. */
+        fun refund(count: Int) {
+            if (count <= 0) return
+            used = (used - count).coerceAtLeast(0)
         }
     }
 

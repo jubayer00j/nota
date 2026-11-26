@@ -3789,4 +3789,78 @@ class NoteImportRobolectricTest {
         assertEquals(count, stack.db.attachmentDao().getAll().size)
     }
 
+    @Test
+    fun importedNoteTagsAreInFtsBeforeRunEndRebuild() = runBlocking {
+        // (Codex R37-F1): writeImportedNote used to refresh the FTS
+        // row BEFORE the tag links were inserted, so the persisted
+        // row omitted the imported tags — the run-end rebuild was the
+        // only backstop, and a process killed before it runs leaves
+        // the committed note unsearchable by tag. The row is built
+        // after the links now, so the note is searchable by tag with
+        // no rebuild at all — the interrupted-run shape, driven
+        // through writeImportedNote directly. The tag is deliberately
+        // unlike the title or body, so only the FTS row's
+        // denormalised tags can match it.
+        val stack = newStack()
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        val saveFailures = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Tagged",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = listOf("quixotic"),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "tagged.md",
+            ),
+            meta,
+        )
+        assertEquals(0, saveFailures)
+        assertEquals(
+            listOf("Tagged"),
+            stack.db.noteDao().searchFts("quixotic").map { it.title },
+        )
+    }
+
+    @Test
+    fun discardedKeepDraftsRefundAttachmentSlots() {
+        // (Codex R37-F2): fifty oversized Keep drafts, each with 100
+        // image attachments, reserve all 5,000 run-wide attachment
+        // slots and are then refused for their own size — before the
+        // fix those slots were never refunded, so the small retained
+        // note that follows lost its image to an exhausted budget.
+        // The drafts are oversized through paragraph markup, not raw
+        // bulk: 140,000 one-letter paragraphs pass the early
+        // lower-bound guard (140K non-whitespace chars) but convert
+        // to ~1.12 MB of HTML, past the 1 MB per-note bound.
+        val paragraphs = "x\\n\\n".repeat(140_000)
+        val attachmentsJson = (0 until 100).joinToString(",") { i ->
+            """{"filePath":"Takeout/Keep/img$i.png","mimetype":"image/png"}"""
+        }
+        val entries = linkedMapOf<String, String>()
+        repeat(50) { i ->
+            entries["Takeout/Keep/big-$i.json"] =
+                """{"title":"Big$i","textContent":"$paragraphs","attachments":[$attachmentsJson],"createdTimestampUsec":${1_700_000_000_000L + i}}"""
+        }
+        entries["Takeout/Keep/small.json"] =
+            """{"title":"Small","textContent":"small","attachments":[{"filePath":"Takeout/Keep/img0.png","mimetype":"image/png"}],"createdTimestampUsec":1700000500000000}"""
+        val binaries = (0 until 100).associate { i -> "Takeout/Keep/img$i.png" to pngBytes }
+        val result = KeepTakeoutParser.parse(zipOf(entries, binaries), stagingDir())
+        assertEquals(
+            (0 until 50).map { SkippedImportFile("big-$it.json", ImportCaps.NOTE_TOO_LARGE_REASON) },
+            result.skippedFiles,
+        )
+        assertEquals(1, result.notes.size)
+        val small = result.notes.single()
+        assertEquals("Small", small.title)
+        assertEquals(1, small.images.size)
+        assertEquals(0, result.attachmentsSkipped)
+    }
+
 }
