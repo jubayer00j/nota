@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.withTransaction
 import app.nota.data.attachments.AttachmentStore
 import app.nota.data.backup.rebuildLibraryIndexes
+import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NotaDatabase
@@ -45,9 +46,11 @@ data class ImportRunResult(
  *  - images ride the editor's own pipeline
  *    ([AttachmentStore.importImageFile]) and land as
  *    `nota-attachment://` embeds in Nota's serialiser shape;
- *  - each note is failure-isolated: a failed note is rolled back (the
- *    row delete cascades to attachment rows + tag links) and named in
- *    the report;
+ *  - each note is failure-isolated: a failed note commits nothing
+ *    — its row, FTS entry, attachment rows and folder/tag rows all
+ *    land in one transaction after its images are staged and its
+ *    final content is known (Codex R24-F1/F3) — and is named in the
+ *    report;
  *  - the run ends with the backup pipeline's index rebuild + attachment
  *    reconcile, so backlinks and the file sweep are truthful. The
  *    semantic index needs nothing: its stamp-gated reconcile picks new
@@ -433,52 +436,13 @@ class NoteImportRepository(
             // same-title note in the same folder.
             val seenRun = HashSet<String>()
 
-            // Folder resolution mirrors 1.x resolveFolderId (seeded map,
-            // case-insensitive trimmed names, create on demand).
-            val folderByName = HashMap<String, String>()
-            for (folder in runDb.folderDao().getAll()) {
-                folderByName[folder.name.trim().lowercase()] = folder.id
-            }
-            suspend fun resolveFolderId(folderName: String?): String? {
-                val trimmed = folderName?.trim().orEmpty()
-                if (trimmed.isEmpty()) return null
-                val key = trimmed.lowercase()
-                folderByName[key]?.let { return it }
-                val now = System.currentTimeMillis()
-                val folder = FolderEntity(
-                    id = UUID.randomUUID().toString(),
-                    name = trimmed,
-                    createdAt = now,
-                    updatedAt = now,
-                )
-                runDb.folderDao().upsert(folder)
-                folderByName[key] = folder.id
-                return folder.id
-            }
-
-            // Tag resolution mirrors NoteRepository.setNoteTags' lookup
-            // spirit: exact name first, then a case-insensitive match, then
-            // create (first-typed form is what gets stored).
-            val tagByExact = HashMap<String, TagEntity>()
-            val tagByLower = HashMap<String, TagEntity>()
-            for (tag in runDb.tagDao().getAllTags()) {
-                tagByExact.putIfAbsent(tag.name, tag)
-                tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
-            }
-            suspend fun resolveTag(rawName: String): TagEntity {
-                val name = rawName.trim()
-                tagByExact[name]?.let { return it }
-                tagByLower[name.lowercase()]?.let { return it }
-                val tag = TagEntity(
-                    id = UUID.randomUUID().toString(),
-                    name = name,
-                    createdAt = System.currentTimeMillis(),
-                )
-                runDb.tagDao().upsert(tag)
-                tagByExact[name] = tag
-                tagByLower.putIfAbsent(name.lowercase(), tag)
-                return tag
-            }
+            // Per-run folder/tag resolution (Codex R24-F3): the
+            // caches are seeded from the run database here, and the
+            // resolvers run inside each note's write transaction —
+            // a failed write rolls its metadata back too, so no
+            // orphan folder or tag survives it. See [RunMetadata].
+            val meta = RunMetadata(runDb)
+            meta.seed()
 
             // Defence in depth: the run-level cap (enforced at the merge
             // by every selection path) is re-checked here so no caller can
@@ -536,14 +500,7 @@ class NoteImportRepository(
                     if (isDuplicate) {
                         duplicates++
                     } else {
-                        val folderId = resolveFolderId(item.folderName)
-                        val tags = item.tagNames
-                            .map { it.trim() }
-                            .filter { it.isNotEmpty() }
-                            .distinct()
-                            .map { resolveTag(it) }
-                            .distinctBy { it.id }
-                        imageSaveFailures += writeImportedNote(runDb, item, folderId, tags)
+                        imageSaveFailures += writeImportedNote(runDb, item, meta)
                         if (isUnknownDate) {
                             seenRun += dedupeKeyUnknownDate(
                                 item.title,
@@ -610,113 +567,226 @@ class NoteImportRepository(
     }
 
     /**
+     * Per-run folder/tag resolution state (Codex R24-F3).
+     *
+     * The caches are seeded from the run database by [seed] and
+     * read by the resolvers; a resolver that has to create a row
+     * upserts it — the caller runs it inside the note's write
+     * transaction — but does NOT update the cache. The caller
+     * applies [noteCommitted] only after that transaction commits,
+     * so a rollback can never poison the cache with an id that was
+     * never persisted (a later note resolving the same name would
+     * otherwise upsert a note pointing at a folder row that does
+     * not exist). Within one note the caller dedupes tag names
+     * before resolving, so the deferred cache update can never
+     * create the same new tag twice in one note.
+     */
+    private class RunMetadata(private val db: NotaDatabase) {
+        private val folderByName = HashMap<String, String>()
+        private val tagByExact = HashMap<String, TagEntity>()
+        private val tagByLower = HashMap<String, TagEntity>()
+
+        suspend fun seed() {
+            // Folder resolution mirrors 1.x resolveFolderId (seeded
+            // map, case-insensitive trimmed names, create on demand).
+            for (folder in db.folderDao().getAll()) {
+                folderByName.putIfAbsent(folder.name.trim().lowercase(), folder.id)
+            }
+            // Tag resolution mirrors NoteRepository.setNoteTags'
+            // lookup spirit: exact name first, then a
+            // case-insensitive match, then create (first-typed form
+            // is what gets stored).
+            for (tag in db.tagDao().getAllTags()) {
+                tagByExact.putIfAbsent(tag.name, tag)
+                tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
+            }
+        }
+
+        /** Resolves one folder inside the caller's transaction. */
+        suspend fun resolveFolderId(folderName: String?): FolderResolution {
+            val trimmed = folderName?.trim().orEmpty()
+            if (trimmed.isEmpty()) return FolderResolution(null, null)
+            val key = trimmed.lowercase()
+            folderByName[key]?.let { return FolderResolution(it, null) }
+            val now = System.currentTimeMillis()
+            val folder = FolderEntity(
+                id = UUID.randomUUID().toString(),
+                name = trimmed,
+                createdAt = now,
+                updatedAt = now,
+            )
+            db.folderDao().upsert(folder)
+            return FolderResolution(folder.id, folder)
+        }
+
+        /** Resolves one tag inside the caller's transaction. */
+        suspend fun resolveTag(rawName: String): TagResolution {
+            val name = rawName.trim()
+            tagByExact[name]?.let { return TagResolution(it, null) }
+            tagByLower[name.lowercase()]?.let { return TagResolution(it, null) }
+            val tag = TagEntity(
+                id = UUID.randomUUID().toString(),
+                name = name,
+                createdAt = System.currentTimeMillis(),
+            )
+            db.tagDao().upsert(tag)
+            return TagResolution(tag, tag)
+        }
+
+        /** Applies the rows a committed note created to the run
+         *  caches. Call only after the transaction that created
+         *  them has committed. */
+        fun noteCommitted(createdFolder: FolderEntity?, createdTags: List<TagEntity>) {
+            createdFolder?.let { folderByName[it.name.trim().lowercase()] = it.id }
+            for (tag in createdTags) {
+                tagByExact[tag.name] = tag
+                tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
+            }
+        }
+    }
+
+    /** A folder resolution: its id, plus the row when it was created
+     *  by this call (null when it already existed). */
+    private data class FolderResolution(val id: String?, val created: FolderEntity?)
+
+    /** A tag resolution: the tag, plus itself when it was created
+     *  by this call (null when it already existed). */
+    private data class TagResolution(val tag: TagEntity, val created: TagEntity?)
+
+    /**
      * Writes one note; returns the number of images that failed to save.
-     * Throws on any other failure — the partial note is rolled back in
-     * the catch below before the throw propagates.
+     * Throws on any other failure — and nothing is committed then: the
+     * note row, its FTS entry, its attachment rows and its folder/tag
+     * rows all land in ONE transaction, after every image file is
+     * staged and the final content is known (Codex R24-F1/F3). A
+     * process killed before that transaction commits leaves no note
+     * row at all — never a committed body full of placeholder tokens
+     * — and staged files with no rows are swept by the run-end
+     * reconcile.
      */
     private suspend fun writeImportedNote(
         db: NotaDatabase,
         item: ImportedNote,
-        folderId: String?,
-        tags: List<TagEntity>,
+        meta: RunMetadata,
     ): Int {
         val noteDao = db.noteDao()
         val noteId = UUID.randomUUID().toString()
-        val entity = NoteEntity(
-            id = noteId,
-            folderId = folderId,
-            title = item.title,
-            contentHtml = item.contentHtml,
-            plainText = NoteDocument.plainText(NoteDocument.parse(item.contentHtml)),
-            createdAt = item.createdAt,
-            updatedAt = item.updatedAt,
-            pinned = item.pinned,
-            archived = item.archived,
-            trashedAt = item.trashedAt,
-        )
         var saveFailures = 0
+        val stagedAttachments = mutableListOf<AttachmentEntity>()
+        var content = item.contentHtml
         try {
-            db.withTransaction {
-                noteDao.upsert(entity)
-                db.refreshFtsEntry(entity)
-            }
-            var content = item.contentHtml
-            for (image in item.images) {
-                try {
-                    // The image row must land in the same database as
-                    // the note row: AttachmentStore resolves its DAO
-                    // from provider.current, which may have moved.
-                    val saved = attachmentStore.importImageFile(noteId, image.stagedFile, db)
-                    val embed = "<img src=\"nota-attachment://${saved.id}\" " +
-                        "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
-                    // replaceFirst, not replace (Codex R21-F2): the
-                    // token is emitted exactly once for this image, so
-                    // only its one occurrence is the embed — any other
-                    // occurrence is the user's literal text and must
-                    // survive. (The token is also salted per file, so
-                    // literal text can't match it in the first place.)
-                    content = if (image.token != null) {
-                        content.replaceFirst(image.token, embed)
-                    } else {
-                        content + "<p>$embed</p>"
+            // One file-mutex hold spans the whole note write (Codex
+            // R24-F1): staging writes files before their rows exist,
+            // and a concurrent reconcile would mistake them for
+            // orphans and delete them (Codex F9) — the lock is what
+            // keeps file and row together. The DB transaction below
+            // runs inside the same hold.
+            attachmentStore.withFileLock {
+                for (image in item.images) {
+                    try {
+                        // Stage first, insert later: the image row is
+                        // only ever written in the final transaction,
+                        // with the note row it belongs to — the note
+                        // row is never committed while its body still
+                        // holds the raw %%NOMA_IMPORT_IMAGE_...%%
+                        // tokens (Codex R24-F1).
+                        val saved = attachmentStore.stageImageFileLocked(noteId, image.stagedFile)
+                        stagedAttachments += saved
+                        val embed = "<img src=\"nota-attachment://${saved.id}\" " +
+                            "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
+                        // replaceFirst, not replace (Codex R21-F2): the
+                        // token is emitted exactly once for this image, so
+                        // only its one occurrence is the embed — any other
+                        // occurrence is the user's literal text and must
+                        // survive. (The token is also salted per file, so
+                        // literal text can't match it in the first place.)
+                        content = if (image.token != null) {
+                            content.replaceFirst(image.token, embed)
+                        } else {
+                            content + "<p>$embed</p>"
+                        }
+                    } catch (e: Exception) {
+                        // The image itself failed to save (a format the
+                        // pipeline can't decode, e.g. SVG): keep the alt
+                        // text in its place rather than losing the note,
+                        // and count it — no silent drops. A null token
+                        // (Keep attachments, appended at the end) gets the
+                        // same fallback as an appended paragraph; a blank
+                        // alt has nothing to preserve.
+                        saveFailures++
+                        if (image.token != null) {
+                            // Same replaceFirst rule as the success path
+                            // (Codex R21-F2): only the emitted occurrence
+                            // becomes the alt text.
+                            content = content.replaceFirst(image.token, escapeImportHtml(image.alt))
+                        } else if (image.alt.isNotBlank()) {
+                            content += "<p>${escapeImportHtml(image.alt)}</p>"
+                        }
+                    } finally {
+                        if (image.deleteAfterUse) runCatching { image.stagedFile.delete() }
                     }
-                } catch (e: Exception) {
-                    // The image itself failed to save (a format the
-                    // pipeline can't decode, e.g. SVG): keep the alt
-                    // text in its place rather than losing the note,
-                    // and count it — no silent drops. A null token
-                    // (Keep attachments, appended at the end) gets the
-                    // same fallback as an appended paragraph; a blank
-                    // alt has nothing to preserve.
-                    saveFailures++
-                    if (image.token != null) {
-                        // Same replaceFirst rule as the success path
-                        // (Codex R21-F2): only the emitted occurrence
-                        // becomes the alt text.
-                        content = content.replaceFirst(image.token, escapeImportHtml(image.alt))
-                    } else if (image.alt.isNotBlank()) {
-                        content += "<p>${escapeImportHtml(image.alt)}</p>"
-                    }
-                } finally {
-                    if (image.deleteAfterUse) runCatching { image.stagedFile.delete() }
                 }
-            }
-            // Recheck the row size after image expansion (Codex
-            // R12-F2): the 1 MB cap ran on the pre-expansion content,
-            // but each embed replaces a short token with a longer
-            // <img> tag — and Keep attachments append a whole
-            // paragraph each — so the final row can exceed the bound
-            // after the check already ran. A row past it breaks the
-            // run-end rebuild (getAll() cannot read past the ~2 MiB
-            // CursorWindow). Throwing here rolls the note back
-            // through the catch below: the first upsert + FTS entry
-            // are deleted and the note is reported as failed, never
-            // written oversize. Images are never dropped to fit —
-            // the note is refused whole, with its name in the report.
-            if (noteRowBytes(item.title, content) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
-                throw IllegalStateException(
-                    "Imported note exceeds the size limit after expanding its images.",
-                )
-            }
-            val finalEntity = entity.copy(
-                contentHtml = content,
-                plainText = NoteDocument.plainText(NoteDocument.parse(content)),
-            )
-            db.withTransaction {
-                noteDao.upsert(finalEntity)
-                db.refreshFtsEntry(finalEntity)
-                val tagDao = db.tagDao()
-                for (tag in tags) tagDao.link(NoteTagCrossRef(noteId, tag.id))
+                // Recheck the row size after image expansion (Codex
+                // R12-F2): the 1 MB cap ran on the pre-expansion content,
+                // but each embed replaces a short token with a longer
+                // <img> tag — and Keep attachments append a whole
+                // paragraph each — so the final row can exceed the bound
+                // after the check already ran. A row past it breaks the
+                // run-end rebuild (getAll() cannot read a row past
+                // Android's ~2 MiB CursorWindow). It now runs BEFORE any
+                // row exists (Codex R24-F1): a too-big note never touches
+                // the database at all. Images are never dropped to fit —
+                // the note is refused whole, with its name in the report.
+                if (noteRowBytes(item.title, content) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
+                    throw IllegalStateException(
+                        "Imported note exceeds the size limit after expanding its images.",
+                    )
+                }
+                // One transaction for the whole note (Codex R24-F1/F3):
+                // note row + FTS entry + attachment rows + tag links,
+                // with the folder/tag rows resolved inside it — a
+                // failed write rolls the metadata back too, so a note
+                // refused here leaves no orphan folder or tag behind.
+                val (createdFolder, createdTags) = db.withTransaction {
+                    val folderResolution = meta.resolveFolderId(item.folderName)
+                    val tagResolutions = item.tagNames
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .distinct()
+                        .map { meta.resolveTag(it) }
+                    val tags = tagResolutions.map { it.tag }.distinctBy { it.id }
+                    val entity = NoteEntity(
+                        id = noteId,
+                        folderId = folderResolution.id,
+                        title = item.title,
+                        contentHtml = content,
+                        plainText = NoteDocument.plainText(NoteDocument.parse(content)),
+                        createdAt = item.createdAt,
+                        updatedAt = item.updatedAt,
+                        pinned = item.pinned,
+                        archived = item.archived,
+                        trashedAt = item.trashedAt,
+                    )
+                    noteDao.upsert(entity)
+                    db.refreshFtsEntry(entity)
+                    for (attachment in stagedAttachments) {
+                        db.attachmentDao().upsert(attachment)
+                    }
+                    val tagDao = db.tagDao()
+                    for (tag in tags) tagDao.link(NoteTagCrossRef(noteId, tag.id))
+                    folderResolution.created to tagResolutions.mapNotNull { it.created }
+                }
+                // Only now — the transaction committed — do the created
+                // rows join the run caches (Codex R24-F3).
+                meta.noteCommitted(createdFolder, createdTags)
             }
         } catch (e: Exception) {
-            // Roll the note back: deleting the row cascades to its
-            // attachment rows + tag links; orphaned files are swept by
-            // the run-end reconcile.
+            // Nothing was committed (the transaction is atomic), so
+            // there is no note row or FTS entry to roll back — only
+            // staged files to remove. The run-end reconcile is the
+            // backstop for any that survive a kill.
             runCatching {
-                db.withTransaction {
-                    noteDao.delete(entity)
-                    db.noteFtsDao().deleteForNote(noteId)
-                }
+                File(context.filesDir, "attachments/$noteId").deleteRecursively()
             }
             for (image in item.images) {
                 if (image.deleteAfterUse) runCatching { image.stagedFile.delete() }

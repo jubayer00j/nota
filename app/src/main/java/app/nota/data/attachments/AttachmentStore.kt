@@ -81,6 +81,29 @@ class AttachmentStore(
             importImageStreamLocked(noteId, file.name, db) { file.inputStream() }
         }
 
+    /**
+     * Runs [block] while holding the file mutex (Codex R24-F1): the
+     * import engine stages image files and inserts their rows in the
+     * same hold as the note row, so a concurrent reconcile can never
+     * see a staged file without its row and delete it as an orphan
+     * (Codex F9). The DB transaction for the note runs inside the
+     * same hold, so file and rows commit together as far as any
+     * other operation can see.
+     */
+    suspend fun <T> withFileLock(block: suspend () -> T): T = fileMutex.withLock { block() }
+
+    /**
+     * Stages an image file for [noteId] — decodes, re-encodes and
+     * writes the JPEG — and returns its entity WITHOUT inserting
+     * the row. Call only while holding [withFileLock]: the caller
+     * inserts the row in the same hold, with the note row it
+     * belongs to, so no staged file is ever visible without its row
+     * (Codex R24-F1 — the import engine's note row used to commit
+     * before its images were saved).
+     */
+    suspend fun stageImageFileLocked(noteId: String, file: File): AttachmentEntity =
+        stageImageStreamLocked(noteId, file.name) { file.inputStream() }
+
     private suspend fun importImageLocked(noteId: String, uri: Uri): AttachmentEntity =
         importImageStreamLocked(noteId, displayName(uri)) {
             context.contentResolver.openInputStream(uri)
@@ -94,6 +117,21 @@ class AttachmentStore(
         noteId: String,
         sourceName: String?,
         db: NotaDatabase? = null,
+        openStream: () -> java.io.InputStream?,
+    ): AttachmentEntity {
+        val entity = stageImageStreamLocked(noteId, sourceName, openStream)
+        (db?.attachmentDao() ?: attachmentDao).upsert(entity)
+        return entity
+    }
+
+    /** The file half of [importImageStreamLocked]: writes the
+     *  re-encoded JPEG and returns its entity; the row insert is
+     *  the caller's job, so the import engine can stage images
+     *  before its note row exists and insert both in one
+     *  transaction (Codex R24-F1). */
+    private suspend fun stageImageStreamLocked(
+        noteId: String,
+        sourceName: String?,
         openStream: () -> java.io.InputStream?,
     ): AttachmentEntity = withContext(Dispatchers.IO) {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -155,7 +193,6 @@ class AttachmentStore(
             heightPx = scaledH,
             createdAt = System.currentTimeMillis(),
         )
-        (db?.attachmentDao() ?: attachmentDao).upsert(entity)
         entity
     }
 

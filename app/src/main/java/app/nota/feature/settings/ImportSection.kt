@@ -8,7 +8,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -225,16 +229,26 @@ fun ImportSection(
                         Text("Files that couldn't be read")
                     }
                     if (showUnreadable) {
-                        for (file in summary.unreadable) {
-                            Text(
-                                "${file.name} — ${file.reason}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(
-                                    start = NotaSpacing.sm,
-                                    top = NotaSpacing.xs,
-                                ),
-                            )
+                        // (Codex R24-F2): the unreadable list is lazy
+                        // and bounded in height — the old eager loop
+                        // composed every entry on expand, and a
+                        // 20,000-entry archive could hang or OOM
+                        // Settings. The list scrolls inside the card
+                        // instead of growing it.
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 320.dp),
+                        ) {
+                            itemsIndexed(summary.unreadable) { _, file ->
+                                Text(
+                                    "${file.name} — ${file.reason}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(
+                                        start = NotaSpacing.sm,
+                                        top = NotaSpacing.xs,
+                                    ),
+                                )
+                            }
                         }
                     }
                 }

@@ -1920,6 +1920,113 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun interruptedNoteWriteLeavesNoPlaceholderTokens() = runBlocking {
+        // (Codex R24-F1): the note row used to commit with its raw
+        // %%NOMA_IMPORT_IMAGE_...%% tokens before the images were
+        // saved, so a kill between the two transactions left a
+        // committed body full of tokens. The row is now written once,
+        // with its final content — so even a write interrupted by a
+        // failed image leaves no token in the stored body, and the
+        // attachment rows match the embeds exactly. (A process kill
+        // itself is not simulable in-process; the structural
+        // invariant — one atomic commit of final content — is what
+        // these tests pin.)
+        val stack = newStack()
+        val imageFile = File.createTempFile("ok-pic", ".png")
+            .apply { writeBytes(pngBytes) }
+        val missing = File(stagingDir(), "gone.png")
+        val note = ImportedNote(
+            title = "TwoImages",
+            contentHtml = "<p>%%NOMA_IMPORT_IMAGE_0%% and %%NOMA_IMPORT_IMAGE_1%%</p>",
+            createdAt = 1_700_000_000_000L,
+            updatedAt = 1_700_000_000_000L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = listOf(
+                ImportedImage(
+                    "pic.png", "image/png", imageFile,
+                    pngBytes.size.toLong(), "a good image",
+                    "%%NOMA_IMPORT_IMAGE_0%%",
+                ),
+                ImportedImage(
+                    "gone.png", "image/png", missing,
+                    123L, "a missing image",
+                    "%%NOMA_IMPORT_IMAGE_1%%",
+                ),
+            ),
+            sourceName = "two-images.md",
+        )
+        val result = stack.repo.importNotes(listOf(note))
+        assertEquals(1, result.report.imported)
+        assertEquals(1, result.imageSaveFailures)
+        val stored = stack.db.noteDao().getAll().single()
+        assertFalse(stored.contentHtml.contains("%%NOMA_IMPORT_IMAGE"))
+        assertTrue(stored.contentHtml.contains("nota-attachment://"))
+        assertTrue(stored.contentHtml.contains("a missing image"))
+        val attachments = stack.db.attachmentDao().getAll()
+        assertEquals(1, attachments.size)
+        assertTrue(
+            stored.contentHtml.contains("nota-attachment://${attachments.single().id}"),
+        )
+    }
+
+    @Test
+    fun oversizeNoteWithImagesLeavesNoOrphans() = runBlocking {
+        // (Codex R24-F1/F3): the old two-transaction write created
+        // the folder/tag rows — and committed the note row with its
+        // tokens — before the post-expansion size check threw. The
+        // catch removed the note row, but the folder/tag rows and
+        // the staged image files survived as orphans. The write is
+        // now one transaction after the size check, so a refused
+        // note leaves no note row, no attachment rows or files, and
+        // no orphan folder or tag. The small note proves the run
+        // itself is intact.
+        val stack = newStack()
+        val imageFile = File.createTempFile("doomed-pic", ".png")
+            .apply { writeBytes(pngBytes) }
+        val big = ImportedNote(
+            title = "BigDoomed",
+            contentHtml = "<p>" + "a".repeat(990_000) + " %%NOMA_IMPORT_IMAGE_0%%</p>",
+            createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = listOf("doomed-a", "doomed-b"), folderName = "Doomed",
+            images = listOf(
+                ImportedImage(
+                    "pic.png", "image/png", imageFile,
+                    pngBytes.size.toLong(), "a".repeat(100_000),
+                    "%%NOMA_IMPORT_IMAGE_0%%",
+                ),
+            ),
+            sourceName = "big-doomed.md",
+        )
+        val small = ImportedNote(
+            title = "Small", contentHtml = "<p>small</p>",
+            createdAt = 1_700_000_010_000L, updatedAt = 1_700_000_010_000L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = null, images = emptyList(),
+            sourceName = "small.md",
+        )
+        val result = stack.repo.importNotes(listOf(big, small))
+        assertEquals(1, result.report.imported)
+        assertEquals(0, result.report.duplicates)
+        assertEquals(1, result.report.failed)
+        assertEquals(listOf("big-doomed.md"), result.report.failedNames)
+        assertEquals(listOf("Small"), stack.db.noteDao().getAll().map { it.title })
+        assertEquals(0, stack.db.attachmentDao().getAll().size)
+        assertTrue(stack.db.folderDao().getAll().none { it.name == "Doomed" })
+        assertTrue(
+            stack.db.tagDao().getAllTags()
+                .none { it.name == "doomed-a" || it.name == "doomed-b" },
+        )
+        val attachmentFiles = File(stack.context.filesDir, "attachments")
+            .walkTopDown().filter { it.isFile }.toList()
+        assertEquals(emptyList<File>(), attachmentFiles)
+    }
+
+    @Test
     fun timestampLessLooseFileReimportDedupes() = runBlocking {
         // R13-F1 end to end: a loose file with no timestamp (the
         // document provider omits COLUMN_LAST_MODIFIED) used to get a
