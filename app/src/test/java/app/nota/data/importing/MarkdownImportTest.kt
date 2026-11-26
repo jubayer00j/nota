@@ -388,6 +388,26 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun protocolRelativeImageKeepsAltAndDoesNotResolve() {
+        // R29-F2: //host/path has no scheme, so the old remote
+        // check missed it and the resolver's unique-basename
+        // fallback embedded the local pic.png — the wrong image.
+        // It is remote: alt text kept, counted, nothing embedded.
+        val imageFile = File.createTempFile("pic", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val resolver = createImportImageResolver(listOf("pic.png" to imageFile))
+        val result = parseOne(
+            "img3.md",
+            "![proto relative](//cdn.example.com/pic.png)",
+            resolver = resolver,
+        )
+        val note = result.notes[0]
+        assertEquals(0, note.images.size)
+        assertEquals("<p>proto relative</p>", note.contentHtml)
+        assertEquals(1, result.imagesUnresolved)
+        imageFile.delete()
+    }
+
+    @Test
     fun unresolvedImageKeepsAltTextAndCounts() {
         val resolver = createImportImageResolver(emptyList())
         val result = parseOne("img2.md", "![missing alt](nope.png)", resolver = resolver)

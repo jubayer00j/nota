@@ -162,6 +162,21 @@ object KeepTakeoutParser {
                     }
                     is CharBoundedText.Ok -> {
                         val raw = read.text
+                        // (Codex R29-F1): bound the JSON structure
+                        // BEFORE the tree exists. Every guard below
+                        // runs on the built tree, but a raw-compliant
+                        // entry of tiny objects materialises a
+                        // HashMap-backed object per item — several
+                        // times the raw size — before any of them
+                        // sees it. The count runs on the raw text
+                        // and retains nothing.
+                        if (jsonStructureExceeds(raw)) {
+                            result.skippedFiles += SkippedImportFile(
+                                base,
+                                ImportCaps.JSON_STRUCTURE_TOO_LARGE_REASON,
+                            )
+                            return@walk
+                        }
                         val json = try {
                             JSONObject(raw)
                         } catch (e: Exception) {
@@ -364,6 +379,85 @@ object KeepTakeoutParser {
         val usec = number.toLong()
         if (usec <= 0) return null
         return usec / 1000
+    }
+
+    /**
+     * Whether [text] exceeds the structural bounds in [ImportCaps]
+     * (Codex R29-F1), counted WITHOUT materialising the JSON tree:
+     * every object, array, string (key or value) and scalar counts
+     * as one node, and open containers count as depth. The scan is
+     * a single pass with string/escape awareness — brackets inside
+     * strings are not structure — and it stops at the first bound
+     * tripped, so even the counting retains O(1) state. Object keys
+     * are counted like values: org.json retains them as HashMap
+     * keys, so they cost a node either way. Over-counting is safe
+     * (it can only refuse data the tree parse or a later guard
+     * would have refused anyway); for well-formed JSON the count
+     * is exact, and malformed text is rejected by the tree parse
+     * right after, as before.
+     */
+    private fun jsonStructureExceeds(text: String): Boolean {
+        var nodes = 0L
+        var depth = 0
+        var inString = false
+        var escaped = false
+        // True when the next token begins a value: at the start of
+        // the input and after '[', ',' or ':'. Object keys arrive
+        // in the same state (after '{' or ','), so they are counted
+        // by the string branch below.
+        var expectValue = true
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    c == '\\' -> escaped = true
+                    c == '"' -> inString = false
+                }
+                i++
+                continue
+            }
+            when (c) {
+                '"' -> {
+                    if (expectValue) {
+                        nodes++
+                        if (nodes > ImportCaps.MAX_JSON_STRUCTURE_NODES) return true
+                        expectValue = false
+                    }
+                    inString = true
+                }
+                '{', '[' -> {
+                    nodes++
+                    if (nodes > ImportCaps.MAX_JSON_STRUCTURE_NODES) return true
+                    depth++
+                    if (depth > ImportCaps.MAX_JSON_STRUCTURE_DEPTH) return true
+                    expectValue = true
+                }
+                '}', ']' -> {
+                    depth--
+                    expectValue = false
+                }
+                ',', ':' -> expectValue = true
+                else -> {
+                    if (expectValue && !c.isWhitespace()) {
+                        // A number or a true/false/null literal:
+                        // one node, consumed whole so its letters
+                        // are never re-read as structure.
+                        nodes++
+                        if (nodes > ImportCaps.MAX_JSON_STRUCTURE_NODES) return true
+                        expectValue = false
+                        while (i < text.length &&
+                            (text[i].isLetterOrDigit() || text[i] == '+' ||
+                                text[i] == '-' || text[i] == '.')
+                        ) i++
+                        continue
+                    }
+                }
+            }
+            i++
+        }
+        return false
     }
 
     private fun keepJsonToDraft(

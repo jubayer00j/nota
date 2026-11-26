@@ -436,6 +436,18 @@ private fun parseFrontMatter(text: String): FrontMatter {
 
 /* ---------------- Inline rendering (escape-first) ---------------- */
 
+/** Image references that are never resolved against local files:
+ *  absolute http(s) URLs, data URIs, and protocol-relative URLs
+ *  (`//host/path` — it carries no scheme of its own, but it names
+ *  a remote host, not a local file; Codex R29-F2). A
+ *  protocol-relative reference used to fall through to the
+ *  resolver, whose unique-basename fallback could embed an
+ *  unrelated local file that happened to share the name. Both the
+ *  render path ([InlineImageSink.addImage]) and the reference
+ *  pre-scan ([collectRefsFrom]) classify with this one pattern so
+ *  the two can never disagree. */
+private val REMOTE_IMAGE_REF = Regex("^(https?:|data:|//)", RegexOption.IGNORE_CASE)
+
 private class InlineImageSink(
     private val result: ImportParseResult,
     private val resolver: ImportImageResolver?,
@@ -453,9 +465,9 @@ private class InlineImageSink(
 
     fun addImage(alt: String, ref: String): String {
         // Remote images are never hot-linked into a note: Nota only
-        // embeds local attachments, so an http(s)/data reference keeps
-        // its alt text and is counted.
-        if (Regex("^(https?:|data:)", RegexOption.IGNORE_CASE).containsMatchIn(ref) || resolver == null) {
+        // embeds local attachments, so an http(s)/data/protocol-
+        // relative reference keeps its alt text and is counted.
+        if (REMOTE_IMAGE_REF.containsMatchIn(ref) || resolver == null) {
             result.imagesUnresolved += 1
             return escapeImportHtml(alt)
         }
@@ -609,7 +621,7 @@ private fun collectRefsFrom(
 ) {
     for (match in RAW_IMAGE_REF.findAll(text)) {
         val ref = match.groupValues[2]
-        if (Regex("^(https?:|data:)", RegexOption.IGNORE_CASE).containsMatchIn(ref)) continue
+        if (REMOTE_IMAGE_REF.containsMatchIn(ref)) continue
         val target = resolveRef(fromPath, ref)
         if (target.isEmpty()) continue
         collector.add(target)

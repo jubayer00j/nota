@@ -300,6 +300,31 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun protocolRelativeImageRefIsNotResolvedLocally() {
+        // R29-F2: a protocol-relative reference names a remote
+        // host, but it carries no scheme, so the old remote check
+        // missed it in both the pre-scan and the render path — it
+        // flowed to the resolver, whose unique-basename fallback
+        // embedded the archive's unrelated local pic.png. The
+        // reference is now classified remote in both places: alt
+        // text kept, counted unresolved, nothing embedded.
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "notes/remote.md" to "# Remote\n\n![Remote pic](//cdn.example.com/pic.png)",
+                ),
+                mapOf("notes/pic.png" to pngBytes),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, result.notes.size)
+        val note = result.notes[0]
+        assertTrue(note.images.isEmpty())
+        assertTrue(note.contentHtml.contains("Remote pic"))
+        assertEquals(1, result.imagesUnresolved)
+    }
+
+    @Test
     fun markdownSelectionReportsUnrecognisedFiles() = runBlocking {
         val stack = newStack()
         val dir = stagingDir()
@@ -908,6 +933,86 @@ class NoteImportRobolectricTest {
         assertEquals(listOf("Small"), result.notes.map { it.title })
         assertEquals(
             listOf(SkippedImportFile("huge.json", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun keepHugeStructureIsRefusedBeforeParsing() {
+        // R29-F1: 40,000 tiny list items are ~1.2M raw chars — well
+        // under the 16M raw bound — but ~200k JSON nodes: org.json
+        // would materialise a HashMap-backed object per item before
+        // the R25-F1 expansion guard ever runs. The parser counts
+        // structure from the raw text and refuses the entry with
+        // the structure reason, before the tree exists; the small
+        // note proves the run is intact. (The pinned 20,000-item
+        // case above is ~100k nodes, so it still reaches the
+        // expansion guard and keeps its reason.)
+        val items = buildString {
+            append('[')
+            repeat(40_000) { i ->
+                if (i > 0) append(',')
+                append("""{"text":"x","isChecked":false}""")
+            }
+            append(']')
+        }
+        val entries = linkedMapOf(
+            "Takeout/Keep/dense.json" to
+                """{"title":"Dense","listContent":$items,"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/small.json" to
+                """{"title":"Small","textContent":"fine","createdTimestampUsec":1700000100000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(listOf("Small"), result.notes.map { it.title })
+        assertEquals(
+            listOf(SkippedImportFile("dense.json", ImportCaps.JSON_STRUCTURE_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun keepHugeLabelsStructureIsRefusedBeforeParsing() {
+        // R29-F1, labels array: 60,000 tiny label objects are
+        // ~180k nodes. The R27-F2 label cap runs on the built tree,
+        // so without the structural count the tree materialises
+        // first; the entry is refused whole with the structure
+        // reason instead of importing with the labels that fit.
+        val labels = buildString {
+            append('[')
+            repeat(60_000) { i ->
+                if (i > 0) append(',')
+                append("""{"name":"l$i"}""")
+            }
+            append(']')
+        }
+        val entries = linkedMapOf(
+            "Takeout/Keep/many-labels.json" to
+                """{"title":"ManyLabels","textContent":"tiny","labels":$labels,"createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("many-labels.json", ImportCaps.JSON_STRUCTURE_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun keepJsonNestedTooDeeplyIsRefused() {
+        // R29-F1, depth: org.json's tree parser recurses per
+        // nesting level, so a deeply nested entry is refused by
+        // the same structural count before the parse starts —
+        // without it this entry would import (the nested field is
+        // not a Keep field and would simply be ignored).
+        val nested = "[".repeat(600) + "]".repeat(600)
+        val entries = linkedMapOf(
+            "Takeout/Keep/deep.json" to
+                """{"title":"Deep","textContent":"fine","extra":$nested,"createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("deep.json", ImportCaps.JSON_STRUCTURE_TOO_LARGE_REASON)),
             result.skippedFiles,
         )
     }

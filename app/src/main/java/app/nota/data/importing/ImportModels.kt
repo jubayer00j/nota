@@ -52,6 +52,27 @@ object ImportCaps {
     const val RAW_ENTRY_TOO_LARGE_REASON =
         "That note's data is too large to import (over 16 million characters)."
 
+    /** Largest JSON structure one Keep entry may hold, counted in
+     *  nodes (every object, array, string and scalar in the raw
+     *  text) and in nesting depth — NOT 1.x caps: the raw-char bound
+     *  above limits the entry's TEXT, but org.json's tree multiplies
+     *  it before any per-array guard can run — a raw-compliant entry
+     *  of tiny objects (~500k list items of ~31 chars each, well
+     *  under the 16M-char raw bound) materialises a HashMap-backed
+     *  object per item, several times the raw size, and deeply
+     *  nested containers recurse the tree parser (Codex R29-F1).
+     *  The parser therefore counts structure from the raw text —
+     *  without building the tree — and refuses an entry past either
+     *  bound with its own reason. 150,000 nodes sits far above any
+     *  real note (a 20,000-item checklist is ~100k nodes and still
+     *  reaches the per-note expansion guard, exactly as before) and
+     *  far below an OOM; real Keep JSON nests ~4 deep, so 512 of
+     *  depth is headroom no export approaches. */
+    const val MAX_JSON_STRUCTURE_NODES = 150_000
+    const val MAX_JSON_STRUCTURE_DEPTH = 512
+    const val JSON_STRUCTURE_TOO_LARGE_REASON =
+        "That note's data is too large to import (over 150,000 items in its lists, labels or attachments)."
+
     /** Aggregate ceiling for image bytes extracted from ZIPs during
      *  one import selection — NOT a 1.x cap: 1.x extracts per archive
      *  with no cross-archive bound. 512 MiB, the same ceiling as the
