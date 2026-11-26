@@ -14,22 +14,41 @@ import java.io.InputStream
  *   The set mirrors what the engine accepts: ZIPs, Markdown/text, and
  *   the image types the Markdown image resolver accepts as fodder.
  *   Anything else is reported as a skipped file, never copied.
- * - [MAX_STAGED_PICK_BYTES] bounds the copy itself. A staged file is
- *   a compressed ZIP (uncompressed content ≤ 512 MiB, so a
- *   stored-entry ZIP can legitimately approach that size compressed)
- *   or a single file the engine caps at 100 MiB — so the cap reuses
- *   [BackupQuota.MAX_DECRYPTED_ZIP_BYTES] (544 MiB), the same headroom
- *   the backup pipeline allows for a decrypted ZIP.
+ * - The per-file cap is type-specific (Codex R40-F1):
+ *   [maxStagedBytesFor] gives a ZIP the full [MAX_STAGED_PICK_BYTES]
+ *   (544 MiB — a stored-entry ZIP can legitimately approach 512 MiB
+ *   compressed, so it needs that headroom), while a Markdown/text
+ *   file or image is capped at the engine's single-file limit
+ *   ([ImportCaps.MAX_IMPORT_FILE_BYTES], 100 MiB). Before this fix
+ *   every pick got the ZIP-sized cap, so a 100–544 MiB text or image
+ *   pick was copied into cache in full and only then rejected by the
+ *   engine — hundreds of MiB staged for nothing on a low-storage
+ *   device. The cap is decided from the pick's name before any copy.
  * - [copyCapped] is the streaming copy that enforces the cap and
  *   deletes the partial target when it trips.
  * - [StagingBudget] bounds a whole multi-file selection (Codex
  *   R6-F2): the per-file cap alone lets several large picks stage
  *   gigabytes into one cache directory before parsing starts.
- *   [stageOne] stages one pick under both caps at once.
+ *   [stageOne] stages one pick under both caps at once. The budget's
+ *   total stays one ZIP cap's worth (544 MiB) — it bounds total
+ *   cache use per selection, and a mixed selection can legitimately
+ *   hold a 544 MiB ZIP; the per-file fix already removes the
+ *   pathological single-file waste.
  */
 object PickedFileStaging {
 
     val MAX_STAGED_PICK_BYTES: Long = BackupQuota.MAX_DECRYPTED_ZIP_BYTES
+
+    /** Per-file staging cap for one pick, by type (Codex R40-F1):
+     *  a ZIP keeps the full 544 MiB headroom; a Markdown/text file or
+     *  image can never exceed the engine's 100 MiB single-file cap, so
+     *  it is refused at 100 MiB instead of being copied in full and
+     *  rejected afterwards. Decided from the pick's name before any
+     *  copy — callers pass the display name they already checked
+     *  with [isSupportedPick]. */
+    fun maxStagedBytesFor(name: String): Long =
+        if (name.lowercase().endsWith(".zip")) MAX_STAGED_PICK_BYTES
+        else ImportCaps.MAX_IMPORT_FILE_BYTES
 
     /** Total bytes one multi-file selection may stage — one
      *  per-file cap's worth across all picks. A selection of several
@@ -64,19 +83,24 @@ object PickedFileStaging {
 
     /** Stages one picked file under the per-file cap AND the
      *  selection [budget]: copies at most the smaller of the two.
+     *  The per-file cap is type-specific ([maxStagedBytesFor]) —
+     *  a ZIP gets the 544 MiB headroom, anything else 100 MiB —
+     *  so a huge text or image pick is refused after copying at
+     *  most 100 MiB instead of being staged in full first.
      *  A rejected copy leaves no file behind, and the input is
      *  always closed. */
-    fun stageOne(input: InputStream, target: File, budget: StagingBudget): StagedPick {
+    fun stageOne(input: InputStream, target: File, budget: StagingBudget, name: String): StagedPick {
         val remaining = budget.remaining()
         if (remaining <= 0) {
             input.close()
             return StagedPick.OverBudget
         }
-        val cap = minOf(MAX_STAGED_PICK_BYTES, remaining)
+        val perFileCap = maxStagedBytesFor(name)
+        val cap = minOf(perFileCap, remaining)
         if (!copyCapped(input, target, cap)) {
             // The cap passed was the binding one: the per-file cap
             // when the budget still had room, the budget otherwise.
-            return if (remaining < MAX_STAGED_PICK_BYTES) StagedPick.OverBudget else StagedPick.TooBig
+            return if (remaining < perFileCap) StagedPick.OverBudget else StagedPick.TooBig
         }
         val bytes = target.length()
         budget.record(bytes)
@@ -117,3 +141,4 @@ object PickedFileStaging {
         return ok
     }
 }
+

@@ -8,12 +8,14 @@ import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.TagEntity
 import app.nota.data.repository.refreshFtsEntry
+import app.nota.data.importing.PickedFileStaging
 import app.nota.feature.settings.stageMarkdownPicks
 import android.net.Uri
 import androidx.room.withTransaction
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -2212,6 +2214,113 @@ class NoteImportRobolectricTest {
             staged.skippedFiles,
         )
         assertTrue(staged.files.first { it.name == "first.md" }.file.readText().contains("First"))
+    }
+
+    /** An InputStream that yields [totalBytes] of 'a' without
+     *  materialising them, counting what was actually read — so a
+     *  test can prove staging stopped at the cap instead of
+     *  consuming the whole stream. */
+    private class GeneratingInputStream(private val totalBytes: Long) : InputStream() {
+        var bytesRead = 0L
+            private set
+
+        override fun read(): Int {
+            if (bytesRead >= totalBytes) return -1
+            bytesRead++
+            return 'a'.code
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (bytesRead >= totalBytes) return -1
+            val n = minOf(len.toLong(), totalBytes - bytesRead).toInt()
+            b.fill('a'.code.toByte(), off, off + n)
+            bytesRead += n
+            return n
+        }
+    }
+
+    @Test
+    fun nonZipPickOver100MiBIsRefusedAtStaging() {
+        // R40-F1: a 150 MiB Markdown pick used to be copied into
+        // cache in full under the ZIP-sized 544 MiB cap and only
+        // then rejected by the engine. It is now refused at the
+        // 100 MiB single-file cap: TooBig, no file left behind,
+        // and the stream was NOT consumed in full — the copy
+        // stopped one buffer past the cap.
+        val dir = java.nio.file.Files.createTempDirectory("import-stage").toFile()
+        val target = File(dir, "big.md")
+        val stream = GeneratingInputStream(150L * 1024 * 1024)
+        val result = PickedFileStaging.stageOne(
+            stream, target, PickedFileStaging.StagingBudget(), "big.md",
+        )
+        assertEquals(PickedFileStaging.StagedPick.TooBig, result)
+        assertFalse(target.exists())
+        assertTrue(stream.bytesRead < 150L * 1024 * 1024)
+        assertTrue(stream.bytesRead <= ImportCaps.MAX_IMPORT_FILE_BYTES + 8192)
+    }
+
+    @Test
+    fun zipPickOver100MiBStillStages() {
+        // R40-F1: the ZIP headroom is preserved — a 150 MiB ZIP is
+        // past the 100 MiB single-file cap but inside the 544 MiB
+        // ZIP cap, so it still stages (a stored-entry ZIP can
+        // legitimately approach 512 MiB compressed).
+        val dir = java.nio.file.Files.createTempDirectory("import-stage").toFile()
+        val target = File(dir, "big.zip")
+        val stream = GeneratingInputStream(150L * 1024 * 1024)
+        val result = PickedFileStaging.stageOne(
+            stream, target, PickedFileStaging.StagingBudget(), "big.zip",
+        )
+        assertEquals(PickedFileStaging.StagedPick.Ok(150L * 1024 * 1024), result)
+        assertEquals(150L * 1024 * 1024, target.length())
+    }
+
+    @Test
+    fun nonZipPickAtExactly100MiBStages() {
+        // R40-F1 boundary: exactly at the 100 MiB single-file cap,
+        // a Markdown pick still stages.
+        val dir = java.nio.file.Files.createTempDirectory("import-stage").toFile()
+        val target = File(dir, "exact.md")
+        val stream = GeneratingInputStream(ImportCaps.MAX_IMPORT_FILE_BYTES)
+        val result = PickedFileStaging.stageOne(
+            stream, target, PickedFileStaging.StagingBudget(), "exact.md",
+        )
+        assertEquals(PickedFileStaging.StagedPick.Ok(ImportCaps.MAX_IMPORT_FILE_BYTES), result)
+        assertEquals(ImportCaps.MAX_IMPORT_FILE_BYTES, target.length())
+    }
+
+    @Test
+    fun nonZipPickJustOver100MiBIsRefused() {
+        // R40-F1 boundary: one byte past the 100 MiB single-file
+        // cap, a Markdown pick is refused and leaves no file.
+        val dir = java.nio.file.Files.createTempDirectory("import-stage").toFile()
+        val target = File(dir, "over.md")
+        val stream = GeneratingInputStream(ImportCaps.MAX_IMPORT_FILE_BYTES + 1)
+        val result = PickedFileStaging.stageOne(
+            stream, target, PickedFileStaging.StagingBudget(), "over.md",
+        )
+        assertEquals(PickedFileStaging.StagedPick.TooBig, result)
+        assertFalse(target.exists())
+    }
+
+    @Test
+    fun oversizedMarkdownPickIsSkippedWith100MbReason() {
+        // R40-F1 end to end: through stageMarkdownPicks, a 150 MiB
+        // Markdown pick is reported as skipped with the 100 MB
+        // reason — not the old 544 MB wording — and no file stages.
+        val context = RuntimeEnvironment.getApplication()
+        val shadowResolver = Shadows.shadowOf(context.contentResolver)
+        val bigUri = Uri.parse("content://import.test/big.md")
+        shadowResolver.registerInputStreamSupplier(bigUri) {
+            GeneratingInputStream(150L * 1024 * 1024)
+        }
+        val dir = java.nio.file.Files.createTempDirectory("import-stage").toFile()
+        val staged = stageMarkdownPicks(context, listOf(bigUri), dir)
+        assertTrue(staged.files.isEmpty())
+        assertEquals(
+            listOf(SkippedImportFile("big.md", "File is larger than 100 MB.")),
+            staged.skippedFiles,
+        )
     }
 
     @Test

@@ -271,14 +271,21 @@ internal fun stageMarkdownPicks(
                 skipped += SkippedImportFile(name, "Couldn't be read.")
                 continue
             }
-            when (PickedFileStaging.stageOne(input, target, budget)) {
+            when (PickedFileStaging.stageOne(input, target, budget, name)) {
                 is PickedFileStaging.StagedPick.Ok -> stagedFiles += StagedImportFile(
                     name = name,
                     file = target,
                     lastModified = pickedLastModified(context, uri),
                 )
                 PickedFileStaging.StagedPick.TooBig ->
-                    skipped += SkippedImportFile(name, "File is larger than 544 MB.")
+                    // (Codex R40-F1): the cap that tripped is
+                    // type-specific — 100 MiB for a Markdown/text
+                    // file or image, 544 MiB for a ZIP — so the
+                    // reason names the cap that actually applied.
+                    skipped += SkippedImportFile(
+                        name,
+                        "File is larger than ${PickedFileStaging.maxStagedBytesFor(name) / (1024 * 1024)} MB.",
+                    )
                 PickedFileStaging.StagedPick.OverBudget ->
                     skipped += SkippedImportFile(
                         name,
@@ -343,3 +350,4 @@ private fun pickedLastModified(context: Context, uri: Uri): Long {
         0L
     }
 }
+
