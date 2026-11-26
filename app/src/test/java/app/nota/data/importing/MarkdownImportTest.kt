@@ -580,6 +580,27 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun aggregateTextBudgetCountsTagNames() {
+        // R27-F2: addNote used to count only title + body toward
+        // the aggregate budget, so tag names were retained for free
+        // — a note with a tiny body but thousands of labels slipped
+        // past it. Tag names count now.
+        val result = ImportParseResult()
+        val added = result.addNote(
+            ImportedNote(
+                title = "T", contentHtml = "<p>x</p>",
+                createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+                pinned = false, archived = false, trashedAt = null,
+                tagNames = listOf("abc", "de"), folderName = null, images = emptyList(),
+                sourceName = "t.md",
+            ),
+        )
+        assertTrue(added)
+        // Title 1 + body 7 + tags 3 + 2.
+        assertEquals(13L, result.retainedTextChars)
+    }
+
+    @Test
     fun enforceContentBudgetSubtractsTitles() {
         // R19-F1: enforceContentBudget used to subtract only the
         // body when dropping a note, so a merged run over budget

@@ -2751,4 +2751,150 @@ class NoteImportRobolectricTest {
         return signature + chunk("IHDR", ihdr) +
             chunk("IDAT", compressed.copyOf(compressedLen)) + chunk("IEND", ByteArray(0))
     }
+
+    @Test
+    fun pastCapImageRefsDoNotStarveLaterZipImages() {
+        // R27-F1: walk 2 used to collect image refs from every
+        // member, including members walk 4 skips at the 5,000-note
+        // cap, and walk 3 staged their images against the shared
+        // selection budget — starving a later ZIP's importable
+        // notes. A selection is emulated at parse level: two
+        // parseImportZip calls sharing one small budget. The big ZIP
+        // fills the note cap with plain notes and references 100
+        // distinct images only past it; the small ZIP holds one note
+        // referencing one image. The small note must import WITH its
+        // image embedded — before the fix its image could not stage
+        // (the budget was spent on past-cap images) and the
+        // reference stayed unresolved.
+        val budget = ExtractedImageBudget(totalBytes = 1_000)
+        val entries = LinkedHashMap<String, String>()
+        repeat(5_000) { i -> entries["note-$i.md"] = "# Note $i\n\nBody $i\n" }
+        repeat(100) { i -> entries["past-$i.md"] = "# Past $i\n\n![img](img-past-$i.png)\n" }
+        val binaries = (0 until 100).associate { "img-past-$it.png" to pngBytes }
+        val big = MarkdownImporter.parseImportZip(
+            zipOf(entries, binaries), stagingDir(), budget,
+        )
+        assertEquals(5_000, big.notes.size)
+        assertEquals(100, big.skippedFiles.count { it.reason.contains("5,000 notes") })
+        // The past-cap images were never staged, so the budget is intact.
+        assertEquals(1_000L, budget.remaining())
+
+        val small = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf("small.md" to "# Small\n\n![img](small.png)\n"),
+                mapOf("small.png" to pngBytes),
+            ),
+            stagingDir(), budget,
+        )
+        assertEquals(1, small.notes.size)
+        assertEquals(1, small.notes[0].images.size)
+        assertEquals(0, small.imagesUnresolved)
+    }
+
+    @Test
+    fun crossArchiveNoteCapStopsPreScan() {
+        // R27-F1, cross-archive half: the running total must travel
+        // into each ZIP parse, so a second archive neither scans
+        // refs for members past the run cap nor converts them. The
+        // first archive contributes 4,999 notes; the second holds
+        // two notes with images, of which only the first fits the
+        // run cap. The budget fits exactly one image, so staging the
+        // second note's image would be observable — it must never
+        // be staged.
+        val budget = ExtractedImageBudget(totalBytes = 140)
+        val firstEntries = LinkedHashMap<String, String>()
+        repeat(4_999) { i -> firstEntries["n-$i.md"] = "# N $i\n\nBody\n" }
+        val first = MarkdownImporter.parseImportZip(
+            zipOf(firstEntries), stagingDir(), budget,
+        )
+        assertEquals(4_999, first.notes.size)
+
+        val second = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "one.md" to "# One\n\n![img](one.png)\n",
+                    "two.md" to "# Two\n\n![img](two.png)\n",
+                ),
+                mapOf("one.png" to pngBytes, "two.png" to pngBytes),
+            ),
+            stagingDir(), budget, null, 4_999,
+        )
+        assertEquals(1, second.notes.size)
+        assertEquals("One", second.notes[0].title)
+        assertEquals(1, second.notes[0].images.size)
+        assertEquals(0, second.imagesUnresolved)
+        assertEquals(1, second.skippedFiles.size)
+        assertTrue(second.skippedFiles[0].reason.contains("5,000 notes"))
+        // Only the first note's image was staged.
+        assertEquals(140L - pngBytes.size, budget.remaining())
+    }
+
+    @Test
+    fun keepHugeLabelsArrayIsBounded() = runBlocking {
+        // R27-F2: labels accumulated unbounded while no text budget
+        // counted them — a huge labels array with a tiny body
+        // retained millions of strings. 150 labels now import with
+        // the first 100 kept as tags; the note itself still imports.
+        val stack = newStack()
+        val labels = (0 until 150).joinToString(",") { """{"name":"label$it"}""" }
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/many.json" to
+                    """{"title":"Many","textContent":"tiny","labels":[$labels],"createdTimestampUsec":1700000000000000}""",
+            ),
+        )
+        val outcome = stack.repo.importKeepZip(zip)
+        assertEquals(1, outcome.report.imported)
+        assertEquals(ImportCaps.MAX_TAGS_PER_NOTE, stack.db.tagDao().getAllTags().size)
+        val note = stack.db.noteDao().getAll().first { it.title == "Many" }
+        assertEquals(
+            ImportCaps.MAX_TAGS_PER_NOTE,
+            stack.db.tagDao().observeAllCrossRefs().first().count { it.noteId == note.id },
+        )
+    }
+
+    @Test
+    fun markdownHugeFrontMatterTagListIsBounded() = runBlocking {
+        // R27-F2, Markdown half: a front-matter tag list of 150 tags
+        // imports with the first 100 kept as tags.
+        val stack = newStack()
+        val tags = (0 until 150).joinToString(", ") { "tag$it" }
+        val zip = zipOf(
+            linkedMapOf(
+                "many.md" to "---\ntags: [$tags]\n---\n# Many\n\nbody",
+            ),
+        )
+        val outcome = stack.repo.importMarkdownZip(zip)
+        assertEquals(1, outcome.report.imported)
+        assertEquals(ImportCaps.MAX_TAGS_PER_NOTE, stack.db.tagDao().getAllTags().size)
+    }
+
+    @Test
+    fun overLongTagNameIsDropped() {
+        // R27-F2: a single label/tag name past the per-name byte cap
+        // is dropped, never truncated — the note keeps its other labels.
+        val longName = "x".repeat(2_000)
+        val keep = KeepTakeoutParser.parse(
+            zipOf(
+                linkedMapOf(
+                    "Takeout/Keep/long.json" to
+                        """{"title":"Long","textContent":"tiny","labels":[{"name":"$longName"},{"name":"kept"}],"createdTimestampUsec":1700000000000000}""",
+                ),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, keep.notes.size)
+        assertEquals(listOf("kept"), keep.notes[0].tagNames)
+
+        val md = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "long.md" to "---\ntags: [$longName, kept]\n---\n# Long\n\nbody",
+                ),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, md.notes.size)
+        assertEquals(listOf("kept"), md.notes[0].tagNames)
+    }
 }

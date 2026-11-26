@@ -159,7 +159,20 @@ class NoteImportRepository(
                             // the archive-only resolver could never see.
                             // The archive resolver stays primary — the
                             // selection one is only its fallback.
-                            MarkdownImporter.parseImportZip(file.file, subDir, imageBudget, resolver),
+                            // The running note total travels in too
+                            // (Codex R27-F1): the pre-scan and the
+                            // note-cap check count against notes
+                            // earlier archives already contributed,
+                            // so a later archive neither scans refs
+                            // for members past the run cap nor
+                            // converts them.
+                            MarkdownImporter.parseImportZip(
+                                file.file,
+                                subDir,
+                                imageBudget,
+                                resolver,
+                                merged.notes.size,
+                            ),
                         )
                         // Enforce the shared caps as sources are
                         // merged (Codex R12-F1): each ZIP's own

@@ -78,6 +78,19 @@ object ImportCaps {
      *  the note still imports. */
     const val MAX_RETAINED_IMAGE_REFS = 50_000
     const val MAX_RETAINED_IMAGE_REF_CHARS = 1024L * 1024
+
+    /** Largest number of tags one imported note may carry, and the
+     *  largest single tag name, in UTF-8 bytes — NOT 1.x caps: 1.x
+     *  accumulates every label/tag name unbounded, and a
+     *  raw-limit-compliant source with a huge labels array and a
+     *  tiny body retains millions of label strings while no text
+     *  budget trips (Codex R27-F2). 100 tags and 1,000 bytes per
+     *  name sit far above any real export (a handful of short
+     *  labels) and far below an OOM. Labels past the count cap and
+     *  names past the byte cap are dropped, never truncated — the
+     *  note still imports with the labels that fit. */
+    const val MAX_TAGS_PER_NOTE = 100
+    const val MAX_TAG_NAME_BYTES = 1_000L
 }
 
 /**
@@ -226,16 +239,24 @@ class ImportParseResult {
      *  the archive quota do not bound the live heap on their own.
      *  The title counts (Codex R19-F1): a ~1 MB title with a tiny
      *  body is a legal single note, and 5,000 of them would retain
-     *  ~5 GB while a body-only counter barely moved. */
+     *  ~5 GB while a body-only counter barely moved. Tag names count
+     *  too (Codex R27-F2): they are retained strings as well, and a
+     *  note with a tiny body but thousands of labels would otherwise
+     *  slip past the budget the same way. */
     var retainedTextChars: Long = 0L
         private set
+
+    /** UTF-16 units retained for one note: title + body + tag names. */
+    private fun retainedChars(note: ImportedNote): Long =
+        note.title.length.toLong() + note.contentHtml.length.toLong() +
+            note.tagNames.sumOf { it.length.toLong() }
 
     /** Adds [note] when the aggregate text budget allows it;
      *  otherwise records the skip and returns false. Callers that
      *  can estimate the size before converting (the parsers) check
      *  first and skip without converting, so this is the true,
      *  defence-in-depth check on the converted note — title AND
-     *  body (Codex R19-F1). A note past the per-note bound is
+     *  body (Codex R19-F1) plus tag names (Codex R27-F2). A note past the per-note bound is
      *  refused first (Codex R7-F1): it would
      *  write fine and then break the run-end rebuild, whose
      *  `noteDao.getAll()` cannot read a row past Android's ~2 MiB
@@ -249,7 +270,7 @@ class ImportParseResult {
             )
             return false
         }
-        val chars = note.title.length.toLong() + note.contentHtml.length.toLong()
+        val chars = retainedChars(note)
         if (retainedTextChars + chars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
             skippedFiles += SkippedImportFile(
                 note.sourceName,
@@ -267,14 +288,14 @@ class ImportParseResult {
      *  for runs assembled from several already-budgeted sources
      *  whose sum still exceeds the budget. Dropped notes are
      *  reported in parse order, like [enforceNoteCap] does. The
-     *  subtraction counts title + body, like [addNote] does
-     *  (Codex R19-F1) — subtracting bodies only would leave the
+     *  subtraction counts title + body + tags, like [addNote] does
+     *  (Codex R19-F1, R27-F2) — subtracting bodies only would leave the
      *  counter overstated by the dropped titles. */
     fun enforceContentBudget() {
         val dropped = mutableListOf<ImportedNote>()
         while (retainedTextChars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS && notes.isNotEmpty()) {
             val note = notes.removeAt(notes.lastIndex)
-            retainedTextChars -= note.title.length + note.contentHtml.length
+            retainedTextChars -= retainedChars(note)
             dropped += note
         }
         for (note in dropped.asReversed()) {
@@ -304,8 +325,8 @@ class ImportParseResult {
         val excess = notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).toList()
         notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).clear()
         for (note in excess) {
-            // Title + body, like addNote counts them (Codex R19-F1).
-            retainedTextChars -= note.title.length + note.contentHtml.length
+            // Title + body + tags, like addNote counts them (Codex R19-F1, R27-F2).
+            retainedTextChars -= retainedChars(note)
             skippedFiles += SkippedImportFile(
                 note.sourceName,
                 "Import limit reached (5,000 notes per run).",

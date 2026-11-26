@@ -351,6 +351,29 @@ private fun parseFrontMatter(text: String): FrontMatter {
     else if (body.startsWith("\n")) body = body.substring(1)
 
     val lines = block.split(Regex("\r?\n"))
+    // Comma-separated tag values, scanned by hand (Codex R27-F2):
+    // split(',') would materialize every tag of a crafted line
+    // before any cap applies. Stops adding at the per-note cap;
+    // a name past the per-name byte cap is dropped, never
+    // truncated — the note still imports with the tags that fit.
+    fun addCommaTags(raw: String) {
+        var start = 0
+        var idx = 0
+        while (idx <= raw.length) {
+            if (idx == raw.length || raw[idx] == ',') {
+                if (tags.size < ImportCaps.MAX_TAGS_PER_NOTE) {
+                    val tag = stripQuotes(raw.substring(start, idx).trim())
+                    if (tag.isNotEmpty() &&
+                        utf8ByteLength(tag) <= ImportCaps.MAX_TAG_NAME_BYTES
+                    ) {
+                        tags += tag
+                    }
+                }
+                start = idx + 1
+            }
+            idx++
+        }
+    }
     var i = 0
     while (i < lines.size) {
         val line = lines[i]
@@ -369,11 +392,9 @@ private fun parseFrontMatter(text: String): FrontMatter {
             }
             "tags" -> {
                 if (value.startsWith("[") && value.endsWith("]")) {
-                    tags += value.substring(1, value.length - 1).split(',')
-                        .map { stripQuotes(it.trim()) }.filter { it.isNotEmpty() }
+                    addCommaTags(value.substring(1, value.length - 1))
                 } else if (value.isNotEmpty()) {
-                    tags += value.split(',')
-                        .map { stripQuotes(it.trim()) }.filter { it.isNotEmpty() }
+                    addCommaTags(value)
                 } else {
                     // Block list:
                     //   tags:
@@ -383,7 +404,12 @@ private fun parseFrontMatter(text: String): FrontMatter {
                     while (j < lines.size) {
                         val item = Regex("^\\s*-\\s+(.*)$").find(lines[j]) ?: break
                         val tag = stripQuotes(item.groupValues[1].trim())
-                        if (tag.isNotEmpty()) tags += tag
+                        if (tag.isNotEmpty() &&
+                            tags.size < ImportCaps.MAX_TAGS_PER_NOTE &&
+                            utf8ByteLength(tag) <= ImportCaps.MAX_TAG_NAME_BYTES
+                        ) {
+                            tags += tag
+                        }
                         i = j
                         j++
                     }
@@ -1811,12 +1837,20 @@ object MarkdownImporter {
      *  fallback behind the archive resolver — the archive wins on
      *  conflict, and a name ambiguous in the archive stays
      *  unresolved (see [combineImportImageResolvers]). A ZIP parsed
-     *  on its own passes nothing, which changes nothing for it. */
+     *  on its own passes nothing, which changes nothing for it.
+     *
+     *  [alreadyImportedNotes] is the selection-level running total
+     *  (Codex R27-F1): how many notes earlier archives of this
+     *  selection already contributed. Walk 2's pre-scan and walk 4's
+     *  note-cap check both count against it, so a later archive
+     *  neither scans refs for members past the run cap nor converts
+     *  them. A single-ZIP parse passes nothing and is unchanged. */
     fun parseImportZip(
         zipFile: File,
         stagingDir: File,
         imageBudget: ExtractedImageBudget = ExtractedImageBudget(),
         externalResolver: ImportImageResolver? = null,
+        alreadyImportedNotes: Int = 0,
     ): ImportParseResult {
         val result = ImportParseResult()
         if (!isZipFile(zipFile)) {
@@ -1895,15 +1929,55 @@ object MarkdownImporter {
             // counted — there is nothing to report about it.
             val referenced = ReferencedImageCollector()
             val scannedText = HashSet<String>()
+            // (Codex R27-F1): the pre-scan must apply the same
+            // eligibility walk 4 applies, against the same running
+            // total — the note cap counts notes already imported
+            // from earlier archives of this selection plus the
+            // members this archive will convert. Without it, an
+            // earlier archive with >5,000 members gets its
+            // beyond-cap members' refs collected and their images
+            // staged against the shared selection budget, starving
+            // a later ZIP's importable notes. A member counts once
+            // it passes the checks below; a .txt member consumes a
+            // cap slot too (it becomes a note) even though it has
+            // no refs to scan, so it is counted without being read
+            // — a .txt walk 4 refuses on the aggregate budget or
+            // the per-note bound is still counted, which can only
+            // under-scan later members' refs in that narrow regime
+            // (an unresolved reference, counted — never a lost
+            // note). The aggregate budget is likewise not simulated
+            // here: the read bound below already refuses a member
+            // past the full budget, exactly as walk 4 would.
+            var eligibleScanned = alreadyImportedNotes
             reader.walk { entry ->
                 if (entry.name !in textMembers) return@walk
                 if (!scannedText.add(entry.name)) return@walk
-                if (isPlainTextEntry(entry.name)) return@walk
+                if (eligibleScanned >= ImportCaps.MAX_IMPORT_NOTES) return@walk
+                if (isPlainTextEntry(entry.name)) {
+                    // No image refs to scan, but the member still
+                    // becomes a note — count the slot.
+                    eligibleScanned++
+                    return@walk
+                }
                 when (val read = entry.readTextUpToChars(
                     ImportCaps.MAX_AGGREGATE_TEXT_CHARS,
                     ImportCaps.MAX_IMPORT_FILE_BYTES,
                 )) {
-                    is CharBoundedText.Ok ->
+                    is CharBoundedText.Ok -> {
+                        // The per-note bound, estimated before the
+                        // scan: appendParsedFile refuses this member
+                        // on the same estimate, so scanning its refs
+                        // would stage images for a note that never
+                        // imports.
+                        val input = MarkdownFileInput(
+                            name = importBaseName(entry.name),
+                            path = entry.name,
+                            text = read.text,
+                            lastModified = textMembers[entry.name] ?: 0L,
+                        )
+                        if (estimateConvertedNoteBytes(input) >
+                            ImportCaps.MAX_NOTE_CONTENT_BYTES
+                        ) return@walk
                         // Front matter is metadata, never body
                         // (Codex R23-F2): parseFrontMatter strips it
                         // before rendering, so an image reference
@@ -1919,6 +1993,8 @@ object MarkdownImporter {
                             parseFrontMatter(read.text.removePrefix("\uFEFF")).body,
                             referenced,
                         )
+                        eligibleScanned++
+                    }
                     else -> { /* walk 4 skips this member too */ }
                 }
             }
@@ -1988,7 +2064,10 @@ object MarkdownImporter {
                 if (entry.name !in textMembers) return@walk
                 if (!convertedText.add(entry.name)) return@walk
                 val base = importBaseName(entry.name)
-                if (result.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
+                // The running total counts notes already imported
+                // from earlier archives of this selection (Codex
+                // R27-F1): the cap is per run, not per archive.
+                if (alreadyImportedNotes + result.notes.size >= ImportCaps.MAX_IMPORT_NOTES) {
                     result.skippedFiles += SkippedImportFile(
                         base,
                         "Import limit reached (5,000 notes per run).",

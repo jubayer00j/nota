@@ -186,9 +186,12 @@ object KeepTakeoutParser {
                             // known here, and a ~1 MB title with a
                             // tiny body must trip it just like a big
                             // body does. addNote re-checks the same
-                            // sum when the draft becomes a note.
+                            // sum when the draft becomes a note. Tag
+                            // names count too (Codex R27-F2): they are
+                            // retained strings as well.
                             if (retainedConvertedChars + draft.title.length +
-                                draft.contentHtml.length >
+                                draft.contentHtml.length +
+                                draft.tagNames.sumOf { it.length.toLong() } >
                                 ImportCaps.MAX_AGGREGATE_TEXT_CHARS
                             ) {
                                 result.skippedFiles += SkippedImportFile(
@@ -198,7 +201,8 @@ object KeepTakeoutParser {
                                 return@walk
                             }
                             drafts += draft
-                            retainedConvertedChars += draft.title.length + draft.contentHtml.length
+                            retainedConvertedChars += draft.title.length + draft.contentHtml.length +
+                                draft.tagNames.sumOf { it.length.toLong() }
                         }
                     }
                 }
@@ -440,9 +444,21 @@ object KeepTakeoutParser {
         val tagNames = mutableListOf<String>()
         val labels = json.opt("labels") as? JSONArray
         if (labels != null) {
+            // (Codex R27-F2): labels used to accumulate unbounded
+            // while no text budget counted them — a huge labels
+            // array with a tiny body retains millions of strings.
+            // Bound the count and each name's bytes; extras are
+            // dropped, never truncated — the note still imports
+            // with the labels that fit.
             for (i in 0 until labels.length()) {
+                if (tagNames.size >= ImportCaps.MAX_TAGS_PER_NOTE) break
                 val name = labels.optJSONObject(i)?.opt("name") as? String
-                if (!name.isNullOrBlank()) tagNames += name.trim()
+                if (!name.isNullOrBlank()) {
+                    val trimmed = name.trim()
+                    if (utf8ByteLength(trimmed) <= ImportCaps.MAX_TAG_NAME_BYTES) {
+                        tagNames += trimmed
+                    }
+                }
             }
         }
 
