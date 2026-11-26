@@ -715,12 +715,15 @@ class NoteImportRepository(
     }
 
     /** A folder resolution: its id, plus the row when it was created
-     *  by this call (null when it already existed). */
-    private data class FolderResolution(val id: String?, val created: FolderEntity?)
+     *  by this call (null when it already existed). Internal, not
+     *  private: [RunMetadata] is internal (Codex R37-F1 test seam),
+     *  and its resolvers return these types. */
+    internal data class FolderResolution(val id: String?, val created: FolderEntity?)
 
     /** A tag resolution: the tag, plus itself when it was created
-     *  by this call (null when it already existed). */
-    private data class TagResolution(val tag: TagEntity, val created: TagEntity?)
+     *  by this call (null when it already existed). Internal for
+     *  the same reason as [FolderResolution]. */
+    internal data class TagResolution(val tag: TagEntity, val created: TagEntity?)
 
     /**
      * Writes one note; returns the number of images that failed to save.
