@@ -380,15 +380,60 @@ object KeepTakeoutParser {
 
         var contentHtml = ""
         if (listContent.length() > 0) {
+            // (Codex R25-F1): bound the task-list expansion WHILE
+            // iterating. Each item expands into a ~70-byte <li>
+            // wrapper around its escaped text, so a raw-limit-compliant
+            // listContent of many tiny items expands into megabytes of
+            // HTML before addNote's size check ever runs (the check
+            // only sees the finished draft). Track the exact output
+            // bytes as we go — title + <ul> wrapper + per-item wrapper
+            // + escaped text, all measured from the literals
+            // taskListHtml emits — and refuse the note whole, with the
+            // same per-note reason addNote would give, as soon as the
+            // estimate passes the bound. The accounting is exact, so a
+            // note that fits is never refused early; the items list
+            // itself never holds more than one bound's worth.
             val items = mutableListOf<Pair<String, Boolean>>()
+            val checkedWrapperBytes = utf8ByteLength(taskItemHtml("", true))
+            val uncheckedWrapperBytes = utf8ByteLength(taskItemHtml("", false))
+            var listBytes = utf8ByteLength(title) +
+                utf8ByteLength("<ul data-type=\"taskList\"></ul>")
+            var overBudget = false
             for (i in 0 until listContent.length()) {
                 val item = listContent.optJSONObject(i)
                 val text = (item?.opt("text") as? String)?.replace(Regex("\\s*\\n\\s*"), " ") ?: ""
                 val checked = item?.opt("isChecked") as? Boolean == true
-                items += escapeImportHtml(text) to checked
+                val escaped = escapeImportHtml(text)
+                listBytes += utf8ByteLength(escaped) +
+                    if (checked) checkedWrapperBytes else uncheckedWrapperBytes
+                if (listBytes > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
+                    overBudget = true
+                    break
+                }
+                items += escaped to checked
+            }
+            if (overBudget) {
+                result.skippedFiles += SkippedImportFile(sourceName, ImportCaps.NOTE_TOO_LARGE_REASON)
+                return null
             }
             contentHtml = taskListHtml(items)
         } else if (textContent.isNotEmpty()) {
+            // (Codex R25-F1, sibling guard): PlainTextCodec escapes
+            // text (& → &amp; is 5x) and wraps paragraphs before any
+            // size check runs, so a raw-compliant textContent of
+            // mostly '&' expands to ~5x its size first. Refuse early
+            // when even a lower bound on the output — the escaped
+            // bytes of the non-whitespace content, which trimming and
+            // paragraph-splitting can never drop — already passes the
+            // per-note bound. Whitespace-heavy bulk never trips it.
+            // Under-counting is safe: the caller's post-check still
+            // refuses anything that slips through.
+            if (utf8ByteLength(title) + escapedNonWhitespaceBytes(textContent) >
+                ImportCaps.MAX_NOTE_CONTENT_BYTES
+            ) {
+                result.skippedFiles += SkippedImportFile(sourceName, ImportCaps.NOTE_TOO_LARGE_REASON)
+                return null
+            }
             contentHtml = PlainTextCodec.textToHtml(textContent)
         }
 
@@ -458,10 +503,49 @@ object KeepTakeoutParser {
 
     /** One task list in Nota's own serialiser shape (see MarkdownImport). */
     private fun taskListHtml(items: List<Pair<String, Boolean>>): String {
-        val lis = items.joinToString("") { (html, checked) ->
-            "<li data-type=\"taskItem\" data-checked=\"${if (checked) "true" else "false"}\">" +
-                "<div><p>$html</p></div></li>"
-        }
+        val lis = items.joinToString("") { (html, checked) -> taskItemHtml(html, checked) }
         return "<ul data-type=\"taskList\">$lis</ul>"
+    }
+
+    /** One task item: the <li> wrapper taskListHtml emits. Kept separate
+     *  so the R25-F1 output budget can measure the wrapper from the same
+     *  literal the renderer uses, instead of hand-counting bytes. */
+    private fun taskItemHtml(html: String, checked: Boolean): String =
+        "<li data-type=\"taskItem\" data-checked=\"${if (checked) "true" else "false"}\">" +
+            "<div><p>$html</p></div></li>"
+
+    /**
+     * Lower bound on PlainTextCodec.textToHtml's output bytes for [text]:
+     * the escaped UTF-8 bytes of its non-whitespace characters (chars
+     * `<= ' '`, the only ones trimming and paragraph-splitting can drop,
+     * contribute nothing). Markup only adds bytes, so the true output is
+     * never smaller — refusing on this bound can never refuse a note
+     * that fits. (Codex R25-F1 sibling guard.)
+     */
+    private fun escapedNonWhitespaceBytes(text: String): Long {
+        var bytes = 0L
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c > ' ') {
+                bytes += when (c) {
+                    '&' -> 5L // &amp;
+                    '<', '>' -> 4L // &lt; / &gt;
+                    '"' -> 6L // &quot;
+                    else -> when {
+                        c < '\u0080' -> 1L
+                        c < '\u0800' -> 2L
+                        c.isHighSurrogate() && i + 1 < text.length &&
+                            text[i + 1].isLowSurrogate() -> {
+                            i++
+                            4L
+                        }
+                        else -> 3L
+                    }
+                }
+            }
+            i++
+        }
+        return bytes
     }
 }

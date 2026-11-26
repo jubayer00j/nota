@@ -871,6 +871,92 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun hugeKeepTaskListIsReportedTooLarge() {
+        // R25-F1: 20,000 tiny task items — ~640K raw JSON chars, well
+        // under the 16M raw bound — expand into ~1.4M bytes of HTML.
+        // The note is refused with the per-note reason BEFORE the
+        // whole list is built, and imports nothing from that entry;
+        // the small note proves the run is intact.
+        val items = buildString {
+            append('[')
+            repeat(20_000) { i ->
+                if (i > 0) append(',')
+                append("""{"text":"x","isChecked":false}""")
+            }
+            append(']')
+        }
+        val entries = linkedMapOf(
+            "Takeout/Keep/huge.json" to
+                """{"title":"Huge","listContent":$items,"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/small.json" to
+                """{"title":"Small","textContent":"fine","createdTimestampUsec":1700000100000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(listOf("Small"), result.notes.map { it.title })
+        assertEquals(
+            listOf(SkippedImportFile("huge.json", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun largeKeepTaskListStillImportsWhole() {
+        // R25-F1, no-false-refusal pin: 10,000 items expand to ~700K
+        // bytes of HTML — under the 1 MB per-note bound — so the whole
+        // list imports, last item included.
+        val items = buildString {
+            append('[')
+            repeat(10_000) { i ->
+                if (i > 0) append(',')
+                append("""{"text":"item-$i","isChecked":${i % 2 == 0}}""")
+            }
+            append(']')
+        }
+        val entries = linkedMapOf(
+            "Takeout/Keep/big-list.json" to
+                """{"title":"BigList","listContent":$items,"createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(listOf("BigList"), result.notes.map { it.title })
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+        assertTrue(result.notes[0].contentHtml.contains("item-9999"))
+    }
+
+    @Test
+    fun ampHeavyKeepTextIsReportedTooLarge() {
+        // R25-F1 sibling: a textContent of '&' expands 5x through
+        // PlainTextCodec before any size check runs. 300K amps read as
+        // ~300K raw chars but convert to ~1.5M bytes of HTML — refused
+        // with the per-note reason before the expansion is built.
+        val amps = "&".repeat(300_000)
+        val entries = linkedMapOf(
+            "Takeout/Keep/amps.json" to
+                """{"title":"Amps","textContent":"$amps","createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("amps.json", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun whitespaceHeavyKeepTextStillImports() {
+        // The textContent guard counts only non-whitespace bytes (a
+        // lower bound on the output): 1.5M spaces around one word
+        // expand to almost nothing, so the note still imports.
+        val text = "hello" + " ".repeat(1_500_000)
+        val entries = linkedMapOf(
+            "Takeout/Keep/spaces.json" to
+                """{"title":"Spaces","textContent":"$text","createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(listOf("Spaces"), result.notes.map { it.title })
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+    }
+
+    @Test
     fun overLimitNoteIsRefusedByEngine() = runBlocking {
         // R7-F1 (defence in depth): a note handed to the engine past
         // the per-note bound is refused, never written — so the
