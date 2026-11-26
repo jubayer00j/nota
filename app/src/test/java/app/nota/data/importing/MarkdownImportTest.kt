@@ -355,8 +355,13 @@ class MarkdownImportTest {
         )
         val note = result.notes[0]
         assertEquals(1, note.images.size)
-        assertEquals("%%NOMA_IMPORT_IMAGE_0%%", note.images[0].token)
-        assertTrue(note.contentHtml.contains("%%NOMA_IMPORT_IMAGE_0%%"))
+        // R21-F2: the token carries a per-file random salt, so its
+        // exact value is unguessable — assert the shape, not a fixed
+        // string, and that the content carries the same token.
+        val token = note.images[0].token
+        assertNotNull(token)
+        assertTrue(token!!.matches(Regex("%%NOMA_IMPORT_IMAGE_[0-9a-f]{12}_0%%")))
+        assertTrue(note.contentHtml.contains(token))
         assertTrue(note.contentHtml.contains("<p>remote</p>"))
         assertEquals(1, result.imagesUnresolved)
         imageFile.delete()

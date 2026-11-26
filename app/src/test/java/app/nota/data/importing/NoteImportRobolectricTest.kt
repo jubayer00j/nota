@@ -1883,6 +1883,112 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun unknownDateNotesWithSameTitleInDifferentFoldersBothImport() = runBlocking {
+        // R21-F1: two files, same title, no dates, different folders —
+        // the old (title, createdAt) key collapsed them into one and
+        // the second note was lost. The folder is part of the
+        // unknown-date key now, so both land — and reimporting the
+        // same two files still dedupes to zero new notes.
+        val stack = newStack()
+        fun note(folder: String, body: String) = ImportedNote(
+            title = "meeting",
+            contentHtml = "<p>$body</p>",
+            createdAt = 0L, updatedAt = 0L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = folder, images = emptyList(),
+            sourceName = "meeting.md",
+        )
+        val first = stack.repo.importNotes(listOf(note("A", "alpha"), note("B", "beta")))
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals(2, notes.size)
+        val folderNameById = stack.db.folderDao().getAll().associate { it.id to it.name }
+        assertEquals(setOf("A", "B"), notes.map { folderNameById[it.folderId] }.toSet())
+        assertEquals(
+            setOf("alpha", "beta"),
+            notes.map { it.contentHtml }.toSet(),
+        )
+
+        val second = stack.repo.importNotes(listOf(note("A", "alpha"), note("B", "beta")))
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun unknownDateNotesWithSameTitleInSameFolderBothImport() = runBlocking {
+        // R21-F1, run half: same folder, same title, no dates — the
+        // source file name is what keeps them apart within a run.
+        // (Reimport still dedupes: the seeded key matches on
+        // (title, folder).)
+        val stack = newStack()
+        fun note(source: String, body: String) = ImportedNote(
+            title = "meeting",
+            contentHtml = "<p>$body</p>",
+            createdAt = 0L, updatedAt = 0L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = "A", images = emptyList(),
+            sourceName = source,
+        )
+        val first = stack.repo.importNotes(listOf(note("x.md", "alpha"), note("y.md", "beta")))
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+
+        val second = stack.repo.importNotes(listOf(note("x.md", "alpha"), note("y.md", "beta")))
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun literalImageTokenTextSurvivesImport() = runBlocking {
+        // R21-F2: a literal %%NOMA_IMPORT_IMAGE_0%% in the source used
+        // to become an <img> at write time, because the engine
+        // replaced EVERY occurrence of the fixed token. The emitted
+        // token is salted per file now, and only its one occurrence is
+        // replaced — so the literal stays literal, in prose and in a
+        // code span, while the real image still embeds exactly once.
+        val stack = newStack()
+        val zip = zipOf(
+            linkedMapOf(
+                "with-image.md" to "# TokenWithImage\n\nThe literal %%NOMA_IMPORT_IMAGE_0%% stays as text.\n\n`%%NOMA_IMPORT_IMAGE_0%%` in code stays too.\n\n![real pic](pic.png)\n",
+                "without-image.md" to "# TokenAlone\n\nJust the literal %%NOMA_IMPORT_IMAGE_0%% here.\n",
+            ),
+            mapOf("pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("tokens.zip", zip, 1_700_000_000_000L)),
+        )
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.report.duplicates)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val notes = stack.db.noteDao().getAll()
+        val withImage = notes.first { it.title == "TokenWithImage" }
+        val alone = notes.first { it.title == "TokenAlone" }
+        // The literal survives twice in the first note (prose + code
+        // span) and once in the second — and the real image embedded
+        // exactly once.
+        assertEquals(2, countOccurrences(withImage.contentHtml, "%%NOMA_IMPORT_IMAGE_0%%"))
+        assertEquals(1, countOccurrences(withImage.contentHtml, "nota-attachment://"))
+        assertEquals(1, countOccurrences(alone.contentHtml, "%%NOMA_IMPORT_IMAGE_0%%"))
+        assertEquals(0, countOccurrences(alone.contentHtml, "nota-attachment://"))
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+    }
+
+    private fun countOccurrences(haystack: String, needle: String): Int {
+        var count = 0
+        var from = 0
+        while (true) {
+            val at = haystack.indexOf(needle, from)
+            if (at < 0) return count
+            count++
+            from = at + needle.length
+        }
+    }
+
+    @Test
     fun duplicateZipImagePathsStayUnresolved() = runBlocking {
         // R13-F2: two entries sharing one image path are ambiguous —
         // the note embeds neither payload, the reference is counted,

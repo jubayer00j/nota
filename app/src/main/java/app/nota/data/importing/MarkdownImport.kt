@@ -4,6 +4,7 @@ import app.nota.data.backup.BackupQuota
 import app.nota.data.text.PlainTextCodec
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.UUID
 
 /**
  * Markdown / plain-text import — a structure-for-structure Kotlin port
@@ -351,6 +352,13 @@ private class InlineImageSink(
 ) {
     private var imageSeq = 0
 
+    // Per-file random salt for the image placeholder (Codex R21-F2):
+    // the old fixed token %%NOMA_IMPORT_IMAGE_0%% is guessable, and
+    // the engine replaced EVERY occurrence — so a literal token in
+    // the source became an <img> at write time. The salt makes the
+    // emitted token unguessable, so literal text can never match it.
+    private val tokenSalt = UUID.randomUUID().toString().replace("-", "").take(12)
+
     fun addImage(alt: String, ref: String): String {
         // Remote images are never hot-linked into a note: Nota only
         // embeds local attachments, so an http(s)/data reference keeps
@@ -367,7 +375,7 @@ private class InlineImageSink(
             result.imagesUnresolved += 1
             return escapeImportHtml(alt)
         }
-        val token = "%%NOMA_IMPORT_IMAGE_${imageSeq++}%%"
+        val token = "%%NOMA_IMPORT_IMAGE_${tokenSalt}_${imageSeq++}%%"
         images += ImportedImage(
             name = resolved.name,
             mimeType = resolved.mimeType,

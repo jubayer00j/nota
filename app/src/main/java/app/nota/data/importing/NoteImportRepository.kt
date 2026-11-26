@@ -285,6 +285,34 @@ class NoteImportRepository(
     private fun dedupeKey(title: String, createdAt: Long): String = "$title $createdAt"
 
     /**
+     * Dedupe key for unknown-date notes (createdAt == 0, Codex R21-F1):
+     * (title, folder, source). A dateless note's only stable identity
+     * is where it came from, so the key carries the folder and — for
+     * notes imported in this run — the source file name. The seeded
+     * half passes sourceName = null: the library stores no per-source
+     * identity for a note, so an existing note can only be matched on
+     * (title, folder); the run half adds the source name, which is
+     * what keeps two same-title dateless notes in one run apart.
+     * Components are length-prefixed: titles and folder names are free
+     * text, so a plain separator could collide ("x 0 y" + "z" vs "x" +
+     * "y 0 z"). Dated notes keep the plain (title, createdAt) key.
+     *
+     * Residual, by design: two dateless notes with the same title in
+     * the SAME folder, imported in separate runs, still collapse
+     * against the seeded key — nothing in the stored row tells them
+     * apart. Within one run the source name keeps them apart.
+     */
+    private fun dedupeKeyUnknownDate(
+        title: String,
+        folderName: String?,
+        sourceName: String?,
+    ): String {
+        val folder = folderName.orEmpty()
+        val source = sourceName.orEmpty()
+        return "U|${title.length}:$title|${folder.length}:$folder|${source.length}:$source"
+    }
+
+    /**
      * Writes [imported] into the target account's library.
      *
      * @param targetDb the database instance captured at import
@@ -343,10 +371,28 @@ class NoteImportRepository(
             var imageSaveFailures = 0
             val failedNames = mutableListOf<String>()
 
+            // Folder names by id, for the unknown-date dedupe keys
+            // (Codex R21-F1): a stored note's folder is the only
+            // source identity the library keeps.
+            val folderNameById = HashMap<String, String>()
+            for (folder in runDb.folderDao().getAll()) {
+                folderNameById[folder.id] = folder.name
+            }
+
             val seen = HashSet<String>()
             for (note in runDb.noteDao().getAll()) {
-                seen += dedupeKey(note.title, note.createdAt)
+                seen += if (note.createdAt == 0L) {
+                    dedupeKeyUnknownDate(note.title, folderNameById[note.folderId], null)
+                } else {
+                    dedupeKey(note.title, note.createdAt)
+                }
             }
+            // Keys of notes imported by this run. `seen` is seeded
+            // from the library only and never grows during the run:
+            // an unknown-date note's seeded key carries no source
+            // name, so adding it here would collapse a second
+            // same-title note in the same folder.
+            val seenRun = HashSet<String>()
 
             // Folder resolution mirrors 1.x resolveFolderId (seeded map,
             // case-insensitive trimmed names, create on demand).
@@ -426,8 +472,22 @@ class NoteImportRepository(
                     // never close — a switch between or during notes
                     // can neither fail a note nor split the run across
                     // accounts.
-                    val key = dedupeKey(item.title, item.createdAt)
-                    if (key in seen) {
+                    val isUnknownDate = item.createdAt == 0L
+                    val isDuplicate = if (isUnknownDate) {
+                        // (Codex R21-F1): the seeded key has no source
+                        // name — it only says a dateless note with
+                        // this title already sits in this folder —
+                        // while the run key adds the source file,
+                        // which is what keeps two same-title dateless
+                        // notes in one run apart.
+                        val seedKey = dedupeKeyUnknownDate(item.title, item.folderName, null)
+                        val runKey = dedupeKeyUnknownDate(item.title, item.folderName, item.sourceName)
+                        seedKey in seen || runKey in seenRun
+                    } else {
+                        val key = dedupeKey(item.title, item.createdAt)
+                        key in seen || key in seenRun
+                    }
+                    if (isDuplicate) {
                         duplicates++
                     } else {
                         val folderId = resolveFolderId(item.folderName)
@@ -438,7 +498,11 @@ class NoteImportRepository(
                             .map { resolveTag(it) }
                             .distinctBy { it.id }
                         imageSaveFailures += writeImportedNote(runDb, item, folderId, tags)
-                        seen += key
+                        if (isUnknownDate) {
+                            seenRun += dedupeKeyUnknownDate(item.title, item.folderName, item.sourceName)
+                        } else {
+                            seenRun += dedupeKey(item.title, item.createdAt)
+                        }
                         importedCount++
                     }
                 } catch (e: Exception) {
@@ -535,8 +599,14 @@ class NoteImportRepository(
                     val saved = attachmentStore.importImageFile(noteId, image.stagedFile, db)
                     val embed = "<img src=\"nota-attachment://${saved.id}\" " +
                         "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
+                    // replaceFirst, not replace (Codex R21-F2): the
+                    // token is emitted exactly once for this image, so
+                    // only its one occurrence is the embed — any other
+                    // occurrence is the user's literal text and must
+                    // survive. (The token is also salted per file, so
+                    // literal text can't match it in the first place.)
                     content = if (image.token != null) {
-                        content.replace(image.token, embed)
+                        content.replaceFirst(image.token, embed)
                     } else {
                         content + "<p>$embed</p>"
                     }
@@ -550,7 +620,10 @@ class NoteImportRepository(
                     // alt has nothing to preserve.
                     saveFailures++
                     if (image.token != null) {
-                        content = content.replace(image.token, escapeImportHtml(image.alt))
+                        // Same replaceFirst rule as the success path
+                        // (Codex R21-F2): only the emitted occurrence
+                        // becomes the alt text.
+                        content = content.replaceFirst(image.token, escapeImportHtml(image.alt))
                     } else if (image.alt.isNotBlank()) {
                         content += "<p>${escapeImportHtml(image.alt)}</p>"
                     }
