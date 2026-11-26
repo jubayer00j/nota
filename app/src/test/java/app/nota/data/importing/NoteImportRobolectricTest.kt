@@ -1906,7 +1906,7 @@ class NoteImportRobolectricTest {
         val folderNameById = stack.db.folderDao().getAll().associate { it.id to it.name }
         assertEquals(setOf("A", "B"), notes.map { folderNameById[it.folderId] }.toSet())
         assertEquals(
-            setOf("alpha", "beta"),
+            setOf("<p>alpha</p>", "<p>beta</p>"),
             notes.map { it.contentHtml }.toSet(),
         )
 
