@@ -148,6 +148,27 @@ object ImportCaps {
      *  silently dropped — the note still imports with the file
      *  names that fit. */
     const val MAX_AMBIGUOUS_ATTACHMENT_PARAGRAPHS = 100
+
+    /** Largest number of suffix entries the Keep entry-name index
+     *  may retain in total — NOT a 1.x cap: 1.x scans names
+     *  linearly per attachment and keeps no index. The suffix arm
+     *  used to contribute one map key + backing list per slash in
+     *  every name, so 8 MiB of slash-heavy names could hold
+     *  millions of entries — HashMap nodes, keys, lists and
+     *  reference slots — and exhaust the heap before any note was
+     *  parsed (Codex R35-F1). The R31 fix stopped copying suffix
+     *  strings and the R34 fix made hashing linear, but neither
+     *  bounded how MANY entries the index holds. 250,000 entries
+     *  sits far above any real export (even a max-size 20,000-entry
+     *  archive with 12-segment paths contributes ~220,000, and a
+     *  real Takeout's paths are 3–4 segments) and far below an OOM
+     *  (~30 MB worst case, one key + list + reference per entry).
+     *  the ceiling, so their verdicts are unchanged.
+     *  Suffixes past the ceiling are simply not indexed: their
+     *  lookup falls through to the basename arm, which stays
+     *  correct — a unique basename still resolves, a shared one
+     *  still stays ambiguous — so the note still imports. */
+    const val MAX_SUFFIX_INDEX_ENTRIES = 250_000
 }
 
 /**

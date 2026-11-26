@@ -439,6 +439,13 @@ object KeepTakeoutParser {
 
         private val bySuffix: Map<SuffixKey, List<String>> = run {
             val map = HashMap<SuffixKey, MutableList<String>>()
+            // (Codex R35-F1): bound the index expansion — every slash
+            // in every name used to contribute a map key + backing
+            // list, so 8 MiB of slash-heavy names could hold millions
+            // of entries before any note was parsed. Past the ceiling
+            // a suffix is simply not indexed; its lookup falls
+            // through to the basename arm, which stays correct.
+            var indexedSuffixes = 0
             for (name in names) {
                 // (Codex R34-F1): every suffix hash of this name in
                 // one reverse pass — suffixHashes[i] is the standard
@@ -456,8 +463,9 @@ object KeepTakeoutParser {
                     pow *= 31
                 }
                 var slash = name.indexOf('/')
-                while (slash >= 0) {
+                while (slash >= 0 && indexedSuffixes < ImportCaps.MAX_SUFFIX_INDEX_ENTRIES) {
                     map.getOrPut(SuffixKey(name, slash + 1, suffixHashes[slash + 1])) { mutableListOf() } += name
+                    indexedSuffixes++
                     slash = name.indexOf('/', slash + 1)
                 }
             }

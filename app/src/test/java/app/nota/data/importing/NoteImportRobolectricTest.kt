@@ -2034,6 +2034,60 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun suffixIndexEntriesAreBounded() {
+        // R35-F1: the suffix index used to contribute one map key +
+        // backing list per slash in every name, so 8 MiB of
+        // slash-heavy names could hold millions of entries before
+        // any note was parsed. The index now stops at
+        // MAX_SUFFIX_INDEX_ENTRIES; a suffix past the ceiling is
+        // simply not indexed, and its lookup falls through to the
+        // basename arm. 260 fillers x 1,000 slashes demand 260,000
+        // suffixes — past the 250,000 ceiling — so everything after
+        // them is unindexed, while the first fillers still are:
+        // - "Early" references a deep suffix of filler #0, whose
+        //   basename is shared with filler #1: it still resolves
+        //   through the suffix arm, exactly as before.
+        // - "LateUnique" references a deep suffix of a late entry
+        //   with a unique basename: the suffix arm misses, the
+        //   basename arm still finds it.
+        // - "LateShared" references a deep suffix of a late entry
+        //   whose basename is shared: the suffix arm misses and the
+        //   basename arm stays ambiguous — counted, never wrong.
+        val fillers = LinkedHashMap<String, ByteArray>()
+        // Fillers #0 and #1 share a basename on purpose, so the
+        // "Early" ref can only resolve through the suffix arm.
+        fillers["s0/".repeat(1000) + "dup.png"] = pngBytes
+        fillers["s1/".repeat(1000) + "dup.png"] = pngBytes
+        for (i in 2 until 260) {
+            fillers["s$i/".repeat(1000) + "filler$i.png"] = pngBytes
+        }
+        // Late targets come after the fillers in the archive, so
+        // none of their suffixes are indexed.
+        fillers["z8/".repeat(20) + "unique.png"] = pngBytes
+        fillers["z9/".repeat(20) + "shared.png"] = pngBytes
+        fillers["other/shared.png"] = pngBytes
+        val entries = linkedMapOf(
+            "Takeout/Keep/early.json" to
+                """{"title":"Early","textContent":"e","attachments":[{"filePath":"s0/s0/dup.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/lateunique.json" to
+                """{"title":"LateUnique","textContent":"u","attachments":[{"filePath":"z8/z8/z8/unique.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+            "Takeout/Keep/lateshared.json" to
+                """{"title":"LateShared","textContent":"s","attachments":[{"filePath":"z9/z9/z9/shared.png","mimetype":"image/png"}],"createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries, fillers), stagingDir())
+        assertEquals(3, result.notes.size)
+        val early = result.notes.first { it.title == "Early" }
+        assertEquals(1, early.images.size)
+        assertEquals("dup.png", early.images[0].name)
+        val lateUnique = result.notes.first { it.title == "LateUnique" }
+        assertEquals(1, lateUnique.images.size)
+        assertEquals("unique.png", lateUnique.images[0].name)
+        val lateShared = result.notes.first { it.title == "LateShared" }
+        assertEquals(0, lateShared.images.size)
+        assertEquals(1, result.attachmentsSkipped)
+    }
+
+    @Test
     fun keepNoteAttachmentsAreCappedPerNote() {
         // R31-F2: a note referencing 150 distinct images retains
         // only the per-note cap of specs; the rest are counted as
