@@ -1584,8 +1584,16 @@ object MarkdownImporter {
         // The true check runs in addNote below (HTML can expand the
         // source — for Markdown the raw text IS the body, so the
         // source length is a fair estimate here; the per-note
-        // expansion is bounded separately, see below).
-        if (result.retainedTextChars + file.text.length > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
+        // expansion is bounded separately, see below). The title
+        // counts too (Codex R19-F1): a front-matter/H1 title is
+        // inside the source text already, so only the filename
+        // fallback adds anything — its length is a conservative
+        // upper bound, exact when the title falls back to the
+        // filename and over-counting by at most the filename
+        // length when front matter/H1 supplies the title instead.
+        if (result.retainedTextChars + file.text.length +
+            titleFromFileName(file.name).length > ImportCaps.MAX_AGGREGATE_TEXT_CHARS
+        ) {
             result.skippedFiles += SkippedImportFile(
                 file.name,
                 ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
@@ -1866,7 +1874,14 @@ object MarkdownImporter {
                 // parser (Codex R10-F2): for Markdown the raw text
                 // IS the body, so it fairly estimates the converted
                 // size — a Keep JSON's overhead is not body text.
-                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - result.retainedTextChars)
+                // The filename title is the one title source outside
+                // the member text (a front-matter/H1 title is inside
+                // it), so room is reserved for it too (Codex R19-F1)
+                // — conservative by at most the filename length when
+                // front matter/H1 supplies the title instead. The
+                // true check is addNote, which counts title + body.
+                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - result.retainedTextChars -
+                    titleFromFileName(base).length)
                     .coerceAtLeast(0L)
                 when (val read = entry.readTextUpToChars(remaining, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
                     is CharBoundedText.OverBytes -> {

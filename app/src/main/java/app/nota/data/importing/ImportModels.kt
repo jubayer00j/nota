@@ -174,9 +174,12 @@ class ImportParseResult {
     var coloredNotes = 0
 
     /** UTF-16 units of note text retained in [notes] — the run-wide
-     *  aggregate budget (Codex R6-F1): converted bodies stay live
-     *  from parse through the write phase, so the count cap and the
-     *  archive quota do not bound the live heap on their own. */
+     *  aggregate budget (Codex R6-F1): converted titles + bodies stay
+     *  live from parse through the write phase, so the count cap and
+     *  the archive quota do not bound the live heap on their own.
+     *  The title counts (Codex R19-F1): a ~1 MB title with a tiny
+     *  body is a legal single note, and 5,000 of them would retain
+     *  ~5 GB while a body-only counter barely moved. */
     var retainedTextChars: Long = 0L
         private set
 
@@ -184,8 +187,9 @@ class ImportParseResult {
      *  otherwise records the skip and returns false. Callers that
      *  can estimate the size before converting (the parsers) check
      *  first and skip without converting, so this is the true,
-     *  defence-in-depth check on the converted body. A note past
-     *  the per-note bound is refused first (Codex R7-F1): it would
+     *  defence-in-depth check on the converted note — title AND
+     *  body (Codex R19-F1). A note past the per-note bound is
+     *  refused first (Codex R7-F1): it would
      *  write fine and then break the run-end rebuild, whose
      *  `noteDao.getAll()` cannot read a row past Android's ~2 MiB
      *  CursorWindow — the UI would report failure while the note
@@ -198,7 +202,7 @@ class ImportParseResult {
             )
             return false
         }
-        val chars = note.contentHtml.length.toLong()
+        val chars = note.title.length.toLong() + note.contentHtml.length.toLong()
         if (retainedTextChars + chars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS) {
             skippedFiles += SkippedImportFile(
                 note.sourceName,
@@ -215,12 +219,15 @@ class ImportParseResult {
      *  [skippedFiles] — the merge-time counterpart of [addNote],
      *  for runs assembled from several already-budgeted sources
      *  whose sum still exceeds the budget. Dropped notes are
-     *  reported in parse order, like [enforceNoteCap] does. */
+     *  reported in parse order, like [enforceNoteCap] does. The
+     *  subtraction counts title + body, like [addNote] does
+     *  (Codex R19-F1) — subtracting bodies only would leave the
+     *  counter overstated by the dropped titles. */
     fun enforceContentBudget() {
         val dropped = mutableListOf<ImportedNote>()
         while (retainedTextChars > ImportCaps.MAX_AGGREGATE_TEXT_CHARS && notes.isNotEmpty()) {
             val note = notes.removeAt(notes.lastIndex)
-            retainedTextChars -= note.contentHtml.length
+            retainedTextChars -= note.title.length + note.contentHtml.length
             dropped += note
         }
         for (note in dropped.asReversed()) {
@@ -250,7 +257,8 @@ class ImportParseResult {
         val excess = notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).toList()
         notes.subList(ImportCaps.MAX_IMPORT_NOTES, notes.size).clear()
         for (note in excess) {
-            retainedTextChars -= note.contentHtml.length
+            // Title + body, like addNote counts them (Codex R19-F1).
+            retainedTextChars -= note.title.length + note.contentHtml.length
             skippedFiles += SkippedImportFile(
                 note.sourceName,
                 "Import limit reached (5,000 notes per run).",

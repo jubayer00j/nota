@@ -198,8 +198,18 @@ class NoteImportRepository(
                             // reported as skipped, never silently
                             // dropped — and never parsed, so no image
                             // counts leak from a note that never imports.
+                            // The filename title is the one title
+                            // source outside the file text (a
+                            // front-matter/H1 title is inside it), so
+                            // room is reserved for it too (Codex
+                            // R19-F1) — file.name.length is a
+                            // conservative upper bound on it (the
+                            // title is the name minus its extension).
+                            // The true check is addNote, which counts
+                            // title + body.
                             val remaining =
-                                (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - merged.retainedTextChars)
+                                (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - merged.retainedTextChars -
+                                    file.name.length)
                                     .coerceAtLeast(0L)
                             when (val read = withContext(Dispatchers.IO) {
                                 file.file.readTextUpToChars(

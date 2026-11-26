@@ -541,6 +541,190 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun aggregateTextBudgetCountsTitles() {
+        // R19-F1: addNote used to count only the body toward the
+        // 16M-char aggregate budget, so twenty-one notes with ~1 MB
+        // titles and tiny bodies all fit while retaining ~19M chars
+        // of titles. Titles count now: eighteen parse (18 × 900,007
+        // ≈ 16.2M chars) and the last three are reported as skipped,
+        // never silently dropped. Titles stay at 900K chars on
+        // purpose: a single note past the ~1 MB per-note bound is
+        // refused for its own size (R7-F1), so the aggregate test
+        // must use individually legal notes.
+        val result = ImportParseResult()
+        repeat(21) { i ->
+            val added = result.addNote(
+                ImportedNote(
+                    title = "T".repeat(900_000), contentHtml = "<p>x</p>",
+                    createdAt = 1_700_000_000_000L + i, updatedAt = 1_700_000_000_000L,
+                    pinned = false, archived = false, trashedAt = null,
+                    tagNames = emptyList(), folderName = null, images = emptyList(),
+                    sourceName = "t-$i.md",
+                ),
+            )
+            assertEquals(i < 18, added)
+        }
+        assertEquals(18, result.notes.size)
+        assertEquals(18L * 900_007L, result.retainedTextChars)
+        assertEquals(
+            (18 until 21).map {
+                SkippedImportFile("t-$it.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)
+            },
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun enforceContentBudgetSubtractsTitles() {
+        // R19-F1: enforceContentBudget used to subtract only the
+        // body when dropping a note, so a merged run over budget
+        // through titles alone never trimmed — the counter barely
+        // moved and every note stayed. Two 10-note sources of 900K
+        // titles total ~18.0M chars; the merged result must drop
+        // its two tail notes and land at 18 × 900,007 chars.
+        val first = ImportParseResult()
+        repeat(10) { i ->
+            assertTrue(
+                first.addNote(
+                    ImportedNote(
+                        title = "T".repeat(900_000), contentHtml = "<p>x</p>",
+                        createdAt = 1_700_000_000_000L + i, updatedAt = 1_700_000_000_000L,
+                        pinned = false, archived = false, trashedAt = null,
+                        tagNames = emptyList(), folderName = null, images = emptyList(),
+                        sourceName = "a-$i.md",
+                    ),
+                ),
+            )
+        }
+        val second = ImportParseResult()
+        repeat(10) { i ->
+            assertTrue(
+                second.addNote(
+                    ImportedNote(
+                        title = "T".repeat(900_000), contentHtml = "<p>x</p>",
+                        createdAt = 1_800_000_000_000L + i, updatedAt = 1_800_000_000_000L,
+                        pinned = false, archived = false, trashedAt = null,
+                        tagNames = emptyList(), folderName = null, images = emptyList(),
+                        sourceName = "b-$i.md",
+                    ),
+                ),
+            )
+        }
+        val merged = ImportParseResult()
+        merged.absorb(first)
+        merged.absorb(second)
+        merged.enforceContentBudget()
+        assertEquals(18, merged.notes.size)
+        assertEquals(18L * 900_007L, merged.retainedTextChars)
+        assertEquals(
+            listOf(
+                SkippedImportFile("b-8.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON),
+                SkippedImportFile("b-9.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON),
+            ),
+            merged.skippedFiles,
+        )
+    }
+
+    @Test
+    fun aggregateTextBudgetCountsTitlesInMarkdownFiles() {
+        // R19-F1, parse level: twenty-one files with ~1 MB
+        // front-matter titles and one-character bodies. Eighteen
+        // parse; the last three are reported as skipped with the
+        // budget reason — the precheck counts the source text and
+        // addNote counts the converted title, so the run trips the
+        // budget on titles alone. Front-matter titles are used on
+        // purpose: the per-note estimator counts a front-matter
+        // title exactly once (its lines are not body text), while
+        // an H1 title is double-counted there (title bound + body
+        // bytes) and would be refused by the per-note bound first
+        // — see the fix-22 notes.
+        val files = (0 until 21).map { i ->
+            MarkdownFileInput(
+                "t-$i.md",
+                "t-$i.md",
+                "---\ntitle: " + "T".repeat(900_000) + "\n---\n\nx",
+                1_700_000_000_000L + i,
+            )
+        }
+        val result = MarkdownImporter.parseMarkdownFiles(files, null)
+        assertEquals(18, result.notes.size)
+        assertTrue(result.notes.all { it.title == "T".repeat(900_000) })
+        assertEquals(
+            (18 until 21).map {
+                SkippedImportFile("t-$it.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)
+            },
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun estimateConvertedNoteBytesCountsTitle() {
+        // R19-F1, precheck level: the per-note estimator already
+        // bounds the title (front-matter title, leading H1, or file
+        // name — whichever the converter would use), so a note whose
+        // TITLE alone passes the ~1 MB per-note bound is refused
+        // before conversion, while a 900K-char title still imports.
+        // Front-matter titles are the exact-count case (their lines
+        // are not body text); H1 titles are double-counted by the
+        // estimator (title bound + body bytes), so the H1 assertions
+        // below only pin the direction, not the exact value — see
+        // the fix-22 notes.
+        val hugeH1 = MarkdownFileInput(
+            "huge.md", "huge.md", "# " + "T".repeat(1_000_000) + "\n\nx",
+            1_700_000_000_000L,
+        )
+        assertTrue(
+            MarkdownImporter.estimateConvertedNoteBytes(hugeH1) >
+                ImportCaps.MAX_NOTE_CONTENT_BYTES,
+        )
+        val h1UnderBound = MarkdownFileInput(
+            "h1.md", "h1.md", "# " + "T".repeat(400_000) + "\n\nx",
+            1_700_000_000_000L,
+        )
+        assertTrue(
+            MarkdownImporter.estimateConvertedNoteBytes(h1UnderBound) <=
+                ImportCaps.MAX_NOTE_CONTENT_BYTES,
+        )
+        val frontMatterTitle = MarkdownFileInput(
+            "fm.md", "fm.md",
+            "---\ntitle: " + "T".repeat(900_000) + "\n---\n\nx",
+            1_700_000_000_000L,
+        )
+        val fmEstimate = MarkdownImporter.estimateConvertedNoteBytes(frontMatterTitle)
+        assertTrue(fmEstimate > 900_000L)
+        assertTrue(fmEstimate <= ImportCaps.MAX_NOTE_CONTENT_BYTES)
+        val txtTitle = MarkdownFileInput(
+            "T".repeat(900_000) + ".txt", "T".repeat(900_000) + ".txt", "x",
+            1_700_000_000_000L,
+        )
+        assertTrue(
+            MarkdownImporter.estimateConvertedNoteBytes(txtTitle) > 900_000L,
+        )
+        val hugeTxtTitle = MarkdownFileInput(
+            "T".repeat(1_000_000) + ".txt", "T".repeat(1_000_000) + ".txt", "x",
+            1_700_000_000_000L,
+        )
+        assertTrue(
+            MarkdownImporter.estimateConvertedNoteBytes(hugeTxtTitle) >
+                ImportCaps.MAX_NOTE_CONTENT_BYTES,
+        )
+        // End to end: a 1M-char front-matter title is refused with
+        // the per-note reason before conversion, not retained and
+        // rejected later.
+        val hugeFm = MarkdownFileInput(
+            "huge-fm.md", "huge-fm.md",
+            "---\ntitle: " + "T".repeat(1_000_000) + "\n---\n\nx",
+            1_700_000_000_000L,
+        )
+        val refused = MarkdownImporter.parseMarkdownFile(hugeFm, null)
+        assertEquals(0, refused.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("huge-fm.md", ImportCaps.NOTE_TOO_LARGE_REASON)),
+            refused.skippedFiles,
+        )
+    }
+
+    @Test
     fun noteOverPerNoteCapIsSkipped() {
         // R7-F1: a single note over ~1 MB of text would write fine
         // and then break the run-end rebuild (getAll() cannot read a

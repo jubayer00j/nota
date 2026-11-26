@@ -99,10 +99,11 @@ object KeepTakeoutParser {
         // aggregate uses), so an entry past it costs no parse work
         // and is skipped with its own reason — and a >100 MiB entry
         // still reports the per-file reason. The aggregate budget is
-        // enforced on the DRAFT below (converted chars, so HTML
-        // expansion — & → &amp;, paragraph markup — counts against
-        // it) and again by addNote: the true check still runs when
-        // the draft becomes a note.
+        // enforced on the DRAFT below (converted title + body chars,
+        // so HTML expansion — & → &amp;, paragraph markup — counts
+        // against it, and so does a long title — Codex R19-F1) and
+        // again by addNote: the true check still runs when the draft
+        // becomes a note.
         val drafts = mutableListOf<KeepDraft>()
         var retainedConvertedChars = 0L
         // A .json that occurs twice is the same logical note (Codex
@@ -163,7 +164,14 @@ object KeepTakeoutParser {
                                 )
                                 return@walk
                             }
-                            if (retainedConvertedChars + draft.contentHtml.length >
+                            // The aggregate budget on the draft (Codex
+                            // R19-F1): title AND body — the title is
+                            // known here, and a ~1 MB title with a
+                            // tiny body must trip it just like a big
+                            // body does. addNote re-checks the same
+                            // sum when the draft becomes a note.
+                            if (retainedConvertedChars + draft.title.length +
+                                draft.contentHtml.length >
                                 ImportCaps.MAX_AGGREGATE_TEXT_CHARS
                             ) {
                                 result.skippedFiles += SkippedImportFile(
@@ -173,7 +181,7 @@ object KeepTakeoutParser {
                                 return@walk
                             }
                             drafts += draft
-                            retainedConvertedChars += draft.contentHtml.length
+                            retainedConvertedChars += draft.title.length + draft.contentHtml.length
                         }
                     }
                 }

@@ -771,6 +771,31 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun keepAggregateTextBudgetCountsTitles() {
+        // R19-F1: the Keep pass-2 draft check used to count only the
+        // converted body toward the 16M-char aggregate budget, so
+        // nineteen notes with ~1 MB titles and one-character bodies
+        // all fit while retaining ~17M chars of titles. Titles count
+        // now: eighteen parse (18 × 900,007 ≈ 16.2M chars) and the
+        // last is reported as skipped, never silently dropped. The
+        // raw JSON stays under its own 16M-char raw bound, so the
+        // skip comes from the aggregate check, not the raw read.
+        val title = "T".repeat(900_000)
+        val entries = linkedMapOf<String, String>()
+        repeat(19) { i ->
+            entries["Takeout/Keep/big-$i.json"] =
+                """{"title":"$title","textContent":"x","createdTimestampUsec":${1_700_000_000_000L + i}}"""
+        }
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(18, result.notes.size)
+        assertTrue(result.notes.all { it.title == title })
+        assertEquals(
+            listOf(SkippedImportFile("big-18.json", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
     fun keepHtmlExpansionCountsAgainstBudget() {
         // R7-F3: HTML expansion (& → &amp;) grows the converted body
         // past the raw JSON length — a note whose raw JSON fits the
