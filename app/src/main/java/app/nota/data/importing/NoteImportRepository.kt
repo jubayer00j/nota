@@ -307,22 +307,6 @@ class NoteImportRepository(
      *  so (title, createdAt) pairs are uniquely recoverable from the key. */
     private fun dedupeKey(title: String, createdAt: Long): String = "$title $createdAt"
 
-    /** SHA-256 of [text] as lowercase hex — the per-pick identity
-     *  for loose-file imports (Codex R23-F1): a picked file's
-     *  display name is not an identity (two SAF picks from
-     *  different folders can share it), so the run dedupe key for
-     *  dateless loose notes carries the content hash instead. The
-     *  decoded text is already in memory when this runs; two files
-     *  with the same decoded text convert to the same note, so the
-     *  same hash is the right identity for them. */
-    private fun contentHashHex(text: String): String {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val bytes = digest.digest(text.toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") {
-            (it.toInt() and 0xFF).toString(16).padStart(2, '0')
-        }
-    }
-
     /**
      * Dedupe key for unknown-date notes (createdAt == 0, Codex R21-F1):
      * (title, folder, source). A dateless note's only stable identity
@@ -332,9 +316,16 @@ class NoteImportRepository(
      * identity for a note, so an existing note can only be matched on
      * (title, folder); the run half adds the identity, which is what
      * keeps two same-title dateless notes in one run apart. The
-     * identity is the source name for ZIP members and Keep notes
-     * (their paths are identities), and a content hash for loose
-     * picks (Codex R23-F1 — a display name is not an identity).
+     * identity is the source name for Keep notes (their paths are
+     * identities) and a content hash for loose picks (Codex R23-F1
+     * — a display name is not an identity) or the full entry path
+     * plus the content hash for ZIP members (Codex R26-F2).
+     * The folder component is normalized with the same trim-and-
+     * lowercase rule as folder resolution (Codex R26-F1):
+     * resolveFolderId reuses an existing folder case-insensitively,
+     * so the stored note's folder name ("notes") and the incoming
+     * item's folder name ("Notes") must key the same, or reimport
+     * inserts a duplicate.
      * Components are length-prefixed: titles and folder names are free
      * text, so a plain separator could collide ("x 0 y" + "z" vs "x" +
      * "y 0 z"). Dated notes keep the plain (title, createdAt) key.
@@ -349,7 +340,7 @@ class NoteImportRepository(
         folderName: String?,
         sourceName: String?,
     ): String {
-        val folder = folderName.orEmpty()
+        val folder = folderName?.trim()?.lowercase().orEmpty()
         val source = sourceName.orEmpty()
         return "U|${title.length}:$title|${folder.length}:$folder|${source.length}:$source"
     }
@@ -483,9 +474,11 @@ class NoteImportRepository(
                         // while the run key adds the source identity,
                         // which is what keeps two same-title dateless
                         // notes in one run apart. The identity is the
-                        // source name for ZIP members and Keep notes,
-                        // and a content hash for loose picks (Codex
-                        // R23-F1 — a display name is not an identity).
+                        // source name for Keep notes, a content hash
+                        // for loose picks (Codex R23-F1 — a display
+                        // name is not an identity), and the full
+                        // entry path plus the content hash for ZIP
+                        // members (Codex R26-F2).
                         val seedKey = dedupeKeyUnknownDate(item.title, item.folderName, null)
                         val runKey = dedupeKeyUnknownDate(
                             item.title,

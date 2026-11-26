@@ -77,16 +77,25 @@ class NoteImportRobolectricTest {
     private fun zipOf(
         entries: Map<String, String>,
         binaries: Map<String, ByteArray> = emptyMap(),
+        // Dateless entries (Codex R26-F2): a ZIP entry written with
+        // time 0 reads back with time 0, so the parser's fallback
+        // stamp is 0 — the note is dateless. The default keeps the
+        // wall clock, as before.
+        dateless: Boolean = false,
     ): File {
         val file = File.createTempFile("import-test", ".zip")
         ZipOutputStream(file.outputStream().buffered()).use { zip ->
             for ((name, body) in entries) {
-                zip.putNextEntry(ZipEntry(name))
+                val entry = ZipEntry(name)
+                if (dateless) entry.time = 0
+                zip.putNextEntry(entry)
                 zip.write(body.toByteArray(Charsets.UTF_8))
                 zip.closeEntry()
             }
             for ((name, body) in binaries) {
-                zip.putNextEntry(ZipEntry(name))
+                val entry = ZipEntry(name)
+                if (dateless) entry.time = 0
+                zip.putNextEntry(entry)
                 zip.write(body)
                 zip.closeEntry()
             }
@@ -2276,6 +2285,174 @@ class NoteImportRobolectricTest {
         assertEquals(1, outcome.report.imported)
         assertEquals(1, outcome.report.duplicates)
         assertEquals(1, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun unknownDateNoteReimportDedupesAcrossFolderCase() = runBlocking {
+        // R26-F1: the library already has a "notes" folder; a
+        // dateless note imported from parent "Notes" resolves into
+        // it (folder resolution is case-insensitive), but the seed
+        // key used the raw folder name, so reimport missed the
+        // stored note and inserted a duplicate. The folder
+        // component is normalized now, so the reimport dedupes —
+        // and only one folder exists, still named "notes".
+        val stack = newStack()
+        stack.repo.importNotes(
+            listOf(
+                ImportedNote(
+                    title = "Seed", contentHtml = "<p>seed</p>",
+                    createdAt = 1_700_000_000_000L, updatedAt = 1_700_000_000_000L,
+                    pinned = false, archived = false, trashedAt = null,
+                    tagNames = emptyList(), folderName = "notes", images = emptyList(),
+                    sourceName = "seed.md",
+                ),
+            ),
+        )
+        assertEquals(listOf("notes"), stack.db.folderDao().getAll().map { it.name })
+        fun note() = ImportedNote(
+            title = "meeting", contentHtml = "<p>body</p>",
+            createdAt = 0L, updatedAt = 0L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = "Notes", images = emptyList(),
+            sourceName = "meeting.md",
+        )
+        val first = stack.repo.importNotes(listOf(note()))
+        assertEquals(1, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        assertEquals(listOf("notes"), stack.db.folderDao().getAll().map { it.name })
+
+        val second = stack.repo.importNotes(listOf(note()))
+        assertEquals(0, second.report.imported)
+        assertEquals(1, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun unknownDateNotesWithSameTitleInCaseVariantFoldersBothImport() = runBlocking {
+        // R26-F1, run half: "Notes/x.md" and "notes/y.md" resolve
+        // to the same folder, but the run key used the raw folder
+        // name — the folder component is normalized now, and the
+        // source names still keep them apart, so both land.
+        val stack = newStack()
+        fun note(source: String, folder: String, body: String) = ImportedNote(
+            title = "meeting",
+            contentHtml = "<p>$body</p>",
+            createdAt = 0L, updatedAt = 0L,
+            pinned = false, archived = false, trashedAt = null,
+            tagNames = emptyList(), folderName = folder, images = emptyList(),
+            sourceName = source,
+        )
+        val first = stack.repo.importNotes(
+            listOf(note("x.md", "Notes", "alpha"), note("y.md", "notes", "beta")),
+        )
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+        assertEquals(listOf("Notes"), stack.db.folderDao().getAll().map { it.name })
+        assertEquals(
+            setOf("<p>alpha</p>", "<p>beta</p>"),
+            stack.db.noteDao().getAll().map { it.contentHtml }.toSet(),
+        )
+    }
+
+    @Test
+    fun datelessZipMembersWithSameBasenameInDifferentParentsBothImport() = runBlocking {
+        // R26-F2: home/notes/meeting.md and work/notes/meeting.md
+        // share a basename and an immediate folder; the run key
+        // used the basename alone, so the second was a duplicate
+        // even though its body differs. The identity now carries
+        // the full entry path (plus a content hash), so both land
+        // — and reimporting the same ZIP still dedupes to zero new
+        // notes.
+        val stack = newStack()
+        val zip = zipOf(
+            linkedMapOf(
+                "home/notes/meeting.md" to "# Meeting\n\nalpha",
+                "work/notes/meeting.md" to "# Meeting\n\nbeta",
+            ),
+            dateless = true,
+        )
+        val first = stack.repo.importMarkdownZip(zip)
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        val notes = stack.db.noteDao().getAll()
+        assertEquals(2, notes.size)
+        assertEquals(0L, notes[0].createdAt)
+        assertEquals(0L, notes[1].createdAt)
+        assertEquals(setOf("<p>alpha</p>", "<p>beta</p>"), notes.map { it.contentHtml }.toSet())
+
+        val second = stack.repo.importMarkdownZip(zip)
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun datelessZipMembersWithSamePathInDifferentZipsBothImport() = runBlocking {
+        // R26-F2, across archives: the same entry path in two ZIPs
+        // of one selection is two different sources when the
+        // contents differ — the path alone would still collapse
+        // them, so the identity also carries a content hash.
+        val stack = newStack()
+        val zipA = zipOf(
+            linkedMapOf("notes/meeting.md" to "# Meeting\n\nalpha"),
+            dateless = true,
+        )
+        val zipB = zipOf(
+            linkedMapOf("notes/meeting.md" to "# Meeting\n\nbeta"),
+            dateless = true,
+        )
+        val first = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 0L),
+                StagedImportFile("b.zip", zipB, 0L),
+            ),
+        )
+        assertEquals(2, first.report.imported)
+        assertEquals(0, first.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+        assertEquals(
+            setOf("<p>alpha</p>", "<p>beta</p>"),
+            stack.db.noteDao().getAll().map { it.contentHtml }.toSet(),
+        )
+
+        val second = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("a.zip", zipA, 0L),
+                StagedImportFile("b.zip", zipB, 0L),
+            ),
+        )
+        assertEquals(0, second.report.imported)
+        assertEquals(2, second.report.duplicates)
+        assertEquals(2, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun repeatedKeepImageReferenceWritesOneAttachment() = runBlocking {
+        // R26-F3: one Keep JSON repeating the same valid image path
+        // five times used to write five attachment rows — the
+        // engine writes one row per spec before the size check,
+        // while staging only ever held one file per path. The
+        // parser dedupes specs per resolved entry now, so the note
+        // imports with exactly one attachment and one embed.
+        val stack = newStack()
+        val repeated = (1..5).joinToString(",") {
+            """{"filePath":"Takeout/Keep/pic.png","mimetype":"image/png"}"""
+        }
+        val zip = zipOf(
+            linkedMapOf(
+                "Takeout/Keep/repeats.json" to
+                    """{"title":"Repeats","textContent":"look","attachments":[$repeated],"createdTimestampUsec":1700000000000000}""",
+            ),
+            mapOf("Takeout/Keep/pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importKeepZip(zip)
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.report.duplicates)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+        val note = stack.db.noteDao().getAll().single()
+        assertEquals(1, "<img".toRegex().findAll(note.contentHtml).count())
     }
 
     @Test

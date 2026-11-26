@@ -131,6 +131,22 @@ internal fun utf8ByteLength(text: String): Long {
     return bytes
 }
 
+/** SHA-256 of [text] as lowercase hex — a content identity for
+ *  unknown-date notes (Codex R23-F1, R26-F2): a picked file's
+ *  display name is not an identity (two SAF picks from different
+ *  folders can share it), and neither is a ZIP member's bare
+ *  path (the same entry path can appear in two archives of one
+ *  selection). The decoded text is already in memory when this
+ *  runs; two sources with the same decoded text convert to the
+ *  same note, so the same hash is the right identity for them. */
+internal fun contentHashHex(text: String): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    val bytes = digest.digest(text.toByteArray(Charsets.UTF_8))
+    return bytes.joinToString("") {
+        (it.toInt() and 0xFF).toString(16).padStart(2, '0')
+    }
+}
+
 /** The row-heavy bytes of a note (title + body), measured against
  *  [ImportCaps.MAX_NOTE_CONTENT_BYTES]. plainText is derived from
  *  the body and never materially longer, so the stored row is at
@@ -174,13 +190,16 @@ class ImportedNote(
     /** Original file/entry name — named in the report when the write fails. */
     val sourceName: String,
     /** Stable per-source identity for the run dedupe of
-     *  unknown-date notes (Codex R23-F1): null means the source
-     *  name plays that role, which is right for ZIP members and
-     *  Keep notes (their paths are identities). A loose pick's
-     *  display name is NOT one — two SAF picks from different
-     *  folders can share it — so the loose-file path sets this to
-     *  a content hash of the file instead. Never persisted; the
-     *  run key is in-memory only. */
+     *  unknown-date notes (Codex R23-F1, R26-F2): null means the
+     *  source name plays that role, which is right for Keep notes
+     *  (their entry paths are identities within one archive). A
+     *  loose pick's display name is NOT one — two SAF picks from
+     *  different folders can share it — so the loose-file path
+     *  sets this to a content hash of the file instead; a ZIP
+     *  member's bare path is not one either — the same entry path
+     *  can appear in two archives of one selection — so the ZIP
+     *  path sets it to the full entry path plus the content hash.
+     *  Never persisted; the run key is in-memory only. */
     val sourceIdentity: String? = null,
 )
 

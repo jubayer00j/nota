@@ -1090,10 +1090,14 @@ data class MarkdownFileInput(
     val text: String,
     val lastModified: Long,
     /** Stable per-source identity for the run dedupe of
-     *  unknown-date notes (Codex R23-F1) — see
+     *  unknown-date notes (Codex R23-F1, R26-F2) — see
      *  [ImportedNote.sourceIdentity]. Null means the source name
-     *  plays that role. Only the loose-file path sets it (a
-     *  content hash); ZIP members keep their path identity. */
+     *  plays that role. The loose-file path sets it to a content
+     *  hash; a ZIP member sets it to its full entry path plus a
+     *  content hash — the bare path alone is not an identity
+     *  across archives (the same entry path can appear in two
+     *  ZIPs of one selection), and the bare basename is not one
+     *  at all (two members can share it from different parents). */
     val sourceIdentity: String? = null,
 )
 
@@ -2036,6 +2040,16 @@ object MarkdownImporter {
                             path = entry.name,
                             text = read.text,
                             lastModified = textMembers[entry.name] ?: 0L,
+                            // (Codex R26-F2): the run dedupe identity
+                            // for a dateless ZIP member is its full
+                            // entry path plus a content hash — the
+                            // basename alone collapses
+                            // home/notes/meeting.md and
+                            // work/notes/meeting.md, and the path
+                            // alone collapses the same entry path in
+                            // two archives of one selection. The text
+                            // is already in memory here.
+                            sourceIdentity = "${entry.name}\n${contentHashHex(read.text)}",
                         )
                         appendParsedFile(result, input, resolver)
                     }

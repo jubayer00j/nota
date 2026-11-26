@@ -447,6 +447,14 @@ object KeepTakeoutParser {
         }
 
         val specs = mutableListOf<AttachmentSpec>()
+        // One attachment per resolved entry (Codex R26-F3): the same
+        // image referenced twice is the same attachment, and the
+        // engine writes one row per spec — decoding, re-encoding
+        // and writing a separate attachment for every occurrence
+        // before the expanded-size check — so repeats would burn
+        // time and disk for nothing. Pass 3 already stages one
+        // file per entry name; the specs match it.
+        val seenEntryNames = HashSet<String>()
         for (i in 0 until attachments.length()) {
             val attachment = attachments.optJSONObject(i)
             val filePath = attachment?.opt("filePath") as? String ?: ""
@@ -479,6 +487,7 @@ object KeepTakeoutParser {
                     continue
                 }
             }
+            if (!seenEntryNames.add(entryName)) continue
             specs += AttachmentSpec(entryName, filePath, mimeType)
         }
 
