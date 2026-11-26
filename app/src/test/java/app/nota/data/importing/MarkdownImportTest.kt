@@ -1125,19 +1125,19 @@ class MarkdownImportTest {
             val first = File(dir, "a.bin")
             assertEquals(
                 PickedFileStaging.StagedPick.Ok(60),
-                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(60)), first, budget),
+                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(60)), first, budget, first.name),
             )
             assertEquals(40L, budget.remaining())
             val second = File(dir, "b.bin")
             assertEquals(
                 PickedFileStaging.StagedPick.OverBudget,
-                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(60)), second, budget),
+                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(60)), second, budget, second.name),
             )
             assertFalse(second.exists())
             val third = File(dir, "c.bin")
             assertEquals(
                 PickedFileStaging.StagedPick.Ok(40),
-                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(40)), third, budget),
+                PickedFileStaging.stageOne(ByteArrayInputStream(ByteArray(40)), third, budget, third.name),
             )
             assertEquals(0L, budget.remaining())
         } finally {
@@ -1290,3 +1290,4 @@ internal fun zipWithDuplicateEntries(entries: List<Pair<String, ByteArray>>): Fi
     }
     return file
 }
+
