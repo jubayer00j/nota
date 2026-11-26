@@ -489,7 +489,7 @@ class MarkdownImportTest {
         val resolver = createImportImageResolver(files)
         repeat(200) { i ->
             val resolved = resolver.resolve("note.md", "img$i.png")
-            assertNotNull(resolved, "img$i.png should resolve")
+            assertNotNull("img$i.png should resolve", resolved)
             assertEquals("img$i.png", resolved!!.name)
         }
         assertNull(resolver.resolve("note.md", "dup.png"))
