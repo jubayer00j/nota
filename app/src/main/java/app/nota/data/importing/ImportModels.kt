@@ -245,6 +245,13 @@ internal fun contentHashHex(text: String): String {
 internal fun noteRowBytes(title: String, contentHtml: String): Long =
     utf8ByteLength(title) + utf8ByteLength(contentHtml)
 
+/** One occurrence of an image in a note's content: its own
+ *  placeholder token and its own alt text. A note can reference the
+ *  same staged file many times with different alts (Codex R38-F2) —
+ *  each occurrence gets its own token, but the file is staged once
+ *  (see [ImportedImage.occurrences]). */
+class ImageOccurrence(val token: String, val alt: String)
+
 class ImportedImage(
     val name: String,
     val mimeType: String,
@@ -252,11 +259,15 @@ class ImportedImage(
      *  (deletes) it after the save attempt. */
     val stagedFile: File,
     val sizeBytes: Long,
-    /** Alt text: kept as the image's alt on success, and replaces the
-     *  image in the content when the save fails. */
+    /** Alt text of the first occurrence: kept as the image's alt on
+     *  success, and replaces the image in the content when the save
+     *  fails. Later occurrences carry their own alt in
+     *  [occurrences]. */
     val alt: String,
-    /** Placeholder token inside the note's contentHtml to swap for the
-     *  saved embed; null = append the image at the end of the note. */
+    /** Placeholder token of the first occurrence inside the note's
+     *  contentHtml to swap for the saved embed; null = append the
+     *  image at the end of the note. Later occurrences have their
+     *  own tokens in [occurrences]. */
     val token: String?,
     /** True when this staged file is exclusively this note's (Keep
      *  attachments are staged per note) and the engine deletes it after
@@ -264,6 +275,17 @@ class ImportedImage(
      *  shared by several notes, so the engine leaves them; their
      *  staging directory is cleaned up by the caller instead. */
     val deleteAfterUse: Boolean = true,
+    /** Per-occurrence (token, alt) pairs for this staged file (Codex
+     *  R38-F2): the Markdown sink appends one per reference, so a
+     *  note repeating the same image with different alts keeps each
+     *  description — the old shape carried a single alt per file and
+     *  the engine embedded the first alt at every occurrence. The
+     *  file is still staged once; the engine iterates these for the
+     *  substitutions. Empty for the Keep path (token null, appended
+     *  at the end) and for callers that construct a spec directly —
+     *  the engine then treats ([token], [alt]) as the single
+     *  occurrence. Built during parsing, read-only after. */
+    val occurrences: MutableList<ImageOccurrence> = mutableListOf(),
 )
 
 class ImportedNote(

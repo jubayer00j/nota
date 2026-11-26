@@ -46,10 +46,10 @@ private const val IMAGE_TOKEN_PREFIX = "%%NOMA_IMPORT_IMAGE_"
  * repeats of the same file). A token with no replacement is
  * copied through unchanged, and text after a prefix with no
  * closing `%%` is copied through too — the same as a replace
- * that matches nothing. Replacements are applied left to right,
- * so every occurrence of a token gets the same replacement
- * (Codex R30-F1). A replacement is never re-scanned, so a
- * token-like string inside an alt text stays literal.
+ * that matches nothing. Each token is unique per occurrence
+ * (Codex R38-F2), so the map holds one replacement per token.
+ * A replacement is never re-scanned, so a token-like string
+ * inside an alt text stays literal.
  */
 internal fun replaceImageTokensOnce(
     content: String,
@@ -76,6 +76,20 @@ internal fun replaceImageTokensOnce(
     }
     return out.toString()
 }
+
+/**
+ * The (token, alt) occurrences of one image spec (Codex R38-F2):
+ * the spec's own list when the Markdown sink built it, or the
+ * spec's single (token, alt) when a caller constructed it
+ * directly (Keep path, tests) — a null token has no occurrences
+ * and is never passed here.
+ */
+private fun imageOccurrences(image: ImportedImage): List<ImageOccurrence> =
+    if (image.occurrences.isEmpty() && image.token != null) {
+        listOf(ImageOccurrence(image.token, image.alt))
+    } else {
+        image.occurrences
+    }
 
 /**
  * The import engine — 1.x `importNotes` rebuilt on Nota's bulk-write
@@ -784,20 +798,24 @@ class NoteImportRepository(
                         // tokens (Codex R24-F1).
                         val saved = attachmentStore.stageImageFileLocked(noteId, image.stagedFile)
                         stagedAttachments += saved
-                        val embed = "<img src=\"nota-attachment://${saved.id}\" " +
-                            "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
-                        // First spec wins for a repeated token (Codex
-                        // R30-F1 / R21-F2): one image spec stands for
-                        // every occurrence of the same image in the
-                        // note, so its token is emitted once per
-                        // occurrence and every occurrence is the embed.
-                        // That is safe because the token is salted per
-                        // file — literal text can't match it — so any
-                        // occurrence in the content is an emitted
-                        // placeholder.
+                        // (Codex R38-F2): one embed per occurrence,
+                        // each with its own alt text — a note repeating
+                        // the same image with different alts keeps
+                        // every description; the old shape embedded the
+                        // first alt at every occurrence. The file is
+                        // staged once, above; only the substitutions
+                        // multiply. Tokens are unique per occurrence
+                        // (salted per file, R21-F2), so putIfAbsent is
+                        // a safety net, not the dedupe.
                         if (image.token != null) {
-                            tokenReplacements.putIfAbsent(image.token, embed)
+                            for (occurrence in imageOccurrences(image)) {
+                                val embed = "<img src=\"nota-attachment://${saved.id}\" " +
+                                    "alt=\"${escapeImportAttr(occurrence.alt.ifBlank { saved.fileName })}\">"
+                                tokenReplacements.putIfAbsent(occurrence.token, embed)
+                            }
                         } else {
+                            val embed = "<img src=\"nota-attachment://${saved.id}\" " +
+                                "alt=\"${escapeImportAttr(image.alt.ifBlank { saved.fileName })}\">"
                             appendedParagraphs.append("<p>$embed</p>")
                         }
                     } catch (e: Exception) {
@@ -810,13 +828,17 @@ class NoteImportRepository(
                         // alt has nothing to preserve.
                         saveFailures++
                         if (image.token != null) {
-                            // Same replace rule as the success path
-                            // (Codex R30-F1): every occurrence of the
-                            // token becomes the alt text.
-                            tokenReplacements.putIfAbsent(
-                                image.token,
-                                escapeImportHtml(image.alt),
-                            )
+                            // Same replace rule as the success path:
+                            // each occurrence's token becomes ITS alt
+                            // text (Codex R38-F2) — a repeated image
+                            // that fails to save keeps every
+                            // description, not just the first.
+                            for (occurrence in imageOccurrences(image)) {
+                                tokenReplacements.putIfAbsent(
+                                    occurrence.token,
+                                    escapeImportHtml(occurrence.alt),
+                                )
+                            }
                         } else if (image.alt.isNotBlank()) {
                             appendedParagraphs.append(
                                 "<p>${escapeImportHtml(image.alt)}</p>",

@@ -467,13 +467,15 @@ private class InlineImageSink(
     // occurrence — a note repeating one image thousands of times used
     // to append a spec per copy, and the engine staged (decode +
     // re-encode + file write) every one before the expanded-size
-    // check could refuse the note. A repeat returns the first
-    // occurrence's token, so every occurrence embeds the same single
-    // attachment (the engine replaces every occurrence of a token —
-    // safe because the token is salted per file, so literal text
-    // can't match it). Keyed on the staged file: the same file
-    // reached by two different spellings is still one attachment.
-    private val tokensByStagedFile = HashMap<File, String>()
+    // check could refuse the note. Keyed on the staged file: the same
+    // file reached by two different spellings is still one attachment.
+    // (Codex R38-F2): a repeat gets its OWN token and alt — the old
+    // shape returned the first occurrence's token, so the engine
+    // embedded the first alt at EVERY occurrence and later
+    // descriptions were silently lost. The repeat appends an
+    // occurrence to the same spec, so the file is still staged once
+    // while each occurrence keeps its own alt text.
+    private val specsByStagedFile = HashMap<File, ImportedImage>()
 
     // Per-file random salt for the image placeholder (Codex R21-F2):
     // the old fixed token %%NOMA_IMPORT_IMAGE_0%% is guessable, and
@@ -498,16 +500,19 @@ private class InlineImageSink(
             result.imagesUnresolved += 1
             return escapeImportHtml(alt)
         }
-        // (Codex R30-F1): a repeat of an image already emitted in
-        // this note returns the first occurrence's token — one spec,
-        // one staged attachment, embedded at every occurrence — and
-        // adds no second spec, so the engine never stages the same
-        // file twice.
-        val existingToken = tokensByStagedFile[resolved.stagedFile]
-        if (existingToken != null) return existingToken
+        // (Codex R30-F1 / R38-F2): a repeat of an image already
+        // emitted in this note gets a NEW token carrying its own alt
+        // text, appended to the same spec's occurrences — one staged
+        // attachment, embedded at every occurrence with that
+        // occurrence's description — and adds no second spec, so the
+        // engine never stages the same file twice.
         val token = "%%NOMA_IMPORT_IMAGE_${tokenSalt}_${imageSeq++}%%"
-        tokensByStagedFile[resolved.stagedFile] = token
-        images += ImportedImage(
+        val existing = specsByStagedFile[resolved.stagedFile]
+        if (existing != null) {
+            existing.occurrences += ImageOccurrence(token, alt)
+            return token
+        }
+        val spec = ImportedImage(
             name = resolved.name,
             mimeType = resolved.mimeType,
             stagedFile = resolved.stagedFile,
@@ -515,24 +520,87 @@ private class InlineImageSink(
             alt = alt,
             token = token,
             deleteAfterUse = false, // resolver files can be shared across notes
+            occurrences = mutableListOf(ImageOccurrence(token, alt)),
         )
+        specsByStagedFile[resolved.stagedFile] = spec
+        images += spec
         return token
     }
 }
 
 private val CODE_SPAN = Regex("(`[^`]+`)")
-private val INLINE_IMAGE =
-    Regex("""!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\s*\)""")
 
 /**
- * Image references in raw (unescaped) Markdown text, for the
- * reference pre-scan in [MarkdownImporter.parseImportZip] (Codex
- * R14-F1). Deliberately more permissive than [INLINE_IMAGE], which
- * runs on escaped text (its title is `&quot;…&quot;`): the pre-scan
- * must never MISS a reference the converter would use — an extra
- * staged image costs a little budget, a missed one loses the embed.
+ * Whitespace exactly as the old bracket-reference regexes saw it
+ * (`\s`): space, tab, newline, vertical tab, form feed, carriage
+ * return. (Kotlin's `Char.isWhitespace()` is broader — it would
+ * also match U+00A0 and other Unicode spaces the regexes never
+ * matched — so the set is spelled out here, mirroring
+ * [estimateConvertedNoteBytes]'s `isWs`.)
+ */
+private fun isPatternWhitespace(c: Char): Boolean =
+    c == ' ' || c == '\t' || c == '\n' || c == '\u000B' || c == '\u000C' || c == '\r'
+
+/**
+ * The closing `)` of an image/link reference whose reference ends
+ * at [p] (Codex R38-F1): the optional `&quot;`-title first, then
+ * the bare close — the regex's greedy-optional backtrack order,
+ * `(?:\s+&quot;[^&]*&quot;)?\s*\)`. Returns the index just past
+ * the `)`, or -1 when neither shape closes here. The title's
+ * `[^&]*` ends at the first `&`, so that `&` must start the
+ * closing `&quot;`; an `&amp;` (or any other entity) there fails
+ * the title outright, and the bare close is tried instead.
+ */
+private fun closeParenEnd(text: String, p: Int): Int {
+    val n = text.length
+    var r = p
+    while (r < n && isPatternWhitespace(text[r])) r++
+    if (r > p && text.startsWith("&quot;", r)) {
+        val titleStart = r + 6
+        val amp = text.indexOf('&', titleStart)
+        if (amp >= 0 && text.startsWith("&quot;", amp)) {
+            var s = amp + 6
+            while (s < n && isPatternWhitespace(text[s])) s++
+            if (s < n && text[s] == ')') return s + 1
+        }
+    }
+    var s = p
+    while (s < n && isPatternWhitespace(text[s])) s++
+    if (s < n && text[s] == ')') return s + 1
+    return -1
+}
+
+/**
+ * Bracketed image/link references, scanned in one left-to-right
+ * pass (Codex R38-F1). This replaces the three regexes that all
+ * contained `([^\]]*)` — the render pass's image and link patterns
+ * and the pre-scan's image pattern. For an unmatched `![`/`[`
+ * opener — no `]` anywhere ahead — the regex engine scans forward
+ * to the end of the remaining text on every attempt, and `findAll`
+ * tries at each opener, so ~30,000 openers in a 60 KB source cost
+ * O(n²) character scans, twice per member (pre-scan and rendering).
+ * This scanner advances once through the text and never rescans:
+ * the index of the next `]` only ever moves forward, so a failed
+ * opener costs O(1) amortised — and when no `]` exists anywhere
+ * ahead, no later opener can match either, so the scan stops there.
  *
- * Code is carved out before this regex runs (Codex R18-F2, see
+ * The match grammar is the regexes' grammar, unchanged: `[` (with
+ * an optional leading `!` for images), a label of any chars except
+ * `]` (at least [minLabel] of them), `(` immediately after the
+ * `]`, optional whitespace, a reference of one or more chars that
+ * are neither `)` nor whitespace; when [requireCloseParen] the
+ * match then needs the optional `&quot;`-title and a closing `)`
+ * (see [closeParenEnd]). The pre-scan passes
+ * `requireCloseParen = false`, so it stays deliberately more
+ * permissive than the render pass, which runs on escaped text (its
+ * title is `&quot;…&quot;`): the pre-scan must never MISS a
+ * reference the converter would use — an extra staged image costs a
+ * little budget, a missed one loses the embed. Matches are
+ * leftmost-first and non-overlapping, exactly as `findAll`/`replace`
+ * produced them; on a failed attempt the scan resumes one character
+ * past the opener.
+ *
+ * Code is carved out before this runs (Codex R18-F2, see
  * [collectImageRefs]): a reference inside a fenced block or a code
  * span is never embedded, so it must not consume the shared
  * extracted-image budget. The earlier "harmless" reading — that an
@@ -540,8 +608,87 @@ private val INLINE_IMAGE =
  * in the budget sense: in a multi-ZIP selection it can starve a
  * later ZIP's real images.
  */
-private val RAW_IMAGE_REF =
-    Regex("""!\[([^\]]*)\]\(\s*([^)\s]+)""")
+private fun scanBracketRefs(
+    text: String,
+    requireBang: Boolean,
+    minLabel: Int,
+    requireCloseParen: Boolean,
+    onMatch: (label: String, ref: String, start: Int, end: Int) -> Unit,
+) {
+    val n = text.length
+    var i = 0
+    // First ']' at or after the current label start; -1 = not yet
+    // known for this position. Only ever moves forward: the text
+    // between the previous label start and this ']' holds no other
+    // ']' by construction, so a later label start past it needs a
+    // fresh search — and a label start before it reuses this one.
+    var closeIdx = -1
+    while (i < n) {
+        val open = if (requireBang) text.indexOf("![", i) else text.indexOf('[', i)
+        if (open < 0) break
+        val labelStart = open + if (requireBang) 2 else 1
+        if (closeIdx < labelStart) {
+            closeIdx = text.indexOf(']', labelStart)
+            if (closeIdx < 0) break
+        }
+        val close = closeIdx
+        if (close - labelStart < minLabel) {
+            i = open + 1
+            continue
+        }
+        var p = close + 1
+        if (p >= n || text[p] != '(') {
+            i = open + 1
+            continue
+        }
+        p++
+        while (p < n && isPatternWhitespace(text[p])) p++
+        val refStart = p
+        while (p < n && text[p] != ')' && !isPatternWhitespace(text[p])) p++
+        if (p == refStart) {
+            i = open + 1
+            continue
+        }
+        val label = text.substring(labelStart, close)
+        val ref = text.substring(refStart, p)
+        if (!requireCloseParen) {
+            onMatch(label, ref, open, p)
+            i = p
+            continue
+        }
+        val end = closeParenEnd(text, p)
+        if (end < 0) {
+            i = open + 1
+            continue
+        }
+        onMatch(label, ref, open, end)
+        i = end
+    }
+}
+
+/**
+ * Rebuilds [text] with every bracketed reference replaced by
+ * [replace]'s return, in the same leftmost-first, non-overlapping
+ * order `Regex.replace` produced (Codex R38-F1). Unmatched text is
+ * copied through verbatim.
+ */
+private fun replaceBracketRefs(
+    text: String,
+    requireBang: Boolean,
+    minLabel: Int,
+    requireCloseParen: Boolean,
+    replace: (label: String, ref: String) -> String,
+): String {
+    val out = StringBuilder(text.length)
+    var lastEnd = 0
+    scanBracketRefs(text, requireBang, minLabel, requireCloseParen) { label, ref, start, end ->
+        out.append(text, lastEnd, start)
+        out.append(replace(label, ref))
+        lastEnd = end
+    }
+    out.append(text, lastEnd, text.length)
+    return out.toString()
+}
 
 /**
  * Splits raw Markdown text into the prose regions the converter
@@ -646,16 +793,14 @@ private fun collectRefsFrom(
     fromPath: String,
     collector: ReferencedImageCollector,
 ) {
-    for (match in RAW_IMAGE_REF.findAll(text)) {
-        val ref = match.groupValues[2]
-        if (REMOTE_IMAGE_REF.containsMatchIn(ref)) continue
+    scanBracketRefs(text, requireBang = true, minLabel = 0, requireCloseParen = false) { _, ref, _, _ ->
+        if (REMOTE_IMAGE_REF.containsMatchIn(ref)) return@scanBracketRefs
         val target = resolveRef(fromPath, ref)
-        if (target.isEmpty()) continue
+        if (target.isEmpty()) return@scanBracketRefs
         collector.add(target)
     }
 }
-private val INLINE_LINK =
-    Regex("""\[([^\]]+)\]\(\s*([^)\s]+)(?:\s+&quot;[^&]*&quot;)?\s*\)""")
+
 private val SAFE_LINK = Regex("^(https?:|mailto:)", RegexOption.IGNORE_CASE)
 
 /**
@@ -684,20 +829,23 @@ private fun renderInlineText(raw: String, images: InlineImageSink): String {
     var text = escapeImportHtml(raw)
 
     // Images first (their syntax contains the link syntax).
-    text = INLINE_IMAGE.replace(text) { match ->
+    // Both passes scan bracketed references in one pass (Codex
+    // R38-F1) — the link pattern shared the image patterns'
+    // `([^\]]*)` hazard, so it uses the same scanner rather than
+    // its own regex.
+    text = replaceBracketRefs(text, requireBang = true, minLabel = 0, requireCloseParen = true) { alt, ref ->
         images.addImage(
-            unescapeEntities(match.groupValues[1]),
-            unescapeEntities(match.groupValues[2]),
+            unescapeEntities(alt),
+            unescapeEntities(ref),
         )
     }
 
     // Links: only http/https/mailto survive as links; anything else
     // degrades to its text (a file:// or javascript: ref is never emitted).
-    text = INLINE_LINK.replace(text) { match ->
-        val label = match.groupValues[1]
-        val rawHref = unescapeEntities(match.groupValues[2])
-        if (SAFE_LINK.containsMatchIn(rawHref)) {
-            "<a href=\"${escapeImportAttr(rawHref)}\">$label</a>"
+    text = replaceBracketRefs(text, requireBang = false, minLabel = 1, requireCloseParen = true) { label, rawHref ->
+        val href = unescapeEntities(rawHref)
+        if (SAFE_LINK.containsMatchIn(href)) {
+            "<a href=\"${escapeImportAttr(href)}\">$label</a>"
         } else {
             label
         }

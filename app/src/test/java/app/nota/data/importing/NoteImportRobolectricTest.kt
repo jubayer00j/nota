@@ -3231,6 +3231,34 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun repeatedMarkdownImageKeepsEachAltText() = runBlocking {
+        // (Codex R38-F2): addImage used to return the FIRST
+        // occurrence's token for a repeat of the same staged file,
+        // and the single spec carried only the first alt — so the
+        // engine embedded the first alt at EVERY occurrence and later
+        // descriptions were silently lost. Each occurrence now gets
+        // its own token and alt while the file is still staged once:
+        // both descriptions survive, with exactly one attachment row.
+        val stack = newStack()
+        val text = "# Note\n\n![Cat](pic.png) ![A black cat sleeping](pic.png)"
+        val zip = zipOf(
+            linkedMapOf("note.md" to text),
+            mapOf("pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("notes.zip", zip, 1_700_000_000_000L)),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        assertEquals(1, stack.db.attachmentDao().getAll().size)
+        val note = stack.db.noteDao().getAll().first { it.title == "Note" }
+        assertEquals(2, countOccurrences(note.contentHtml, "nota-attachment://"))
+        assertTrue(note.contentHtml.contains("alt=\"Cat\""))
+        assertTrue(note.contentHtml.contains("alt=\"A black cat sleeping\""))
+        assertFalse(note.contentHtml.contains("%%NOMA_IMPORT_IMAGE"))
+    }
+
+    @Test
     fun markdownZipNotePrefersInZipImageOverPickedImage() = runBlocking {
         // R22-F1: when the same name exists both in the archive and
         // among the picked images, the archive image wins. The two
@@ -3747,6 +3775,55 @@ class NoteImportRobolectricTest {
         assertTrue(
             notes.first { it.title == "TinyTwo" }.contentHtml.contains("nota-attachment://"),
         )
+    }
+
+    @Test
+    fun unmatchedImageOpenersParseWithoutStall() = runBlocking {
+        // (Codex R38-F1): both image patterns contained `([^\]]*)`,
+        // so an unmatched `![` opener made the regex engine scan
+        // forward to the end of the remaining text on every attempt,
+        // and findAll tried at each opener — ~30,000 openers in a
+        // 60 KB source cost O(n²) character scans, twice per member
+        // (pre-scan and rendering). The reference scan is a single
+        // left-to-right pass now, so the storm member parses in
+        // linear time and the note still imports; the well-formed
+        // image in the second member still resolves.
+        val stack = newStack()
+        val storm = "![".repeat(30_000)
+        val zip = zipOf(
+            linkedMapOf(
+                "notes/storm.md" to "# Storm\n\n$storm",
+                "notes/ok.md" to "# Ok\n\n![p](pic.png)",
+            ),
+            mapOf("notes/pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownZip(zip)
+        assertEquals(2, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val ok = stack.db.noteDao().getAll().first { it.title == "Ok" }
+        assertTrue(ok.contentHtml.contains("nota-attachment://"))
+    }
+
+    @Test
+    fun unmatchedLinkOpenersParseWithoutStall() = runBlocking {
+        // (Codex R38-F1, same shape for links): the link pattern
+        // shared the image patterns' `([^\]]*)` hazard — an
+        // unmatched `[` opener made the engine scan to the end of the
+        // remaining text on every attempt. The link pass uses the
+        // same single-pass scanner now, so the storm member parses
+        // in linear time and a well-formed link still renders.
+        val stack = newStack()
+        val storm = "[".repeat(30_000)
+        val zip = zipOf(
+            linkedMapOf(
+                "notes/storm.md" to "# Storm\n\n$storm",
+                "notes/ok.md" to "# Ok\n\n[Example](https://example.com)",
+            ),
+        )
+        val outcome = stack.repo.importMarkdownZip(zip)
+        assertEquals(2, outcome.report.imported)
+        val ok = stack.db.noteDao().getAll().first { it.title == "Ok" }
+        assertTrue(ok.contentHtml.contains("<a href=\"https://example.com\">Example</a>"))
     }
 
     @Test
