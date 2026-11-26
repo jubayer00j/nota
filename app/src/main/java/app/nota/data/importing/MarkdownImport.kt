@@ -225,8 +225,21 @@ fun interface ImportImageResolver {
  * reference is counted at the call site) instead of silently embedding
  * whichever file was staged last. The same staged file listed twice
  * is one candidate, not an ambiguity.
+ *
+ * [ambiguousNames] are paths that are ambiguous by duplication but
+ * have no staged payload (Codex R42-F1): a ZIP path that occurs twice
+ * is never staged — staging it would embed whichever payload appears
+ * last — so it never appears in [files], yet a reference to it must
+ * still stay unresolved instead of falling through to another
+ * resolver's guess. The names are matched the same way staged files
+ * are — by normalised path first, then by lowercase basename — so a
+ * ref for the full duplicate path and a ref for just its basename
+ * both stay ambiguous.
  */
-fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResolver {
+fun createImportImageResolver(
+    files: List<Pair<String, File>>,
+    ambiguousNames: Set<String> = emptySet(),
+): ImportImageResolver {
     // (normalised path, display name, staged file) per entry — matching
     // runs on the ORIGINAL paths/names, never on staging file names.
     val entries = files.distinct().map { (path, file) ->
@@ -240,6 +253,18 @@ fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResol
     // byPath; groupBy preserves the filter's order and duplicates, so
     // the unique/ambiguous semantics are unchanged.
     val byBasename = entries.groupBy { it.second.lowercase() }
+    // (Codex R42-F1): paths ambiguous by duplication, with no staged
+    // payload to resolve to. A duplicate ZIP path is never staged, so
+    // it is absent from [byPath]/[byBasename] — without this set the
+    // resolver would report "no match" for it and a combiner would
+    // fall through to another resolver's file. Both arms are covered,
+    // exactly like staged entries: a direct-path match decides on its
+    // own only when the path is NOT a duplicate, and a basename match
+    // counts only when no duplicate shares it.
+    val ambiguousPaths = ambiguousNames.map { normaliseImportPath(it) }.toSet()
+    val ambiguousBasenames = ambiguousNames.map {
+        importBaseName(it.replace('\\', '/')).lowercase()
+    }.toSet()
     fun pick(name: String, file: File): ResolvedImportImage = ResolvedImportImage(
         name = name,
         mimeType = importMimeFromName(name) ?: "",
@@ -250,6 +275,13 @@ fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResol
     // two can never disagree about a reference: a direct-path match
     // decides on its own (size 1 resolves, more is ambiguous), and
     // only when there is no direct match does the basename count.
+    // A duplicate name short-circuits both arms: it has no payload,
+    // so it can never resolve, and it is ambiguous by definition.
+    fun isDuplicatePath(target: String): Boolean = target in ambiguousPaths
+
+    fun isDuplicateBasename(target: String): Boolean =
+        importBaseName(target).lowercase() in ambiguousBasenames
+
     fun directMatches(target: String): List<Triple<String, String, File>>? = byPath[target]
 
     fun basenameMatches(target: String): List<Triple<String, String, File>> {
@@ -259,18 +291,22 @@ fun createImportImageResolver(files: List<Pair<String, File>>): ImportImageResol
     return object : ImportImageResolver {
         override fun resolve(fromPath: String, ref: String): ResolvedImportImage? {
             val target = resolveRef(fromPath, ref)
+            if (isDuplicatePath(target)) return null
             val direct = directMatches(target)
             if (direct != null) {
                 return if (direct.size == 1) pick(importBaseName(target), direct[0].third) else null
             }
+            if (isDuplicateBasename(target)) return null
             val matches = basenameMatches(target)
             return if (matches.size == 1) pick(matches[0].second, matches[0].third) else null
         }
 
         override fun isAmbiguous(fromPath: String, ref: String): Boolean {
             val target = resolveRef(fromPath, ref)
+            if (isDuplicatePath(target)) return true
             val direct = directMatches(target)
             if (direct != null) return direct.size > 1
+            if (isDuplicateBasename(target)) return true
             return basenameMatches(target).size > 1
         }
     }
@@ -2371,7 +2407,17 @@ object MarkdownImporter {
             // combineImportImageResolvers). The pre-scan above only
             // stages archive images, which is unchanged: picked
             // images are already staged files on disk.
-            val archiveResolver = createImportImageResolver(imageFiles.toList())
+            // (Codex R42-F1): duplicate paths are never staged
+            // (walk 3 skips them), so they never appear in
+            // imageFiles — but a reference to one must still stay
+            // unresolved instead of falling through to a picked
+            // image. Their names travel into the resolver's
+            // ambiguity state; resolve still returns null for them
+            // (no payload was staged).
+            val archiveResolver = createImportImageResolver(
+                imageFiles.toList(),
+                reader.duplicateEntryNames,
+            )
             val resolver = externalResolver?.let {
                 combineImportImageResolvers(archiveResolver, it)
             } ?: archiveResolver

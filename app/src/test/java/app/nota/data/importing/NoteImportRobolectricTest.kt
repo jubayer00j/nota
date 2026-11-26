@@ -3480,6 +3480,111 @@ class NoteImportRobolectricTest {
         assertEquals(0, stack.db.attachmentDao().getAll().size)
     }
 
+    @Test
+    fun duplicateZipImagePathStaysUnresolvedDespitePickedImage() = runBlocking {
+        // (Codex R42-F1): the R22-F1 test above covers a name
+        // duplicated across DIFFERENT paths (a/pic.png + b/pic.png),
+        // which the archive resolver sees as two basename candidates.
+        // The hole was the SAME path twice (images/pic.png ×2): walk 3
+        // never stages either payload, so the archive resolver never
+        // saw the name at all and the combiner fell through to the
+        // picked image, silently embedding a guess. Both arms are
+        // pinned here — the basename ref `pic.png` and the full-path
+        // ref `images/pic.png` — plus a uniquely pathed image in the
+        // same ZIP that must still embed, proving no over-blocking.
+        val stack = newStack()
+        val dir = stagingDir()
+        val picked = File(dir, "pic.png").apply { writeBytes(pngBytes) }
+        val zip = zipWithDuplicateEntries(
+            listOf(
+                "note.md" to "# Note\n\n![p](pic.png)\n\n![ok](img/ok.png)"
+                    .toByteArray(Charsets.UTF_8),
+                "other.md" to "# Other\n\n![q](images/pic.png)"
+                    .toByteArray(Charsets.UTF_8),
+                "images/pic.png" to pngBytes,
+                "images/pic.png" to byteArrayOf(9, 9, 9),
+                "img/ok.png" to pngBytes,
+            ),
+        )
+        try {
+            val outcome = stack.repo.importMarkdownSelection(
+                listOf(
+                    StagedImportFile("notes.zip", zip, 1_700_000_000_000L),
+                    StagedImportFile("pic.png", picked, 1_700_000_000_000L),
+                ),
+            )
+            assertEquals(2, outcome.report.imported)
+            assertEquals(2, outcome.parse.imagesUnresolved)
+            val notes = stack.db.noteDao().getAll()
+            val note = notes.first { it.title == "Note" }
+            assertTrue(note.contentHtml.contains("<p>p</p>")) // alt kept, not embedded
+            assertTrue(note.contentHtml.contains("nota-attachment://")) // the ok image
+            assertEquals("<p>q</p>", notes.first { it.title == "Other" }.contentHtml)
+            assertEquals(1, stack.db.attachmentDao().getAll().size) // ok only
+        } finally {
+            zip.delete()
+        }
+    }
+
+    @Test
+    fun uniqueZipImagePathStillBeatsPickedImage() = runBlocking {
+        // (Codex R42-F1 control): the same setup as above, but the ZIP
+        // path is NOT duplicated — the archive image still wins over
+        // the picked file, and the new duplicate-name state must not
+        // over-block a genuinely unique path. The candidates differ in
+        // size (archive 1×1, picked 2×2 red) so the winner is
+        // observable in the stored attachment's dimensions.
+        val stack = newStack()
+        val dir = stagingDir()
+        val picked = File(dir, "pic.png").apply { writeBytes(redPng2x2()) }
+        val zip = zipOf(
+            linkedMapOf("note.md" to "# Note\n\n![p](pic.png)"),
+            mapOf("images/pic.png" to pngBytes),
+        )
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("notes.zip", zip, 1_700_000_000_000L),
+                StagedImportFile("pic.png", picked, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.parse.imagesUnresolved)
+        val attachments = stack.db.attachmentDao().getAll()
+        assertEquals(1, attachments.size)
+        assertEquals(1, attachments[0].widthPx)
+        assertEquals(1, attachments[0].heightPx)
+    }
+
+    @Test
+    fun duplicateZipImagePathStaysUnresolvedWithoutPickedImage() = runBlocking {
+        // (Codex R42-F1 control): a duplicated path with NO external
+        // pick stays unresolved, as before — the new ambiguity state
+        // changes nothing when there is no fallback to fall through
+        // to. Short-named counterpart of
+        // longNamedDuplicateImagePathStaysUnresolved, pinning the
+        // archive-resolver-alone path.
+        val stack = newStack()
+        val zip = zipWithDuplicateEntries(
+            listOf(
+                "note.md" to "# Note\n\n![p](pic.png)".toByteArray(Charsets.UTF_8),
+                "images/pic.png" to pngBytes,
+                "images/pic.png" to byteArrayOf(9, 9, 9),
+            ),
+        )
+        try {
+            val outcome = stack.repo.importMarkdownSelection(
+                listOf(StagedImportFile("notes.zip", zip, 1_700_000_000_000L)),
+            )
+            assertEquals(1, outcome.report.imported)
+            assertEquals(1, outcome.parse.imagesUnresolved)
+            val note = stack.db.noteDao().getAll().single()
+            assertEquals("<p>p</p>", note.contentHtml)
+            assertEquals(0, stack.db.attachmentDao().getAll().size)
+        } finally {
+            zip.delete()
+        }
+    }
+
     /** A 2×2 red PNG, built byte-by-byte: Bitmap is unproven under
      *  this Robolectric harness, and the test needs an image whose
      *  dimensions differ from [pngBytes] (1×1) so the winner is
