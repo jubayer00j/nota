@@ -545,7 +545,7 @@ class MarkdownImportTest {
         // R19-F1: addNote used to count only the body toward the
         // 16M-char aggregate budget, so twenty-one notes with ~1 MB
         // titles and tiny bodies all fit while retaining ~19M chars
-        // of titles. Titles count now: eighteen parse (18 × 900,007
+        // of titles. Titles count now: eighteen parse (18 × 900,008
         // ≈ 16.2M chars) and the last three are reported as skipped,
         // never silently dropped. Titles stay at 900K chars on
         // purpose: a single note past the ~1 MB per-note bound is
@@ -565,7 +565,7 @@ class MarkdownImportTest {
             assertEquals(i < 18, added)
         }
         assertEquals(18, result.notes.size)
-        assertEquals(18L * 900_007L, result.retainedTextChars)
+        assertEquals(18L * 900_008L, result.retainedTextChars)
         assertEquals(
             (18 until 21).map {
                 SkippedImportFile("t-$it.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)
@@ -581,7 +581,7 @@ class MarkdownImportTest {
         // through titles alone never trimmed — the counter barely
         // moved and every note stayed. Two 10-note sources of 900K
         // titles total ~18.0M chars; the merged result must drop
-        // its two tail notes and land at 18 × 900,007 chars.
+        // its two tail notes and land at 18 × 900,008 chars.
         val first = ImportParseResult()
         repeat(10) { i ->
             assertTrue(
@@ -615,7 +615,7 @@ class MarkdownImportTest {
         merged.absorb(second)
         merged.enforceContentBudget()
         assertEquals(18, merged.notes.size)
-        assertEquals(18L * 900_007L, merged.retainedTextChars)
+        assertEquals(18L * 900_008L, merged.retainedTextChars)
         assertEquals(
             listOf(
                 SkippedImportFile("b-8.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON),
