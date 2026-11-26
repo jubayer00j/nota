@@ -2921,6 +2921,20 @@ class NoteImportRobolectricTest {
         dbs += dbLive
         val dbSibling = NotaDatabase.build(context, accountId)
         dbs += dbSibling
+        // Pre-open the sibling handle BEFORE the live transaction
+        // starts, inside a dummy transaction on the sibling's own
+        // transaction thread: a fresh handle's first open writes
+        // library_meta from Room's onOpen callback, and that INSERT
+        // throws SQLITE_BUSY if a write transaction already holds
+        // the file — the fix-18 busy_timeout does not cover that
+        // path under Robolectric's connection pool (gate run
+        // 45803787095 failed exactly there). Running it here, with
+        // no contention, also re-asserts the pragma on the
+        // connection the rebuild's BEGIN will use.
+        dbSibling.withTransaction {
+            dbSibling.openHelper.writableDatabase
+                .query("PRAGMA busy_timeout = 5000").close()
+        }
         fun note(id: String, body: String) = NoteEntity(
             id = id,
             title = id,
