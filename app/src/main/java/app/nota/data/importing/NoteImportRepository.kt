@@ -38,6 +38,30 @@ data class ImportRunResult(
 private const val IMAGE_TOKEN_PREFIX = "%%NOMA_IMPORT_IMAGE_"
 
 /**
+ * Thrown inside a note's write transaction (Codex R45-F1) when
+ * the per-note dedupe recheck finds a twin that landed after
+ * the run's one-time seed — a Merge restore or a sync apply
+ * writing mid-import. The import loop counts it as a duplicate,
+ * not a failure: the note is already in the library, just under
+ * another id. Nothing is committed when it throws: the check
+ * runs before the note row exists, and the transaction rolls
+ * back — including a folder row resolved just before it.
+ */
+internal class DuplicateImportedNoteException(message: String) : Exception(message)
+
+/**
+ * The result of one note's write (Codex R45-F1): images that
+ * failed to save, plus the stored row's id — the run tracks its
+ * own ids so the dedupe recheck can tell a concurrent twin from
+ * a note this run just wrote (a dateless twin and a run note
+ * share (title, folder); only the id tells them apart).
+ */
+internal data class ImportedNoteWrite(
+    val saveFailures: Int,
+    val noteId: String,
+)
+
+/**
  * Replaces every %%NOMA_IMPORT_IMAGE_...%% token in [content]
  * with its replacement in a single scan (Codex R36-F2). The old
  * per-image `content.replace(token, embed)` scanned and copied
@@ -514,6 +538,13 @@ class NoteImportRepository(
             // same-title note in the same folder.
             val seenRun = HashSet<String>()
 
+            // Ids of notes this run wrote (Codex R45-F1): the
+            // per-note dedupe recheck in writeImportedNote must
+            // tell a concurrent twin from a note this run just
+            // wrote — a dateless twin and a run note share
+            // (title, folder), so only the id separates them.
+            val runNoteIds = HashSet<String>()
+
             // Per-run folder/tag resolution (Codex R24-F3): the
             // caches are seeded from the run database here, and the
             // resolvers run inside each note's write transaction —
@@ -580,7 +611,9 @@ class NoteImportRepository(
                     if (isDuplicate) {
                         duplicates++
                     } else {
-                        imageSaveFailures += writeImportedNote(runDb, item, meta)
+                        val write = writeImportedNote(runDb, item, meta, runNoteIds)
+                        imageSaveFailures += write.saveFailures
+                        runNoteIds += write.noteId
                         if (isUnknownDate) {
                             seenRun += dedupeKeyUnknownDate(
                                 item.title,
@@ -592,6 +625,16 @@ class NoteImportRepository(
                         }
                         importedCount++
                     }
+                } catch (e: DuplicateImportedNoteException) {
+                    // (Codex R45-F1): the per-note recheck found a
+                    // twin a concurrent restore or sync apply wrote
+                    // after the seed — a duplicate, not a failure.
+                    // The note is already in the library. The write
+                    // transaction rolled back, so no rows were
+                    // written for this item; staged files are
+                    // removed by writeImportedNote's cleanup or
+                    // swept by the run-end reconcile.
+                    duplicates++
                 } catch (e: Exception) {
                     failed++
                     failedNames += item.sourceName
@@ -759,7 +802,14 @@ class NoteImportRepository(
         db: NotaDatabase,
         item: ImportedNote,
         meta: RunMetadata,
-    ): Int {
+        // (Codex R45-F1): ids of notes this run already wrote.
+        // The per-note dedupe recheck below must not mistake them
+        // for concurrent twins — a dateless run note and a dateless
+        // twin share (title, folder), so only the id separates
+        // them. Direct callers pass nothing: with no run in
+        // flight, every matching row is a twin.
+        excludeNoteIds: Set<String> = emptySet(),
+    ): ImportedNoteWrite {
         val noteDao = db.noteDao()
         val noteId = UUID.randomUUID().toString()
         var saveFailures = 0
@@ -873,6 +923,38 @@ class NoteImportRepository(
                 // refused here leaves no orphan folder or tag behind.
                 val (createdFolder, createdTags) = db.withTransaction {
                     val folderResolution = meta.resolveFolderId(item.folderName)
+                    // (Codex R45-F1): recheck dedupe against the
+                    // database, inside this transaction. The run's
+                    // one-time seed predates any restore or sync
+                    // apply that landed mid-import, and the
+                    // in-memory sets cannot see it — so a twin
+                    // committed after the seed would otherwise be
+                    // inserted again under a new id. The check runs
+                    // here, after folder resolution (a dateless
+                    // twin is matched on its resolved folder) and
+                    // before any tag or note row exists, and the
+                    // transaction holds the write lock from its
+                    // start (BEGIN IMMEDIATE), so no concurrent
+                    // writer can commit between the check and the
+                    // insert below. The queries are id-only
+                    // projections, never full entities (Codex
+                    // R32-F1), and the caller filters its own run's
+                    // ids in Kotlin — a second same-title dateless
+                    // note in one run (different source identity)
+                    // still imports (Codex R21-F1). A match throws
+                    // DuplicateImportedNoteException: the loop counts
+                    // it as a duplicate, and the rollback takes the
+                    // resolved folder row with it.
+                    val twinIds = if (item.createdAt == 0L) {
+                        noteDao.findDatelessIdsByTitleAndFolder(item.title, folderResolution.id)
+                    } else {
+                        noteDao.findIdsByTitleAndCreatedAt(item.title, item.createdAt)
+                    }
+                    if (twinIds.any { it !in excludeNoteIds }) {
+                        throw DuplicateImportedNoteException(
+                            "A note titled \"${item.title}\" already exists in the library.",
+                        )
+                    }
                     val tagResolutions = item.tagNames
                         .map { it.trim() }
                         .filter { it.isNotEmpty() }
@@ -935,6 +1017,6 @@ class NoteImportRepository(
             }
             throw e
         }
-        return saveFailures
+        return ImportedNoteWrite(saveFailures, noteId)
     }
 }

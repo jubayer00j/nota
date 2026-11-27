@@ -59,7 +59,24 @@ data class NoteDedupeRow(
  *  rebuild used to load full entities too, so the same oversized
  *  row crashed the import at the finish even with the dedupe seed
  *  fixed. This projection never touches the body column
- *  (contentHtml). */
+ *  (contentHtml).
+ *
+ *  Codex R45-F2: the plainText it carries is cut in SQL to
+ *  [MAX_INDEX_PLAIN_TEXT_CHARS] characters (the same
+ *  `substr(plainText, 1, N)` shape the Phase 6.1 list rows
+ *  already use for their excerpts). The rebuild reads plainText
+ *  only to build the FTS row and to scan for [[backlinks]], so a
+ *  note whose stored plainText exceeds Android's ~2 MiB
+ *  CursorWindow — reachable, because createRichNote stores it
+ *  with no size cap and neither restore nor sync caps it — no
+ *  longer aborts the whole rebuild after the caller's notes have
+ *  committed. Body words past the cap are simply not indexed and
+ *  backlinks past it are not resolved; the note itself stays, and
+ *  its title (exact, never cut) stays searchable. 250,000 chars
+ *  is at most ~1 MiB even at 4 bytes per char, so the row keeps
+ *  headroom under the window alongside the title and ids. */
+const val MAX_INDEX_PLAIN_TEXT_CHARS = 250_000
+
 data class NoteIndexRow(
     val id: String,
     val title: String,
@@ -220,9 +237,34 @@ interface NoteDao {
      *  rows as [getAll], no contentHtml: an oversized existing row
      *  can exceed Android's CursorWindow (2 MB) and crash the
      *  rebuild — and with it the import, restore or copy that
-     *  called it. */
-    @Query("SELECT id, title, plainText, locked, trashedAt, folderId FROM notes")
+     *  called it. Codex R45-F2: the plainText is cut in SQL to
+     *  [MAX_INDEX_PLAIN_TEXT_CHARS] — the rebuild only indexes
+     *  and link-scans it, so the stored value's full length never
+     *  crosses the cursor. */
+    @Query(
+        "SELECT id, title, substr(plainText, 1, " + MAX_INDEX_PLAIN_TEXT_CHARS + "), locked, trashedAt, folderId FROM notes",
+    )
     suspend fun getAllIndexRows(): List<NoteIndexRow>
+
+    /** Codex R45-F1: the ids of notes with this (title, createdAt)
+     *  — the import engine's per-note dedupe recheck. A Merge
+     *  restore or sync apply landing mid-import can add a twin
+     *  after the run's one-time seed, so each note's write
+     *  rechecks the database inside its own transaction instead
+     *  of trusting the seed alone. Ids only, never entities: the
+     *  caller filters its own run's ids in Kotlin. No trashedAt
+     *  filter — dedupe counts notes in ANY state, like the seed. */
+    @Query("SELECT id FROM notes WHERE title = :title AND createdAt = :createdAt")
+    suspend fun findIdsByTitleAndCreatedAt(title: String, createdAt: Long): List<String>
+
+    /** Codex R45-F1, unknown-date half: the ids of dateless notes
+     *  with this title in this folder — the seeded key for a
+     *  dateless note is (title, folder), and the folder is the
+     *  RESOLVED folder id, i.e. the folder the note will actually
+     *  land in. `IS` (not `=`) so a null folderId matches notes
+     *  with no folder. */
+    @Query("SELECT id FROM notes WHERE title = :title AND createdAt = 0 AND folderId IS :folderId")
+    suspend fun findDatelessIdsByTitleAndFolder(title: String, folderId: String?): List<String>
 
     /** Every note, observed (Phase 4.4: the link graph's node metadata). */
     @Query("SELECT * FROM notes")
@@ -619,7 +661,23 @@ interface NoteFtsDao {
 
     @Query("DELETE FROM notes_fts")
     suspend fun deleteAll()
+
+    /** Codex R45-F2: one note's indexed row, without its stored
+     *  entity — the stored row can exceed the CursorWindow, so
+     *  searchFts (full entities) cannot prove an oversized note's
+     *  FTS row exists. The plainText here is the indexed body,
+     *  already bounded by the rebuild's projection cap. */
+    @Query("SELECT noteId, title, plainText FROM notes_fts WHERE noteId = :noteId")
+    suspend fun ftsRowForNote(noteId: String): NoteFtsRow?
 }
+
+/** Codex R45-F2: one note's FTS row at row weight — the indexed
+ *  title and body, nothing else. */
+data class NoteFtsRow(
+    val noteId: String,
+    val title: String,
+    val plainText: String,
+)
 
 @Dao
 interface SavedSearchDao {

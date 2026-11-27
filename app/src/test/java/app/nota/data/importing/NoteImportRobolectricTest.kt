@@ -4,6 +4,7 @@ import app.nota.data.attachments.AttachmentStore
 import app.nota.data.backup.rebuildLibraryIndexes
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
+import app.nota.data.db.MAX_INDEX_PLAIN_TEXT_CHARS
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.TagEntity
@@ -4491,7 +4492,7 @@ class NoteImportRobolectricTest {
         val stack = newStack()
         val meta = NoteImportRepository.RunMetadata(stack.db)
         meta.seed()
-        val saveFailures = stack.repo.writeImportedNote(
+        val write = stack.repo.writeImportedNote(
             stack.db,
             ImportedNote(
                 title = "Tagged",
@@ -4508,7 +4509,7 @@ class NoteImportRobolectricTest {
             ),
             meta,
         )
-        assertEquals(0, saveFailures)
+        assertEquals(0, write.saveFailures)
         assertEquals(
             listOf("Tagged"),
             stack.db.noteDao().searchFts("quixotic").map { it.title },
@@ -4548,6 +4549,391 @@ class NoteImportRobolectricTest {
         assertEquals("Small", small.title)
         assertEquals(1, small.images.size)
         assertEquals(0, result.attachmentsSkipped)
+    }
+
+    @Test
+    fun writeImportedNoteRefusesTwinThatLandedAfterSeed() = runBlocking {
+        // (Codex R45-F1): the recheck inside writeImportedNote's
+        // transaction, driven directly — a twin already in the
+        // database (as a concurrent restore would have left it)
+        // is refused with DuplicateImportedNoteException and no
+        // second row is written. Direct callers pass no exclusion
+        // set, so every matching row is a twin.
+        val stack = newStack()
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "twin",
+                title = "Twin",
+                contentHtml = "<p>first</p>",
+                plainText = "first",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        assertThrows(DuplicateImportedNoteException::class.java) {
+            runBlocking {
+                stack.repo.writeImportedNote(
+                    stack.db,
+                    ImportedNote(
+                        title = "Twin",
+                        contentHtml = "<p>second</p>",
+                        createdAt = 1_700_000_000_000L,
+                        updatedAt = 1_700_000_000_000L,
+                        pinned = false,
+                        archived = false,
+                        trashedAt = null,
+                        tagNames = emptyList(),
+                        folderName = null,
+                        images = emptyList(),
+                        sourceName = "twin.md",
+                    ),
+                    meta,
+                )
+            }
+        }
+        assertEquals(1, stack.db.noteDao().getAllDedupeRows().count { it.title == "Twin" })
+    }
+
+    @Test
+    fun concurrentTwinIsDuplicateNotFailure() = runBlocking {
+        // (Codex R45-F1): a Merge restore landing mid-import —
+        // after the seed, before the twin item's write — is
+        // reported as a duplicate, not a failure, and no second
+        // row is inserted. The twin is inserted from onProgress
+        // after the first note commits, so the seed predates it
+        // and only the in-transaction recheck can see it.
+        val stack = newStack()
+        val first = ImportedNote(
+            title = "First",
+            contentHtml = "<p>one</p>",
+            createdAt = 1_700_000_000_001L,
+            updatedAt = 1_700_000_000_001L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = emptyList(),
+            sourceName = "first.md",
+        )
+        val twinItem = ImportedNote(
+            title = "Twin",
+            contentHtml = "<p>second</p>",
+            createdAt = 1_700_000_000_000L,
+            updatedAt = 1_700_000_000_000L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = emptyList(),
+            sourceName = "twin.md",
+        )
+        val result = stack.repo.importNotes(listOf(first, twinItem)) { done, _ ->
+            if (done == 1) {
+                runBlocking {
+                    stack.db.noteDao().upsert(
+                        NoteEntity(
+                            id = "restore-twin",
+                            title = "Twin",
+                            contentHtml = "<p>restored</p>",
+                            plainText = "restored",
+                            createdAt = 1_700_000_000_000L,
+                            updatedAt = 1_700_000_000_000L,
+                        ),
+                    )
+                }
+            }
+        }
+        assertEquals(1, result.report.imported)
+        assertEquals(1, result.report.duplicates)
+        assertEquals(0, result.report.failed)
+        assertEquals(
+            listOf("First", "Twin"),
+            stack.db.noteDao().getAllDedupeRows().map { it.title }.sorted(),
+        )
+    }
+
+    @Test
+    fun concurrentNewNoteStillImports() = runBlocking {
+        // (Codex R45-F1) control: a note landing mid-import with
+        // a different title is genuinely new — it still imports.
+        val stack = newStack()
+        val first = ImportedNote(
+            title = "First",
+            contentHtml = "<p>one</p>",
+            createdAt = 1_700_000_000_001L,
+            updatedAt = 1_700_000_000_001L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = emptyList(),
+            sourceName = "first.md",
+        )
+        val second = ImportedNote(
+            title = "Second",
+            contentHtml = "<p>two</p>",
+            createdAt = 1_700_000_000_002L,
+            updatedAt = 1_700_000_000_002L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = emptyList(),
+            sourceName = "second.md",
+        )
+        val result = stack.repo.importNotes(listOf(first, second)) { done, _ ->
+            if (done == 1) {
+                runBlocking {
+                    stack.db.noteDao().upsert(
+                        NoteEntity(
+                            id = "restore-other",
+                            title = "Other",
+                            contentHtml = "<p>restored</p>",
+                            plainText = "restored",
+                            createdAt = 1_700_000_000_003L,
+                            updatedAt = 1_700_000_000_003L,
+                        ),
+                    )
+                }
+            }
+        }
+        assertEquals(2, result.report.imported)
+        assertEquals(0, result.report.duplicates)
+        assertEquals(0, result.report.failed)
+        assertEquals(3, stack.db.noteDao().getAllDedupeRows().size)
+    }
+
+    @Test
+    fun concurrentDatelessTwinIsDuplicate() = runBlocking {
+        // (Codex R45-F1), unknown-date half: a dateless twin in
+        // the same folder, landing mid-import after the seed, is
+        // a duplicate — the recheck matches on the RESOLVED
+        // folder, i.e. the folder the note will actually land in.
+        val stack = newStack()
+        stack.db.folderDao().upsert(
+            FolderEntity(id = "folder-a", name = "A", createdAt = 0L, updatedAt = 0L),
+        )
+        val first = ImportedNote(
+            title = "First",
+            contentHtml = "<p>one</p>",
+            createdAt = 1_700_000_000_001L,
+            updatedAt = 1_700_000_000_001L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = null,
+            images = emptyList(),
+            sourceName = "first.md",
+        )
+        val twinItem = ImportedNote(
+            title = "meeting",
+            contentHtml = "<p>again</p>",
+            createdAt = 0L,
+            updatedAt = 0L,
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = emptyList(),
+            folderName = "A",
+            images = emptyList(),
+            sourceName = "meeting.md",
+        )
+        val result = stack.repo.importNotes(listOf(first, twinItem)) { done, _ ->
+            if (done == 1) {
+                runBlocking {
+                    stack.db.noteDao().upsert(
+                        NoteEntity(
+                            id = "restore-meeting",
+                            folderId = "folder-a",
+                            title = "meeting",
+                            contentHtml = "<p>restored</p>",
+                            plainText = "restored",
+                            createdAt = 0L,
+                            updatedAt = 0L,
+                        ),
+                    )
+                }
+            }
+        }
+        assertEquals(1, result.report.imported)
+        assertEquals(1, result.report.duplicates)
+        assertEquals(0, result.report.failed)
+        assertEquals(2, stack.db.noteDao().getAllDedupeRows().size)
+    }
+
+    @Test
+    fun sameTitleDatelessNotesInOneRunStillImport() = runBlocking {
+        // (Codex R45-F1, R21-F1): two dateless notes with the same
+        // title in the same folder, different sources, in ONE run
+        // still both import — the recheck must not mistake the
+        // first for a concurrent twin. This is the exclusion set
+        // doing its job: without it, the recheck would see the
+        // first note's (title, folder) and refuse the second.
+        val stack = newStack()
+        val notes = listOf("a.md", "b.md").map { name ->
+            ImportedNote(
+                title = "meeting",
+                contentHtml = "<p>$name</p>",
+                createdAt = 0L,
+                updatedAt = 0L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = "A",
+                images = emptyList(),
+                sourceName = name,
+            )
+        }
+        val result = stack.repo.importNotes(notes)
+        assertEquals(2, result.report.imported)
+        assertEquals(0, result.report.duplicates)
+        assertEquals(0, result.report.failed)
+        assertEquals(2, stack.db.noteDao().getAllDedupeRows().count { it.title == "meeting" })
+    }
+
+    @Test
+    fun oversizedPlainTextDoesNotBreakRebuild() = runBlocking {
+        // (Codex R45-F2): the run-end rebuild used to read the
+        // full plainText column, so one editor-shaped note past
+        // Android's ~2 MiB CursorWindow aborted the rebuild AFTER
+        // the import's notes had committed — import reported
+        // failed, rebuild unapplied. The projection now cuts
+        // plainText in SQL, so the import completes, the rebuild
+        // runs (the backlink edge lands), and the oversized note
+        // keeps an FTS row — title indexed, body bounded. The
+        // assertions read through projections themselves: a full
+        // getAll()/searchFts on the oversized row would throw
+        // SQLiteBlobTooBigException.
+        val stack = newStack()
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "oversized",
+                title = "Huge",
+                contentHtml = "x".repeat(3_000_000),
+                plainText = "x".repeat(3_000_000),
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "linker",
+                title = "Linker",
+                contentHtml = "<p>see [[Huge]]</p>",
+                plainText = "see [[Huge]]",
+                createdAt = 1_700_000_000_002L,
+                updatedAt = 1_700_000_000_002L,
+            ),
+        )
+        val outcome = stack.repo.importNotes(
+            listOf(
+                ImportedNote(
+                    title = "Small",
+                    contentHtml = "<p>small</p>",
+                    createdAt = 1_700_000_000_001L,
+                    updatedAt = 1_700_000_000_001L,
+                    pinned = false,
+                    archived = false,
+                    trashedAt = null,
+                    tagNames = emptyList(),
+                    folderName = null,
+                    images = emptyList(),
+                    sourceName = "small.md",
+                ),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(0, outcome.report.duplicates)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(1, stack.db.noteLinkDao().count())
+        val indexRow = stack.db.noteDao().getAllIndexRows().single { it.title == "Huge" }
+        assertEquals(MAX_INDEX_PLAIN_TEXT_CHARS, indexRow.plainText.length)
+        val ftsRow = stack.db.noteFtsDao().ftsRowForNote("oversized")
+        assertNotNull(ftsRow)
+        assertEquals("Huge", ftsRow!!.title)
+        assertEquals(MAX_INDEX_PLAIN_TEXT_CHARS, ftsRow.plainText.length)
+    }
+
+    @Test
+    fun indexPlainTextIsCappedAtBound() = runBlocking {
+        // (Codex R45-F2): the cap is pinned exactly — a body one
+        // char past it is cut to the cap, a body exactly at it is
+        // untouched, and a short body passes through verbatim.
+        val stack = newStack()
+        val overBody = "y".repeat(MAX_INDEX_PLAIN_TEXT_CHARS + 1)
+        val exactBody = "z".repeat(MAX_INDEX_PLAIN_TEXT_CHARS)
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "big",
+                title = "Big",
+                contentHtml = "<p>x</p>",
+                plainText = overBody,
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "exact",
+                title = "Exact",
+                contentHtml = "<p>x</p>",
+                plainText = exactBody,
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+            ),
+        )
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "small",
+                title = "Small",
+                contentHtml = "<p>s</p>",
+                plainText = "short body",
+                createdAt = 1_700_000_000_002L,
+                updatedAt = 1_700_000_000_002L,
+            ),
+        )
+        val rows = stack.db.noteDao().getAllIndexRows()
+        assertEquals(MAX_INDEX_PLAIN_TEXT_CHARS, rows.single { it.id == "big" }.plainText.length)
+        assertEquals(exactBody, rows.single { it.id == "exact" }.plainText)
+        assertEquals("short body", rows.single { it.id == "small" }.plainText)
+    }
+
+    @Test
+    fun normalNoteFtsBodyUnchanged() = runBlocking {
+        // (Codex R45-F2) control: an ordinary note's FTS row still
+        // carries its full body — a distinctive body word finds it
+        // after the rebuild, so the cap only bites past the bound.
+        val stack = newStack()
+        val outcome = stack.repo.importNotes(
+            listOf(
+                ImportedNote(
+                    title = "Normal",
+                    contentHtml = "<p>zanzibar-quixotic body</p>",
+                    createdAt = 1_700_000_000_000L,
+                    updatedAt = 1_700_000_000_000L,
+                    pinned = false,
+                    archived = false,
+                    trashedAt = null,
+                    tagNames = emptyList(),
+                    folderName = null,
+                    images = emptyList(),
+                    sourceName = "normal.md",
+                ),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(
+            listOf("Normal"),
+            stack.db.noteDao().searchFts("zanzibar-quixotic").map { it.title },
+        )
     }
 
 }
