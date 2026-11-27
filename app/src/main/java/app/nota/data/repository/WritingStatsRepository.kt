@@ -8,16 +8,23 @@ import java.time.ZoneId
  * Reading stats (v0.37.0): loads the active account's stats
  * projection and runs the pure calculator over it. DAOs resolve
  * through [DatabaseProvider] at call time (the Phase 3a rule),
- * so the numbers always describe the library on screen. [zone]
- * is the device zone in production; tests pin it (and "today",
- * via [loadStats]'s parameter) for determinism.
+ * so the numbers always describe the library on screen.
+ *
+ * [zone] pins the zone for tests; when it is null (the
+ * production shape — the Koin singleton is built without one),
+ * the current system zone is resolved on every [loadStats]
+ * call, so a device timezone change while the process is alive
+ * is honoured instead of grouping days under the zone the
+ * repository happened to be constructed in (fix round 5).
+ * Callers may also pass a zone to [loadStats] directly; that
+ * wins over both.
  */
 class WritingStatsRepository(
     private val provider: DatabaseProvider,
-    private val zone: ZoneId = ZoneId.systemDefault(),
+    private val zone: ZoneId? = null,
 ) {
     suspend fun loadStats(
-        zone: ZoneId = this.zone,
+        zone: ZoneId = this.zone ?: ZoneId.systemDefault(),
         today: LocalDate = LocalDate.now(zone),
     ): WritingStats {
         val rows = provider.current.noteDao().getStatsRows()

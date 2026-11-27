@@ -7,7 +7,9 @@ import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
 import app.nota.data.repository.NoteRepository
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.TimeZone
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -324,5 +326,92 @@ class WritingStatsRobolectricTest {
         assertEquals(3, stats.editedThisMonth)
         assertEquals(LocalDate.of(2026, 10, 15), stats.writingSince)
         assertEquals(3, stats.weeklyActivity.last())
+    }
+
+    /**
+     * Fix round 5 (R5-F1): the repository is a Koin singleton, so
+     * a zone captured at construction is frozen for the process
+     * lifetime. A note created at 23:00 UTC on 24 November falls
+     * on the 24th in UTC but on the 25th in Asia/Dhaka — so the
+     * zone the load resolves with is directly observable in
+     * `writingSince`. Constructed with no zone while the system
+     * zone is UTC, then loaded after the system zone moves to
+     * Dhaka, the stats must follow Dhaka, not the construction
+     * zone. The JVM default zone is restored in a finally block:
+     * it is process-global, and no other test may see the move.
+     */
+    @Test
+    fun zoneChangeBetweenConstructionAndLoadIsHonoured() = runBlocking {
+        val instant = LocalDateTime.of(2026, 11, 24, 23, 0)
+            .atZone(ZoneId.of("UTC")).toInstant().toEpochMilli()
+        db.noteDao().upsert(
+            NoteEntity(
+                id = "late",
+                title = "late",
+                contentHtml = "<p>late words</p>",
+                plainText = "late words",
+                wordCount = 2,
+                createdAt = instant,
+                updatedAt = instant,
+                contentEditedAt = instant,
+            ),
+        )
+        val originalZone = TimeZone.getDefault()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+            val context = RuntimeEnvironment.getApplication()
+            // No zone argument: production shape, resolved at load.
+            val liveRepository = WritingStatsRepository(
+                DatabaseProvider.forDatabase(context, db),
+            )
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Dhaka"))
+            val stats = liveRepository.loadStats(
+                today = LocalDate.of(2026, 11, 25),
+            )
+            assertEquals(1, stats.totalNotes)
+            assertEquals(1, stats.writingDays)
+            // 23:00 UTC is 05:00 on the 25th in Dhaka.
+            assertEquals(LocalDate.of(2026, 11, 25), stats.writingSince)
+            assertEquals(1, stats.currentStreak)
+        } finally {
+            TimeZone.setDefault(originalZone)
+        }
+    }
+
+    /**
+     * Fix round 5 (R5-F1): the other half of the contract — an
+     * explicitly pinned zone (tests, and any caller that passes
+     * one) still wins over the system zone. The setUp repository
+     * pins UTC; with the system zone moved to Dhaka the load
+     * must still group the 23:00 UTC note onto the 24th.
+     */
+    @Test
+    fun constructorZoneStillPinsWhenSystemZoneChanges() = runBlocking {
+        val instant = LocalDateTime.of(2026, 11, 24, 23, 0)
+            .atZone(ZoneId.of("UTC")).toInstant().toEpochMilli()
+        db.noteDao().upsert(
+            NoteEntity(
+                id = "late",
+                title = "late",
+                contentHtml = "<p>late words</p>",
+                plainText = "late words",
+                wordCount = 2,
+                createdAt = instant,
+                updatedAt = instant,
+                contentEditedAt = instant,
+            ),
+        )
+        val originalZone = TimeZone.getDefault()
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Dhaka"))
+            val stats = repository.loadStats(
+                today = LocalDate.of(2026, 11, 25),
+            )
+            assertEquals(1, stats.totalNotes)
+            assertEquals(1, stats.writingDays)
+            assertEquals(LocalDate.of(2026, 11, 24), stats.writingSince)
+        } finally {
+            TimeZone.setDefault(originalZone)
+        }
     }
 }
