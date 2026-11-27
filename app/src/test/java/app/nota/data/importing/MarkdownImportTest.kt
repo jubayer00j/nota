@@ -1019,11 +1019,14 @@ class MarkdownImportTest {
     }
 
     @Test
-    fun refusedNoteLeavesNoImageCountsBehind() {
+    fun refusedNoteCountsItsUnresolvedImageReference() {
         // R54-F1: conversion counts unresolved image references as it
-        // goes; a note addNote then refuses on its true converted
-        // charge never imports, so its references must not stay in the
-        // report (the R6-F1 property).
+        // goes, and the count STAYS when addNote then refuses the
+        // note on its true converted charge — the counters are a
+        // report of references the parse encountered (the R49-F1
+        // pin; see ImportParseResult.abandon()'s doc), not a budget.
+        // Only retainedTextChars feeds a budget, and the refused
+        // note contributes none of it.
         val probe = MarkdownFileInput(
             "amp.md",
             "amp.md",
@@ -1036,7 +1039,7 @@ class MarkdownImportTest {
             listOf(SkippedImportFile("amp.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
             result.skippedFiles,
         )
-        assertEquals(0, result.imagesUnresolved)
+        assertEquals(1, result.imagesUnresolved)
     }
 
     @Test

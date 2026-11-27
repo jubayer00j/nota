@@ -2214,15 +2214,16 @@ object MarkdownImporter {
         // refusing on the estimate would reintroduce the same false
         // refusal for files whose true converted size fits.
         // Conversion counts unresolved image references into
-        // result.imagesUnresolved as it goes; a note addNote then
-        // refuses never imports, so those counts are restored —
-        // the R6-F1 property that a refused file leaves no image
-        // counts behind.
-        val unresolvedBefore = result.imagesUnresolved
+        // result.imagesUnresolved as it goes, and those counts
+        // STAY when addNote refuses the note: the counters are a
+        // report of references the parse encountered, not a budget
+        // (see ImportParseResult.abandon()'s doc — only
+        // retainedTextChars feeds a budget), and the R49-F1 tests
+        // pin a refused member's unresolved reference as counted.
+        // A refused note contributes nothing else: the note itself
+        // never lands in result.notes.
         val note = markdownFileToImportedNote(file, resolver, result)
-        if (!result.addNote(note)) {
-            result.imagesUnresolved = unresolvedBefore
-        }
+        result.addNote(note)
     }
 
     private fun markdownFileToImportedNote(

@@ -4799,10 +4799,19 @@ class NoteImportRobolectricTest {
         assertEquals(setOf("small.png"), dir.listFiles()?.map { it.name }?.toSet())
         val small = result.notes.first { it.title == "Small" }
         assertEquals(1, small.images.size)
-        // The titled member is refused before conversion (its raw
-        // text, title included, is past walk 4's remaining budget),
-        // so its reference is never even counted.
-        assertEquals(0, result.imagesUnresolved)
+        // The titled member is refused AFTER conversion now (Codex
+        // R54-F1): the old shape refused it before conversion — its
+        // raw text, title included, was past walk 4's remaining
+        // budget — so its reference was never counted. Now the read
+        // is capped by the per-file cap only, conversion runs, and
+        // addNote refuses on the true converted charge (the 700K
+        // title is past the ~627K remaining). Its reference IS
+        // counted, like the escape-heavy member's: the counters are
+        // a report of references the parse encountered. The
+        // starvation property still holds — the refused member's
+        // image was never staged, so the small member that fits
+        // keeps its image.
+        assertEquals(1, result.imagesUnresolved)
     }
 
     @Test
