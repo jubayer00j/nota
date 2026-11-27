@@ -17,8 +17,8 @@ class WritingStatsRepository(
     private val zone: ZoneId = ZoneId.systemDefault(),
 ) {
     suspend fun loadStats(
-        today: LocalDate = LocalDate.now(zone),
         zone: ZoneId = this.zone,
+        today: LocalDate = LocalDate.now(zone),
     ): WritingStats {
         val rows = provider.current.noteDao().getStatsRows()
         return WritingStatsCalculator.compute(rows, today, zone)
