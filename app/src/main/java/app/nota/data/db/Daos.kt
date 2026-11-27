@@ -86,6 +86,23 @@ data class NoteIndexRow(
     val folderId: String?,
 )
 
+/** Reading stats (v0.37.0): one note's stats input at projection
+ *  weight — exactly the columns the stats calculator reads
+ *  (creation/edit stamps, the lock flag, the plain text). A
+ *  locked note's plainText is empty by construction (it is
+ *  blanked under the seal), so this projection can never carry
+ *  locked body text; the calculator additionally skips locked
+ *  rows for word counts by flag, so stats never decrypt — and
+ *  never need to. Trashed notes are filtered in SQL: they are
+ *  excluded from every stat. Archived notes ride along — the
+ *  stats semantics exclude trash only. */
+data class NoteStatsRow(
+    val createdAt: Long,
+    val updatedAt: Long,
+    val locked: Boolean,
+    val plainText: String,
+)
+
 /** Performance chapter 2 (F3/F6): the library stamp — the
  *  invalidation key for the corpus cache and the semantic
  *  reconcile stamp gate, read on every search keystroke and
@@ -403,6 +420,16 @@ interface NoteDao {
      *  envelopes) for a whole library on a cold start. */
     @Query("SELECT id, title, plainText FROM notes")
     suspend fun getAllNoteTexts(): List<NoteTextRow>
+
+    /** Reading stats (v0.37.0): every untrashed note's stats
+     *  input — see [NoteStatsRow]. One pass over the projection;
+     *  the calculator derives days, streaks, periods and word
+     *  totals from it in memory. */
+    @Query(
+        "SELECT createdAt, updatedAt, locked, plainText FROM notes " +
+            "WHERE trashedAt IS NULL",
+    )
+    suspend fun getStatsRows(): List<NoteStatsRow>
 
     /** Performance chapter 2 (F3/F6): the library stamp — see
      *  [LibraryStampRow]. A single-row read of `library_meta`;
