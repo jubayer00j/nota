@@ -2184,28 +2184,6 @@ object MarkdownImporter {
             result.skippedFiles += SkippedImportFile(file.name, "File is larger than 100 MB.")
             return
         }
-        // Aggregate text budget (Codex R6-F1): estimated from the
-        // source length BEFORE conversion, so an over-budget file
-        // costs no parse work and leaves no image counts behind.
-        // The true check runs in addNote below (HTML can expand the
-        // source — for Markdown the raw text IS the body, so the
-        // source length is a fair estimate here; the per-note
-        // expansion is bounded separately, see below). The title
-        // counts too (Codex R19-F1): a front-matter/H1 title is
-        // inside the source text already, so only the filename
-        // fallback adds anything — its length is a conservative
-        // upper bound, exact when the title falls back to the
-        // filename and over-counting by at most the filename
-        // length when front matter/H1 supplies the title instead.
-        if (result.retainedTextChars + file.text.length +
-            titleFromFileName(file.name).length > ImportCaps.MAX_AGGREGATE_TEXT_CHARS
-        ) {
-            result.skippedFiles += SkippedImportFile(
-                file.name,
-                ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
-            )
-            return
-        }
         // Per-note bound, estimated BEFORE conversion (Codex R10-F1):
         // conversion escapes text (& → &amp;) and adds block markup,
         // so a source that fits the aggregate budget can still
@@ -2223,7 +2201,28 @@ object MarkdownImporter {
             )
             return
         }
-        result.addNote(markdownFileToImportedNote(file, resolver, result))
+        // Aggregate text budget (Codex R54-F1): checked on the
+        // CONVERTED note, by addNote below — title + body + tags,
+        // exactly as retained. The old pre-conversion check counted
+        // the raw source length (Codex R6-F1), so a file whose raw
+        // text exceeded the remaining budget was refused even though
+        // its converted note would fit: front matter is stripped
+        // before rendering and .txt whitespace is discarded by
+        // PlainTextCodec, so neither survives into the retained
+        // note. The estimator is NOT the aggregate gate: it
+        // over-counts in known cases (the H1 double-count), so
+        // refusing on the estimate would reintroduce the same false
+        // refusal for files whose true converted size fits.
+        // Conversion counts unresolved image references into
+        // result.imagesUnresolved as it goes; a note addNote then
+        // refuses never imports, so those counts are restored —
+        // the R6-F1 property that a refused file leaves no image
+        // counts behind.
+        val unresolvedBefore = result.imagesUnresolved
+        val note = markdownFileToImportedNote(file, resolver, result)
+        if (!result.addNote(note)) {
+            result.imagesUnresolved = unresolvedBefore
+        }
     }
 
     private fun markdownFileToImportedNote(
@@ -2475,22 +2474,27 @@ object MarkdownImporter {
                 if (!scannedText.add(entry.name)) return@walk
                 if (eligibleScanned >= ImportCaps.MAX_IMPORT_NOTES) return@walk
                 val base = importBaseName(entry.name)
-                // The simulated remaining budget for this member —
-                // the same shape as walk 4's per-member remaining,
-                // with the selection-level total in place of the
-                // local result's.
-                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS -
-                    alreadyRetainedTextChars - scannedTextChars -
-                    titleFromFileName(base).length).coerceAtLeast(0L)
+                // (Codex R54-F1): the read is capped by the per-file
+                // cap only — never by the simulated remaining budget.
+                // A member whose raw text exceeds the remaining
+                // budget but whose converted note fits (a large
+                // front-matter block, .txt whitespace) is one walk 4
+                // imports now, so the pre-scan must read it too, or
+                // its image references would never be collected and
+                // staged. The simulation's BUDGET accounting below
+                // is unchanged: members are charged the estimator's
+                // converted size, never the raw length. The char cap
+                // equals the byte cap, so the byte cap is the binding
+                // one (see walk 4) — OverChars below cannot fire.
                 if (isPlainTextEntry(entry.name)) {
                     // No image refs to scan, but the member still
                     // becomes a note and consumes aggregate budget —
-                    // read it against the same simulated remaining,
-                    // so a .txt member walk 4 refuses on the budget
-                    // doesn't leave the simulation overstated for
-                    // later members.
+                    // read it under the same per-file cap as walk 4,
+                    // so a .txt member walk 4 refuses on its true
+                    // converted charge doesn't leave the simulation
+                    // overstated for later members.
                     when (val read = entry.readTextUpToChars(
-                        remaining,
+                        ImportCaps.MAX_IMPORT_FILE_BYTES,
                         ImportCaps.MAX_IMPORT_FILE_BYTES,
                     )) {
                         is CharBoundedText.Ok -> {
@@ -2523,12 +2527,12 @@ object MarkdownImporter {
                                 eligibleScanned++
                             }
                         }
-                        else -> { /* walk 4 refuses this member too */ }
+                        else -> { /* over the per-file cap — walk 4 refuses this member too */ }
                     }
                     return@walk
                 }
                 when (val read = entry.readTextUpToChars(
-                    remaining,
+                    ImportCaps.MAX_IMPORT_FILE_BYTES,
                     ImportCaps.MAX_IMPORT_FILE_BYTES,
                 )) {
                     is CharBoundedText.Ok -> {
@@ -2570,11 +2574,12 @@ object MarkdownImporter {
                         // nothing — the estimator reads only its title
                         // out of the front matter, never its raw
                         // length.) A member whose charge would push
-                        // the simulated total past the cap is one
-                        // walk 4 (or the merge) refuses on the
-                        // aggregate budget: its refs are not collected
-                        // and it is not charged, exactly as walk 4
-                        // charges nothing for it.
+                        // the simulated total past the cap is not
+                        // scanned and not charged: walk 4 may still
+                        // import it when the estimator over-counts
+                        // (its true converted charge fits), in which
+                        // case its references stay unresolved,
+                        // counted, never a lost note.
                         val charge = estimate +
                             frontMatter.tags.sumOf { it.length.toLong() }
                         if (alreadyRetainedTextChars + scannedTextChars + charge >
@@ -2609,7 +2614,7 @@ object MarkdownImporter {
                         scannedTextChars += charge
                         eligibleScanned++
                     }
-                    else -> { /* walk 4 skips this member too */ }
+                    else -> { /* over the per-file cap — walk 4 skips this member too */ }
                 }
             }
             reader.walk { entry ->
@@ -2698,31 +2703,38 @@ object MarkdownImporter {
                     )
                     return@walk
                 }
-                // The per-file cap (100 MiB) and the aggregate text
-                // budget are both checked BEFORE the member is
-                // materialized (Codex R7-F3): readTextUpToChars stops
-                // retaining as soon as the decoded text exceeds the
-                // remaining budget, and a >100 MiB member still
-                // reports the per-file reason. (The old code buffered
-                // the member under the 100 MiB byte cap, then checked
-                // String.length — a multibyte file could pass the
-                // character count while far exceeding 100 MiB on disk
-                // — and an over-budget member was buffered in full
-                // before the budget check rejected it.) The remaining
-                // budget is the right bound here, unlike the Keep
-                // parser (Codex R10-F2): for Markdown the raw text
-                // IS the body, so it fairly estimates the converted
-                // size — a Keep JSON's overhead is not body text.
-                // The filename title is the one title source outside
-                // the member text (a front-matter/H1 title is inside
-                // it), so room is reserved for it too (Codex R19-F1)
-                // — conservative by at most the filename length when
-                // front matter/H1 supplies the title instead. The
-                // true check is addNote, which counts title + body.
-                val remaining = (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - result.retainedTextChars -
-                    titleFromFileName(base).length)
-                    .coerceAtLeast(0L)
-                when (val read = entry.readTextUpToChars(remaining, ImportCaps.MAX_IMPORT_FILE_BYTES)) {
+                // The read is capped by the per-file cap only
+                // (Codex R54-F1) — never by the remaining aggregate
+                // budget. The old shape (Codex R7-F3) stopped
+                // retaining as soon as the decoded text exceeded the
+                // remaining budget, so a member whose raw text was
+                // over the remaining budget was refused before
+                // conversion even though its converted note would
+                // fit: front matter is stripped before rendering
+                // and .txt whitespace is discarded by PlainTextCodec.
+                // The aggregate budget is enforced on the CONVERTED
+                // note instead, by addNote inside appendParsedFile
+                // (title + body + tags, exactly as retained) — a
+                // member whose converted size exceeds the remaining
+                // budget is still refused with the aggregate reason.
+                // The trade-off is the R7-F3 one, reversed: a member
+                // past the remaining budget in raw terms is now read
+                // in full (up to the 100 MiB per-file cap, ~200 MB
+                // as a UTF-16 String) before the budget decision,
+                // where the old code stopped retaining early. The
+                // per-note estimator guard in appendParsedFile still
+                // bounds the HTML build, and the per-file byte cap
+                // still bounds the read.
+                // The char cap equals the byte cap, so the byte cap
+                // is the binding one: decoded text past 100M chars
+                // is past 100 MiB of UTF-8 bytes, and a file past
+                // both bounds reports OverBytes — OverChars below
+                // cannot fire with these caps, and stays as defence
+                // in depth if they ever diverge.
+                when (val read = entry.readTextUpToChars(
+                    ImportCaps.MAX_IMPORT_FILE_BYTES,
+                    ImportCaps.MAX_IMPORT_FILE_BYTES,
+                )) {
                     is CharBoundedText.OverBytes -> {
                         result.skippedFiles += SkippedImportFile(
                             base,

@@ -308,34 +308,33 @@ class NoteImportRepository(
                             // Converted immediately and the text dropped:
                             // a loose-file selection never holds every
                             // file's text at once (the R2 ZIP-path fix,
-                            // same shape). The aggregate text budget is
-                            // checked BEFORE the file is materialized
-                            // (Codex R9-F1, same shape as the ZIP walk 3
-                            // and the Keep pass 2): a loose file under
-                            // the 100 MB per-file cap but past the
-                            // remaining run budget must not be read in
-                            // full first — an ASCII file near the cap
-                            // would allocate ~200 MB as a UTF-16 String
-                            // on a 1 GB device. Over-budget files are
-                            // reported as skipped, never silently
-                            // dropped — and never parsed, so no image
-                            // counts leak from a note that never imports.
-                            // The filename title is the one title
-                            // source outside the file text (a
-                            // front-matter/H1 title is inside it), so
-                            // room is reserved for it too (Codex
-                            // R19-F1) — file.name.length is a
-                            // conservative upper bound on it (the
-                            // title is the name minus its extension).
-                            // The true check is addNote, which counts
-                            // title + body.
-                            val remaining =
-                                (ImportCaps.MAX_AGGREGATE_TEXT_CHARS - merged.retainedTextChars -
-                                    file.name.length)
-                                    .coerceAtLeast(0L)
+                            // same shape). The read is capped by the
+                            // per-file cap only (Codex R54-F1) — never
+                            // by the remaining run budget: a loose file
+                            // whose raw text is past the remaining
+                            // budget but whose converted note fits (a
+                            // large front-matter block, .txt whitespace)
+                            // imports now. The aggregate budget is
+                            // enforced on the CONVERTED note instead —
+                            // inside parseMarkdownFile by addNote, and
+                            // at merge time by enforceContentBudget
+                            // below, which drops tail notes past the
+                            // budget with the aggregate reason.
+                            // Over-budget files are reported as skipped,
+                            // never silently dropped. The trade-off is
+                            // the R9-F1 one, reversed: a file past the
+                            // remaining budget in raw terms is now read
+                            // in full (up to the 100 MB per-file cap,
+                            // ~200 MB as a UTF-16 String on a 1 GB
+                            // device) before the budget decision — the
+                            // per-file byte cap still bounds the read.
+                            // The char cap equals the byte cap, so
+                            // OverChars below cannot fire (a file past
+                            // both bounds reports OverBytes) and stays
+                            // as defence in depth.
                             when (val read = withContext(Dispatchers.IO) {
                                 file.file.readTextUpToChars(
-                                    remaining,
+                                    ImportCaps.MAX_IMPORT_FILE_BYTES,
                                     ImportCaps.MAX_IMPORT_FILE_BYTES,
                                 )
                             }) {
@@ -368,14 +367,37 @@ class NoteImportRepository(
                                         // dedupe.
                                         sourceIdentity = contentHashHex(read.text),
                                     )
-                                    merged.absorb(MarkdownImporter.parseMarkdownFile(input, resolver))
+                                    val parsed = MarkdownImporter.parseMarkdownFile(input, resolver)
+                                    // (Codex R54-F1): the aggregate budget
+                                    // is enforced on the CONVERTED note —
+                                    // check the converted charge against
+                                    // the merged remaining BEFORE
+                                    // absorbing, so a note that doesn't
+                                    // fit never contributes its image
+                                    // counts to the merged total (the
+                                    // R6-F1/R9-F1 property: a refused
+                                    // file leaves no image counts
+                                    // behind). The merge-time trim below
+                                    // stays as the backstop for sums
+                                    // across sources.
+                                    if (merged.retainedTextChars + parsed.retainedTextChars >
+                                        ImportCaps.MAX_AGGREGATE_TEXT_CHARS
+                                    ) {
+                                        for (note in parsed.notes) {
+                                            merged.skippedFiles += SkippedImportFile(
+                                                note.sourceName,
+                                                ImportCaps.AGGREGATE_TEXT_BUDGET_REASON,
+                                            )
+                                        }
+                                        merged.skippedFiles += parsed.skippedFiles
+                                    } else {
+                                        merged.absorb(parsed)
+                                    }
                                     // Same merge-time trim as the ZIP
-                                    // branch above (Codex R12-F1):
-                                    // conversion can expand the text
-                                    // past the pre-read source-length
-                                    // estimate, so the merged result is
-                                    // re-checked after every absorb,
-                                    // not just at the end of the loop.
+                                    // branch above (Codex R12-F1): the
+                                    // merged result is re-checked after
+                                    // every absorb, not just at the end
+                                    // of the loop.
                                     merged.enforceNoteCap()
                                     merged.enforceContentBudget()
                                 }

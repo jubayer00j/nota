@@ -946,6 +946,99 @@ class MarkdownImportTest {
         )
     }
 
+    // R54-F1: twenty 800K-char notes leave ~777K chars of the 16M
+    // aggregate budget — a probe whose raw text exceeds that remainder
+    // but whose converted note fits is the shape the old raw-length
+    // check refused.
+    private fun aggregateBudgetFillers(): List<MarkdownFileInput> =
+        (0 until 20).map { i ->
+            MarkdownFileInput(
+                "big-$i.md",
+                "big-$i.md",
+                "# Big$i\n\n" + "x".repeat(800_000),
+                1_700_000_000_000L + i,
+            )
+        }
+
+    @Test
+    fun frontMatterHeavyFileImportsWhenConvertedFits() {
+        // R54-F1: the old raw-length aggregate check refused a file
+        // whose raw text exceeded the remaining budget even though its
+        // converted note fit — a 900K-char front-matter block is
+        // metadata, stripped before rendering, so only the title and
+        // the small body survive into the retained note.
+        val probe = MarkdownFileInput(
+            "heavy.md",
+            "heavy.md",
+            "---\ntitle: Front Heavy\nnote: " + "y".repeat(900_000) + "\n---\n\nSmall body here.",
+            1_700_000_100_000L,
+        )
+        val result = MarkdownImporter.parseMarkdownFiles(aggregateBudgetFillers() + probe, null)
+        assertEquals(21, result.notes.size)
+        assertEquals("Front Heavy", result.notes.last().title)
+        assertTrue(result.notes.last().contentHtml.contains("Small body here."))
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+    }
+
+    @Test
+    fun whitespaceHeavyTextFileImportsWhenConvertedFits() {
+        // R54-F1, .txt shape: PlainTextCodec discards whitespace-only
+        // content, so a 900K-char file of blank lines converts to a
+        // one-line note — the old raw-length check refused it. Two
+        // hundred lines stay well under the R44-F1 line cap.
+        val probe = MarkdownFileInput(
+            "spacey.txt",
+            "spacey.txt",
+            (" ".repeat(9_000) + "\n\n").repeat(100) + "hello",
+            1_700_000_100_000L,
+        )
+        val result = MarkdownImporter.parseMarkdownFiles(aggregateBudgetFillers() + probe, null)
+        assertEquals(21, result.notes.size)
+        assertEquals("<p>hello</p>", result.notes.last().contentHtml)
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+    }
+
+    @Test
+    fun convertedOverBudgetFileIsStillRefusedAfterConversion() {
+        // R54-F1 control: the budget is now enforced on the CONVERTED
+        // note — 160K '&' chars fit the remaining budget raw but
+        // expand to ~800K chars of HTML, past what remains, so the
+        // file is still refused with the aggregate reason.
+        val probe = MarkdownFileInput(
+            "amp.md",
+            "amp.md",
+            "# Amp\n\n" + "&".repeat(160_000),
+            1_700_000_100_000L,
+        )
+        val result = MarkdownImporter.parseMarkdownFiles(aggregateBudgetFillers() + probe, null)
+        assertEquals(20, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("amp.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun refusedNoteLeavesNoImageCountsBehind() {
+        // R54-F1: conversion counts unresolved image references as it
+        // goes; a note addNote then refuses on its true converted
+        // charge never imports, so its references must not stay in the
+        // report (the R6-F1 property).
+        val probe = MarkdownFileInput(
+            "amp.md",
+            "amp.md",
+            "# Amp\n\n" + "&".repeat(160_000) + "\n\n![ghost](missing.png)",
+            1_700_000_100_000L,
+        )
+        val result = MarkdownImporter.parseMarkdownFiles(aggregateBudgetFillers() + probe, null)
+        assertEquals(20, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("amp.md", ImportCaps.AGGREGATE_TEXT_BUDGET_REASON)),
+            result.skippedFiles,
+        )
+        assertEquals(0, result.imagesUnresolved)
+    }
+
     @Test
     fun estimateConvertedNoteBytesCountsTitle() {
         // R19-F1, precheck level: the per-note estimator already

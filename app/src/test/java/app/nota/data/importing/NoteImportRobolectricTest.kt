@@ -921,6 +921,89 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun frontMatterHeavyMemberImportsWhenConvertedFits() {
+        // R54-F1, ZIP level: walk 4 used to cap the raw member read
+        // by the remaining budget, so a member whose raw text exceeded
+        // it was refused before conversion even though its converted
+        // note fit. Twenty 800K-char members leave ~777K chars of
+        // budget; a member with a 900K-char front-matter block and a
+        // small body imports now, with the front-matter title.
+        val entries = linkedMapOf<String, String>()
+        for (i in 0 until 20) {
+            entries["notes/big-$i.md"] = "# Big$i\n\n" + "x".repeat(800_000)
+        }
+        entries["notes/heavy.md"] =
+            "---\ntitle: Front Heavy\nnote: " + "y".repeat(900_000) + "\n---\n\nSmall body here."
+        val result = MarkdownImporter.parseImportZip(zipOf(entries), stagingDir())
+        assertEquals(21, result.notes.size)
+        val heavy = result.notes.first { it.title == "Front Heavy" }
+        assertTrue(heavy.contentHtml.contains("Small body here."))
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+    }
+
+    @Test
+    fun whitespaceHeavyTextMemberImportsWhenConvertedFits() {
+        // R54-F1, .txt shape at ZIP level: walk 2 and walk 4 both
+        // capped the raw read by the remaining budget; a whitespace-
+        // heavy .txt member converts to a one-line note through
+        // PlainTextCodec. Two hundred lines stay well under the
+        // R44-F1 line cap.
+        val entries = linkedMapOf<String, String>()
+        for (i in 0 until 20) {
+            entries["notes/big-$i.md"] = "# Big$i\n\n" + "x".repeat(800_000)
+        }
+        entries["notes/spacey.txt"] = (" ".repeat(9_000) + "\n\n").repeat(100) + "hello"
+        val result = MarkdownImporter.parseImportZip(zipOf(entries), stagingDir())
+        assertEquals(21, result.notes.size)
+        val spacey = result.notes.first { it.title == "spacey" }
+        assertEquals("<p>hello</p>", spacey.contentHtml)
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+    }
+
+    @Test
+    fun frontMatterHeavyMemberImageStagesAndEmbeds() {
+        // R54-F1, pre-scan consistency: walk 2 must read the member
+        // under the same independent cap, or its image reference would
+        // never be collected and staged even though the note now
+        // imports — the reference would stay unresolved instead.
+        val entries = linkedMapOf<String, String>()
+        for (i in 0 until 20) {
+            entries["notes/big-$i.md"] = "# Big$i\n\n" + "x".repeat(800_000)
+        }
+        entries["notes/heavy.md"] =
+            "---\ntitle: Front Heavy\nnote: " + "y".repeat(900_000) + "\n---\n\n![Pic](pic.png)"
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(entries, mapOf("notes/pic.png" to pngBytes)),
+            stagingDir(),
+        )
+        assertEquals(21, result.notes.size)
+        val heavy = result.notes.first { it.title == "Front Heavy" }
+        assertEquals(1, heavy.images.size)
+        assertEquals("Pic", heavy.images[0].alt)
+        val token = heavy.images[0].token
+        assertNotNull(token)
+        assertTrue(heavy.contentHtml.contains(token!!))
+        assertEquals(0, result.imagesUnresolved)
+    }
+
+    @Test
+    fun memberOverPerFileCapStillReportsFileTooLarge() {
+        // R54-F1 control: the per-file cap is untouched — a member
+        // past 100 MiB still reports the per-file reason, not the
+        // aggregate one. Highly compressible content keeps the ZIP
+        // itself small.
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(linkedMapOf("notes/big.md" to "x".repeat(101 * 1024 * 1024))),
+            stagingDir(),
+        )
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("big.md", "File is larger than 100 MB.")),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
     fun deepPathRepeatedImageRefsResolve() {
         // R44-F2: a ZIP member at a 300-segment path whose Markdown
         // repeats one image ref 2,000 times — the old shape split and
@@ -2355,14 +2438,16 @@ class NoteImportRobolectricTest {
     }
 
     @Test
-    fun looseFileOverRemainingBudgetIsSkippedBeforeParsing() = runBlocking {
-        // R9-F1: a loose file past the REMAINING run budget is
-        // skipped before it is materialized or parsed. Eighty-three
-        // 200K-char fillers leave ~176K chars of budget; a 500K-char
-        // file with an unresolvable image reference is over what
-        // remains. Before the fix it was read in full and parsed —
-        // the image count leaked into the report even though the
-        // note was then dropped by the merge-time budget check.
+    fun looseFileOverRemainingBudgetIsSkippedWithoutImageCounts() = runBlocking {
+        // R9-F1, as re-shaped by R54-F1: a loose file past the
+        // REMAINING run budget is read and parsed now (its raw text
+        // is capped by the per-file cap only), but the converted
+        // note is checked against the merged remaining before it is
+        // absorbed — so it is refused with the aggregate reason and
+        // its image reference never leaks into the report. Eighty-
+        // three 200K-char fillers leave ~176K chars of budget; a
+        // 500K-char file with an unresolvable image reference is over
+        // what remains, converted as well as raw.
         val stack = newStack()
         val dir = stagingDir()
         val staged = (0 until 83).map { i ->
@@ -2386,6 +2471,36 @@ class NoteImportRobolectricTest {
         )
         assertEquals(0, outcome.parse.imagesUnresolved)
         assertEquals(83, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun looseFileWithHeavyFrontMatterImportsWhenConvertedFits() = runBlocking {
+        // R54-F1, loose-file shape: the same raw-cap fix as the ZIP
+        // walks — a loose file whose raw text exceeds the remaining
+        // budget but whose converted note fits imports now. Eighty-
+        // three 200K-char fillers leave ~176K chars of budget; the
+        // probe's 900K-char front-matter block is metadata, so only
+        // its title and small body count.
+        val stack = newStack()
+        val dir = stagingDir()
+        val staged = (0 until 83).map { i ->
+            val file = File(dir, "big-$i.md").apply { writeText("# Big$i\n\n" + "x".repeat(200_000)) }
+            StagedImportFile("big-$i.md", file, 1_700_000_000_000L + i)
+        } + listOf(
+            StagedImportFile(
+                "heavy.md",
+                File(dir, "heavy.md").apply {
+                    writeText("---\ntitle: Front Heavy\nnote: " + "y".repeat(900_000) + "\n---\n\nSmall body here.")
+                },
+                1_700_000_100_000L,
+            ),
+        )
+        val outcome = stack.repo.importMarkdownSelection(staged)
+        assertEquals(84, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(emptyList<SkippedImportFile>(), outcome.parse.skippedFiles)
+        assertEquals(84, stack.db.noteDao().getAll().size)
+        assertTrue(stack.db.noteDao().getAll().any { it.title == "Front Heavy" })
     }
 
     @Test
