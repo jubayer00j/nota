@@ -1,6 +1,7 @@
 package app.nota.data.repository
 
 import androidx.room.Room
+import app.nota.data.backup.BackupRepository
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
@@ -75,6 +76,10 @@ class WritingStatsRobolectricTest {
         title = id,
         contentHtml = "<p>$plainText</p>",
         plainText = plainText,
+        // Fix round 2: fixtures state the stored count, as a
+        // real writer would — the stats read the column, never
+        // the body.
+        wordCount = BackupRepository.wordCount(plainText),
         createdAt = millis(created),
         updatedAt = millis(updated),
         contentEditedAt = contentEdited?.let { millis(it) },
@@ -192,6 +197,53 @@ class WritingStatsRobolectricTest {
         assertEquals(1, stats.editedThisMonth)
         assertEquals(0, stats.startedThisWeek)
         assertEquals(1, stats.startedThisMonth)
+    }
+
+    /**
+     * Fix round 2 (R2-F1): a note whose body is past Android's
+     * ~2 MiB CursorWindow must not fail the stats load. The
+     * projection carries no body text at all — the 1.2M-char
+     * body below (240,000 words, ~2.4 MB as UTF-16) is counted
+     * from its stored column, and the load succeeds with the
+     * exact total.
+     */
+    @Test
+    fun hugeNoteCannotFailStatsLoad() = runBlocking {
+        db.noteDao().upsert(
+            entity(
+                "huge",
+                LocalDate.of(2026, 11, 25),
+                plainText = "word ".repeat(240_000),
+            ),
+        )
+        db.noteDao().upsert(
+            entity("small", LocalDate.of(2026, 11, 25), plainText = "one two"),
+        )
+        val stats = stats()
+        assertEquals(2, stats.totalNotes)
+        assertEquals(240_002, stats.totalWords)
+        assertEquals(1, stats.writingDays)
+        assertEquals(1, stats.currentStreak)
+    }
+
+    /**
+     * Fix round 2: the stored count is maintained by the
+     * repository's write paths — created and edited bodies get
+     * their exact count, and a metadata op (pin) leaves both
+     * the text and its count alone.
+     */
+    @Test
+    fun wordCountMaintainedByRepositoryWrites() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
+        val created = notes.createNote(title = "t", plainBody = "one two three")
+        assertEquals(3, db.noteDao().getById(created.id)!!.wordCount)
+        val edited = notes.updateBody(created, "t", "one two three four five")
+        assertEquals(5, db.noteDao().getById(edited.id)!!.wordCount)
+        notes.setPinned(edited, true)
+        val stored = db.noteDao().getById(edited.id)!!
+        assertEquals(5, stored.wordCount)
+        assertEquals("one two three four five", stored.plainText)
     }
 
     @Test

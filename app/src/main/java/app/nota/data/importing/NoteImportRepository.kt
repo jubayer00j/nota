@@ -3,6 +3,7 @@ package app.nota.data.importing
 import android.content.Context
 import androidx.room.withTransaction
 import app.nota.data.attachments.AttachmentStore
+import app.nota.data.backup.BackupRepository
 import app.nota.data.backup.rebuildLibraryIndexes
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
@@ -1191,12 +1192,19 @@ class NoteImportRepository(
                         .distinctBy { it.lowercase() }
                         .map { meta.resolveTag(it) }
                     val tags = tagResolutions.map { it.tag }.distinctBy { it.id }
+                    // Fix round 2: imported notes bypass
+                    // NoteRepository.upsert, so the stored word
+                    // count is computed here from the same
+                    // derived text the row stores.
+                    val importedPlain =
+                        NoteDocument.plainText(NoteDocument.parse(content))
                     val entity = NoteEntity(
                         id = noteId,
                         folderId = folderResolution.id,
                         title = item.title,
                         contentHtml = content,
-                        plainText = NoteDocument.plainText(NoteDocument.parse(content)),
+                        plainText = importedPlain,
+                        wordCount = BackupRepository.wordCount(importedPlain),
                         createdAt = item.createdAt,
                         updatedAt = item.updatedAt,
                         // Fix round 1: an imported note's last content

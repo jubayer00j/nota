@@ -1,6 +1,7 @@
 package app.nota.data.repository
 
 import androidx.room.withTransaction
+import app.nota.data.backup.BackupRepository
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.LibraryStampRow
@@ -89,13 +90,26 @@ class NoteRepository(
     suspend fun upsert(note: NoteEntity) {
         db.withTransaction {
             val previousTitle = noteDao.getById(note.id)?.title
-            noteDao.upsert(note)
+            // Reading stats fix round 2 (R2-F1): the stored word
+            // count is the stats' only word source, so it is
+            // (re)derived from the stored text here — every
+            // in-app note write funnels through this one choke
+            // point (create, edits, restore, lock/unlock, and
+            // the metadata ops, whose text is unchanged so the
+            // count comes back identical), and the count can
+            // never drift from the text. The direct-DAO writers
+            // (import, sync/restore via BxNote.toEntity) compute
+            // it at construction instead.
+            val stored = note.copy(
+                wordCount = BackupRepository.wordCount(note.plainText),
+            )
+            noteDao.upsert(stored)
             // The FTS row (title, body, tag names, folder name —
             // with the Phase 2b seal discipline: a locked note's
             // body is never indexed, its title is) is built by the
             // one shared builder; see FtsSync.
-            db.refreshFtsEntry(note)
-            relink(note)
+            db.refreshFtsEntry(stored)
+            relink(stored)
             if (previousTitle != note.title) {
                 // Codex fix G5a: creating a note or renaming one changes
                 // which [[title]] references resolve. Re-run extraction

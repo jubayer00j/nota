@@ -22,12 +22,14 @@ class WritingStatsCalculatorTest {
     private fun millis(day: LocalDate): Long =
         day.atTime(12, 0).atZone(zone).toInstant().toEpochMilli()
 
+    // Fix round 2: rows carry the stored word count, not the
+    // body — the stats query no longer selects plain text.
     private fun row(
         created: LocalDate,
         contentEdited: LocalDate? = created,
         locked: Boolean = false,
-        text: String = "",
-    ) = NoteStatsRow(millis(created), contentEdited?.let { millis(it) }, locked, text)
+        words: Int = 0,
+    ) = NoteStatsRow(millis(created), contentEdited?.let { millis(it) }, locked, words)
 
     private fun compute(rows: List<NoteStatsRow>, on: LocalDate = today) =
         WritingStatsCalculator.compute(rows, on, zone)
@@ -172,12 +174,12 @@ class WritingStatsCalculatorTest {
     fun wordCount_whitespaceSplitOverUnlockedRowsOnly() {
         val stats = compute(
             listOf(
-                row(today, text = "one two  three\nfour"),
-                row(today, text = "  five  "),
-                // A locked row's text never counts — the flag
-                // rules even if a stored text were present.
-                row(today, locked = true, text = "six seven eight"),
-                row(today, text = ""),
+                row(today, words = 4),
+                row(today, words = 1),
+                // A locked row's stored count never counts — the
+                // flag rules even if a count were present.
+                row(today, locked = true, words = 3),
+                row(today),
             ),
         )
         assertEquals(5, stats.totalWords)
@@ -283,18 +285,18 @@ class WritingStatsCalculatorTest {
         val empty = compute(emptyList())
         assertEquals("Notes, words and streaks", writingStatsSummary(empty))
 
-        val one = compute(listOf(row(today, text = "hello")))
+        val one = compute(listOf(row(today, words = 1)))
         assertEquals("1 note · 1-day streak", writingStatsSummary(one))
 
         val many = compute(
-            (0..5).map { row(today.minusDays(it.toLong()), text = "w") } +
-                (0..121).map { row(LocalDate.of(2026, 1, 5), text = "w") },
+            (0..5).map { row(today.minusDays(it.toLong()), words = 1) } +
+                (0..121).map { row(LocalDate.of(2026, 1, 5), words = 1) },
         )
         assertEquals(128, many.totalNotes)
         assertEquals(6, many.currentStreak)
         assertEquals("128 notes · 6-day streak", writingStatsSummary(many))
 
-        val streakless = compute(listOf(row(LocalDate.of(2026, 11, 10), text = "w")))
+        val streakless = compute(listOf(row(LocalDate.of(2026, 11, 10), words = 1)))
         assertEquals("1 note", writingStatsSummary(streakless))
     }
 }

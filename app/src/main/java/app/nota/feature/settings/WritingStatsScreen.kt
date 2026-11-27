@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -22,7 +23,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -46,8 +50,18 @@ fun WritingStatsScreen(
     onBack: () -> Unit,
     statsRepository: WritingStatsRepository = koinInject(),
 ) {
-    val stats by produceState<WritingStats?>(initialValue = null) {
-        value = runCatching { statsRepository.loadStats() }.getOrNull()
+    // Fix round 2 (R2-F1): a failed load used to swallow the
+    // error and show a blank screen — a note over the
+    // CursorWindow limit, a corrupt database, anything. The
+    // load now has a real state, and a failure shows a calm
+    // error with a retry instead of nothing.
+    var retryCount by remember { mutableIntStateOf(0) }
+    val state by produceState<LoadState>(initialValue = LoadState.Loading, retryCount) {
+        value = runCatching { statsRepository.loadStats() }
+            .fold(
+                onSuccess = { LoadState.Loaded(it) },
+                onFailure = { LoadState.Failed },
+            )
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -76,15 +90,27 @@ fun WritingStatsScreen(
                 .padding(horizontal = NotaSpacing.md, vertical = NotaSpacing.md),
             verticalArrangement = Arrangement.spacedBy(NotaSpacing.md),
         ) {
-            val loaded = stats
-            when {
-                loaded == null -> Unit // Local read; a frame of quiet.
-                loaded.isEmpty -> Text(
-                    "Your writing story starts with your first note.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                else -> WritingStatsContent(loaded)
+            when (val loaded = state) {
+                LoadState.Loading -> Unit // Local read; a frame of quiet.
+                is LoadState.Loaded -> if (loaded.stats.isEmpty) {
+                    Text(
+                        "Your writing story starts with your first note.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    WritingStatsContent(loaded.stats)
+                }
+                LoadState.Failed -> {
+                    Text(
+                        "Couldn't load your writing stats.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = { retryCount++ }) {
+                        Text("Try again")
+                    }
+                }
             }
         }
     }
@@ -204,6 +230,14 @@ private fun WeeklyActivityStrip(weekly: List<Int>) {
             )
         }
     }
+}
+
+/** The stats load's state: loading, loaded, or failed — a
+ *  failure is shown, never swallowed into a blank screen. */
+private sealed interface LoadState {
+    data object Loading : LoadState
+    data class Loaded(val stats: WritingStats) : LoadState
+    data object Failed : LoadState
 }
 
 /** Locale-proof grouping, like the Writing typography stamp. */

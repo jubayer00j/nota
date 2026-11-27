@@ -6,6 +6,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.room.Room
+import app.nota.data.backup.BackupRepository
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
@@ -81,6 +82,9 @@ class WritingStatsUiTest {
                     title = id,
                     contentHtml = "<p>$plainText</p>",
                     plainText = plainText,
+                    // Fix round 2: fixtures state the stored
+                    // count, as a real writer would.
+                    wordCount = BackupRepository.wordCount(plainText),
                     createdAt = millis(day),
                     updatedAt = millis(day),
                     locked = locked,
@@ -148,6 +152,35 @@ class WritingStatsUiTest {
         composeRule.onNodeWithText("Locked notes aren't counted in word totals.")
             .assertExists()
         // The empty state stays away when there is data.
+        composeRule.onNodeWithText(
+            "Your writing story starts with your first note.",
+        ).assertDoesNotExist()
+    }
+
+    /**
+     * Fix round 2 (R2-F1): a failed load used to swallow the
+     * error and show a blank screen. The closed database below
+     * makes the load throw; the screen must show its error
+     * state with a retry instead of nothing.
+     */
+    @Test
+    fun screen_failedLoadShowsErrorStateWithRetry() {
+        db.close()
+
+        composeRule.setContent {
+            NotaTheme {
+                WritingStatsScreen(onBack = {}, statsRepository = repository)
+            }
+        }
+
+        awaitTrue("error state composed") {
+            exists("Couldn't load your writing stats.")
+        }
+        composeRule.onNodeWithText("Your writing").assertExists()
+        composeRule.onNodeWithText("Try again").assertExists()
+        // No data sections, no empty state — the failure is
+        // shown as a failure, not as an empty library.
+        composeRule.onNodeWithText("Writing days").assertDoesNotExist()
         composeRule.onNodeWithText(
             "Your writing story starts with your first note.",
         ).assertDoesNotExist()

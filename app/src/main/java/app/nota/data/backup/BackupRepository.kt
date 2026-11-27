@@ -755,6 +755,12 @@ internal fun BxFolder.toEntity(): FolderEntity = FolderEntity(
 
 internal fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
     val locked = lockJson != null
+    // Fix round 2: the stored word count is computed from the
+    // same derived text the row stores — a restored/synced note
+    // bypasses NoteRepository.upsert, so this conversion is its
+    // maintenance site. Locked rows store an empty text and a
+    // zero count, as the lock flow leaves them.
+    val plain = if (locked) "" else NoteDocument.plainText(NoteDocument.parse(content))
     return NoteEntity(
         id = id,
         folderId = folderId?.takeIf { it in validFolderIds },
@@ -763,7 +769,8 @@ internal fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
         // record are stored verbatim (PR-B invariants). Unlocked
         // bodies get only the image-scheme normalisation above.
         contentHtml = if (locked) content else content.toNotaImageScheme(),
-        plainText = if (locked) "" else NoteDocument.plainText(NoteDocument.parse(content)),
+        plainText = plain,
+        wordCount = BackupRepository.wordCount(plain),
         createdAt = createdAt,
         updatedAt = updatedAt,
         // The archive carries no content-edited timestamp (the

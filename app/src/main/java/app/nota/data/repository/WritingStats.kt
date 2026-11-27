@@ -1,6 +1,5 @@
 package app.nota.data.repository
 
-import app.nota.data.backup.BackupRepository
 import app.nota.data.db.NoteStatsRow
 import java.time.DayOfWeek
 import java.time.Instant
@@ -24,8 +23,9 @@ import java.time.temporal.TemporalAdjusters
 data class WritingStats(
     /** Every untrashed note, locked and archived included. */
     val totalNotes: Int,
-    /** Whitespace-split words over unlocked notes' plain text.
-     *  Locked notes never contribute (see [lockedNotes]). */
+    /** Stored word counts over unlocked notes (see
+     *  [NoteEntity.wordCount]). Locked notes never contribute
+     *  (see [lockedNotes]). */
     val totalWords: Int,
     /** Distinct local days with any writing activity, all-time. */
     val writingDays: Int,
@@ -116,12 +116,15 @@ object WritingStatsCalculator {
 
         return WritingStats(
             totalNotes = rows.size,
-            // The app's one word-count definition (the backup
-            // writer's), so a note's words mean the same thing
-            // everywhere. Locked rows are skipped by flag —
-            // their stored text is empty under the seal anyway.
+            // Fix round 2: words come from the stored count
+            // (NoteEntity.wordCount), never from the body — the
+            // projection carries no text at all. The stored count
+            // uses the app's one word-count definition (the
+            // backup writer's), so a note's words mean the same
+            // thing everywhere. Locked rows are skipped by flag —
+            // their stored count is 0 under the seal anyway.
             totalWords = rows.filter { !it.locked }
-                .sumOf { BackupRepository.wordCount(it.plainText) },
+                .sumOf { it.wordCount },
             writingDays = writingDays.size,
             currentStreak = currentStreak(writingDays, today),
             longestStreak = longestStreak(writingDays),
