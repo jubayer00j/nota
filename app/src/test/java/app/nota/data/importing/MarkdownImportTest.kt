@@ -3,6 +3,8 @@ package app.nota.data.importing
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 import java.time.LocalDate
 import java.time.ZoneId
@@ -14,6 +16,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 /**
@@ -637,6 +640,43 @@ class MarkdownImportTest {
         assertTrue(PickedFileStaging.copyCapped(ByteArrayInputStream(ByteArray(0)), target, 100L))
         assertEquals(0L, target.length())
         target.delete()
+    }
+
+    /** An InputStream that yields [totalBytes] of 'a' and then throws
+     *  — a SAF provider failing mid-read (Codex R51-F1). */
+    private class FailingAfterInputStream(private val totalBytes: Long) : InputStream() {
+        var bytesRead = 0L
+            private set
+
+        override fun read(): Int {
+            if (bytesRead >= totalBytes) throw IOException("simulated read failure")
+            bytesRead++
+            return 'a'.code
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (bytesRead >= totalBytes) throw IOException("simulated read failure")
+            val n = minOf(len.toLong(), totalBytes - bytesRead).toInt()
+            b.fill('a'.code.toByte(), off, off + n)
+            bytesRead += n
+            return n
+        }
+    }
+
+    @Test
+    fun cappedCopyDeletesPartialOnReadFailure() {
+        // R51-F1: a provider that throws mid-read used to leave the
+        // partial file in cache — up to the per-file cap, uncharged
+        // to the selection budget. The exception still propagates,
+        // but the partial target is deleted first.
+        val target = File.createTempFile("stage-fail", ".bin")
+        try {
+            PickedFileStaging.copyCapped(FailingAfterInputStream(60), target, 100L)
+            fail("expected IOException")
+        } catch (e: IOException) {
+            // expected — the caller's per-URI catch records the pick as skipped
+        }
+        assertFalse(target.exists())
     }
 
     @Test
@@ -1335,6 +1375,30 @@ class MarkdownImportTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun stageOnePropagatesReadFailureWithoutChargingBudget() {
+        // R51-F1, through stageOne: the pick is not staged, no bytes
+        // are charged to the budget, and no partial file is left
+        // behind — stageMarkdownPicks records the pick as skipped.
+        val budget = PickedFileStaging.StagingBudget(totalBytes = 100)
+        val dir = File.createTempFile("staging-fail", ".dir")
+            .apply { delete(); mkdir() }
+        try {
+            val target = File(dir, "a.bin")
+            try {
+                PickedFileStaging.stageOne(FailingAfterInputStream(30), target, budget, target.name)
+                fail("expected IOException")
+            } catch (e: IOException) {
+                // expected — stageMarkdownPicks records the pick as skipped
+            }
+            assertFalse(target.exists())
+            assertEquals(100L, budget.remaining())
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
     @Test
     fun stagingFileNameBoundsLongNamesTo255Bytes() {
         // (Codex R17-F2): an overlong basename used to make

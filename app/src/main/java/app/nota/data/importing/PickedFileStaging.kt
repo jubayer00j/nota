@@ -25,7 +25,10 @@ import java.io.InputStream
  *   engine — hundreds of MiB staged for nothing on a low-storage
  *   device. The cap is decided from the pick's name before any copy.
  * - [copyCapped] is the streaming copy that enforces the cap and
- *   deletes the partial target when it trips.
+ *   deletes the partial target when it trips — or when the read
+ *   itself fails (Codex R51-F1): a provider that throws mid-stream
+ *   used to leave the partial file in cache, uncharged to the
+ *   selection budget.
  * - [StagingBudget] bounds a whole multi-file selection (Codex
  *   R6-F2): the per-file cap alone lets several large picks stage
  *   gigabytes into one cache directory before parsing starts.
@@ -118,24 +121,37 @@ object PickedFileStaging {
 
     /** Copies [input] into [target], enforcing [maxBytes]. Returns
      *  false — and leaves no file behind — when the stream exceeds
-     *  the cap. */
+     *  the cap. A read or write failure also leaves no file behind:
+     *  the exception still propagates (the callers record the pick
+     *  as skipped), but the partial target is deleted first — a
+     *  failing pick must never leave up-to-the-cap bytes in cache,
+     *  uncharged to the selection budget (Codex R51-F1). */
     fun copyCapped(input: InputStream, target: File, maxBytes: Long = MAX_STAGED_PICK_BYTES): Boolean {
         var copied = 0L
         var ok = true
-        input.use { ins ->
-            target.outputStream().buffered().use { out ->
-                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                while (true) {
-                    val n = ins.read(buffer)
-                    if (n < 0) break
-                    copied += n
-                    if (copied > maxBytes) {
-                        ok = false
-                        break
+        try {
+            input.use { ins ->
+                target.outputStream().buffered().use { out ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        val n = ins.read(buffer)
+                        if (n < 0) break
+                        copied += n
+                        if (copied > maxBytes) {
+                            ok = false
+                            break
+                        }
+                        out.write(buffer, 0, n)
                     }
-                    out.write(buffer, 0, n)
                 }
             }
+        } catch (e: Exception) {
+            // The exception still propagates to the caller — delete
+            // first, so no partial file survives a failed copy.
+            // CancellationException is an Exception too: deleting
+            // then rethrowing keeps cancellation semantics intact.
+            target.delete()
+            throw e
         }
         if (!ok) target.delete()
         return ok
