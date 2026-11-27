@@ -281,8 +281,8 @@ val MIGRATION_9_10: Migration = object : Migration(9, 10) {
 internal const val WORD_COUNT_CHUNK_CHARS = 65_536
 
 internal fun countWordsChunked(
-    readChunk: (offset: Int, size: Int) -> String,
     chunkSize: Int = WORD_COUNT_CHUNK_CHARS,
+    readChunk: (offset: Int, size: Int) -> String,
 ): Int {
     var words = 0
     var inWord = false
