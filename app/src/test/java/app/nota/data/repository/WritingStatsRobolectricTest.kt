@@ -174,7 +174,9 @@ class WritingStatsRobolectricTest {
         )
         val stats = stats()
         assertEquals(3, stats.totalNotes)
-        assertEquals(3, stats.writingDays)
+        // Four writing days: c contributes two (created 15 Oct,
+        // last edited today) alongside a's and b's single days.
+        assertEquals(4, stats.writingDays)
         assertEquals(3, stats.currentStreak)
         assertEquals(3, stats.longestStreak)
         // This week (Mon 23 – Sun 29 Nov): a and b started, all
