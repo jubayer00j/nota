@@ -327,7 +327,12 @@ jobs:
           fi
           rm -rf app/build/reports/tests app/build/test-results
 
-      - name: Run fast unit tests (shard A, 72 classes)
+      # Reading stats (v0.37.0): +1 class — the pure-JVM stats
+      # calculator suite, appended at the END of shard A's list so
+      # every existing class keeps its fork composition (the
+      # forkEvery=25 landmine documented above); B2's frozen list
+      # is untouched.
+      - name: Run fast unit tests (shard A, 73 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.DatabaseNamingTest" \
@@ -402,6 +407,7 @@ jobs:
             --tests "app.nota.feature.export.NoteExportDeliveryTest" \
             --tests "app.nota.feature.spike.HtmlRoundTripProbeTest" \
             --tests "app.nota.ui.theme.ThemeSelectionTest" \
+            --tests "app.nota.data.repository.WritingStatsCalculatorTest" \
             --stacktrace
 
       - name: Upload fast-shard-A test reports
@@ -669,7 +675,10 @@ jobs:
           fi
           rm -rf app/build/reports/tests app/build/test-results
 
-      - name: Run fast unit tests (shard B4, 12 classes)
+      # Reading stats (v0.37.0): +1 class — the stats repository
+      # Robolectric suite, appended at the end of B4 (the lightest
+      # fast shard by test count); B2's frozen list is untouched.
+      - name: Run fast unit tests (shard B4, 13 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.html.NoteDocumentNestedTest" \
@@ -684,6 +693,7 @@ jobs:
             --tests "app.nota.data.capture.ShareIntentsRobolectricTest" \
             --tests "app.nota.feature.widget.WidgetDataSourceRobolectricTest" \
             --tests "app.nota.data.security.AppLockManagerSetupTest" \
+            --tests "app.nota.data.repository.WritingStatsRobolectricTest" \
             --stacktrace
 
       - name: Upload fast-shard-B4 test reports
