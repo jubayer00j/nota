@@ -4911,6 +4911,17 @@ class NoteImportRobolectricTest {
         // (Codex R45-F2) control: an ordinary note's FTS row still
         // carries its full body — a distinctive body word finds it
         // after the rebuild, so the cap only bites past the bound.
+        // The search below uses ONE token of the body word, not the
+        // whole hyphenated string: searchFts passes its argument
+        // raw to an FTS4 MATCH, where "-" is the NOT operator, so
+        // "zanzibar-quixotic" would parse as "zanzibar AND NOT
+        // quixotic" and could never match a body containing both
+        // halves. (Production search is unaffected — FtsQueryBuilder
+        // quotes each token into a phrase, inside which the hyphen
+        // tokenises to an adjacent-token phrase and matches.)
+        // "zanzibar" occurs only in the body — not the title, tags
+        // or folder — so the match still proves the body itself was
+        // indexed, exactly what this control exists to prove.
         val stack = newStack()
         val outcome = stack.repo.importNotes(
             listOf(
@@ -4932,7 +4943,7 @@ class NoteImportRobolectricTest {
         assertEquals(1, outcome.report.imported)
         assertEquals(
             listOf("Normal"),
-            stack.db.noteDao().searchFts("zanzibar-quixotic").map { it.title },
+            stack.db.noteDao().searchFts("zanzibar").map { it.title },
         )
     }
 
