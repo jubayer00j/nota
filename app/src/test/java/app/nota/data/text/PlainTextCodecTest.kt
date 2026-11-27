@@ -49,6 +49,55 @@ class PlainTextCodecTest {
     }
 
     @Test
+    fun blankLineHeavyTextConvertsToTinyNote() {
+        // Codex R47-F1: millions of blank-line separators used to
+        // materialise one list entry per paragraph before the filter
+        // ran. The range-based conversion must produce the tiny note
+        // without ever building that list.
+        val text = "\n\n".repeat(300_000) + "hello"
+        assertEquals("<p>hello</p>", PlainTextCodec.textToHtml(text))
+    }
+
+    @Test
+    fun singleHugeParagraphWithManySingleNewlines() {
+        // Same family, inner split: a paragraph of many single newlines
+        // must not materialise a per-line list either.
+        val text = "word\n".repeat(50_000) + "end"
+        val html = PlainTextCodec.textToHtml(text)
+        assertTrue(html.startsWith("<p>word<br>word<br>word"))
+        assertTrue(html.endsWith("end</p>"))
+        assertEquals(50_000, html.split("<br>").size - 1)
+    }
+
+    @Test
+    fun paragraphSplittingMatchesExactOutput() {
+        // Pins the exact output shape the range-based conversion must
+        // preserve: <br> for single newlines, trimmed paragraphs,
+        // CRLF / lone CR normalisation, separator whitespace, escaping.
+        assertEquals(
+            "<p>First line<br>second line</p><p>New paragraph</p>",
+            PlainTextCodec.textToHtml("First line\nsecond line\n\nNew paragraph"),
+        )
+        assertEquals(
+            "<p>a<br>  x</p><p>b</p>",
+            PlainTextCodec.textToHtml("a\n  x\n\nb"),
+        )
+        assertEquals("<p>a</p><p>b</p>", PlainTextCodec.textToHtml("a\r\n\r\nb"))
+        assertEquals("<p>a<br>b</p>", PlainTextCodec.textToHtml("a\rb"))
+        assertEquals("<p>a</p><p>b</p>", PlainTextCodec.textToHtml("a\n \n b"))
+        assertEquals("<p>a</p><p>b</p>", PlainTextCodec.textToHtml("a\n\n   \n\nb"))
+        assertEquals("<p>padded</p><p>next</p>", PlainTextCodec.textToHtml("  padded  \n\n  next  "))
+        assertEquals("<p>a</p>", PlainTextCodec.textToHtml("a\n\n"))
+        assertEquals("<p>a</p>", PlainTextCodec.textToHtml("\n\na"))
+        assertEquals("<p>a</p><p>b</p>", PlainTextCodec.textToHtml("a\n\n\nb"))
+        assertEquals("<p>a</p><p>b</p>", PlainTextCodec.textToHtml("a\n\t\nb"))
+        assertEquals(
+            "<p>a &amp; b &lt; c &gt; d &quot;e&quot;</p>",
+            PlainTextCodec.textToHtml("a & b < c > d \"e\""),
+        )
+    }
+
+    @Test
     fun blockBoundariesBecomeLineBreaksNotFusedWords() {
         // Rich-editor shapes must not fuse adjacent blocks into single
         // words in the plain-text projection (snippets + FTS).

@@ -1563,6 +1563,44 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun blankLineHeavyKeepTextContentImports() {
+        // Codex R47-F1: a textContent of millions of escaped blank-line
+        // separators + one word passes every upstream cap (the raw JSON
+        // is under the 16M-char cap; the sibling guard counts
+        // non-whitespace bytes only) and used to exhaust memory in the
+        // paragraph split inside PlainTextCodec.textToHtml, before any
+        // check. The range-based codec must convert it to the tiny note.
+        val text = "\\n\\n".repeat(300_000) + "hello"
+        val entries = linkedMapOf(
+            "Takeout/Keep/blanks.json" to
+                """{"title":"Blanks","textContent":"$text","createdTimestampUsec":1700000000000000}""",
+        )
+        val result = KeepTakeoutParser.parse(zipOf(entries), stagingDir())
+        assertEquals(listOf("Blanks"), result.notes.map { it.title })
+        assertEquals(emptyList<SkippedImportFile>(), result.skippedFiles)
+        assertEquals("<p>hello</p>", result.notes[0].contentHtml)
+    }
+
+    @Test
+    fun blankLineHeavyTxtFileStillRefusedWithLineReason() = runBlocking {
+        // The .txt path shares the codec, but it is already protected
+        // the other way: the R44-F1 line cap in appendParsedFile refuses
+        // a blank-line-heavy file before conversion ever runs. Pin that
+        // the codec change leaves that refusal exactly as it was.
+        val stack = newStack()
+        val dir = stagingDir()
+        val txt = File(dir, "blanks.txt").apply { writeText("\n".repeat(300_000)) }
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("blanks.txt", txt, 1_700_000_000_000L)),
+        )
+        assertEquals(0, outcome.report.imported)
+        assertEquals(
+            listOf(SkippedImportFile("blanks.txt", ImportCaps.TOO_MANY_LINES_REASON)),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
     fun overLimitNoteIsRefusedByEngine() = runBlocking {
         // R7-F1 (defence in depth): a note handed to the engine past
         // the per-note bound is refused, never written — so the
