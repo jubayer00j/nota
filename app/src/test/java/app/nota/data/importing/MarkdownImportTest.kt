@@ -75,6 +75,25 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun angleBracketedLinkKeepsWorking() {
+        // R52-F1 (link side of the same fix): the bracketed
+        // destination is unwrapped by the shared scanner, so a
+        // `<https://...>` link survives as a link instead of
+        // degrading to its label. An unsafe scheme still degrades.
+        // (The unsafe example carries no parens: a `)` inside the
+        // brackets ends the bracketed form by design, so it would
+        // exercise the malformed-input fallback instead.)
+        val result = parseOne(
+            "links.md",
+            "[site](<https://example.com>) and [bad](<javascript:alert>).",
+        )
+        assertEquals(
+            "<p><a href=\"https://example.com\">site</a> and bad.</p>",
+            result.notes[0].contentHtml,
+        )
+    }
+
+    @Test
     fun h1BecomesTitleAndInlineFormattingRenders() {
         val result = parseOne(
             "hello.md",
@@ -430,6 +449,53 @@ class MarkdownImportTest {
         assertEquals(0, note.images.size)
         assertEquals("<p>proto relative</p>", note.contentHtml)
         assertEquals(1, result.imagesUnresolved)
+        imageFile.delete()
+    }
+
+    @Test
+    fun angleBracketedRemoteImageKeepsAltAndDoesNotResolve() {
+        // R52-F1: the bracketed destination is unwrapped by the
+        // shared scanner, so a remote `<https://...>` is classified
+        // remote in the render path: alt text kept, counted, nothing
+        // embedded — even though a local photo.png shares the
+        // basename. (Pin: the outcome already held before the fix —
+        // the trailing `>` poisoned the resolver's basename match —
+        // so this guards the classification against a future
+        // resolver change, it does not fail on the old code.)
+        val imageFile = File.createTempFile("pic", ".png").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val resolver = createImportImageResolver(listOf("pic.png" to imageFile))
+        val result = parseOne(
+            "img4.md",
+            "![photo](<https://cdn.example/photo.png>)",
+            resolver = resolver,
+        )
+        val note = result.notes[0]
+        assertEquals(0, note.images.size)
+        assertEquals("<p>photo</p>", note.contentHtml)
+        assertEquals(1, result.imagesUnresolved)
+        imageFile.delete()
+    }
+
+    @Test
+    fun angleBracketedLocalImageWithSpacesResolves() {
+        // R52-F1: a local destination with spaces inside the
+        // brackets (`<my photo.png>`) scans whole and resolves to
+        // the staged file. Before the fix the space ended the
+        // reference, the match failed, and the whole `![...](...)`
+        // stayed literal text in the note.
+        val imageFile = File.createTempFile("spaced", ".png").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+        val resolver = createImportImageResolver(listOf("my photo.png" to imageFile))
+        val result = parseOne(
+            "img5.md",
+            "![a](<my photo.png>)",
+            resolver = resolver,
+        )
+        val note = result.notes[0]
+        assertEquals(1, note.images.size)
+        val token = note.images[0].token
+        assertNotNull(token)
+        assertTrue(note.contentHtml.contains(token!!))
+        assertEquals(0, result.imagesUnresolved)
         imageFile.delete()
     }
 

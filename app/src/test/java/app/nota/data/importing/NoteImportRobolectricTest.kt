@@ -847,6 +847,41 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun angleBracketedImageRefsClassifyInPreScanAndRender() {
+        // R52-F1, ZIP level: the pre-scan runs on raw text and the
+        // render pass on escaped text, so the bracketed destination
+        // must unwrap in both spellings — a remote `<https://...>`
+        // stays remote in both (alt kept, counted, nothing
+        // embedded, even with a local photo.png in the archive),
+        // and a local `<my photo.png>` is collected by the pre-scan
+        // (so it is staged) and embedded by the render pass.
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "notes/remote.md" to "# Remote\n\n![Remote](<https://cdn.example/photo.png>)",
+                    "notes/spaced.md" to "# Spaced\n\n![Spaced](<my photo.png>)",
+                ),
+                mapOf(
+                    "notes/photo.png" to pngBytes,
+                    "notes/my photo.png" to pngBytes,
+                ),
+            ),
+            stagingDir(),
+        )
+        assertEquals(2, result.notes.size)
+        val remote = result.notes.first { it.title == "Remote" }
+        assertTrue(remote.images.isEmpty())
+        assertTrue(remote.contentHtml.contains("Remote"))
+        val spaced = result.notes.first { it.title == "Spaced" }
+        assertEquals(1, spaced.images.size)
+        assertEquals("Spaced", spaced.images[0].alt)
+        val token = spaced.images[0].token
+        assertNotNull(token)
+        assertTrue(spaced.contentHtml.contains(token!!))
+        assertEquals(1, result.imagesUnresolved)
+    }
+
+    @Test
     fun deepPathRepeatedImageRefsResolve() {
         // R44-F2: a ZIP member at a 300-segment path whose Markdown
         // repeats one image ref 2,000 times — the old shape split and

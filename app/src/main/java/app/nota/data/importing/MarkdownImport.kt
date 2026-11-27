@@ -560,7 +560,12 @@ private fun parseFrontMatter(text: String): FrontMatter {
  *  embed an unrelated local file that happened to share the name
  *  (Codex R43-F2). Both the render path ([InlineImageSink.addImage])
  *  and the reference pre-scan ([collectRefsFrom]) classify with this
- *  one pattern so the two can never disagree.
+ *  one pattern so the two can never disagree. Angle-bracketed
+ *  destinations (`<...>` — the CommonMark form, which may contain
+ *  spaces) are unwrapped by the shared bracket scanner
+ *  ([scanBracketRefs] / [bracketedDestination]) before they reach
+ *  this check, so a remote `<https://...>` is recognised here too
+ *  (Codex R52-F1).
  *
  *  Edge: a relative filename containing a colon before any slash
  *  (a literal `note:1.png`) also matches the scheme shape and is
@@ -688,6 +693,50 @@ private fun closeParenEnd(text: String, p: Int): Int {
 }
 
 /**
+ * Unwraps an angle-bracketed link/image destination starting at
+ * [start] — the CommonMark `<...>` form — returning the inner
+ * destination and the index just past the closing delimiter, or null
+ * when the text there is not a well-formed bracketed destination.
+ * Both spellings are recognised: raw `<`/`>` (the reference
+ * pre-scan, which runs on raw text) and HTML-escaped `&lt;`/`&gt;`
+ * (the render pass, which scans escaped text). The closing
+ * delimiter must appear before the next `)` and before any line
+ * ending, and a nested opener before the closer disqualifies it —
+ * so a malformed `<...` falls back to the plain extraction, which
+ * keeps today's behaviour for it. (Codex R52-F1: without this, the
+ * leading `<` defeated the remote check, so a remote
+ * `<https://...>` fell through to the resolver — and a local
+ * `<my photo.png>` never even scanned, because the space inside
+ * the brackets ended the reference.)
+ */
+private fun bracketedDestination(text: String, start: Int): Pair<String, Int>? {
+    val n = text.length
+    val openLen: Int
+    val close: String
+    when {
+        start < n && text[start] == '<' -> {
+            openLen = 1
+            close = ">"
+        }
+        text.startsWith("&lt;", start) -> {
+            openLen = 4
+            close = "&gt;"
+        }
+        else -> return null
+    }
+    var q = start + openLen
+    while (q < n) {
+        if (text[q] == '\n' || text[q] == '\r' || text[q] == ')') return null
+        if (text.startsWith(close, q)) {
+            return text.substring(start + openLen, q) to (q + close.length)
+        }
+        if (text[q] == '<' || text.startsWith("&lt;", q)) return null
+        q++
+    }
+    return null
+}
+
+/**
  * Bracketed image/link references, scanned in one left-to-right
  * pass (Codex R38-F1). This replaces the three regexes that all
  * contained `([^\]]*)` — the render pass's image and link patterns
@@ -705,7 +754,10 @@ private fun closeParenEnd(text: String, p: Int): Int {
  * an optional leading `!` for images), a label of any chars except
  * `]` (at least [minLabel] of them), `(` immediately after the
  * `]`, optional whitespace, a reference of one or more chars that
- * are neither `)` nor whitespace; when [requireCloseParen] the
+ * are neither `)` nor whitespace — or an angle-bracketed destination
+ * `<...>` (see [bracketedDestination]), which may contain spaces
+ * and is unwrapped here, so the reference the callbacks see never
+ * carries the brackets; when [requireCloseParen] the
  * match then needs the optional `&quot;`-title and a closing `)`
  * (see [closeParenEnd]). The pre-scan passes
  * `requireCloseParen = false`, so it stays deliberately more
@@ -761,13 +813,25 @@ private fun scanBracketRefs(
         p++
         while (p < n && isPatternWhitespace(text[p])) p++
         val refStart = p
-        while (p < n && text[p] != ')' && !isPatternWhitespace(text[p])) p++
-        if (p == refStart) {
-            i = open + 1
-            continue
+        // (Codex R52-F1): an angle-bracketed destination is unwrapped
+        // here, in the one shared scanner, so the render pass and the
+        // pre-scan can never disagree about it — and so a destination
+        // with spaces inside the brackets scans whole instead of
+        // ending at the first space.
+        val bracketed = bracketedDestination(text, refStart)
+        val ref: String
+        if (bracketed != null) {
+            ref = bracketed.first
+            p = bracketed.second
+        } else {
+            while (p < n && text[p] != ')' && !isPatternWhitespace(text[p])) p++
+            if (p == refStart) {
+                i = open + 1
+                continue
+            }
+            ref = text.substring(refStart, p)
         }
         val label = text.substring(labelStart, close)
-        val ref = text.substring(refStart, p)
         if (!requireCloseParen) {
             onMatch(label, ref, open, p)
             i = p

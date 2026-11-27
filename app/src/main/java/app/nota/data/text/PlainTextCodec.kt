@@ -46,11 +46,16 @@ object PlainTextCodec {
                 }
                 j = p + 1
             }
-            // Trim the paragraph with String.trim()'s predicate (<= ' ').
+            // Trim the paragraph exactly as String.trim() does:
+            // Char.isWhitespace() is Unicode-aware — it trims a
+            // non-breaking space, where the old `<= ' '` predicate
+            // did not — so a paragraph of only Unicode whitespace is
+            // dropped by the s < e check below, exactly as the old
+            // split/trim/filter shape dropped it (Codex R52-F2).
             var s = i
             var e = paraEnd
-            while (s < e && normalized[s] <= ' ') s++
-            while (e > s && normalized[e - 1] <= ' ') e--
+            while (s < e && normalized[s].isWhitespace()) s++
+            while (e > s && normalized[e - 1].isWhitespace()) e--
             if (s < e) {
                 out.append("<p>")
                 var ls = s
