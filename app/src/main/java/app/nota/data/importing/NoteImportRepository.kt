@@ -733,7 +733,38 @@ class NoteImportRepository(
             val trimmed = folderName?.trim().orEmpty()
             if (trimmed.isEmpty()) return FolderResolution(null, null)
             val key = trimmed.lowercase()
-            folderByName[key]?.let { return FolderResolution(it, null) }
+            folderByName[key]?.let { cachedId ->
+                // (Codex R48-F1): the cache is seeded once at run
+                // start, and the folder can be deleted after the
+                // seed — the user deleting it from the library UI
+                // while a long import is parsing, or a Merge restore
+                // landing mid-import (a Replace restore wipes
+                // folders, which stales EVERY cached id). Returning
+                // the dead id would violate the note's foreign key
+                // to folders and fail the whole note write.
+                // Revalidate inside this transaction: the row still
+                // exists under the same name → reuse it. The name
+                // must match too, not just the id: a rename after
+                // the seed leaves a live id pointing at a different
+                // name, and the note belongs in a folder of the
+                // imported name.
+                db.folderDao().getById(cachedId)?.let { existing ->
+                    if (existing.name.trim().lowercase() == key) {
+                        return FolderResolution(existing.id, null)
+                    }
+                }
+            }
+            // Re-resolve by name: another writer may have recreated
+            // a same-named folder after the seed (or after deleting
+            // the cached one) — reuse it instead of creating a
+            // second folder that differs only by case. A row found
+            // here already exists, so adopt it into the cache now:
+            // it is persisted by another writer and exists
+            // regardless of this transaction's outcome.
+            db.folderDao().getByNameIgnoreCase(trimmed)?.let { existing ->
+                folderByName[key] = existing.id
+                return FolderResolution(existing.id, null)
+            }
             val now = System.currentTimeMillis()
             val folder = FolderEntity(
                 id = UUID.randomUUID().toString(),
@@ -748,8 +779,29 @@ class NoteImportRepository(
         /** Resolves one tag inside the caller's transaction. */
         suspend fun resolveTag(rawName: String): TagResolution {
             val name = rawName.trim()
-            tagByExact[name]?.let { return TagResolution(it, null) }
-            tagByLower[name.lowercase()]?.let { return TagResolution(it, null) }
+            tagByExact[name]?.let { cached ->
+                // (Codex R48-F1): the same staleness shape as
+                // folders — a tag deleted after the seed leaves a
+                // dead id in the cache, and the note_tags link would
+                // violate its foreign key to tags and fail the whole
+                // note write. Revalidate inside this transaction: a
+                // live row under the same name is reused, and
+                // anything else falls through to the re-read below
+                // (which also reuses a same-named row another writer
+                // recreated). The name must match too: a rename
+                // after the seed leaves a live id pointing at a
+                // different name.
+                db.tagDao().getById(cached.id)?.let { existing ->
+                    if (existing.name == name) return TagResolution(existing, null)
+                }
+            }
+            tagByLower[name.lowercase()]?.let { cached ->
+                db.tagDao().getById(cached.id)?.let { existing ->
+                    if (existing.name.trim().lowercase() == name.lowercase()) {
+                        return TagResolution(existing, null)
+                    }
+                }
+            }
             // (Codex R46-F2): the caches are seeded once at run start,
             // and a Merge restore can add a tag after the seed — the
             // fix-48 recheck covers notes only, not metadata. Re-read

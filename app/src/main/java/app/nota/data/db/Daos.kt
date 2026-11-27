@@ -456,6 +456,17 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE id = :id")
     suspend fun getById(id: String): FolderEntity?
 
+    /** Case-insensitive folder lookup (Codex R48-F1): the importer's
+     *  run cache is seeded once, so a folder deleted after the seed
+     *  leaves a dead id in it — re-resolving by name lets the note
+     *  reuse a same-named folder another writer recreated, instead
+     *  of creating a second folder that differs only by case.
+     *  SQLite NOCASE folds ASCII only; a non-ASCII case-variant can
+     *  still create a second row (never a crash — there is no unique
+     *  index on folder names). */
+    @Query("SELECT * FROM folders WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun getByNameIgnoreCase(name: String): FolderEntity?
+
     @Query("DELETE FROM folders")
     suspend fun deleteAll()
 

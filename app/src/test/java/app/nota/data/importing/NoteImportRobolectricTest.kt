@@ -4947,6 +4947,213 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun deletedFolderIsRecreatedNotFailed() = runBlocking {
+        // (Codex R48-F1): a folder deleted after the seed leaves a
+        // dead id in the run cache — returning it would violate the
+        // note's foreign key to folders and fail the whole note
+        // write. The cached id is revalidated inside the write
+        // transaction, so the folder is recreated and the note
+        // imports. Driven directly (the R45-F1 test shape): the
+        // folder lands before meta.seed() and is deleted after it.
+        val stack = newStack()
+        val folder = FolderEntity(
+            id = "folder-dead",
+            name = "Archive",
+            createdAt = 0L,
+            updatedAt = 0L,
+        )
+        stack.db.folderDao().upsert(folder)
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.db.folderDao().delete(folder)
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Filed",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = "Archive",
+                images = emptyList(),
+                sourceName = "filed.md",
+            ),
+            meta,
+        )
+        val folders = stack.db.folderDao().getAll()
+        assertEquals(1, folders.size)
+        assertEquals("Archive", folders.single().name)
+        assertTrue(folders.single().id != "folder-dead")
+        val note = stack.db.noteDao().getAll().single()
+        assertEquals(folders.single().id, note.folderId)
+    }
+
+    @Test
+    fun untouchedFolderStillReusesCachedId() = runBlocking {
+        // (Codex R48-F1) control: a folder that was NOT deleted
+        // still reuses the cached id — the revalidation must not
+        // create a duplicate folder row.
+        val stack = newStack()
+        stack.db.folderDao().upsert(
+            FolderEntity(id = "folder-keep", name = "Archive", createdAt = 0L, updatedAt = 0L),
+        )
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Filed",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = "Archive",
+                images = emptyList(),
+                sourceName = "filed.md",
+            ),
+            meta,
+        )
+        val folders = stack.db.folderDao().getAll()
+        assertEquals(1, folders.size)
+        assertEquals("folder-keep", folders.single().id)
+        val note = stack.db.noteDao().getAll().single()
+        assertEquals("folder-keep", note.folderId)
+    }
+
+    @Test
+    fun recreatedFolderIsReusedNotDuplicated() = runBlocking {
+        // (Codex R48-F1): the cached folder is deleted after the
+        // seed, but another writer recreates a same-named folder
+        // before the note is written — the note links to the
+        // recreated row instead of creating a second folder. The
+        // recreated spelling wins (first spelling wins, Codex
+        // R33-F1's spirit).
+        val stack = newStack()
+        stack.db.folderDao().upsert(
+            FolderEntity(id = "folder-old", name = "Archive", createdAt = 0L, updatedAt = 0L),
+        )
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.db.folderDao().delete(
+            FolderEntity(id = "folder-old", name = "Archive", createdAt = 0L, updatedAt = 0L),
+        )
+        stack.db.folderDao().upsert(
+            FolderEntity(id = "folder-new", name = "archive", createdAt = 1L, updatedAt = 1L),
+        )
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Filed",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = "Archive",
+                images = emptyList(),
+                sourceName = "filed.md",
+            ),
+            meta,
+        )
+        val folders = stack.db.folderDao().getAll()
+        assertEquals(1, folders.size)
+        assertEquals("folder-new", folders.single().id)
+        assertEquals("archive", folders.single().name)
+        val note = stack.db.noteDao().getAll().single()
+        assertEquals("folder-new", note.folderId)
+    }
+
+    @Test
+    fun deletedTagIsRecreatedNotFailed() = runBlocking {
+        // (Codex R48-F1), tag half: a tag deleted after the seed
+        // leaves a dead id in the run cache — linking it would
+        // violate the note_tags foreign key to tags and fail the
+        // whole note write. The cached id is revalidated inside
+        // the write transaction, so the tag is recreated and the
+        // note imports with it linked.
+        val stack = newStack()
+        val tag = TagEntity(id = "tag-dead", name = "Race", createdAt = 1_700_000_000_000L)
+        stack.db.tagDao().upsert(tag)
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.db.tagDao().delete(tag)
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Tagged",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = listOf("Race"),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "tagged.md",
+            ),
+            meta,
+        )
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(1, tags.size)
+        assertEquals("Race", tags.single().name)
+        assertTrue(tags.single().id != "tag-dead")
+        val noteId = stack.db.noteDao().getAll().single().id
+        assertEquals(listOf("Race"), stack.db.tagDao().getTagNamesForNote(noteId))
+    }
+
+    @Test
+    fun recreatedTagIsReusedNotDuplicated() = runBlocking {
+        // (Codex R48-F1), tag half: the cached tag is deleted
+        // after the seed, but another writer recreates a
+        // same-named tag before the note is written — the note
+        // links to the recreated row instead of creating a
+        // second tag.
+        val stack = newStack()
+        stack.db.tagDao().upsert(
+            TagEntity(id = "tag-old", name = "Race", createdAt = 1_700_000_000_000L),
+        )
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.db.tagDao().delete(
+            TagEntity(id = "tag-old", name = "Race", createdAt = 1_700_000_000_000L),
+        )
+        stack.db.tagDao().upsert(
+            TagEntity(id = "tag-new", name = "Race", createdAt = 1_700_000_000_001L),
+        )
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Tagged",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = listOf("Race"),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "tagged.md",
+            ),
+            meta,
+        )
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(1, tags.size)
+        assertEquals("tag-new", tags.single().id)
+        val noteId = stack.db.noteDao().getAll().single().id
+        assertEquals(listOf("Race"), stack.db.tagDao().getTagNamesForNote(noteId))
+    }
+
+    @Test
     fun concurrentDatelessTwinIsDuplicate() = runBlocking {
         // (Codex R45-F1), unknown-date half: a dateless twin in
         // the same folder, landing mid-import after the seed, is
