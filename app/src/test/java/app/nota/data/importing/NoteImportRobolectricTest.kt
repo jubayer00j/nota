@@ -16,6 +16,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
@@ -458,27 +459,80 @@ class NoteImportRobolectricTest {
     /** A ZIP whose [corruptName] entry carries a deliberately wrong
      *  CRC (Codex R43-F1): the header is valid, so the file passes
      *  the magic check, but ZipInputStream throws ZipException when
-     *  the entry's data is read to the end. A STORED entry's CRC is
-     *  written as given — setting it to 0 forges the mismatch. */
+     *  the entry's data is read to the end. The bytes are packed by
+     *  hand (the zipWithDuplicateEntries shape) because
+     *  ZipOutputStream verifies a STORED entry's CRC on closeEntry
+     *  and refuses to write a forged one — the CRC here is written
+     *  as 0 in both the local header and the central directory. */
     private fun corruptCrcZipOf(
         entries: Map<String, String>,
         corruptName: String,
     ): File {
         val file = File.createTempFile("import-corrupt", ".zip")
-        ZipOutputStream(file.outputStream().buffered()).use { zip ->
+        val central = ByteArrayOutputStream()
+        var offset = 0
+        fun le16(out: OutputStream, v: Int) {
+            out.write(v and 0xFF)
+            out.write((v ushr 8) and 0xFF)
+        }
+        fun le32(out: OutputStream, v: Long) {
+            out.write((v and 0xFF).toInt())
+            out.write(((v ushr 8) and 0xFF).toInt())
+            out.write(((v ushr 16) and 0xFF).toInt())
+            out.write(((v ushr 24) and 0xFF).toInt())
+        }
+        // DOS date/time for 2020-06-15 12:00:00.
+        val dosTime = 0x6000
+        val dosDate = 0x50CF
+        file.outputStream().buffered().use { out ->
             for ((name, body) in entries) {
-                val bytes = body.toByteArray(Charsets.UTF_8)
-                val entry = ZipEntry(name)
-                if (name == corruptName) {
-                    entry.method = ZipEntry.STORED
-                    entry.size = bytes.size.toLong()
-                    entry.compressedSize = bytes.size.toLong()
-                    entry.crc = 0L // deliberately wrong
-                }
-                zip.putNextEntry(entry)
-                zip.write(bytes)
-                zip.closeEntry()
+                val data = body.toByteArray(Charsets.UTF_8)
+                val nameBytes = name.toByteArray(Charsets.UTF_8)
+                val crc = if (name == corruptName) 0L else CRC32().apply { update(data) }.value
+                val headerOffset = offset
+                le32(out, 0x04034b50L)
+                le16(out, 20) // version needed
+                le16(out, 0) // flags
+                le16(out, 0) // method: STORED
+                le16(out, dosTime)
+                le16(out, dosDate)
+                le32(out, crc)
+                le32(out, data.size.toLong())
+                le32(out, data.size.toLong())
+                le16(out, nameBytes.size)
+                le16(out, 0) // extra length
+                out.write(nameBytes)
+                out.write(data)
+                offset += 30 + nameBytes.size + data.size
+                le32(central, 0x02014b50L)
+                le16(central, 20) // version made by
+                le16(central, 20) // version needed
+                le16(central, 0)
+                le16(central, 0)
+                le16(central, dosTime)
+                le16(central, dosDate)
+                le32(central, crc)
+                le32(central, data.size.toLong())
+                le32(central, data.size.toLong())
+                le16(central, nameBytes.size)
+                le16(central, 0)
+                le16(central, 0)
+                le16(central, 0)
+                le16(central, 0)
+                le32(central, 0)
+                le32(central, headerOffset.toLong())
+                central.write(nameBytes)
             }
+            val centralOffset = offset
+            out.write(central.toByteArray())
+            le32(out, 0x06054b50L)
+            le16(out, 0)
+            le16(out, 0)
+            le16(out, entries.size)
+            le16(out, entries.size)
+            le32(out, central.size().toLong())
+            le32(out, centralOffset.toLong())
+            le16(out, 0)
         }
         return file
     }
