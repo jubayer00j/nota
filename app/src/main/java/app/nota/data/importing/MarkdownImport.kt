@@ -2697,7 +2697,11 @@ object MarkdownImporter {
         } catch (e: ImportZipException) {
             // A quota trip aborts the whole archive: nothing partial
             // is applied from it (same contract as the backup reader).
-            result.notes.clear()
+            // (Codex R50-F1): clearing the notes alone left the
+            // retained-text count behind, and the merge absorbs it —
+            // abandon() resets both, so the archive contributes
+            // nothing to the run's aggregate budget.
+            result.abandon()
             result.skippedFiles += SkippedImportFile("ZIP archive", e.message ?: "That ZIP couldn't be read.")
             return result
         } catch (e: java.io.IOException) {
@@ -2711,8 +2715,9 @@ object MarkdownImporter {
             // but it is reported as a damaged file, not a quota trip.
             // ImportZipException is not an IOException, so the two
             // catches cannot overlap: a quota trip still takes the
-            // branch above.
-            result.notes.clear()
+            // branch above. (Codex R50-F1): abandon() resets the
+            // retained-text count with the notes, as above.
+            result.abandon()
             result.skippedFiles += SkippedImportFile("ZIP archive", "That ZIP file is damaged and couldn't be read.")
             return result
         }

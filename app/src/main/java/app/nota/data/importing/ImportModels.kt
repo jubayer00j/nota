@@ -426,6 +426,28 @@ class ImportParseResult {
         return true
     }
 
+    /**
+     * Abandons everything this parse retained: the notes go, and the
+     * retained-text count goes with them (Codex R50-F1). The quota and
+     * read-error catches in the parsers clear a damaged or over-quota
+     * archive instead of applying it partially — but `notes.clear()`
+     * alone left `retainedTextChars` behind, and `absorb` adds that
+     * count to the merged total, so the abandoned archive's text kept
+     * consuming the run's aggregate budget and later legal files were
+     * refused as over-budget even though the archive contributed no
+     * notes. An abandoned archive contributes nothing: no notes, no
+     * retained text. The per-file skip records stay — they are the
+     * honest record of individually refused members — and the report
+     * counters (`attachmentsSkipped`, `imagesUnresolved`,
+     * `coloredNotes`) stay too: they describe references the parse
+     * encountered, and no budget or later-file decision reads them;
+     * only `retainedTextChars` feeds a budget.
+     */
+    fun abandon() {
+        notes.clear()
+        retainedTextChars = 0L
+    }
+
     /** Drops tail notes past the aggregate text budget into
      *  [skippedFiles] — the merge-time counterpart of [addNote],
      *  for runs assembled from several already-budgeted sources

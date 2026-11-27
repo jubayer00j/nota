@@ -771,6 +771,44 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun abandonResetsRetainedTextChars() {
+        // (Codex R50-F1): the quota/read-error catches used to clear
+        // the notes but leave retainedTextChars behind, so an
+        // abandoned archive kept consuming the run's aggregate
+        // budget and later legal files were refused as over-budget
+        // even though the archive contributed no notes. abandon()
+        // resets both — and a merged run absorbs nothing from it.
+        // This is the regression net for the reset: the end-to-end
+        // phantom cannot be driven through parseImportZip today
+        // (a corrupt entry throws in the inventory walk, before any
+        // note converts — verified on the JVM), so the counter reset
+        // is pinned here, at the method that performs it.
+        val result = ImportParseResult()
+        repeat(2) { i ->
+            assertTrue(
+                result.addNote(
+                    ImportedNote(
+                        title = "T$i", contentHtml = "<p>body $i</p>",
+                        createdAt = 1_700_000_000_000L + i, updatedAt = 1_700_000_000_000L,
+                        pinned = false, archived = false, trashedAt = null,
+                        tagNames = emptyList(), folderName = null, images = emptyList(),
+                        sourceName = "t-$i.md",
+                    ),
+                ),
+            )
+        }
+        // Title 2 + body 13, twice.
+        assertEquals(30L, result.retainedTextChars)
+        result.abandon()
+        assertTrue(result.notes.isEmpty())
+        assertEquals(0L, result.retainedTextChars)
+        val merged = ImportParseResult()
+        merged.absorb(result)
+        assertTrue(merged.notes.isEmpty())
+        assertEquals(0L, merged.retainedTextChars)
+    }
+
+    @Test
     fun aggregateTextBudgetCountsTitlesInMarkdownFiles() {
         // R19-F1, parse level: twenty-one files with ~1 MB
         // front-matter titles and one-character bodies. Eighteen

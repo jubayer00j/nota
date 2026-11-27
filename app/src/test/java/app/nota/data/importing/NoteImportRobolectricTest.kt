@@ -639,6 +639,93 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun abandonedArchiveContributesNoRetainedText() {
+        // (Codex R50-F1, parse level): a damaged archive is one
+        // skipped file and contributes no notes — and no retained
+        // text either. The corrupt entry throws in the inventory
+        // walk, before any note converts, so the counter is zero
+        // here either way; the counter-zero assertion pins the
+        // contract the catches must uphold whenever they fire (the
+        // reset itself is pinned by abandonResetsRetainedTextChars
+        // in MarkdownImportTest).
+        val result = MarkdownImporter.parseImportZip(
+            corruptCrcZipOf(
+                linkedMapOf(
+                    "notes/a.md" to "# A\n\nbody a",
+                    "notes/b.md" to "# B\n\nbody b",
+                ),
+                corruptName = "notes/b.md",
+            ),
+            stagingDir(),
+        )
+        assertTrue(result.notes.isEmpty())
+        assertEquals(0L, result.retainedTextChars)
+        assertEquals(
+            listOf(SkippedImportFile("ZIP archive", "That ZIP file is damaged and couldn't be read.")),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun largeMembersAccumulateRetainedText() {
+        // (Codex R50-F1) control for the test below: seventeen
+        // ~930K-char members convert and retain ~15.8M chars — the
+        // phantom a damaged archive would leave behind if its notes
+        // were cleared without resetting the counter. Each member is
+        // one paragraph, so the per-note estimate stays under the
+        // 1M-byte cap.
+        val entries = linkedMapOf<String, String>()
+        repeat(17) { i ->
+            entries["notes/m%02d.md".format(i)] = "# M%02d\n\n".format(i) + "a".repeat(930_000)
+        }
+        val result = MarkdownImporter.parseImportZip(zipOf(entries), stagingDir())
+        assertEquals(17, result.notes.size)
+        // Title 3 + body ("<p>" + 930,000 + "</p>") 930,007, per member.
+        assertEquals(17L * 930_010L, result.retainedTextChars)
+    }
+
+    @Test
+    fun damagedArchiveDoesNotStarveLaterLooseFile() = runBlocking {
+        // (Codex R50-F1): a damaged archive whose good members would
+        // have retained ~15.8M chars must not starve a later loose
+        // file. The loose file is 990K chars: it fits the 16M-char
+        // budget only if the abandoned archive contributes no
+        // retained text — with the phantom it would be refused as
+        // over-budget. Honest note: the corrupt entry throws in the
+        // inventory walk, before any note converts (verified on the
+        // JVM: ZipInputStream verifies the CRC when the entry is
+        // drained), so the phantom cannot form through this path
+        // today and this test passes with or without the reset — the
+        // reset itself is pinned by abandonResetsRetainedTextChars.
+        // This test pins the end-to-end behaviour the finding
+        // describes, and would catch the phantom if a throw ever
+        // fired after accumulation.
+        val stack = newStack()
+        val dir = stagingDir()
+        val entries = linkedMapOf<String, String>()
+        repeat(17) { i ->
+            entries["notes/m%02d.md".format(i)] = "# M%02d\n\n".format(i) + "a".repeat(930_000)
+        }
+        val corrupt = corruptCrcZipOf(
+            entries + ("notes/bad.md" to "# Bad\n\nbody"),
+            corruptName = "notes/bad.md",
+        )
+        val later = File(dir, "later.md").apply { writeText("a".repeat(990_000)) }
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(
+                StagedImportFile("bad.zip", corrupt, 1_700_000_000_000L),
+                StagedImportFile("later.md", later, 1_700_000_000_000L),
+            ),
+        )
+        assertEquals(1, outcome.report.imported)
+        assertEquals(1, stack.db.noteDao().getAll().size)
+        assertEquals(
+            listOf(SkippedImportFile("ZIP archive", "That ZIP file is damaged and couldn't be read.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
     fun validEmptyZipImportsAsZeroNotes() = runBlocking {
         // (Codex R46-F1) control: a genuinely valid empty archive —
         // a complete 22-byte record, no entries — still imports as a
