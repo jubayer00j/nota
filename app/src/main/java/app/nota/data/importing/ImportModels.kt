@@ -40,6 +40,28 @@ object ImportCaps {
     const val NOTE_TOO_LARGE_REASON =
         "That note is too large to import (over 1 MB of text)."
 
+    /** Largest number of lines one imported note may hold — NOT a
+     *  1.x cap: 1.x converts by splitting the source into a line
+     *  list, and Nota's converter does the same: renderMarkdownBlocks
+     *  materialises one list entry per line plus two per-line
+     *  IntArrays, and the image pre-scan splits lines the same way
+     *  (proseSegments). The per-note byte estimator bounds the source at ~1M bytes, so at most ~1M
+     *  lines can reach the renderer — one entry per blank line, and
+     *  blank lines cost almost no HTML, so the estimator admits
+     *  them. ~1M entries is tens of MiB of list + arrays before any
+     *  note is saved, too much on a 1 GB device (Codex R44-F1).
+     *  250,000 lines sits far above any real note (a 20,000-item
+     *  checklist is the largest stress case in the suite) and bounds
+     *  the renderer's working set to ~15 MiB. A note past the cap is
+     *  refused with its own reason, never silently dropped — the
+     *  estimator enforces it before conversion and before the
+     *  pre-scan, so neither split ever sees an over-cap file. Lines
+     *  are counted the way the converter splits them: \n breaks plus
+     *  lone CRs (the converter normalises \r\n? to \n). */
+    const val MAX_LINES_PER_NOTE = 250_000
+    const val TOO_MANY_LINES_REASON =
+        "That note has too many lines to import safely."
+
     /** Largest single raw Keep entry the parser will read, in decoded
      *  characters — NOT the aggregate budget: a Keep JSON carries field
      *  names, timestamps and attachment metadata that are never

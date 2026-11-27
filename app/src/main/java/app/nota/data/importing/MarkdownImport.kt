@@ -60,8 +60,21 @@ internal fun importMimeFromName(name: String): String? {
 }
 
 internal fun importBaseName(path: String): String {
-    val parts = path.split('/').filter { it.isNotEmpty() }
-    return parts.lastOrNull() ?: path
+    // (Codex R44-F2): was split('/').filter { it.isNotEmpty() }
+    // .lastOrNull() — a full split of the whole path on every call,
+    // so a 64 KiB slash-heavy target paid ~32k segments per resolve,
+    // in the same per-occurrence shape as resolveRef's parent split.
+    // The basename is the last non-empty '/'-segment, found by
+    // scanning back from the end — no allocation but the returned
+    // substring. Equivalent to the old shape on every input: trailing
+    // slashes are skipped, a path of only slashes (or empty) returns
+    // itself, and backslashes are not separators (callers replace
+    // them first where they matter).
+    var end = path.length
+    while (end > 0 && path[end - 1] == '/') end--
+    if (end == 0) return path
+    val start = path.lastIndexOf('/', end - 1) + 1
+    return path.substring(start, end)
 }
 
 /** A ZIP member / picked file that parses as a Markdown or text note. */
@@ -185,11 +198,53 @@ private fun percentDecode(value: String): String {
     return bytes.toByteArray().toString(Charsets.UTF_8)
 }
 
-private fun resolveRef(fromPath: String, ref: String): String {
+/** The normalised parent directory of [fromPath], computed once per
+ *  member (Codex R44-F2): the old resolveRef used to split and
+ *  re-join the whole parent path on every call, so a deep path ×
+ *  thousands of repeated refs paid the full split/join/normalise per
+ *  occurrence.
+ *  Exactly the parent the old shape used, normalised once: the raw
+ *  dir is fromPath up to its last '/', and normalising it first
+ *  changes nothing downstream — normalise processes segments
+ *  left-to-right with a stack, so normalising the parent and then
+ *  the joined path gives the same result as normalising the joined
+ *  path directly (a ".." in the parent pops the same segment either
+ *  way, and one past the root is dropped either way). A fromPath
+ *  with no '/' (or only backslashes, which split('/') does not see)
+ *  has an empty parent, exactly as before. */
+internal fun normalisedParentDir(fromPath: String): String {
+    val dir = fromPath.split('/').dropLast(1).joinToString("/")
+    return normaliseImportPath(dir)
+}
+
+/** Whether [decoded] needs no normalisation against its parent: no
+ *  backslashes, and every '/'-separated segment non-empty and
+ *  neither "." nor "..". Such a ref appends to an already-normalised
+ *  parent unchanged — normalise would return the joined string as
+ *  it stands. Anything else takes the slow path (full normalise of
+ *  the joined string), which stays exactly correct; clean refs are
+ *  the overwhelming case, exotic ones are rare. */
+private fun isCleanRef(decoded: String): Boolean {
+    if ('\\' in decoded) return false
+    for (segment in decoded.split('/')) {
+        if (segment.isEmpty() || segment == "." || segment == "..") return false
+    }
+    return true
+}
+
+/** Resolves [ref] against a precomputed normalised parent dir — the
+ *  per-occurrence half of the old resolveRef, with the parent work
+ *  hoisted out (Codex R44-F2). The fast path (clean ref, non-empty
+ *  parent) is a single concatenation; the slow path runs the existing
+ *  normalise over the joined string, so "." / ".." / "//" /
+ *  backslash refs resolve exactly as before. An absolute ref never
+ *  touches the parent; an empty parent normalises the ref alone. */
+internal fun resolveRefWithParent(parentDir: String, ref: String): String {
     val decoded = percentDecode(ref)
     if (decoded.startsWith("/")) return normaliseImportPath(decoded)
-    val dir = fromPath.split('/').dropLast(1).joinToString("/")
-    return normaliseImportPath(if (dir.isNotEmpty()) "$dir/$decoded" else decoded)
+    if (parentDir.isEmpty()) return normaliseImportPath(decoded)
+    if (isCleanRef(decoded)) return "$parentDir/$decoded"
+    return normaliseImportPath("$parentDir/$decoded")
 }
 
 class ResolvedImportImage(
@@ -288,9 +343,26 @@ fun createImportImageResolver(
         val base = importBaseName(target).lowercase()
         return byBasename[base] ?: emptyList()
     }
+    // (Codex R44-F2): the parent directory, computed once per member
+    // rather than once per reference — resolve/isAmbiguous are called
+    // per image occurrence, and the parent split used to run on every
+    // one. A single-entry memo keyed by fromPath is enough: the
+    // resolver is used sequentially (one member converts at a time,
+    // rendering is synchronous, the combiner delegates in order), so
+    // consecutive calls for one member hit the memo and a new member
+    // recomputes once. Instance-local, never shared across parses.
+    var cachedFromPath: String? = null
+    var cachedParentDir: String = ""
+    fun parentDirFor(fromPath: String): String {
+        if (fromPath != cachedFromPath) {
+            cachedFromPath = fromPath
+            cachedParentDir = normalisedParentDir(fromPath)
+        }
+        return cachedParentDir
+    }
     return object : ImportImageResolver {
         override fun resolve(fromPath: String, ref: String): ResolvedImportImage? {
-            val target = resolveRef(fromPath, ref)
+            val target = resolveRefWithParent(parentDirFor(fromPath), ref)
             if (isDuplicatePath(target)) return null
             val direct = directMatches(target)
             if (direct != null) {
@@ -302,7 +374,7 @@ fun createImportImageResolver(
         }
 
         override fun isAmbiguous(fromPath: String, ref: String): Boolean {
-            val target = resolveRef(fromPath, ref)
+            val target = resolveRefWithParent(parentDirFor(fromPath), ref)
             if (isDuplicatePath(target)) return true
             val direct = directMatches(target)
             if (direct != null) return direct.size > 1
@@ -820,27 +892,31 @@ private fun collectImageRefs(
     text: String,
     collector: ReferencedImageCollector,
 ) {
+    // (Codex R44-F2): the parent is computed once for the whole
+    // member, not once per reference — every prose segment of this
+    // member shares it.
+    val parentDir = normalisedParentDir(fromPath)
     for (segment in proseSegments(text)) {
         // Carve code spans out first (renderInline's shape): the
         // prose between spans is scanned, the spans themselves
         // never are.
         var lastIndex = 0
         for (span in CODE_SPAN.findAll(segment)) {
-            collectRefsFrom(segment.substring(lastIndex, span.range.first), fromPath, collector)
+            collectRefsFrom(segment.substring(lastIndex, span.range.first), parentDir, collector)
             lastIndex = span.range.last + 1
         }
-        collectRefsFrom(segment.substring(lastIndex), fromPath, collector)
+        collectRefsFrom(segment.substring(lastIndex), parentDir, collector)
     }
 }
 
 private fun collectRefsFrom(
     text: String,
-    fromPath: String,
+    parentDir: String,
     collector: ReferencedImageCollector,
 ) {
     scanBracketRefs(text, requireBang = true, minLabel = 0, requireCloseParen = false) { _, ref, _, _ ->
         if (REMOTE_IMAGE_REF.containsMatchIn(ref)) return@scanBracketRefs
-        val target = resolveRef(fromPath, ref)
+        val target = resolveRefWithParent(parentDir, ref)
         if (target.isEmpty()) return@scanBracketRefs
         collector.add(target)
     }
@@ -1441,6 +1517,31 @@ object MarkdownImporter {
         return result
     }
 
+    /** Whether [text] has more converter lines than
+     *  [ImportCaps.MAX_LINES_PER_NOTE] — the same count the estimator
+     *  trips on: \n breaks plus lone CRs (the converter normalises
+     *  \r\n? to \n, so a CR before a \n is one break, not two), plus
+     *  one for the final line. Range-based with an early exit, so it
+     *  costs nothing on an ordinary file; only called on the refusal
+     *  path, to pick the honest reason between a byte trip and a
+     *  line trip. */
+    internal fun exceedsLineCap(text: String): Boolean {
+        var lines = 1L
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            if (c == '\n') {
+                lines++
+                if (lines > ImportCaps.MAX_LINES_PER_NOTE) return true
+            } else if (c == '\r' && (i + 1 >= text.length || text[i + 1] != '\n')) {
+                lines++
+                if (lines > ImportCaps.MAX_LINES_PER_NOTE) return true
+            }
+            i++
+        }
+        return lines > ImportCaps.MAX_LINES_PER_NOTE
+    }
+
     /**
      * Upper bound on the UTF-8 bytes of the note [markdownFileToImportedNote]
      * would build from [file] (title + contentHtml), computed from the
@@ -1488,6 +1589,18 @@ object MarkdownImporter {
      *   Front matter is not body text (mirrors [parseFrontMatter];
      *   .txt files never have it), so its lines contribute nothing
      *   but the title.
+     *
+     * Line count (Codex R44-F1): the converter and the pre-scan both
+     * split the source into a line list, so a blank-line-heavy file
+     * the byte bound would admit (blank lines cost almost no HTML)
+     * must not reach them with ~1M entries. Lines are counted in the
+     * walk below — \n breaks plus lone CRs, the way the converter
+     * splits them — and past [ImportCaps.MAX_LINES_PER_NOTE] the
+     * estimator returns [ImportCaps.MAX_NOTE_CONTENT_BYTES] + 1: a
+     * refusal signal, not a byte estimate, so both call sites refuse
+     * with the per-note reason before any conversion or pre-scan
+     * work. The early return also bounds the estimator's own walk on
+     * a pathological file.
      */
     internal fun estimateConvertedNoteBytes(file: MarkdownFileInput): Long {
         val text = file.text
@@ -1824,6 +1937,11 @@ object MarkdownImporter {
 
         var idx = 0
         var lineNo = 0
+        // (Codex R44-F1): lone CRs seen so far — a lone CR is a line
+        // break too (the converter normalises \r\n? to \n), so the
+        // line total is lineNo + loneCr + 1. Counted in the per-char
+        // loop below, next to the byte counts.
+        var loneCr = 0
         while (idx <= text.length) {
             val end = text.indexOf('\n', idx).let { if (it < 0) text.length else it }
             val inFrontMatter = lineNo <= fmEndLine
@@ -1833,6 +1951,14 @@ object MarkdownImporter {
             var i = idx
             while (i < end) {
                 val c = text[i]
+                // (Codex R44-F1): a CR immediately before this line's
+                // \n (i + 1 == end, and a \n follows) is part of that
+                // break, not a second one; a CR at the very end of
+                // the text (end == text.length) has nothing after it,
+                // so it is lone. Any other CR in the line is lone —
+                // the next char cannot be a \n, since end is the
+                // first one.
+                if (c == '\r' && (i + 1 < end || end == text.length)) loneCr++
                 when (c) {
                     '&' -> {
                         lineUtf8 += 1
@@ -1930,6 +2056,18 @@ object MarkdownImporter {
                 }
             }
 
+            // (Codex R44-F1): the line cap — lineNo counts the
+            // \n-terminated lines before this one, loneCr the lone
+            // CRs seen so far, and the +1 is this line. The final
+            // total can only grow from here (more breaks ahead), so
+            // tripping now is exact, and it also stops the estimator's
+            // own walk early on a pathological file. The return is
+            // the refusal signal documented on the estimator: both
+            // call sites refuse with the per-note reason.
+            if (lineNo + loneCr + 1 > ImportCaps.MAX_LINES_PER_NOTE) {
+                return ImportCaps.MAX_NOTE_CONTENT_BYTES + 1
+            }
+
             if (end >= text.length) break
             idx = end + 1
             lineNo++
@@ -2013,7 +2151,11 @@ object MarkdownImporter {
         if (estimateConvertedNoteBytes(file) > ImportCaps.MAX_NOTE_CONTENT_BYTES) {
             result.skippedFiles += SkippedImportFile(
                 file.name,
-                ImportCaps.NOTE_TOO_LARGE_REASON,
+                // (Codex R44-F1): the estimator returns the same
+                // over-bound signal for a line-cap trip — the line
+                // count, not the byte count, is what refused it.
+                if (exceedsLineCap(file.text)) ImportCaps.TOO_MANY_LINES_REASON
+                else ImportCaps.NOTE_TOO_LARGE_REASON,
             )
             return
         }

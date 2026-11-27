@@ -664,6 +664,59 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun deepPathRepeatedImageRefsResolve() {
+        // R44-F2: a ZIP member at a 300-segment path whose Markdown
+        // repeats one image ref 2,000 times — the old shape split and
+        // re-joined the whole parent path (and normalised it) on
+        // every occurrence in both the pre-scan and the render. The
+        // parent is now computed once per member: the note imports
+        // with the single image embedded at every occurrence.
+        val deepDir = (0 until 300).joinToString("/") { "d$it" }
+        val body = "# Deep\n\n" + "![p](pic.png)\n\n".repeat(2000)
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf("$deepDir/note.md" to body),
+                mapOf("$deepDir/pic.png" to pngBytes),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, result.notes.size)
+        val note = result.notes[0]
+        assertEquals(1, note.images.size)
+        assertEquals(2000, note.images[0].occurrences.size)
+        assertEquals(0, result.imagesUnresolved)
+    }
+
+    @Test
+    fun dotdotAndAbsoluteRefsResolveUnderDeepParent() {
+        // R44-F2: the parent precompute + fast/slow path must resolve
+        // exactly like the old per-call normalise — dotdot climbs,
+        // absolute refs, dot segments and a climb past the root all
+        // land on the same targets.
+        val result = MarkdownImporter.parseImportZip(
+            zipOf(
+                linkedMapOf(
+                    "a/b/c/note.md" to "# Note\n\n![up](../shared.png)\n\n![abs](/top.png)\n\n![dot](./sub.png)\n\n![esc](../../../escape.png)",
+                ),
+                mapOf(
+                    "a/b/shared.png" to pngBytes,
+                    "top.png" to pngBytes,
+                    "a/b/c/sub.png" to pngBytes,
+                    "escape.png" to pngBytes,
+                ),
+            ),
+            stagingDir(),
+        )
+        assertEquals(1, result.notes.size)
+        val note = result.notes[0]
+        assertEquals(
+            setOf("shared.png", "top.png", "sub.png", "escape.png"),
+            note.images.map { it.name }.toSet(),
+        )
+        assertEquals(0, result.imagesUnresolved)
+    }
+
+    @Test
     fun markdownSelectionReportsUnrecognisedFiles() = runBlocking {
         val stack = newStack()
         val dir = stagingDir()

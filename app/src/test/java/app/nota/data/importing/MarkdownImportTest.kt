@@ -1038,6 +1038,159 @@ class MarkdownImportTest {
     }
 
     @Test
+    fun blankLineHeavyFileIsRefusedWithLineReason() {
+        // R44-F1: a file of 300,000 blank lines is 300 KB of source —
+        // the byte estimator would admit it (blank lines produce
+        // almost no HTML) — but the converter would materialise one
+        // list entry per line. The line cap refuses it before any
+        // conversion, with its own reason.
+        val text = "\n".repeat(300_000)
+        val input = MarkdownFileInput("blanks.md", "blanks.md", text, 1_700_000_000_000L)
+        assertTrue(
+            MarkdownImporter.estimateConvertedNoteBytes(input) >
+                ImportCaps.MAX_NOTE_CONTENT_BYTES,
+        )
+        val result = MarkdownImporter.parseMarkdownFile(input, null)
+        assertEquals(0, result.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("blanks.md", ImportCaps.TOO_MANY_LINES_REASON)),
+            result.skippedFiles,
+        )
+    }
+
+    @Test
+    fun blankLineHeavyFileUnderCapStillImports() {
+        // R44-F1 control: 100,000 blank lines are under the cap, so
+        // the file still imports and the real content after the
+        // blanks survives.
+        val result = parseOne("blanks.md", "\n".repeat(100_000) + "# Title\n\nReal content")
+        assertEquals(1, result.notes.size)
+        assertEquals("Title", result.notes[0].title)
+        assertTrue(result.notes[0].contentHtml.contains("Real content"))
+        assertTrue(result.skippedFiles.isEmpty())
+    }
+
+    @Test
+    fun lineCapBoundaryIsExact() {
+        // R44-F1: the cap counts converter lines — \n breaks plus
+        // one for the final line — so exactly 250,000 lines import
+        // and 250,001 are refused.
+        val atCap = MarkdownFileInput(
+            "at-cap.md", "at-cap.md", "\n".repeat(249_999) + "x", 1_700_000_000_000L,
+        )
+        val atCapResult = MarkdownImporter.parseMarkdownFile(atCap, null)
+        assertEquals(1, atCapResult.notes.size)
+        assertEquals("<p>x</p>", atCapResult.notes[0].contentHtml)
+        val overCap = MarkdownFileInput(
+            "over-cap.md", "over-cap.md", "\n".repeat(250_000) + "x", 1_700_000_000_000L,
+        )
+        val overCapResult = MarkdownImporter.parseMarkdownFile(overCap, null)
+        assertEquals(0, overCapResult.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("over-cap.md", ImportCaps.TOO_MANY_LINES_REASON)),
+            overCapResult.skippedFiles,
+        )
+    }
+
+    @Test
+    fun lineCapCountsLoneCarriageReturnsAndCrlf() {
+        // R44-F1: the converter normalises \r\n? to \n, so a lone CR
+        // is a line break and a CRLF is one break, not two — the cap
+        // counts them the same way.
+        val loneCr = MarkdownFileInput(
+            "crs.md", "crs.md", "x\r".repeat(250_000), 1_700_000_000_000L,
+        )
+        val loneCrResult = MarkdownImporter.parseMarkdownFile(loneCr, null)
+        assertEquals(0, loneCrResult.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("crs.md", ImportCaps.TOO_MANY_LINES_REASON)),
+            loneCrResult.skippedFiles,
+        )
+        val crlf = MarkdownFileInput(
+            "crlf.md", "crlf.md", "\r\n".repeat(250_000) + "x", 1_700_000_000_000L,
+        )
+        val crlfResult = MarkdownImporter.parseMarkdownFile(crlf, null)
+        assertEquals(0, crlfResult.notes.size)
+        assertEquals(
+            listOf(SkippedImportFile("crlf.md", ImportCaps.TOO_MANY_LINES_REASON)),
+            crlfResult.skippedFiles,
+        )
+        // And the admitted side: 249,999 lone CRs are 250,000 lines.
+        val underCr = MarkdownFileInput(
+            "under-cr.md", "under-cr.md", "x\r".repeat(249_999) + "x", 1_700_000_000_000L,
+        )
+        assertEquals(1, MarkdownImporter.parseMarkdownFile(underCr, null).notes.size)
+    }
+
+    @Test
+    fun importBaseNameFindsLastSegmentWithoutSplitting() {
+        // R44-F2: the old shape split the whole path on every call —
+        // a 64 KiB slash-heavy target paid ~32k segments per resolve.
+        // The scan-back shape returns the same last non-empty
+        // '/'-segment on every input, including the edges.
+        val cases = mapOf(
+            "a/b/c.png" to "c.png",
+            "a/b/" to "b",
+            "a//b" to "b",
+            "/" to "/",
+            "" to "",
+            "pic.png" to "pic.png",
+            "a/b/." to ".",
+            "a/b/.." to "..",
+            "a/b//" to "b",
+            ("d/".repeat(1000) + "leaf.png") to "leaf.png",
+        )
+        for ((path, expected) in cases) {
+            assertEquals("importBaseName($path)", expected, importBaseName(path))
+        }
+    }
+
+    @Test
+    fun resolveRefWithParentMatchesNormalisedJoin() {
+        // R44-F2: resolving against the precomputed normalised parent
+        // must match the old per-call shape — normalise the raw dir
+        // joined with the ref — on every input, including dotdot
+        // climbs, absolute refs, backslash parents, empty refs and a
+        // climb past the root. The old shape is spelled out here with
+        // the public normaliseImportPath (these refs carry no '%',
+        // so no decoding is involved); the percent-encoded case is
+        // pinned by its hand-computed value.
+        fun oldResolve(fromPath: String, ref: String): String {
+            val decoded = ref
+            if (decoded.startsWith("/")) return normaliseImportPath(decoded)
+            val dir = fromPath.split('/').dropLast(1).joinToString("/")
+            return normaliseImportPath(if (dir.isNotEmpty()) "$dir/$decoded" else decoded)
+        }
+        val deepParent = (0 until 300).joinToString("/") { "d$it" }
+        val cases = listOf(
+            "a/b/c/note.md" to "pic.png",
+            "a/b/c/note.md" to "../pic.png",
+            "a/b/c/note.md" to "../../pic.png",
+            "a/b/c/note.md" to "../../../pic.png",
+            "a/b/c/note.md" to "/top.png",
+            "a/b/c/note.md" to "./pic.png",
+            "a/b/c/note.md" to "sub/../pic.png",
+            "a/b/c/note.md" to "a//b.png",
+            "a/b/c/note.md" to ".",
+            "a/b/c/note.md" to "",
+            "note.md" to "pic.png",
+            "a\\b\\note.md" to "pic.png",
+            "a/b/../c/note.md" to "../x.png",
+            "$deepParent/note.md" to "pic.png",
+            "$deepParent/note.md" to "../../other.png",
+        )
+        for ((fromPath, ref) in cases) {
+            val actual = resolveRefWithParent(normalisedParentDir(fromPath), ref)
+            assertEquals("resolve($fromPath, $ref)", oldResolve(fromPath, ref), actual)
+        }
+        // Percent-encoded navigation decodes before resolving.
+        assertEquals(
+            "a/x.png",
+            resolveRefWithParent(normalisedParentDir("a/b/note.md"), "%2E%2E/x.png"),
+        )
+    }
+
+    @Test
     fun corruptZipWithPkPrefixIsReportedUnreadable() {
         // R11-F2: a file starting with "PK" but with no valid ZIP
         // structure used to yield zero entries silently — a normal
