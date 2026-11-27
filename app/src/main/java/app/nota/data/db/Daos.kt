@@ -777,6 +777,29 @@ interface NoteLinkDao {
     @Query("DELETE FROM note_links WHERE sourceId = :sourceId")
     suspend fun deleteForSource(sourceId: String)
 
+    /**
+     * (Codex R53-F1): whether [sourceId] may gain an edge to a note
+     * titled [title] — the source row still exists, is unlocked and
+     * untrashed, and has no edge to any note of that title yet. One
+     * indexed query: the import engine's per-note backlink step
+     * checks each incoming linker this way, so a linker deleted,
+     * trashed or locked after the run's linker snapshot — or a linker
+     * that already links to this title — never breaks the note
+     * transaction with a foreign-key violation or a duplicate edge.
+     * Returns 1 when the edge may be created, 0 otherwise.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM notes n
+        WHERE n.id = :sourceId AND n.locked = 0 AND n.trashedAt IS NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM note_links l JOIN notes t ON t.id = l.targetId
+            WHERE l.sourceId = :sourceId AND t.title = :title
+        )
+        """,
+    )
+    suspend fun canLinkToTitle(sourceId: String, title: String): Int
+
     @Query("DELETE FROM note_links")
     suspend fun deleteAll()
 

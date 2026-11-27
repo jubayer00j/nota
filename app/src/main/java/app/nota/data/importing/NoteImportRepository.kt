@@ -9,6 +9,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.data.db.NoteLinkEntity
 import app.nota.data.db.NoteTagCrossRef
 import app.nota.data.db.TagEntity
 import app.nota.data.html.NoteDocument
@@ -135,10 +136,17 @@ private fun imageOccurrences(image: ImportedImage): List<ImageOccurrence> =
  *    land in one transaction after its images are staged and its
  *    final content is known (Codex R24-F1/F3) — and is named in the
  *    report;
- *  - the run ends with the backup pipeline's index rebuild + attachment
- *    reconcile, so backlinks and the file sweep are truthful. The
- *    semantic index needs nothing: its stamp-gated reconcile picks new
- *    notes up, and nothing is embedded during an import.
+ *  - backlinks are created per note, inside the same transaction
+ *    (Codex R53-F1): the note's own outgoing [[title]] edges, plus
+ *    edges from existing notes that link to its title. The run-end
+ *    rebuild used to be the only backstop, so a process killed
+ *    before it ran left committed notes' edges missing — and the
+ *    startup backfill never repairs them once any link row (or its
+ *    done-marker) exists. The rebuild still runs at the end as the
+ *    final reconcile (it also does FTS + the file sweep), but a
+ *    killed run's graph is truthful without it. The semantic index
+ *    needs nothing: its stamp-gated reconcile picks new notes up,
+ *    and nothing is embedded during an import.
  */
 class NoteImportRepository(
     private val context: Context,
@@ -712,6 +720,38 @@ class NoteImportRepository(
         private val tagByExact = HashMap<String, TagEntity>()
         private val tagByLower = HashMap<String, TagEntity>()
 
+        /**
+         * Pre-existing notes that link to each title (Codex R53-F1):
+         * title → ids of library notes whose plain text mentions
+         * `[[title]]`, seeded once at run start from the index
+         * projection. When a note of that title is imported, its
+         * incoming edges are created from this map inside the note's
+         * transaction — no per-note library scan. Locked or trashed
+         * sources are excluded at seed time, mirroring
+         * [app.nota.data.repository.NoteRepository.relink]; a source
+         * deleted, trashed or locked after the seed is caught again
+         * by [createBacklinks]' per-linker check.
+         *
+         * Cost: one extra projection pass at run start — the same
+         * pass the run-end rebuild already pays once. It reads the
+         * same [getAllIndexRows] rows, so a `[[title]]` mention past
+         * the plain-text cut is invisible here exactly as it is to
+         * the rebuild. Staleness: a concurrent writer adding a linker
+         * mid-import is not in the map — the same class as the
+         * dedupe seed's staleness, and the writer's own end-rebuild
+         * (restore/sync) is the backstop for a completed run.
+         */
+        private val linkersByTitle = HashMap<String, MutableList<String>>()
+
+        /**
+         * Same-run linkers (Codex R53-F1): title → ids of notes this
+         * run already wrote whose `[[title]]` did not resolve at
+         * their write time. Recorded only after the note's
+         * transaction commits (see [recordUnresolvedLinker]), so a
+         * rolled-back note can never leave a phantom linker behind.
+         */
+        private val unresolvedByTitle = HashMap<String, MutableList<String>>()
+
         suspend fun seed() {
             // Folder resolution mirrors 1.x resolveFolderId (seeded
             // map, case-insensitive trimmed names, create on demand).
@@ -726,6 +766,87 @@ class NoteImportRepository(
                 tagByExact.putIfAbsent(tag.name, tag)
                 tagByLower.putIfAbsent(tag.name.trim().lowercase(), tag)
             }
+            // Backlink linkers (Codex R53-F1): one pass over the
+            // index projection — id, title, plain text, locked,
+            // trashedAt — recording, per title, the notes that
+            // mention it. Only unlocked, untrashed sources link.
+            for (row in db.noteDao().getAllIndexRows()) {
+                if (row.locked || row.trashedAt != null) continue
+                for (title in NoteDocument.backlinkTitles(row.plainText)) {
+                    linkersByTitle.getOrPut(title) { mutableListOf() } += row.id
+                }
+            }
+        }
+
+        /**
+         * Records [noteId] as a linker for [titles] whose `[[title]]`
+         * did not resolve at its write time. Call only after the
+         * note's transaction has committed — the ids are only
+         * meaningful once the note row exists.
+         */
+        fun recordUnresolvedLinker(noteId: String, titles: List<String>) {
+            for (title in titles) {
+                unresolvedByTitle.getOrPut(title) { mutableListOf() } += noteId
+            }
+        }
+
+        /**
+         * Creates this note's backlinks inside its write transaction
+         * (Codex R53-F1) — call after the note row, tag links and
+         * FTS refresh have landed, so the edges are atomic with the
+         * note itself. Returns the `[[title]]` mentions that did not
+         * resolve, for [recordUnresolvedLinker] after commit.
+         *
+         * Outgoing: each distinct `[[title]]` in [plainText] resolves
+         * through the row-weight target lookup; a missing or locked
+         * target (and a self-mention) yields no edge, mirroring
+         * NoteRepository.relink — the first two are recorded as
+         * unresolved, so a later note of that title links back.
+         * Incoming: notes linking to [title] — pre-existing ones from
+         * [linkersByTitle], same-run ones from [unresolvedByTitle] —
+         * gain an edge to this note, but only when the per-linker
+         * check passes (the source still exists, unlocked and
+         * untrashed, and links to no note of this title yet — first
+         * target wins, as the rebuild's LIMIT 1 resolves it).
+         * A trashed note holds no edges in either direction.
+         * The run-end rebuild still re-derives everything, so these
+         * per-note edges are additive, never a replacement.
+         */
+        suspend fun createBacklinks(
+            db: NotaDatabase,
+            noteId: String,
+            title: String,
+            plainText: String,
+            trashedAt: Long?,
+        ): List<String> {
+            if (trashedAt != null) return emptyList()
+            val linkDao = db.noteLinkDao()
+            val noteDao = db.noteDao()
+            val unresolved = mutableListOf<String>()
+            for (mentioned in NoteDocument.backlinkTitles(plainText)) {
+                val target = noteDao.getLinkTargetByTitle(mentioned)
+                when {
+                    target == null || target.locked -> unresolved += mentioned
+                    target.id != noteId -> linkDao.insertAll(
+                        listOf(NoteLinkEntity(noteId, target.id)),
+                    )
+                    // A self-mention resolves to this note: no edge,
+                    // and not unresolved either — the rebuild's LIMIT 1
+                    // also lands on this note first, so a later
+                    // same-title note must not steal the link.
+                }
+            }
+            if (title.isNotEmpty()) {
+                val linkers = (linkersByTitle[title] ?: emptyList()) +
+                    (unresolvedByTitle[title] ?: emptyList())
+                for (linkerId in linkers) {
+                    if (linkerId == noteId) continue
+                    if (linkDao.canLinkToTitle(linkerId, title) > 0) {
+                        linkDao.insertAll(listOf(NoteLinkEntity(linkerId, noteId)))
+                    }
+                }
+            }
+            return unresolved
         }
 
         /** Resolves one folder inside the caller's transaction. */
@@ -1000,7 +1121,7 @@ class NoteImportRepository(
                 // with the folder/tag rows resolved inside it — a
                 // failed write rolls the metadata back too, so a note
                 // refused here leaves no orphan folder or tag behind.
-                val (createdFolder, createdTags) = db.withTransaction {
+                val (createdFolder, createdTags, unresolvedTitles) = db.withTransaction {
                     val folderResolution = meta.resolveFolderId(item.folderName)
                     // (Codex R45-F1): recheck dedupe against the
                     // database, inside this transaction. The run's
@@ -1077,11 +1198,31 @@ class NoteImportRepository(
                     // reason ("a tag assignment is a search-index
                     // write too").
                     db.refreshFtsEntry(entity)
-                    folderResolution.created to tagResolutions.mapNotNull { it.created }
+                    // (Codex R53-F1): backlinks are created here, in
+                    // the same transaction as the note row — the
+                    // outgoing [[title]] edges, plus edges from
+                    // existing notes linking to this note's title.
+                    // The returned titles are the mentions that did
+                    // not resolve; they are recorded below, after the
+                    // commit, so a later note of that title links
+                    // back to this one.
+                    val unresolvedTitles = meta.createBacklinks(
+                        db,
+                        noteId,
+                        entity.title,
+                        entity.plainText,
+                        entity.trashedAt,
+                    )
+                    Triple(
+                        folderResolution.created,
+                        tagResolutions.mapNotNull { it.created },
+                        unresolvedTitles,
+                    )
                 }
                 // Only now — the transaction committed — do the created
                 // rows join the run caches (Codex R24-F3).
                 meta.noteCommitted(createdFolder, createdTags)
+                meta.recordUnresolvedLinker(noteId, unresolvedTitles)
             }
         } catch (e: Exception) {
             // Nothing was committed (the transaction is atomic), so

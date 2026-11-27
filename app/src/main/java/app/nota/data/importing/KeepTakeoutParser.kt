@@ -48,6 +48,13 @@ object KeepTakeoutParser {
          *  always sets it). */
         val sourceIdentity: String? = null,
         val attachments: List<AttachmentSpec>,
+        /**
+         * Specs whose run-budget slot was unavailable when parsed
+         * (Codex R53-F2): parked, not dropped, so pass 3 can admit
+         * them once failed entries refund their slots. A parked spec
+         * holds no slot and produces no image unless admitted.
+         */
+        val deferredAttachments: List<AttachmentSpec> = emptyList(),
     )
 
     fun parse(zipFile: File, stagingDir: File): ImportParseResult {
@@ -290,7 +297,11 @@ object KeepTakeoutParser {
         // The shared file is never deleted per note
         // (deleteAfterUse = false): the engine only reads it, and the
         // run-level staging-dir cleanup in importKeepZip owns it.
-        val wanted = drafts.flatMap { it.attachments }.map { it.entryName }.toSet()
+        // Deferred specs (Codex R53-F2) reference entries too: their
+        // files must be staged like the retained ones', or pass 3
+        // could never admit them.
+        val wanted = drafts.flatMap { it.attachments + it.deferredAttachments }
+            .map { it.entryName }.toSet()
         val stagedByEntry = HashMap<String, File?>()
         if (wanted.isNotEmpty()) {
             val usedNames = mutableSetOf<String>()
@@ -332,11 +343,66 @@ object KeepTakeoutParser {
             }
         }
 
+        // (Codex R53-F2): refund the run-budget slots for entries
+        // whose staging failed — the specs were reserved in pass 2,
+        // one slot per spec, but a failed entry produces no image,
+        // so its specs must not consume the run budget. The refund
+        // is per distinct entry: pass 3 stages each entry once
+        // while many drafts can reference it, so the count is the
+        // RETAINED specs per entry across all drafts (parked specs
+        // never took a slot, so they are not counted). Every failure
+        // mode lands here with a null staged file — over-cap
+        // (copyToUpTo deletes the target), IOException, a duplicate
+        // entry name deliberately never staged, an entry never
+        // reached after a mid-walk abort, or a referenced entry
+        // missing from the archive entirely — so one refund site
+        // covers them all. The refund alone would be dead — the
+        // budget is per-parse and every take() already ran in pass
+        // 2 — so it is paired below with re-admission: parked specs
+        // are offered the freed slots in the draft loop.
+        val retainedPerEntry = HashMap<String, Int>()
+        for (draft in drafts) {
+            for (spec in draft.attachments) {
+                retainedPerEntry[spec.entryName] =
+                    (retainedPerEntry[spec.entryName] ?: 0) + 1
+            }
+        }
+        for (entryName in wanted) {
+            if (stagedByEntry[entryName] == null) {
+                attachmentBudget.refund(retainedPerEntry[entryName] ?: 0)
+            }
+        }
+
         for (draft in drafts) {
             val images = mutableListOf<ImportedImage>()
             for (spec in draft.attachments) {
                 val staged = stagedByEntry[spec.entryName]
                 if (staged == null) {
+                    result.attachmentsSkipped += 1
+                    continue
+                }
+                images += ImportedImage(
+                    name = importBaseName(spec.filePath),
+                    mimeType = spec.mimeType,
+                    stagedFile = staged,
+                    sizeBytes = staged.length(),
+                    alt = importBaseName(spec.filePath),
+                    token = null, // appended at the end of the content, in order
+                    deleteAfterUse = false, // shared by every referencing note
+                )
+            }
+            // (Codex R53-F2): admit parked specs against the slots
+            // the refund just freed. A parked spec whose entry failed
+            // staging is still skipped — it never held a slot — and
+            // one that still finds no slot is skipped too; only a
+            // staged entry with a free slot becomes an image.
+            for (spec in draft.deferredAttachments) {
+                val staged = stagedByEntry[spec.entryName]
+                if (staged == null) {
+                    result.attachmentsSkipped += 1
+                    continue
+                }
+                if (!attachmentBudget.take()) {
                     result.attachmentsSkipped += 1
                     continue
                 }
@@ -452,11 +518,25 @@ object KeepTakeoutParser {
         private val maxSpecs: Int = ImportCaps.MAX_ATTACHMENTS_PER_RUN,
     ) {
         private var used = 0
+        private var deferredUsed = 0
 
         /** True when another spec may be retained. */
         fun take(): Boolean {
             if (used >= maxSpecs) return false
             used++
+            return true
+        }
+
+        /**
+         * Parks one spec for pass-3 re-admission (Codex R53-F2):
+         * true when the park has room. The park is bounded at one
+         * run-budget worth — the most slots a refund can ever free
+         * is the budget itself, so a larger park could never be
+         * admitted — keeping retained + parked specs bounded.
+         */
+        fun tryDefer(): Boolean {
+            if (deferredUsed >= maxSpecs) return false
+            deferredUsed++
             return true
         }
 
@@ -795,6 +875,11 @@ object KeepTakeoutParser {
         }
 
         val specs = mutableListOf<AttachmentSpec>()
+        // Specs parked for pass-3 re-admission (Codex R53-F2) — see
+        // the take() branch below. Kept apart from [specs]: a parked
+        // spec holds no run-budget slot and produces no image unless
+        // pass 3 admits it.
+        val deferred = mutableListOf<AttachmentSpec>()
         // One attachment per resolved entry (Codex R26-F3): the same
         // image referenced twice is the same attachment, and the
         // engine writes one row per spec — decoding, re-encoding
@@ -856,15 +941,27 @@ object KeepTakeoutParser {
             }
             if (!seenEntryNames.add(entryName)) continue
             // (Codex R31-F2): bound the retained specs — the per-note
-            // ceiling and the run ceiling. Past either, the reference
-            // is counted as skipped, like a missing one: the note
-            // still imports with the images that fit. Repeats never
-            // reach here (the dedupe above skips them), so they
-            // consume neither cap.
-            if (specs.size >= ImportCaps.MAX_ATTACHMENTS_PER_NOTE ||
-                !attachmentBudget.take()
-            ) {
+            // ceiling and the run ceiling. Past the per-note ceiling,
+            // the reference is counted as skipped, like a missing one:
+            // the note still imports with the images that fit. Repeats
+            // never reach here (the dedupe above skips them), so they
+            // consume neither cap. Past the RUN ceiling, the spec is
+            // parked for pass 3 instead (Codex R53-F2): a refund there
+            // — entries that fail staging return their slots — can
+            // still admit it, and dropping it now would lose a valid
+            // image to slots that failed entries never deserved. The
+            // per-note ceiling counts parked specs too, so a note can
+            // never admit past it in pass 3.
+            if (specs.size + deferred.size >= ImportCaps.MAX_ATTACHMENTS_PER_NOTE) {
                 result.attachmentsSkipped += 1
+                continue
+            }
+            if (!attachmentBudget.take()) {
+                if (attachmentBudget.tryDefer()) {
+                    deferred += AttachmentSpec(entryName, filePath, mimeType)
+                } else {
+                    result.attachmentsSkipped += 1
+                }
                 continue
             }
             specs += AttachmentSpec(entryName, filePath, mimeType)
@@ -887,6 +984,7 @@ object KeepTakeoutParser {
             sourceName = sourceName,
             sourceIdentity = sourceIdentity,
             attachments = specs,
+            deferredAttachments = deferred,
         )
     }
 

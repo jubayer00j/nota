@@ -117,6 +117,45 @@ class NoteImportRobolectricTest {
         return file
     }
 
+    private fun zipWithBigZeroEntries(
+        entries: Map<String, String>,
+        binaries: Map<String, ByteArray> = emptyMap(),
+        bigEntries: Map<String, Long> = emptyMap(),
+    ): File {
+        // Like [zipOf], plus entries of N zero bytes each, streamed in
+        // 1 MiB chunks so the test never holds them in memory. Zeros
+        // compress ~1000:1, so the file stays small while the entries
+        // read back at their full size (Codex R53-F2: over-cap
+        // attachments).
+        val file = File.createTempFile("import-test", ".zip")
+        ZipOutputStream(file.outputStream().buffered()).use { zip ->
+            for ((name, body) in entries) {
+                val entry = ZipEntry(name)
+                zip.putNextEntry(entry)
+                zip.write(body.toByteArray(Charsets.UTF_8))
+                zip.closeEntry()
+            }
+            for ((name, body) in binaries) {
+                val entry = ZipEntry(name)
+                zip.putNextEntry(entry)
+                zip.write(body)
+                zip.closeEntry()
+            }
+            val chunk = ByteArray(1024 * 1024)
+            for ((name, size) in bigEntries) {
+                zip.putNextEntry(ZipEntry(name))
+                var remaining = size
+                while (remaining > 0) {
+                    val n = minOf(remaining, chunk.size.toLong()).toInt()
+                    zip.write(chunk, 0, n)
+                    remaining -= n
+                }
+                zip.closeEntry()
+            }
+        }
+        return file
+    }
+
     private fun stagingDir(): File =
         java.nio.file.Files.createTempDirectory("import-parse").toFile()
 
@@ -4858,6 +4897,285 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun importedNoteOutgoingBacklinkExistsBeforeRunEndRebuild() = runBlocking {
+        // (Codex R53-F1): the per-note transaction used to leave
+        // backlinks to the run-end rebuild, so a process killed
+        // before it ran left committed notes' [[title]] edges missing
+        // — and the startup backfill never repairs them once any
+        // link row exists. Edges are created per note now: B first,
+        // then A mentioning [[B]], and the edge exists with no
+        // rebuild at all.
+        val stack = newStack()
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        val target = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "B",
+                contentHtml = "<p>bee</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "b.md",
+            ),
+            meta,
+        )
+        val source = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "A",
+                contentHtml = "<p>See [[B]] now</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "a.md",
+            ),
+            meta,
+        )
+        assertEquals(
+            listOf(source.noteId to target.noteId),
+            stack.db.noteLinkDao().observeAll().first()
+                .map { it.sourceId to it.targetId },
+        )
+    }
+
+    @Test
+    fun preExistingLinkerGainsEdgeWhenTargetImported() = runBlocking {
+        // (Codex R53-F1), incoming direction for a linker that
+        // predates the run: A already links to [[B]]; importing B
+        // creates A's edge inside B's transaction, with no rebuild.
+        val stack = newStack()
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "linker-a",
+                title = "A",
+                contentHtml = "<p>See [[B]]</p>",
+                plainText = "See [[B]]",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+            ),
+        )
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        val target = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "B",
+                contentHtml = "<p>bee</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "b.md",
+            ),
+            meta,
+        )
+        assertEquals(
+            listOf("linker-a" to target.noteId),
+            stack.db.noteLinkDao().observeAll().first()
+                .map { it.sourceId to it.targetId },
+        )
+    }
+
+    @Test
+    fun sameRunLinkerGainsEdgeWhenTargetImportedLater() = runBlocking {
+        // (Codex R53-F1), incoming direction within one run: A is
+        // imported first while [[B]] resolves to nothing, so its
+        // mention is recorded; importing B later creates A's edge
+        // inside B's transaction, with no rebuild.
+        val stack = newStack()
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        val source = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "A",
+                contentHtml = "<p>See [[B]] now</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "a.md",
+            ),
+            meta,
+        )
+        val target = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "B",
+                contentHtml = "<p>bee</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "b.md",
+            ),
+            meta,
+        )
+        assertEquals(
+            listOf(source.noteId to target.noteId),
+            stack.db.noteLinkDao().observeAll().first()
+                .map { it.sourceId to it.targetId },
+        )
+    }
+
+    @Test
+    fun trashedImportedNoteCreatesNoBacklinks() = runBlocking {
+        // (Codex R53-F1): a trashed note holds no edges in either
+        // direction — its own [[B]] creates none, and its [[C]]
+        // mention is never recorded, so importing C later creates
+        // no edge from it either. Mirrors relink, which clears a
+        // trashed note's edges.
+        val stack = newStack()
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "B",
+                contentHtml = "<p>bee</p>",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "b.md",
+            ),
+            meta,
+        )
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "A",
+                contentHtml = "<p>See [[B]] and [[C]]</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = 1_700_000_000_002L,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "a.md",
+            ),
+            meta,
+        )
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "C",
+                contentHtml = "<p>cee</p>",
+                createdAt = 1_700_000_000_003L,
+                updatedAt = 1_700_000_000_003L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "c.md",
+            ),
+            meta,
+        )
+        assertEquals(
+            emptyList<Pair<String, String>>(),
+            stack.db.noteLinkDao().observeAll().first()
+                .map { it.sourceId to it.targetId },
+        )
+    }
+
+    @Test
+    fun lockedTargetDefersLinkUntilUnlockedTargetArrives() = runBlocking {
+        // (Codex R53-F1): a [[B]] mention whose only target is
+        // locked yields no edge — relink skips locked targets —
+        // but stays recorded as unresolved, so a later unlocked
+        // note of the same title links back to its linker.
+        val stack = newStack()
+        stack.db.noteDao().upsert(
+            NoteEntity(
+                id = "locked-b",
+                title = "B",
+                contentHtml = "<p>secret</p>",
+                plainText = "secret",
+                createdAt = 1_700_000_000_000L,
+                updatedAt = 1_700_000_000_000L,
+                locked = true,
+            ),
+        )
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        val source = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "A",
+                contentHtml = "<p>See [[B]] now</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "a.md",
+            ),
+            meta,
+        )
+        assertEquals(
+            emptyList<Pair<String, String>>(),
+            stack.db.noteLinkDao().observeAll().first()
+                .map { it.sourceId to it.targetId },
+        )
+        val target = stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "B",
+                contentHtml = "<p>bee</p>",
+                createdAt = 1_700_000_000_002L,
+                updatedAt = 1_700_000_000_002L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = emptyList(),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "b2.md",
+            ),
+            meta,
+        )
+        assertEquals(
+            listOf(source.noteId to target.noteId),
+            stack.db.noteLinkDao().observeAll().first()
+                .map { it.sourceId to it.targetId },
+        )
+    }
+
+    @Test
     fun discardedKeepDraftsRefundAttachmentSlots() {
         // (Codex R37-F2): fifty oversized Keep drafts, each with 100
         // image attachments, reserve all 5,000 run-wide attachment
@@ -4890,6 +5208,43 @@ class NoteImportRobolectricTest {
         assertEquals("Small", small.title)
         assertEquals(1, small.images.size)
         assertEquals(0, result.attachmentsSkipped)
+    }
+
+    @Test
+    fun failedKeepAttachmentsRefundRunBudgetSlots() {
+        // (Codex R53-F2): 2,500 notes each referencing the same two
+        // over-cap images reserve all 5,000 run-wide attachment
+        // slots in pass 2; the valid note that follows used to lose
+        // its image to the exhausted budget, because pass 3 dropped
+        // the over-cap images without returning their slots. The
+        // valid note's spec is parked instead and admitted once the
+        // refund frees the slots — so it keeps its image and exactly
+        // the 5,000 doomed specs are counted skipped. Two 101 MiB
+        // entries (202 MiB per pass, under the 512 MiB archive quota,
+        // which is per pass) are the smallest shape that exhausts
+        // the budget inside the 5,000-note run cap: one entry could
+        // waste at most 4,999 slots before the note cap bites.
+        val bigBytes = 101L * 1024L * 1024L
+        val entries = linkedMapOf<String, String>()
+        repeat(2500) { i ->
+            entries["Takeout/Keep/n$i.json"] =
+                """{"title":"N$i","textContent":"n$i","attachments":[{"filePath":"Takeout/Keep/big1.png","mimetype":"image/png"},{"filePath":"Takeout/Keep/big2.png","mimetype":"image/png"}],"createdTimestampUsec":${1_700_000_000_000L + i}}"""
+        }
+        entries["Takeout/Keep/good.json"] =
+            """{"title":"Good","textContent":"good","attachments":[{"filePath":"Takeout/Keep/good.png","mimetype":"image/png"}],"createdTimestampUsec":1700000500000000}"""
+        val zip = zipWithBigZeroEntries(
+            entries,
+            binaries = mapOf("Takeout/Keep/good.png" to pngBytes),
+            bigEntries = mapOf(
+                "Takeout/Keep/big1.png" to bigBytes,
+                "Takeout/Keep/big2.png" to bigBytes,
+            ),
+        )
+        val result = KeepTakeoutParser.parse(zip, stagingDir())
+        assertEquals(2501, result.notes.size)
+        val good = result.notes.single { it.title == "Good" }
+        assertEquals(1, good.images.size)
+        assertEquals(5000, result.attachmentsSkipped)
     }
 
     @Test
