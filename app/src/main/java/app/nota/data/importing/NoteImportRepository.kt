@@ -1199,6 +1199,10 @@ class NoteImportRepository(
                         plainText = NoteDocument.plainText(NoteDocument.parse(content)),
                         createdAt = item.createdAt,
                         updatedAt = item.updatedAt,
+                        // Fix round 1: an imported note's last content
+                        // edit is the source's last edit — the only
+                        // timestamp the import carries.
+                        contentEditedAt = item.updatedAt,
                         pinned = item.pinned,
                         archived = item.archived,
                         trashedAt = item.trashedAt,

@@ -4,6 +4,7 @@ import androidx.room.Room
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
+import app.nota.data.repository.NoteRepository
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.runBlocking
@@ -64,6 +65,7 @@ class WritingStatsRobolectricTest {
         id: String,
         created: LocalDate,
         updated: LocalDate = created,
+        contentEdited: LocalDate? = updated,
         plainText: String = "",
         archived: Boolean = false,
         trashedAt: Long? = null,
@@ -75,6 +77,7 @@ class WritingStatsRobolectricTest {
         plainText = plainText,
         createdAt = millis(created),
         updatedAt = millis(updated),
+        contentEditedAt = contentEdited?.let { millis(it) },
         archived = archived,
         trashedAt = trashedAt,
         locked = locked,
@@ -154,6 +157,41 @@ class WritingStatsRobolectricTest {
         assertEquals(1, stats.totalNotes)
         assertEquals(3, stats.totalWords)
         assertEquals(1, stats.writingDays)
+    }
+
+    /**
+     * Fix round 1 (R1-F1): pinning is a metadata operation, not
+     * writing. The note was created (and last content-edited) on
+     * Monday 16 November; the pin below bumps `updatedAt` to real
+     * now (Friday 27 November) through the real repository path.
+     * Before the fix the pin's day counted — two writing days and
+     * an edit this week; after it, the stats see only the 16th.
+     */
+    @Test
+    fun pinningDoesNotCountAsWriting() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
+        db.noteDao().upsert(
+            entity("solo", LocalDate.of(2026, 11, 16), plainText = "solo"),
+        )
+        notes.setPinned(db.noteDao().getById("solo")!!, true)
+        val stored = db.noteDao().getById("solo")!!
+        // The pin moved updatedAt to today but left the content
+        // edit where it was.
+        assertTrue(stored.updatedAt > millis(LocalDate.of(2026, 11, 25)))
+        assertEquals(millis(LocalDate.of(2026, 11, 16)), stored.contentEditedAt)
+        val stats = stats()
+        assertEquals(1, stats.totalNotes)
+        assertEquals(1, stats.writingDays)
+        assertEquals(0, stats.currentStreak)
+        // The pin's day (27 Nov) is in this week — the content
+        // edit (16 Nov) is not, so no edit counts this week.
+        assertEquals(0, stats.editedThisWeek)
+        // …but the content edit IS in November, so the month
+        // count still sees it; only the week is pin-free.
+        assertEquals(1, stats.editedThisMonth)
+        assertEquals(0, stats.startedThisWeek)
+        assertEquals(1, stats.startedThisMonth)
     }
 
     @Test

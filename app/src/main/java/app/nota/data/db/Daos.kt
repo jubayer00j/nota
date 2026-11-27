@@ -98,7 +98,13 @@ data class NoteIndexRow(
  *  stats semantics exclude trash only. */
 data class NoteStatsRow(
     val createdAt: Long,
-    val updatedAt: Long,
+    /** The last CONTENT edit (see [NoteEntity.contentEditedAt]);
+     *  null only for a row whose content edit was never recorded
+     *  (pre-v10 rows are backfilled by MIGRATION_9_10, so in
+     *  practice every row carries one) — the calculator treats
+     *  null as "no recorded content edit", never as [updatedAt],
+     *  or a metadata bump would count as writing again. */
+    val contentEditedAt: Long?,
     val locked: Boolean,
     val plainText: String,
 )
@@ -424,9 +430,11 @@ interface NoteDao {
     /** Reading stats (v0.37.0): every untrashed note's stats
      *  input — see [NoteStatsRow]. One pass over the projection;
      *  the calculator derives days, streaks, periods and word
-     *  totals from it in memory. */
+     *  totals from it in memory. The edited day comes from
+     *  `contentEditedAt`, never `updatedAt` (fix round 1:
+     *  metadata ops bump `updatedAt` without any writing). */
     @Query(
-        "SELECT createdAt, updatedAt, locked, plainText FROM notes " +
+        "SELECT createdAt, contentEditedAt, locked, plainText FROM notes " +
             "WHERE trashedAt IS NULL",
     )
     suspend fun getStatsRows(): List<NoteStatsRow>

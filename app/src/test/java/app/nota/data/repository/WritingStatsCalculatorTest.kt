@@ -24,10 +24,10 @@ class WritingStatsCalculatorTest {
 
     private fun row(
         created: LocalDate,
-        updated: LocalDate = created,
+        contentEdited: LocalDate? = created,
         locked: Boolean = false,
         text: String = "",
-    ) = NoteStatsRow(millis(created), millis(updated), locked, text)
+    ) = NoteStatsRow(millis(created), contentEdited?.let { millis(it) }, locked, text)
 
     private fun compute(rows: List<NoteStatsRow>, on: LocalDate = today) =
         WritingStatsCalculator.compute(rows, on, zone)
@@ -112,25 +112,46 @@ class WritingStatsCalculatorTest {
     // ---- Writing days -------------------------------------------
 
     @Test
-    fun writingDays_unionOfCreatedAndUpdatedDays() {
+    fun writingDays_unionOfCreatedAndContentEditedDays() {
         val stats = compute(
             listOf(
-                // Created Monday, last edited Wednesday: two
+                // Created Monday, content last edited Wednesday: two
                 // writing days from one note.
                 row(
                     created = LocalDate.of(2026, 11, 23),
-                    updated = LocalDate.of(2026, 11, 25),
+                    contentEdited = LocalDate.of(2026, 11, 25),
                 ),
                 // A second note on the same two days adds none.
                 row(
                     created = LocalDate.of(2026, 11, 23),
-                    updated = LocalDate.of(2026, 11, 25),
+                    contentEdited = LocalDate.of(2026, 11, 25),
                 ),
             ),
         )
         assertEquals(2, stats.totalNotes)
         assertEquals(2, stats.writingDays)
         assertEquals(LocalDate.of(2026, 11, 23), stats.writingSince)
+    }
+
+    // Fix round 1 (R1-F1): a row with no recorded content edit
+    // contributes its creation day only — never a metadata bump.
+    // There is no updatedAt in the row at all anymore; the
+    // calculator cannot fall back to it.
+    @Test
+    fun unrecordedContentEdit_contributesNoEditedDay() {
+        val stats = compute(
+            listOf(
+                row(
+                    created = LocalDate.of(2026, 11, 23),
+                    contentEdited = null,
+                ),
+            ),
+        )
+        assertEquals(1, stats.totalNotes)
+        assertEquals(1, stats.writingDays)
+        assertEquals(0, stats.editedThisWeek)
+        assertEquals(0, stats.editedThisMonth)
+        assertEquals(1, stats.startedThisWeek)
     }
 
     @Test
@@ -206,12 +227,12 @@ class WritingStatsCalculatorTest {
                 // Created AND edited inside this week: one count.
                 row(
                     created = LocalDate.of(2026, 11, 24),
-                    updated = LocalDate.of(2026, 11, 25),
+                    contentEdited = LocalDate.of(2026, 11, 25),
                 ),
                 // Created in week 0, edited in week 11: both.
                 row(
                     created = LocalDate.of(2026, 9, 8),
-                    updated = LocalDate.of(2026, 11, 25),
+                    contentEdited = LocalDate.of(2026, 11, 25),
                 ),
             ),
         )
@@ -245,7 +266,7 @@ class WritingStatsCalculatorTest {
             listOf(
                 row(
                     created = LocalDate.of(2026, 10, 15),
-                    updated = LocalDate.of(2026, 11, 24),
+                    contentEdited = LocalDate.of(2026, 11, 24),
                 ),
             ),
         )

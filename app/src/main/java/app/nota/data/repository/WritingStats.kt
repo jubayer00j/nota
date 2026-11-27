@@ -14,9 +14,12 @@ import java.time.temporal.TemporalAdjusters
  * numbers, computed entirely on-device from the notes table the
  * app already holds. No activity log exists in the data model
  * and this feature adds none: a note contributes the day it was
- * created and the day it was last edited, and days it was edited
- * before its last edit are unknowable — the stats honestly
- * reflect exactly that.
+ * created and the day its content was last edited
+ * ([NoteEntity.contentEditedAt], fix round 1 — `updatedAt`
+ * alone cannot tell writing from organising, since pinning,
+ * archiving, moving and the rest bump it too), and days it was
+ * edited before its last content edit are unknowable — the
+ * stats honestly reflect exactly that.
  */
 data class WritingStats(
     /** Every untrashed note, locked and archived included. */
@@ -68,10 +71,15 @@ object WritingStatsCalculator {
             Instant.ofEpochMilli(epochMillis).atZone(zone).toLocalDate()
 
         val createdDays = rows.map { dayOf(it.createdAt) }
-        val updatedDays = rows.map { dayOf(it.updatedAt) }
+        // Fix round 1: the edited day is the CONTENT edit. A null
+        // contentEditedAt (a row that predates the v10 backfill
+        // and somehow missed it) contributes no edited day — it
+        // must never fall back to updatedAt, or a pin/archive/
+        // move would count as writing again.
+        val editedDays = rows.map { it.contentEditedAt?.let { edited -> dayOf(edited) } }
         val writingDays = HashSet<LocalDate>().apply {
             addAll(createdDays)
-            addAll(updatedDays)
+            editedDays.filterNotNull().forEach { add(it) }
         }
 
         // The activity window: the last ACTIVITY_WEEKS Monday-
@@ -81,7 +89,8 @@ object WritingStatsCalculator {
         val weekly = IntArray(ACTIVITY_WEEKS)
         rows.indices.forEach { i ->
             val touched = HashSet<Int>()
-            for (day in listOf(createdDays[i], updatedDays[i])) {
+            val days = listOfNotNull(createdDays[i], editedDays[i])
+            for (day in days) {
                 val weekStart = day.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
                 val index = ChronoUnit.WEEKS.between(windowStart, weekStart).toInt()
                 if (index in 0 until ACTIVITY_WEEKS) touched += index
@@ -98,11 +107,11 @@ object WritingStatsCalculator {
         var editedMonth = 0
         rows.indices.forEach { i ->
             val created = createdDays[i]
-            val updated = updatedDays[i]
+            val edited = editedDays[i]
             if (created in thisWeekStart..weekEnd) startedWeek++
-            if (updated in thisWeekStart..weekEnd) editedWeek++
+            if (edited != null && edited in thisWeekStart..weekEnd) editedWeek++
             if (created in monthStart..monthEnd) startedMonth++
-            if (updated in monthStart..monthEnd) editedMonth++
+            if (edited != null && edited in monthStart..monthEnd) editedMonth++
         }
 
         return WritingStats(

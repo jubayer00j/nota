@@ -57,6 +57,17 @@ data class NoteEntity(
     val plainText: String = "",
     val createdAt: Long,
     val updatedAt: Long,
+    /**
+     * Reading stats fix round 1 (v0.37.0, R1-F1): epoch millis
+     * of the last CONTENT edit (title or body). Metadata-only
+     * operations — pin, favourite, archive, trash/restore, move,
+     * lock/unlock — bump [updatedAt] (load-bearing: library sort
+     * + sync newest-wins) but must never touch this field, so the
+     * stats can tell writing apart from organising. Null only
+     * for rows written before the v10 migration backfilled it;
+     * every writer since sets it (see MIGRATION_9_10).
+     */
+    val contentEditedAt: Long? = null,
     val pinned: Boolean = false,
     val favourite: Boolean = false,
     val archived: Boolean = false,

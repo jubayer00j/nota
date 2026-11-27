@@ -8,6 +8,7 @@ import app.nota.data.backup.BxNote
 import app.nota.data.backup.BxReminder
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
+import app.nota.data.db.NoteEntity
 import app.nota.data.db.ReminderEntity
 import app.nota.data.reminders.AlarmToneMode
 import app.nota.data.reminders.ReminderAlertType
@@ -217,5 +218,95 @@ class SyncApplierDeviceLocalTest {
         assertNotNull(db.noteDao().getById("good-note"))
         assertNull(db.noteDao().getById("../../evil-note"))
         assertEquals(1, db.noteDao().getAll().size)
+    }
+
+    /**
+     * Reading stats fix round 1 (R1-F1): the archive carries no
+     * content-edited timestamp, so a merged row defaults its
+     * contentEditedAt to the archive's updatedAt — but when the
+     * incoming content is unchanged, the local value is the
+     * truth. A pin on the other device arrives with a newer
+     * updatedAt (the merge winner) and must not re-date this
+     * device's last edit; a genuine remote edit must.
+     */
+    @Test
+    fun syncApplyPreservesContentEditedAtWhenContentUnchanged() = runBlocking {
+        db.noteDao().upsert(
+            NoteEntity(
+                id = "n1", title = "Dentist", contentHtml = "<p>Dentist</p>",
+                plainText = "Dentist", createdAt = 10L, updatedAt = 100L,
+                contentEditedAt = 50L,
+            ),
+        )
+        // Same content, newer updatedAt, newly pinned: the remote
+        // pin, exactly the R1-F1 shape.
+        val merged = exportData(
+            "n1",
+            BxReminder(
+                id = "r1", noteId = "n1", scheduledAt = 2_000L,
+                status = "pending", createdAt = 10L, updatedAt = 100L,
+            ),
+        ).copy(
+            notes = listOf(bxNote("n1").copy(updatedAt = 200L, pinned = true)),
+        )
+        applier.apply(
+            merged = merged,
+            remoteHandle = null,
+            conflictAttachmentSources = emptyMap(),
+            knownEntityIds = mapOf(
+                EntityHash.ENTITY_NOTE to setOf("n1"),
+                EntityHash.ENTITY_FOLDER to emptySet(),
+                EntityHash.ENTITY_TAG to emptySet(),
+                EntityHash.ENTITY_REMINDER to setOf("r1"),
+                EntityHash.ENTITY_ATTACHMENT to emptySet(),
+            ),
+            mergedAttachmentContent = emptyMap(),
+            localAttachmentContent = emptyMap(),
+        )
+        val row = db.noteDao().getById("n1")
+        assertEquals(200L, row?.updatedAt)
+        assertEquals(true, row?.pinned)
+        assertEquals(50L, row?.contentEditedAt)
+    }
+
+    @Test
+    fun syncApplyUpdatesContentEditedAtWhenContentChanged() = runBlocking {
+        db.noteDao().upsert(
+            NoteEntity(
+                id = "n1", title = "Dentist", contentHtml = "<p>Dentist</p>",
+                plainText = "Dentist", createdAt = 10L, updatedAt = 100L,
+                contentEditedAt = 50L,
+            ),
+        )
+        // Different body, newer updatedAt: a real remote edit.
+        val merged = exportData(
+            "n1",
+            BxReminder(
+                id = "r1", noteId = "n1", scheduledAt = 2_000L,
+                status = "pending", createdAt = 10L, updatedAt = 100L,
+            ),
+        ).copy(
+            notes = listOf(
+                bxNote("n1").copy(content = "<p>Dentist!!</p>", updatedAt = 300L),
+            ),
+        )
+        applier.apply(
+            merged = merged,
+            remoteHandle = null,
+            conflictAttachmentSources = emptyMap(),
+            knownEntityIds = mapOf(
+                EntityHash.ENTITY_NOTE to setOf("n1"),
+                EntityHash.ENTITY_FOLDER to emptySet(),
+                EntityHash.ENTITY_TAG to emptySet(),
+                EntityHash.ENTITY_REMINDER to setOf("r1"),
+                EntityHash.ENTITY_ATTACHMENT to emptySet(),
+            ),
+            mergedAttachmentContent = emptyMap(),
+            localAttachmentContent = emptyMap(),
+        )
+        val row = db.noteDao().getById("n1")
+        assertEquals(300L, row?.updatedAt)
+        assertEquals(300L, row?.contentEditedAt)
+        assertEquals("<p>Dentist!!</p>", row?.contentHtml)
     }
 }

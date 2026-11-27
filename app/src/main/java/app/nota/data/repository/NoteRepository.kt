@@ -227,6 +227,7 @@ class NoteRepository(
             plainText = plainBody,
             createdAt = now,
             updatedAt = now,
+            contentEditedAt = now,
             dailyDate = dailyDate,
         )
         upsert(note)
@@ -288,6 +289,7 @@ class NoteRepository(
             contentHtml = version.contentHtml,
             plainText = NoteDocument.plainText(NoteDocument.parse(version.contentHtml)),
             updatedAt = System.currentTimeMillis(),
+            contentEditedAt = System.currentTimeMillis(),
         )
         upsert(restored)
         return true
@@ -306,6 +308,7 @@ class NoteRepository(
             contentHtml = newContentHtml,
             plainText = plainBody,
             updatedAt = System.currentTimeMillis(),
+            contentEditedAt = System.currentTimeMillis(),
         )
         upsert(updated)
         return updated
@@ -318,7 +321,7 @@ class NoteRepository(
      */
     suspend fun updateTitle(note: NoteEntity, title: String): NoteEntity {
         snapshotStoredIfChanged(note.id, title, newContentHtml = null)
-        val updated = note.copy(title = title, updatedAt = System.currentTimeMillis())
+        val updated = note.copy(title = title, updatedAt = System.currentTimeMillis(), contentEditedAt = System.currentTimeMillis())
         upsert(updated)
         return updated
     }
@@ -340,6 +343,7 @@ class NoteRepository(
             plainText = NoteDocument.plainText(NoteDocument.parse(contentHtml)),
             createdAt = now,
             updatedAt = now,
+            contentEditedAt = now,
             dailyDate = dailyDate,
         )
         upsert(note)
@@ -356,6 +360,7 @@ class NoteRepository(
             contentHtml = contentHtml,
             plainText = NoteDocument.plainText(NoteDocument.parse(contentHtml)),
             updatedAt = System.currentTimeMillis(),
+            contentEditedAt = System.currentTimeMillis(),
         )
         upsert(updated)
         return updated
@@ -455,6 +460,7 @@ class NoteRepository(
             plainText = "",
             createdAt = now,
             updatedAt = now,
+            contentEditedAt = now,
             dailyDate = date,
         )
         noteDao.upsert(note)

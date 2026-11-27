@@ -223,3 +223,32 @@ val MIGRATION_8_9: Migration = object : Migration(8, 9) {
         installLibraryMeta(db)
     }
 }
+
+/**
+ * Reading stats fix round 1 (v0.37.0, Codex R1-F1): the
+ * content-edited timestamp. `updatedAt` cannot tell a content
+ * edit from a metadata bump (pin, favourite, archive,
+ * trash/restore, move, lock/unlock all bump it), and stopping
+ * the bump is not an option — the library sorts by `updatedAt`
+ * and the sync merge is whole-row newest-wins on it, so a
+ * metadata op that stopped bumping could lose to a newer remote
+ * copy. A new nullable column is the minimal correct fix: no
+ * existing table is touched beyond the one added column, and no
+ * note data moves.
+ *
+ * - New rows are written with `contentEditedAt` set by their
+ *   content-edit path (create / updateBody / updateTitle /
+ *   updateRichBody / restoreVersion / saveLockedContent); the
+ *   archive converters (`BxNote.toEntity`, import) set it to the
+ *   source's `updatedAt`; metadata ops never touch it.
+ * - Existing rows are backfilled to their `updatedAt` — the only
+ *   edit timestamp a pre-upgrade install has. Honest residual:
+ *   a note whose last pre-upgrade bump was metadata-only keeps
+ *   that day in the stats until its next real content edit.
+ */
+val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `notes` ADD COLUMN `contentEditedAt` INTEGER")
+        db.execSQL("UPDATE `notes` SET `contentEditedAt` = `updatedAt`")
+    }
+}

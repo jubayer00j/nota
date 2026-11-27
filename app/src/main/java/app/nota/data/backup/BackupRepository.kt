@@ -478,7 +478,13 @@ class BackupRepository(
                                 counts += MergeCounts(added = 1)
                             }
                             note.updatedAt > existing.updatedAt -> {
-                                noteDao.upsert(note.toEntity(folderIds))
+                                // Fix round 1: same carry-over as the
+                                // sync apply — a winning payload whose
+                                // content is unchanged must not re-date
+                                // the last content edit.
+                                noteDao.upsert(
+                                    note.toEntityPreservingContentEditedAt(folderIds, existing),
+                                )
                                 tagDao.unlinkAllForNote(note.id)
                                 insertCrossRefs(note, tagIdRemap, allPayloadTagIds + knownTagIds)
                                 counts += MergeCounts(updated = 1)
@@ -760,6 +766,14 @@ internal fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
         plainText = if (locked) "" else NoteDocument.plainText(NoteDocument.parse(content)),
         createdAt = createdAt,
         updatedAt = updatedAt,
+        // The archive carries no content-edited timestamp (the
+        // 1.x wire format must stay byte-faithful), so a converted
+        // row dates its last content edit at the archive's
+        // updatedAt. That is the only timestamp a foreign archive
+        // has — and the sync/restore apply paths below keep a
+        // local value when the incoming content is unchanged, so
+        // a remote pin/archive/move cannot re-date the edit.
+        contentEditedAt = updatedAt,
         pinned = pinned,
         favourite = favorite,
         archived = archived,
@@ -771,6 +785,38 @@ internal fun BxNote.toEntity(validFolderIds: Set<String>): NoteEntity {
         locked = locked,
         lockRecordJson = lockJson,
     )
+}
+
+/**
+ * Reading stats fix round 1: the archive-to-entity conversion
+ * that PRESERVES a local row's content-edited timestamp when
+ * the incoming content is unchanged. [BxNote.toEntity] dates
+ * the last content edit at the archive's `updatedAt` — right
+ * for a new row, wrong when the archive only carries a metadata
+ * change: a pin/archive/move on another device bumps its
+ * `updatedAt`, and applying it blindly would re-date this
+ * device's last edit and inflate the stats (the R1-F1 finding,
+ * via sync). The comparison is over content only (title, body,
+ * plain text, lock state) — pin, favourite, archive, folder,
+ * trash and colour are metadata and never move the date.
+ *
+ * Known residual, sync/restore only: a lock or unlock DOES move
+ * the date, because the sealed envelope IS the stored body and
+ * a pure lock is indistinguishable from a locked content edit
+ * without decrypting. Local lock ops are unaffected (they never
+ * touch `contentEditedAt`).
+ */
+internal fun BxNote.toEntityPreservingContentEditedAt(
+    validFolderIds: Set<String>,
+    existing: NoteEntity?,
+): NoteEntity {
+    val converted = toEntity(validFolderIds)
+    if (existing == null) return converted
+    val contentSame = converted.title == existing.title &&
+        converted.contentHtml == existing.contentHtml &&
+        converted.plainText == existing.plainText &&
+        converted.locked == existing.locked
+    return if (contentSame) converted.copy(contentEditedAt = existing.contentEditedAt) else converted
 }
 
 internal fun BxReminder.toEntity(): ReminderEntity = ReminderEntity(

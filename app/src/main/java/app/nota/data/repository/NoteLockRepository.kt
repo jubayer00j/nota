@@ -403,6 +403,9 @@ class NoteLockRepository(
             contentHtml = NoteLockCrypto.encryptText(nek, newHtml),
             plainText = "",
             updatedAt = System.currentTimeMillis(),
+            // A locked content save IS a content edit (fix round 1);
+            // lock/unlock themselves are metadata ops and stay out.
+            contentEditedAt = System.currentTimeMillis(),
         )
         attachmentStore.runExclusive {
             noteRepository.upsert(updated)
