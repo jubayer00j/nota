@@ -4444,6 +4444,92 @@ class NoteImportRobolectricTest {
     }
 
     @Test
+    fun escapeHeavyMemberRefusedOnAggregateDoesNotStarveLaterImage() {
+        // (Codex R49-F1): the pre-scan used to advance its simulated
+        // aggregate budget by the RAW body length, but walk 4's
+        // addNote charges the CONVERTED body — escaping expands it
+        // (& → &amp; is 5x). Seventeen 190K-char '&' fillers cost
+        // ~950K chars each converted (~16.15M of the ~16.78M cap);
+        // the heavy member's ~150K raw chars convert to ~670K,
+        // which pushes walk 4 past the cap, so walk 4 refuses it —
+        // but the old simulation charged it ~150K, scanned it, and
+        // staged its image against the shared budget, leaving the
+        // small member that DOES fit with its image unresolved.
+        // The budget fits exactly one image.
+        val dir = stagingDir()
+        val entries = LinkedHashMap<String, String>()
+        repeat(17) { i -> entries["f%02d.md".format(i)] = "&".repeat(190_000) }
+        entries["heavy.md"] = "&".repeat(130_000) + "x".repeat(20_000) +
+            "\n\n![a](a.png)"
+        entries["small.md"] = "# Small\n\n![s](small.png)"
+        val zip = zipOf(
+            entries,
+            mapOf("a.png" to pngBytes, "small.png" to pngBytes),
+        )
+        val budget = ExtractedImageBudget(totalBytes = pngBytes.size.toLong())
+        val result = MarkdownImporter.parseImportZip(zip, dir, budget)
+        // 17 fillers + the small note; the heavy member is refused
+        // by walk 4 on the aggregate budget.
+        assertEquals(18, result.notes.size)
+        assertTrue(
+            result.skippedFiles.any {
+                it.name == "heavy.md" &&
+                    it.reason == ImportCaps.AGGREGATE_TEXT_BUDGET_REASON
+            },
+        )
+        // Only the small note's image was staged — the refused
+        // member's image never touched the shared budget.
+        assertEquals(0L, budget.remaining())
+        assertEquals(setOf("small.png"), dir.listFiles()?.map { it.name }?.toSet())
+        val small = result.notes.first { it.title == "Small" }
+        assertEquals(1, small.images.size)
+        // The heavy member's reference is the only unresolved one
+        // (counted at conversion, never staged).
+        assertEquals(1, result.imagesUnresolved)
+    }
+
+    @Test
+    fun longFrontMatterTitleMemberRefusedOnAggregateDoesNotStarveLaterImage() {
+        // (Codex R49-F1, title half): the pre-scan used to reserve
+        // only the FILE NAME's length for a member's title, but
+        // walk 4 charges the ACTUAL title — a front-matter title
+        // can be arbitrarily long. This member's body is tiny; its
+        // 700K-char front-matter title is what walk 4 refuses on
+        // the aggregate budget (the seventeen '&' fillers leave
+        // ~627K chars of it). The old simulation charged the member
+        // almost nothing (tiny body + file-name title), scanned it,
+        // and staged its image; the small member that fits then
+        // lost its image. The budget fits exactly one image.
+        val dir = stagingDir()
+        val entries = LinkedHashMap<String, String>()
+        repeat(17) { i -> entries["f%02d.md".format(i)] = "&".repeat(190_000) }
+        entries["titled.md"] = "---\ntitle: " + "T".repeat(700_000) +
+            "\n---\nbody ![a](a.png)"
+        entries["small.md"] = "# Small\n\n![s](small.png)"
+        val zip = zipOf(
+            entries,
+            mapOf("a.png" to pngBytes, "small.png" to pngBytes),
+        )
+        val budget = ExtractedImageBudget(totalBytes = pngBytes.size.toLong())
+        val result = MarkdownImporter.parseImportZip(zip, dir, budget)
+        assertEquals(18, result.notes.size)
+        assertTrue(
+            result.skippedFiles.any {
+                it.name == "titled.md" &&
+                    it.reason == ImportCaps.AGGREGATE_TEXT_BUDGET_REASON
+            },
+        )
+        assertEquals(0L, budget.remaining())
+        assertEquals(setOf("small.png"), dir.listFiles()?.map { it.name }?.toSet())
+        val small = result.notes.first { it.title == "Small" }
+        assertEquals(1, small.images.size)
+        // The titled member is refused before conversion (its raw
+        // text, title included, is past walk 4's remaining budget),
+        // so its reference is never even counted.
+        assertEquals(0, result.imagesUnresolved)
+    }
+
+    @Test
     fun consumedH1ImageRefDoesNotConsumeImageBudget() = runBlocking {
         // (Codex R41-F1): the ZIP pre-scan collected image refs from
         // the body AFTER the front-matter strip but BEFORE the

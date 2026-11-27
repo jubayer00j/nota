@@ -2374,21 +2374,36 @@ object MarkdownImporter {
             // ([alreadyRetainedTextChars], converted titles + bodies
             // as the engine counts them) minus what this archive's
             // pre-scan already accepted. A member is charged what
-            // walk 4's addNote will charge for it: for Markdown,
-            // the retained body (after front matter is stripped —
-            // Codex R36-F1) plus the filename-title reservation
-            // plus its tags; for .txt, the raw source length,
-            // which IS its body. Without it, a member the
-            // merge will refuse on the remaining budget still got
-            // its refs collected and its images staged against the
-            // shared selection budget. The simulation is exact for
-            // the earlier archives' share (converted, counted by
-            // the engine) and for the read decision (raw length);
-            // within this archive it can drift by the conversion
-            // expansion of accepted members, so a member near the
-            // edge may still be over- or under-scanned by that
-            // delta — an unresolved reference, counted, never a
-            // lost note.
+            // walk 4's addNote will charge for it (Codex R49-F1):
+            // the converted size the estimator bounds — the ACTUAL
+            // title (front-matter, consumed H1, or file name) plus
+            // the converted body — plus its tag names; for .txt,
+            // the estimator's file-name title plus converted body
+            // (a .txt note has no tags). The estimator returns
+            // UTF-8 bytes, an upper bound on the converted note
+            // (pinned by MarkdownImportTest's
+            // estimateNeverUnderstatesConvertedNote), and bytes are
+            // never fewer than the UTF-16 units addNote counts, so
+            // a charge never understates walk 4's. A member whose
+            // charge would push the simulated total past the cap is
+            // one walk 4 (or the merge) refuses on the budget: it
+            // is not scanned and not charged, exactly as walk 4
+            // charges nothing for it. Before R49-F1 the charge was
+            // the RAW body length plus the file-name title's length
+            // — it understated walk 4 twice over (escaping and
+            // block markup expand the rendered body past the raw
+            // length, and a front-matter title was reserved at the
+            // file name's length though it can be arbitrarily
+            // long), so a refused member's images were staged
+            // against the shared selection budget and later,
+            // importable notes' images went unresolved. The
+            // simulation is exact for the earlier archives' share
+            // (converted, counted by the engine) and for the read
+            // decision (raw length); within this archive it can
+            // over-scan by the estimator's own over-count (the H1
+            // counted as both title and body, bytes counted for
+            // non-ASCII text) — an unresolved reference, counted,
+            // never a lost note.
             var eligibleScanned = alreadyImportedNotes
             var scannedTextChars = 0L
             reader.walk { entry ->
@@ -2415,9 +2430,34 @@ object MarkdownImporter {
                         ImportCaps.MAX_IMPORT_FILE_BYTES,
                     )) {
                         is CharBoundedText.Ok -> {
-                            scannedTextChars += read.text.length +
-                                titleFromFileName(base).length
-                            eligibleScanned++
+                            // (Codex R49-F1): charge the converted
+                            // size, not the raw length — a .txt body
+                            // escapes through PlainTextCodec just
+                            // like a Markdown body (& → &amp; is 5x),
+                            // so the raw length understates walk 4's
+                            // charge the same way. The estimator's
+                            // .txt bound is the file-name title plus
+                            // the converted body; a .txt note has no
+                            // tags. A member the estimator refuses
+                            // per-note, or whose charge would push
+                            // the simulated total past the cap, is
+                            // one walk 4 refuses too — it is charged
+                            // nothing, as walk 4 charges nothing.
+                            val estimate = estimateConvertedNoteBytes(
+                                MarkdownFileInput(
+                                    name = base,
+                                    path = entry.name,
+                                    text = read.text,
+                                    lastModified = textMembers[entry.name] ?: 0L,
+                                ),
+                            )
+                            if (estimate <= ImportCaps.MAX_NOTE_CONTENT_BYTES &&
+                                alreadyRetainedTextChars + scannedTextChars + estimate <=
+                                ImportCaps.MAX_AGGREGATE_TEXT_CHARS
+                            ) {
+                                scannedTextChars += estimate
+                                eligibleScanned++
+                            }
                         }
                         else -> { /* walk 4 refuses this member too */ }
                     }
@@ -2439,9 +2479,8 @@ object MarkdownImporter {
                             text = read.text,
                             lastModified = textMembers[entry.name] ?: 0L,
                         )
-                        if (estimateConvertedNoteBytes(input) >
-                            ImportCaps.MAX_NOTE_CONTENT_BYTES
-                        ) return@walk
+                        val estimate = estimateConvertedNoteBytes(input)
+                        if (estimate > ImportCaps.MAX_NOTE_CONTENT_BYTES) return@walk
                         // Front matter is metadata, never body
                         // (Codex R23-F2): parseFrontMatter strips it
                         // before rendering, so an image reference
@@ -2455,6 +2494,28 @@ object MarkdownImporter {
                         val frontMatter = parseFrontMatter(
                             read.text.removePrefix("\uFEFF"),
                         )
+                        // (Codex R49-F1): the simulated charge is what
+                        // walk 4's addNote will charge — the
+                        // estimator's converted bound (the ACTUAL
+                        // title: front-matter, consumed H1, or file
+                        // name — plus the converted body) plus the tag
+                        // names. (Codex R36-F1's retained-size rule
+                        // still holds: front matter is stripped before
+                        // rendering, so a member with huge front
+                        // matter and a tiny body is charged almost
+                        // nothing — the estimator reads only its title
+                        // out of the front matter, never its raw
+                        // length.) A member whose charge would push
+                        // the simulated total past the cap is one
+                        // walk 4 (or the merge) refuses on the
+                        // aggregate budget: its refs are not collected
+                        // and it is not charged, exactly as walk 4
+                        // charges nothing for it.
+                        val charge = estimate +
+                            frontMatter.tags.sumOf { it.length.toLong() }
+                        if (alreadyRetainedTextChars + scannedTextChars + charge >
+                            ImportCaps.MAX_AGGREGATE_TEXT_CHARS
+                        ) return@walk
                         // The consumed H1 is a title, never body
                         // (Codex R41-F1): the converter drops the
                         // leading H1 line when front matter didn't
@@ -2481,24 +2542,7 @@ object MarkdownImporter {
                             scanBody,
                             referenced,
                         )
-                        // (Codex R36-F1): advance by the size walk 4's
-                        // addNote will charge — retained title + body
-                        // + tags — not the raw source length. Front
-                        // matter is stripped before rendering, so a
-                        // member with huge front matter and a tiny body
-                        // retains almost nothing; charging its raw
-                        // length would shrink the simulated remaining
-                        // budget for later members and leave their
-                        // images unstaged, though walk 4 imports them.
-                        // The body length is a lower bound on the
-                        // rendered body (escaping and block markup only
-                        // expand it, apart from the consumed H1 line),
-                        // so the simulation can only over-scan by the
-                        // expansion delta — an image staged for a note
-                        // walk 4 refuses, never the reverse.
-                        scannedTextChars += frontMatter.body.length +
-                            titleFromFileName(base).length +
-                            frontMatter.tags.sumOf { it.length.toLong() }
+                        scannedTextChars += charge
                         eligibleScanned++
                     }
                     else -> { /* walk 4 skips this member too */ }
