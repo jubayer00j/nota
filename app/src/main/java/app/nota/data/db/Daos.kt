@@ -242,7 +242,7 @@ interface NoteDao {
      *  and link-scans it, so the stored value's full length never
      *  crosses the cursor. */
     @Query(
-        "SELECT id, title, substr(plainText, 1, " + MAX_INDEX_PLAIN_TEXT_CHARS + "), locked, trashedAt, folderId FROM notes",
+        "SELECT id, title, substr(plainText, 1, " + MAX_INDEX_PLAIN_TEXT_CHARS + ") AS plainText, locked, trashedAt, folderId FROM notes",
     )
     suspend fun getAllIndexRows(): List<NoteIndexRow>
 
