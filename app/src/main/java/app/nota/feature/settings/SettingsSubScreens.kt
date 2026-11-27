@@ -89,6 +89,9 @@ fun SettingsSyncScreen(onBack: () -> Unit) {
         // BackupSection renders the Drive cards + the local-file
         // card itself (see BackupSection / DriveBackupSection).
         BackupSection()
+        // Import (Keep Takeout + Markdown/text) sits with backup,
+        // as in 1.x; it renders its own card.
+        ImportSection()
     }
 }
 

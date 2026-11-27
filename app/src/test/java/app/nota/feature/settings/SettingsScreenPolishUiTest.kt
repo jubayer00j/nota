@@ -17,7 +17,12 @@ import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.work.Configuration
 import androidx.work.WorkManager
+import app.nota.data.importing.ImportSummary
+import app.nota.data.importing.PendingImportStore
+import app.nota.data.importing.SkippedImportFile
+import app.nota.data.importing.StagedImport
 import app.nota.ui.theme.NotaTheme
+import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -249,5 +254,38 @@ class SettingsScreenPolishUiTest {
         composeRule.onNodeWithText("About").assertExists()
         composeRule.onNodeWithText("Version").assertExists()
         composeRule.onNodeWithText("0.13.0").assertExists()
+    }
+
+    @Test
+    fun importUnreadableListIsLazy() {
+        // (Codex R24-F2): the "Files that couldn't be read" section
+        // used to compose every entry on expand — a 20,000-entry
+        // archive could hang or OOM Settings. It is a bounded
+        // LazyColumn now: the first entries render, the count line
+        // stays, and the tail is never composed.
+        val store = PendingImportStore()
+        val unreadable = (0 until 300).map {
+            SkippedImportFile("unreadable-%03d.zip".format(it), "Couldn't be read.")
+        }
+        store.stageAndRun(
+            newTempDir = { Files.createTempDirectory("import-ui-test").toFile() },
+            stage = { dir -> StagedImport(dir, null, emptyList()) },
+            run = { _, _ ->
+                ImportSummary(0, 0, 0, unreadable, 0, 0, 0)
+            },
+        )
+        composeRule.setContent {
+            NotaTheme {
+                ImportSection(pendingImportStore = store)
+            }
+        }
+        awaitTrue("import summary composed") { exists("Files that couldn't be read") }
+        composeRule.onNodeWithText("Files that couldn't be read").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("300 files couldn't be read", substring = true)
+            .assertExists()
+        composeRule.onNodeWithText("unreadable-000.zip", substring = true).assertExists()
+        composeRule.onNodeWithText("unreadable-299.zip", substring = true)
+            .assertDoesNotExist()
     }
 }

@@ -1,0 +1,353 @@
+package app.nota.feature.settings
+
+import android.content.Context
+import android.net.Uri
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.unit.dp
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import app.nota.data.importing.NoteImportRepository
+import app.nota.data.importing.PendingImportState
+import app.nota.data.importing.PendingImportStore
+import app.nota.data.importing.PickedFileStaging
+import app.nota.data.importing.SkippedImportFile
+import app.nota.data.importing.StagedImport
+import app.nota.data.importing.StagedImportFile
+import app.nota.data.importing.stagingFileName
+import app.nota.ui.theme.NotaSpacing
+import java.io.File
+import kotlinx.coroutines.CancellationException
+import org.koin.compose.koinInject
+
+/**
+ * Settings → Sync & backup → "Import from…" (1.x ImportSection parity):
+ * Google Keep Takeout ZIPs and Markdown/text files (plus ZIPs of them).
+ * Importing only ever adds notes — duplicates by (title, createdAt)
+ * are skipped, so re-importing the same export is a no-op.
+ *
+ * Like the restore flow, the run's state lives in the app-scoped
+ * [PendingImportStore]: returning from the SAF picker can re-lock the
+ * app and destroy this composition, and an import must never die
+ * silently with it. This section only renders the store's stages and
+ * forwards intents; the terminal summary stays until dismissed.
+ * Android has no folder picker in this flow — a folder of Markdown
+ * files travels as a ZIP, which preserves its paths (and therefore
+ * its folder names and relative image references).
+ */
+@Composable
+fun ImportSection(
+    importRepository: NoteImportRepository = koinInject(),
+    pendingImportStore: PendingImportStore = PendingImportStore.shared,
+) {
+    val context = LocalContext.current
+    val pending by pendingImportStore.state.collectAsState()
+    val busy = pending is PendingImportState.Staging || pending is PendingImportState.Running
+    var showUnreadable by remember { mutableStateOf(false) }
+    LaunchedEffect(pending) {
+        if (pending is PendingImportState.Completed) showUnreadable = false
+    }
+
+    val keepLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        pendingImportStore.stageAndRun(
+            newTempDir = { newImportTempDir(context) },
+            stage = { dir ->
+                // Reject before copying: the picker accepts anything,
+                // and a non-ZIP must never be staged in full first.
+                val name = pickedDisplayName(context, uri)
+                if (!name.lowercase().endsWith(".zip")) {
+                    error("That file isn't a ZIP archive — pick your Google Keep Takeout ZIP.")
+                }
+                val target = File(dir, "keep-takeout.zip")
+                copyPickedFile(context, uri, target)
+                StagedImport(tempDir = dir, keepZip = target, files = emptyList())
+            },
+            run = { input, onProgress ->
+                importRepository.importKeepZip(
+                    requireNotNull(input.keepZip),
+                    onProgress,
+                ).toSummary()
+            },
+        )
+    }
+
+    val filesLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        pendingImportStore.stageAndRun(
+            newTempDir = { newImportTempDir(context) },
+            stage = { dir -> stageMarkdownPicks(context, uris, dir) },
+            run = { input, onProgress ->
+                importRepository.importMarkdownSelection(
+                    input.files,
+                    input.skippedFiles,
+                    onProgress,
+                ).toSummary()
+            },
+        )
+    }
+
+    SettingsCard(title = "Import from…") {
+        Text(
+            "Importing adds notes — it never replaces or deletes what's here.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (busy) {
+            Spacer(Modifier.height(NotaSpacing.sm))
+            CircularProgressIndicator()
+        }
+        TextButton(
+            onClick = {
+                keepLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+            },
+            enabled = !busy,
+        ) { Text("Google Keep (.zip)") }
+        TextButton(
+            onClick = { filesLauncher.launch(arrayOf("*/*")) },
+            enabled = !busy,
+        ) { Text("Markdown or text files") }
+
+        when (val state = pending) {
+            is PendingImportState.Running -> {
+                Text(
+                    if (state.total > 0) {
+                        "Importing ${state.done} / ${state.total}…"
+                    } else {
+                        "Importing…"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                )
+            }
+            is PendingImportState.Completed -> {
+                val summary = state.summary
+                Spacer(Modifier.height(NotaSpacing.xs))
+                Text(
+                    buildString {
+                        append("Imported ${summary.imported} note")
+                        if (summary.imported != 1) append("s")
+                        if (summary.duplicates > 0) {
+                            append(" · skipped ${summary.duplicates} already imported")
+                        }
+                        if (summary.unreadable.isNotEmpty()) {
+                            append(" · ${summary.unreadable.size} file")
+                            if (summary.unreadable.size != 1) append("s")
+                            append(" couldn't be read")
+                        }
+                        if (summary.attachmentsSkipped > 0) {
+                            append(" · ${summary.attachmentsSkipped} attachment")
+                            if (summary.attachmentsSkipped != 1) append("s")
+                            append(" skipped")
+                        }
+                        if (summary.imagesUnresolved > 0) {
+                            append(" · ${summary.imagesUnresolved} image")
+                            if (summary.imagesUnresolved != 1) append("s")
+                            append(" couldn't be found")
+                        }
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                )
+                if (summary.coloredNotes > 0) {
+                    Text(
+                        "Note colours aren't supported in Nota, so coloured Keep notes " +
+                            "were imported without their colour.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (summary.unreadable.isNotEmpty()) {
+                    TextButton(onClick = { showUnreadable = !showUnreadable }) {
+                        Text("Files that couldn't be read")
+                    }
+                    if (showUnreadable) {
+                        // (Codex R24-F2): the unreadable list is lazy
+                        // and bounded in height — the old eager loop
+                        // composed every entry on expand, and a
+                        // 20,000-entry archive could hang or OOM
+                        // Settings. The list scrolls inside the card
+                        // instead of growing it.
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = 320.dp),
+                        ) {
+                            itemsIndexed(summary.unreadable) { _, file ->
+                                Text(
+                                    "${file.name} — ${file.reason}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(
+                                        start = NotaSpacing.sm,
+                                        top = NotaSpacing.xs,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+                TextButton(onClick = { pendingImportStore.acknowledge() }) { Text("Dismiss") }
+            }
+            is PendingImportState.Failed -> {
+                Text(
+                    state.message,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(vertical = NotaSpacing.xs),
+                )
+                TextButton(onClick = { pendingImportStore.acknowledge() }) { Text("Dismiss") }
+            }
+            else -> Unit
+        }
+
+        Spacer(Modifier.height(NotaSpacing.xs))
+        Text(
+            "Using Apple Notes? Apple Notes doesn't export files — export your notes " +
+                "to Markdown on a Mac (e.g. with the Exporter app), then import them here.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun newImportTempDir(context: Context): File =
+    File(context.cacheDir, "import-pick-${System.nanoTime()}").apply { mkdirs() }
+
+/** Stages one SAF multi-file selection for the Markdown/text
+ *  launcher. A provider that THROWS from openInputStream used to
+ *  escape the loop and fail the whole staging, discarding files
+ *  already staged and later picks (Codex R31-F4) — a throwing URI
+ *  is now one skipped pick, like a null stream. Cancellation is
+ *  rethrown, never swallowed: the store launches staging on its own
+ *  scope. */
+internal fun stageMarkdownPicks(
+    context: Context,
+    uris: List<Uri>,
+    dir: File,
+): StagedImport {
+    val usedNames = mutableSetOf<String>()
+    val stagedFiles = mutableListOf<StagedImportFile>()
+    val skipped = mutableListOf<SkippedImportFile>()
+    // One budget spans the whole selection (Codex R6-F2): the
+    // per-file cap alone lets several large picks stage gigabytes
+    // into cache before parsing starts.
+    val budget = PickedFileStaging.StagingBudget()
+    for (uri in uris) {
+        try {
+            val name = pickedDisplayName(context, uri)
+            // Reject unsupported types BEFORE copying — the picker
+            // accepts anything, and an unsupported file must never
+            // be staged in full first. Rejected picks are still
+            // reported, never silently dropped.
+            if (!PickedFileStaging.isSupportedPick(name)) {
+                skipped += SkippedImportFile(name, "Not a Markdown, text or ZIP file.")
+                continue
+            }
+            val target = File(dir, stagingFileName(name, usedNames))
+            val input = context.contentResolver.openInputStream(uri)
+            if (input == null) {
+                skipped += SkippedImportFile(name, "Couldn't be read.")
+                continue
+            }
+            when (PickedFileStaging.stageOne(input, target, budget, name)) {
+                is PickedFileStaging.StagedPick.Ok -> stagedFiles += StagedImportFile(
+                    name = name,
+                    file = target,
+                    lastModified = pickedLastModified(context, uri),
+                )
+                PickedFileStaging.StagedPick.TooBig ->
+                    // (Codex R40-F1): the cap that tripped is
+                    // type-specific — 100 MiB for a Markdown/text
+                    // file or image, 544 MiB for a ZIP — so the
+                    // reason names the cap that actually applied.
+                    skipped += SkippedImportFile(
+                        name,
+                        "File is larger than ${PickedFileStaging.maxStagedBytesFor(name) / (1024 * 1024)} MB.",
+                    )
+                PickedFileStaging.StagedPick.OverBudget ->
+                    skipped += SkippedImportFile(
+                        name,
+                        "Total staged files exceed the 544 MB selection budget.",
+                    )
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            skipped += SkippedImportFile(pickedDisplayName(context, uri), "Couldn't be read.")
+        }
+    }
+    return StagedImport(
+        tempDir = dir,
+        keepZip = null,
+        files = stagedFiles,
+        skippedFiles = skipped,
+    )
+}
+
+/** Single-file staging for the Keep launcher: the copy is capped
+ *  (see [PickedFileStaging]) — a file over the cap fails the stage
+ *  with a message instead of filling the cache first. */
+private fun copyPickedFile(context: Context, uri: Uri, target: File) {
+    val input = context.contentResolver.openInputStream(uri)
+        ?: error("Could not open the chosen file.")
+    if (!PickedFileStaging.copyCapped(input, target)) {
+        error("That file is too large to import safely.")
+    }
+}
+
+/** The picked file's display name (its identity for titles, folders
+ *  and the report); falls back to the URI's last path segment. */
+private fun pickedDisplayName(context: Context, uri: Uri): String {
+    try {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (idx >= 0) cursor.getString(idx)?.takeIf { it.isNotBlank() }?.let { return it }
+                }
+            }
+    } catch (e: Exception) {
+        // Fall through to the path segment.
+    }
+    return uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "file"
+}
+
+/** Best-effort last-modified for a picked file (0 = unknown; the
+ *  parser falls back to now, exactly like 1.x's lastModified rule). */
+private fun pickedLastModified(context: Context, uri: Uri): Long {
+    return try {
+        context.contentResolver.query(
+            uri,
+            arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else 0L
+        } ?: 0L
+    } catch (e: Exception) {
+        0L
+    }
+}
+

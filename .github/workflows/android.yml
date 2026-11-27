@@ -545,7 +545,11 @@ jobs:
           fi
           rm -rf app/build/reports/tests app/build/test-results
 
-      - name: Run fast unit tests (shard B, 11 classes)
+      # Importers (v0.36.0): +2 classes — MarkdownImportTest (pure
+      # JVM converter tests) and NoteImportRobolectricTest (Keep parse
+      # + engine, beside the backup suite). Shard stays single-fork
+      # (13 ≤ 25); B2's frozen composition is untouched.
+      - name: Run fast unit tests (shard B, 13 classes)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
             --tests "app.nota.data.ai.AiBackupExclusionTest" \
@@ -559,6 +563,8 @@ jobs:
             --tests "app.nota.data.db.Migration78RobolectricTest" \
             --tests "app.nota.data.sync.SyncApplierDeviceLocalTest" \
             --tests "app.nota.data.html.NoteDocumentTest" \
+            --tests "app.nota.data.importing.MarkdownImportTest" \
+            --tests "app.nota.data.importing.NoteImportRobolectricTest" \
             --stacktrace
 
       - name: Upload fast-shard-B test reports

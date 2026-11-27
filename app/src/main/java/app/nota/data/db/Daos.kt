@@ -40,6 +40,52 @@ data class NoteTextRow(
     val plainText: String,
 )
 
+/** Codex R32-F1: the import engine's dedupe seed — exactly the
+ *  columns the seed reads (title, createdAt, folderId). The seed
+ *  used to run a full-entity getAll(), materialising every note's
+ *  contentHtml and plainText; a single oversized existing row can
+ *  exceed Android's CursorWindow (2 MB) and crash the import before
+ *  the first note is processed. This projection never touches the
+ *  body columns. */
+data class NoteDedupeRow(
+    val title: String,
+    val createdAt: Long,
+    val folderId: String?,
+)
+
+/** Codex R32-F1, follow-on: the index rebuild's row — exactly the
+ *  columns [app.nota.data.backup.rebuildLibraryIndexes] reads
+ *  (id, title, plainText, locked, trashedAt, folderId). The
+ *  rebuild used to load full entities too, so the same oversized
+ *  row crashed the import at the finish even with the dedupe seed
+ *  fixed. This projection never touches the body column
+ *  (contentHtml).
+ *
+ *  Codex R45-F2: the plainText it carries is cut in SQL to
+ *  [MAX_INDEX_PLAIN_TEXT_CHARS] characters (the same
+ *  `substr(plainText, 1, N)` shape the Phase 6.1 list rows
+ *  already use for their excerpts). The rebuild reads plainText
+ *  only to build the FTS row and to scan for [[backlinks]], so a
+ *  note whose stored plainText exceeds Android's ~2 MiB
+ *  CursorWindow — reachable, because createRichNote stores it
+ *  with no size cap and neither restore nor sync caps it — no
+ *  longer aborts the whole rebuild after the caller's notes have
+ *  committed. Body words past the cap are simply not indexed and
+ *  backlinks past it are not resolved; the note itself stays, and
+ *  its title (exact, never cut) stays searchable. 250,000 chars
+ *  is at most ~1 MiB even at 4 bytes per char, so the row keeps
+ *  headroom under the window alongside the title and ids. */
+const val MAX_INDEX_PLAIN_TEXT_CHARS = 250_000
+
+data class NoteIndexRow(
+    val id: String,
+    val title: String,
+    val plainText: String,
+    val locked: Boolean,
+    val trashedAt: Long?,
+    val folderId: String?,
+)
+
 /** Performance chapter 2 (F3/F6): the library stamp — the
  *  invalidation key for the corpus cache and the semantic
  *  reconcile stamp gate, read on every search keystroke and
@@ -108,6 +154,15 @@ data class NoteLinkTarget(
     val title: String,
 )
 
+/** Codex R32-F1, follow-on: a [[ ]] link target at row weight —
+ *  the rebuild's backlink loop reads id + locked only (see
+ *  [app.nota.data.backup.rebuildLibraryIndexes]), so resolving a
+ *  link to an oversized note must not load its full row. */
+data class NoteLinkTargetRow(
+    val id: String,
+    val locked: Boolean,
+)
+
 @Dao
 interface NoteDao {
     /** Phase 5.1: every note incl. trashed/archived — the reminder
@@ -150,6 +205,12 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE title = :title LIMIT 1")
     suspend fun getByTitle(title: String): NoteEntity?
 
+    /** Codex R32-F1, follow-on: the rebuild's backlink loop at row
+     *  weight — id + locked are all it reads (see
+     *  [app.nota.data.backup.rebuildLibraryIndexes]). */
+    @Query("SELECT id, locked FROM notes WHERE title = :title LIMIT 1")
+    suspend fun getLinkTargetByTitle(title: String): NoteLinkTargetRow?
+
     @Query("SELECT * FROM notes WHERE id = :id")
     fun observeById(id: String): Flow<NoteEntity?>
 
@@ -159,6 +220,51 @@ interface NoteDao {
     /** Every note, for backlink re-resolution and the startup backfill. */
     @Query("SELECT * FROM notes")
     suspend fun getAll(): List<NoteEntity>
+
+    /** Codex R32-F1: the import dedupe seed at row weight — the
+     *  seed reads title, createdAt and folderId only (see
+     *  NoteImportRepository.importNotes), so it must not load full
+     *  entities. Same rows as [getAll], no body columns: an
+     *  oversized existing row can exceed Android's CursorWindow
+     *  (2 MB) and crash the import before the first note is
+     *  processed. */
+    @Query("SELECT title, createdAt, folderId FROM notes")
+    suspend fun getAllDedupeRows(): List<NoteDedupeRow>
+
+    /** Codex R32-F1, follow-on: the index rebuild at row weight —
+     *  exactly the columns
+     *  [app.nota.data.backup.rebuildLibraryIndexes] reads. Same
+     *  rows as [getAll], no contentHtml: an oversized existing row
+     *  can exceed Android's CursorWindow (2 MB) and crash the
+     *  rebuild — and with it the import, restore or copy that
+     *  called it. Codex R45-F2: the plainText is cut in SQL to
+     *  [MAX_INDEX_PLAIN_TEXT_CHARS] — the rebuild only indexes
+     *  and link-scans it, so the stored value's full length never
+     *  crosses the cursor. */
+    @Query(
+        "SELECT id, title, substr(plainText, 1, " + MAX_INDEX_PLAIN_TEXT_CHARS + ") AS plainText, locked, trashedAt, folderId FROM notes",
+    )
+    suspend fun getAllIndexRows(): List<NoteIndexRow>
+
+    /** Codex R45-F1: the ids of notes with this (title, createdAt)
+     *  — the import engine's per-note dedupe recheck. A Merge
+     *  restore or sync apply landing mid-import can add a twin
+     *  after the run's one-time seed, so each note's write
+     *  rechecks the database inside its own transaction instead
+     *  of trusting the seed alone. Ids only, never entities: the
+     *  caller filters its own run's ids in Kotlin. No trashedAt
+     *  filter — dedupe counts notes in ANY state, like the seed. */
+    @Query("SELECT id FROM notes WHERE title = :title AND createdAt = :createdAt")
+    suspend fun findIdsByTitleAndCreatedAt(title: String, createdAt: Long): List<String>
+
+    /** Codex R45-F1, unknown-date half: the ids of dateless notes
+     *  with this title in this folder — the seeded key for a
+     *  dateless note is (title, folder), and the folder is the
+     *  RESOLVED folder id, i.e. the folder the note will actually
+     *  land in. `IS` (not `=`) so a null folderId matches notes
+     *  with no folder. */
+    @Query("SELECT id FROM notes WHERE title = :title AND createdAt = 0 AND folderId IS :folderId")
+    suspend fun findDatelessIdsByTitleAndFolder(title: String, folderId: String?): List<String>
 
     /** Every note, observed (Phase 4.4: the link graph's node metadata). */
     @Query("SELECT * FROM notes")
@@ -350,6 +456,17 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE id = :id")
     suspend fun getById(id: String): FolderEntity?
 
+    /** Case-insensitive folder lookup (Codex R48-F1): the importer's
+     *  run cache is seeded once, so a folder deleted after the seed
+     *  leaves a dead id in it — re-resolving by name lets the note
+     *  reuse a same-named folder another writer recreated, instead
+     *  of creating a second folder that differs only by case.
+     *  SQLite NOCASE folds ASCII only; a non-ASCII case-variant can
+     *  still create a second row (never a crash — there is no unique
+     *  index on folder names). */
+    @Query("SELECT * FROM folders WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun getByNameIgnoreCase(name: String): FolderEntity?
+
     @Query("DELETE FROM folders")
     suspend fun deleteAll()
 
@@ -367,6 +484,18 @@ interface TagDao {
 
     @Query("SELECT * FROM tags WHERE name = :name LIMIT 1")
     suspend fun getByName(name: String): TagEntity?
+
+    /** Case-insensitive tag lookup (Codex R46-F2): the importer's
+     *  run cache is seeded once, so a tag added by another writer
+     *  after the seed is invisible to it — the exact lookup above
+     *  misses a case-variant (`Foo` in the database, `foo` in the
+     *  note), and creating it would leave two tags differing only
+     *  by case. SQLite NOCASE folds ASCII only; a non-ASCII
+     *  case-variant in the race window can still create a second
+     *  row (never a crash — the unique index is BINARY, so
+     *  case-variants do not conflict). */
+    @Query("SELECT * FROM tags WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun getByNameIgnoreCase(name: String): TagEntity?
 
     @Query("SELECT * FROM tags")
     suspend fun getAllTags(): List<TagEntity>
@@ -555,7 +684,23 @@ interface NoteFtsDao {
 
     @Query("DELETE FROM notes_fts")
     suspend fun deleteAll()
+
+    /** Codex R45-F2: one note's indexed row, without its stored
+     *  entity — the stored row can exceed the CursorWindow, so
+     *  searchFts (full entities) cannot prove an oversized note's
+     *  FTS row exists. The plainText here is the indexed body,
+     *  already bounded by the rebuild's projection cap. */
+    @Query("SELECT noteId, title, plainText FROM notes_fts WHERE noteId = :noteId")
+    suspend fun ftsRowForNote(noteId: String): NoteFtsRow?
 }
+
+/** Codex R45-F2: one note's FTS row at row weight — the indexed
+ *  title and body, nothing else. */
+data class NoteFtsRow(
+    val noteId: String,
+    val title: String,
+    val plainText: String,
+)
 
 @Dao
 interface SavedSearchDao {
@@ -631,6 +776,29 @@ interface NoteLinkDao {
 
     @Query("DELETE FROM note_links WHERE sourceId = :sourceId")
     suspend fun deleteForSource(sourceId: String)
+
+    /**
+     * (Codex R53-F1): whether [sourceId] may gain an edge to a note
+     * titled [title] — the source row still exists, is unlocked and
+     * untrashed, and has no edge to any note of that title yet. One
+     * indexed query: the import engine's per-note backlink step
+     * checks each incoming linker this way, so a linker deleted,
+     * trashed or locked after the run's linker snapshot — or a linker
+     * that already links to this title — never breaks the note
+     * transaction with a foreign-key violation or a duplicate edge.
+     * Returns 1 when the edge may be created, 0 otherwise.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM notes n
+        WHERE n.id = :sourceId AND n.locked = 0 AND n.trashedAt IS NULL
+        AND NOT EXISTS (
+            SELECT 1 FROM note_links l JOIN notes t ON t.id = l.targetId
+            WHERE l.sourceId = :sourceId AND t.title = :title
+        )
+        """,
+    )
+    suspend fun canLinkToTitle(sourceId: String, title: String): Int
 
     @Query("DELETE FROM note_links")
     suspend fun deleteAll()

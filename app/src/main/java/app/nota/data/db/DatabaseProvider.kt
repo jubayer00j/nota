@@ -55,6 +55,17 @@ class DatabaseProvider(
      * Switches the active database to [accountId]'s. Returns false when
      * already there (no rebuild, no close). Synchronised so two rapid
      * sign-in/sign-out taps can never interleave a half-swapped state.
+     *
+     * A switch closes the previous [current] instance, so a caller
+     * that must keep writing to one account across a possible switch
+     * holds a dedicated handle instead of [current] (see
+     * [openDedicatedOnSameFileAs]): the import engine runs its whole
+     * write phase on one, so no switch can close its handle mid-write.
+     * That is the guarantee the R6-F3 switch mutex approximated for
+     * captured handles — at the cost of stalling a switch for the
+     * length of a note write, image conversion included (Codex
+     * R8-F1/F2) — so the mutex is retired: with the engine on a
+     * dedicated handle, nothing needs to hold a switch off.
      */
     @Synchronized
     fun switchTo(accountId: String): Boolean {
@@ -77,6 +88,46 @@ class DatabaseProvider(
     fun openAdditional(accountId: String): NotaDatabase =
         if (accountId == _accountId.value) current
         else NotaDatabase.build(appContext, accountId)
+
+    /**
+     * Opens a DEDICATED handle on [accountId]'s database file —
+     * always a fresh instance, even for the active account (unlike
+     * [openAdditional], which returns [current] for the active
+     * account). The caller owns it and must close it via
+     * [closeAdditional]. A dedicated handle survives a switch,
+     * because [switchTo] only ever closes [current]; SQLite
+     * serializes the two connections on the same file. (The import
+     * engine's finish ran on one for Codex R7-F2; since R8 the whole
+     * import run uses [openDedicatedOnSameFileAs] instead.)
+     */
+    fun openDedicated(accountId: String): NotaDatabase =
+        NotaDatabase.build(appContext, accountId)
+
+    /**
+     * Opens a DEDICATED handle on the same database FILE as [db] —
+     * a fresh instance, never [db] itself and never [current]. The
+     * caller owns it and must close it via [closeAdditional].
+     * Anchoring on the handle rather than an account id keeps the
+     * new instance on exactly the file [db] writes to.
+     *
+     * [switchTo] only ever closes [current], so the returned handle
+     * survives any account switch. The import engine runs its whole
+     * write phase on one (Codex R8-F1/F2): no switch can close it
+     * mid-note, an away-and-back switch cannot hand back a closed
+     * instance the way an account-id check can, and no lock has to
+     * be held across slow work (image conversion) to protect it.
+     */
+    fun openDedicatedOnSameFileAs(db: NotaDatabase): NotaDatabase =
+        NotaDatabase.build(
+            appContext,
+            // The inverse of NotaDatabase.databaseName's scheme:
+            // "nota_guest" -> "guest" (GUEST_ACCOUNT), "nota_<uid>"
+            // -> "<uid>". Every database NotaDatabase.build makes is
+            // file-backed, so the name is never null in practice.
+            checkNotNull(db.openHelper.databaseName) {
+                "A dedicated sibling needs a named (file-backed) database."
+            }.removePrefix("nota_"),
+        )
 
     /** Closes [db] only when it is an additional instance from
      *  [openAdditional] — closing [current] would break the app. */
@@ -116,13 +167,19 @@ class DatabaseProvider(
     /**
      * The union of attachment localPaths across EVERY account database
      * on the device — the keep-set for the shared attachments/ file
-     * sweep. The active database is read through [current]; the others
-     * are opened read-and-close for this call only.
+     * sweep. EVERY database, the active one included, is read through
+     * a dedicated handle opened for this call only: reading through
+     * [current] would race an account switch — [switchTo] closes the
+     * previous [current] and Room cancels its in-flight DAO
+     * coroutines, which aborted the import run's finish when a switch
+     * landed mid-scan (Codex R8 loop, storm regression). A dedicated
+     * handle is never closed by a switch, so the scan always runs to
+     * completion.
      */
     suspend fun allAttachmentLocalPaths(): Set<String> {
         val paths = mutableSetOf<String>()
         for (account in existingAccountIds()) {
-            val db = openAdditional(account)
+            val db = openDedicated(account)
             try {
                 paths += db.attachmentDao().getAll().map { it.localPath }
             } finally {

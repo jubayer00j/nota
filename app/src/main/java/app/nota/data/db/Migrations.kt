@@ -158,6 +158,30 @@ val MIGRATION_4_5: Migration = object : Migration(4, 5) {
  * writes, which is exactly the stamp's contract).
  */
 fun installLibraryMeta(db: SupportSQLiteDatabase) {
+    // (PR #59 fix round 18) How long this connection waits on a
+    // locked database before failing with SQLITE_BUSY. The open
+    // path's first write is the INSERT below, run from Room's onOpen
+    // callback, and another connection can legitimately hold the
+    // file at that moment — the app-startup orphan sweep opens every
+    // account database it finds, and a test (or a fresh install) can
+    // open the same file while the sweep is mid-write. SQLite's
+    // default busy timeout is 0, so the loser failed instantly:
+    // BackupRestoreSemanticsTest flaked three times (fix rounds 11,
+    // 14, 17) with SQLiteDatabaseLockedException at that INSERT. A
+    // 5 s wait lets the loser ride out a millisecond write instead;
+    // a genuinely stuck lock still fails, 5 s later. Set FIRST, so
+    // it covers every write below on every caller (onCreate/onOpen,
+    // forDatabase's eager install, MIGRATION_8_9) — PRAGMA
+    // busy_timeout is a per-connection setting, not a schema change,
+    // so it is safe inside a migration transaction too.
+    //
+    // It MUST run as a query, not execSQL: `PRAGMA busy_timeout =
+    // 5000` returns the new value as a row, and Android's execSQL
+    // rejects statements that return data ("Queries can be performed
+    // using SQLiteDatabase query or rawQuery methods only" —
+    // Migration67RobolectricTest proved it the hard way). Run it as
+    // a query and close the cursor.
+    db.query("PRAGMA busy_timeout = 5000").close()
     db.execSQL(
         "CREATE TABLE IF NOT EXISTS `library_meta` (`id` INTEGER NOT NULL, " +
             "`notesWriteGeneration` INTEGER NOT NULL, PRIMARY KEY(`id`))",
