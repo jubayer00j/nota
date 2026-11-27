@@ -246,6 +246,44 @@ class WritingStatsRobolectricTest {
         assertEquals("one two three four five", stored.plainText)
     }
 
+    /**
+     * Fix round 3 (R3-F1): a metadata op on a huge note must not
+     * recount its words. The 1.2M-char body below is counted once,
+     * at creation, by the streaming counter; pin/favourite/archive/
+     * move/trash/restore then reuse the stored count — the
+     * wordCountRecomputations seam stays put and the stored count
+     * (and the stats total) never moves. A real content edit does
+     * recount, streaming, to the exact new total.
+     */
+    @Test
+    fun metadataOpsOnHugeNoteReuseStoredWordCount() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
+        val huge = "word ".repeat(240_000) // 1.2M chars, 240,000 words
+        val created = notes.createNote(title = "huge", plainBody = huge)
+        val id = created.id
+        assertEquals(240_000, db.noteDao().getById(id)!!.wordCount)
+        // The create counted once (streaming); nothing below may
+        // recount while the text is unchanged.
+        assertEquals(1, notes.wordCountRecomputations)
+        notes.setPinned(db.noteDao().getById(id)!!, true)
+        notes.setFavourite(db.noteDao().getById(id)!!, true)
+        notes.setArchived(db.noteDao().getById(id)!!, true)
+        notes.moveToFolder(db.noteDao().getById(id)!!, null)
+        notes.trash(db.noteDao().getById(id)!!)
+        notes.restore(db.noteDao().getById(id)!!)
+        assertEquals(1, notes.wordCountRecomputations)
+        val stored = db.noteDao().getById(id)!!
+        assertEquals(240_000, stored.wordCount)
+        assertEquals(huge, stored.plainText)
+        assertEquals(240_000, stats().totalWords)
+        // A real content edit DOES recount — streaming, exact.
+        notes.updateBody(stored, stored.title, "one two")
+        assertEquals(2, notes.wordCountRecomputations)
+        assertEquals(2, db.noteDao().getById(id)!!.wordCount)
+        assertEquals(2, stats().totalWords)
+    }
+
     @Test
     fun streakAndPeriodsFromRealRows() = runBlocking {
         db.noteDao().upsert(

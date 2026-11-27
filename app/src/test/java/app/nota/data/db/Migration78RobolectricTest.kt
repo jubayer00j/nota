@@ -355,4 +355,33 @@ class Migration78RobolectricTest {
             }
         }
     }
+
+    /**
+     * Fix round 3: the same counter with the default 64K chunk —
+     * the size upsert reads an in-memory body in — must agree with
+     * wordCount on long bodies, including bodies that end exactly
+     * on a chunk boundary.
+     */
+    @Test
+    fun countWordsChunked_defaultChunkSize_matchesWordCount() {
+        val cases = listOf(
+            "word ".repeat(50_000), // 250,000 chars, several chunks
+            "a".repeat(65_536), // exactly one chunk, a single word
+            "word ".repeat(13_107) + "x", // exactly 65,536 chars
+            "word ".repeat(26_214) + "ta", // exactly 131,072 chars
+        )
+        for (text in cases) {
+            val counted = countWordsChunked { offset, size ->
+                if (offset > text.length) "" else text.substring(
+                    offset - 1,
+                    minOf(offset - 1 + size, text.length),
+                )
+            }
+            assertEquals(
+                "len=${text.length}",
+                BackupRepository.wordCount(text),
+                counted,
+            )
+        }
+    }
 }

@@ -1,12 +1,12 @@
 package app.nota.data.repository
 
 import androidx.room.withTransaction
-import app.nota.data.backup.BackupRepository
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.LibraryStampRow
 import app.nota.data.db.SearchTextRow
 import app.nota.data.db.SyncMetaEntity
+import app.nota.data.db.countWordsChunked
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
 import app.nota.data.db.NoteLinkEntity
@@ -87,22 +87,52 @@ class NoteRepository(
         noteDao.observeLinkableTargets()
 
     // --- Core write path (FTS-synced) --------------------------------------
+
+    /** Test seam (fix round 3): how many times [upsert] recomputed
+     *  the stored word count instead of reusing the previous row's
+     *  count — a metadata-only write never recomputes. Mirrors the
+     *  [corpusLoadCount] seam in the search section. */
+    var wordCountRecomputations: Int = 0
+        private set
+
     suspend fun upsert(note: NoteEntity) {
         db.withTransaction {
-            val previousTitle = noteDao.getById(note.id)?.title
+            val previous = noteDao.getById(note.id)
+            val previousTitle = previous?.title
             // Reading stats fix round 2 (R2-F1): the stored word
             // count is the stats' only word source, so it is
-            // (re)derived from the stored text here — every
-            // in-app note write funnels through this one choke
-            // point (create, edits, restore, lock/unlock, and
-            // the metadata ops, whose text is unchanged so the
-            // count comes back identical), and the count can
-            // never drift from the text. The direct-DAO writers
-            // (import, sync/restore via BxNote.toEntity) compute
-            // it at construction instead.
-            val stored = note.copy(
-                wordCount = BackupRepository.wordCount(note.plainText),
-            )
+            // maintained here — every in-app note write funnels
+            // through this one choke point (create, edits,
+            // restore, lock/unlock, and the metadata ops). The
+            // direct-DAO writers (import, sync/restore via
+            // BxNote.toEntity) compute it at construction
+            // instead.
+            //
+            // Fix round 3 (R3-F1): the count is NOT recomputed
+            // on every write. When the stored text is unchanged
+            // — every metadata op (pin/favourite/archive/trash/
+            // restore/move, and a title-only edit) — the previous
+            // row's count is reused, so a huge note pays nothing
+            // for an otherwise small operation. When the text did
+            // change (or the note is brand new), the count comes
+            // from the shared streaming counter (countWordsChunked,
+            // the fix-2 backfill counter — same Java \s definition
+            // as BackupRepository.wordCount, no token list), reading
+            // the in-memory body in bounded slices.
+            val stored = if (previous != null && previous.plainText == note.plainText) {
+                note.copy(wordCount = previous.wordCount)
+            } else {
+                wordCountRecomputations++
+                note.copy(
+                    wordCount = countWordsChunked { offset, size ->
+                        val start = offset - 1
+                        if (start >= note.plainText.length) "" else note.plainText.substring(
+                            start,
+                            minOf(start + size, note.plainText.length),
+                        )
+                    },
+                )
+            }
             noteDao.upsert(stored)
             // The FTS row (title, body, tag names, folder name —
             // with the Phase 2b seal discipline: a locked note's

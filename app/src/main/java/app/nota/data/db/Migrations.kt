@@ -277,6 +277,11 @@ val MIGRATION_9_10: Migration = object : Migration(9, 10) {
  * and the counter carries its mid-word state across slices, so
  * a word straddling a boundary counts once. The separator set
  * is Java `\s` exactly, matching BackupRepository.wordCount.
+ *
+ * Fix round 3: this is also the shared streaming word counter
+ * NoteRepository.upsert uses for changed text (with an in-memory
+ * slice reader instead of SUBSTR) — one definition, two reader
+ * shapes; the upsert comment states the contract.
  */
 internal const val WORD_COUNT_CHUNK_CHARS = 65_536
 
