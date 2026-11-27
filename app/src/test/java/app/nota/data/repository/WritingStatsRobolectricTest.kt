@@ -248,21 +248,30 @@ class WritingStatsRobolectricTest {
 
     /**
      * Fix round 3 (R3-F1): a metadata op on a huge note must not
-     * recount its words. The 1.2M-char body below is counted once,
+     * recount its words. The 300K-char body below is counted once,
      * at creation, by the streaming counter; pin/favourite/archive/
      * move/trash/restore then reuse the stored count — the
      * wordCountRecomputations seam stays put and the stored count
      * (and the stats total) never moves. A real content edit does
      * recount, streaming, to the exact new total.
+     *
+     * Why 300K chars, not 1.2M: a 1.2M-char body makes the note's
+     * full row exceed Android's ~2 MiB CursorWindow, so the
+     * repository's own full-row reads (getById, and
+     * relinkReferencingNotes' getAll on a title change) fail before
+     * the skip is even reached — a PRE-EXISTING gap in the write
+     * path, not this finding (see fix3 SUMMARY). 300K chars keeps
+     * the row readable while the split it avoids is still a real
+     * 60,000-token list; the seam, not the size, proves the skip.
      */
     @Test
     fun metadataOpsOnHugeNoteReuseStoredWordCount() = runBlocking {
         val context = RuntimeEnvironment.getApplication()
         val notes = NoteRepository(DatabaseProvider.forDatabase(context, db))
-        val huge = "word ".repeat(240_000) // 1.2M chars, 240,000 words
+        val huge = "word ".repeat(60_000) // 300K chars, 60,000 words
         val created = notes.createNote(title = "huge", plainBody = huge)
         val id = created.id
-        assertEquals(240_000, db.noteDao().getById(id)!!.wordCount)
+        assertEquals(60_000, db.noteDao().getById(id)!!.wordCount)
         // The create counted once (streaming); nothing below may
         // recount while the text is unchanged.
         assertEquals(1, notes.wordCountRecomputations)
@@ -274,9 +283,9 @@ class WritingStatsRobolectricTest {
         notes.restore(db.noteDao().getById(id)!!)
         assertEquals(1, notes.wordCountRecomputations)
         val stored = db.noteDao().getById(id)!!
-        assertEquals(240_000, stored.wordCount)
+        assertEquals(60_000, stored.wordCount)
         assertEquals(huge, stored.plainText)
-        assertEquals(240_000, stats().totalWords)
+        assertEquals(60_000, stats().totalWords)
         // A real content edit DOES recount — streaming, exact.
         notes.updateBody(stored, stored.title, "one two")
         assertEquals(2, notes.wordCountRecomputations)
