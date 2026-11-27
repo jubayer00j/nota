@@ -42,7 +42,9 @@ data class WritingStats(
     val startedThisMonth: Int,
     val editedThisMonth: Int,
     /** The local day the oldest note was created; null when the
-     *  library is empty. */
+     *  library is empty — or when no note has a known creation
+     *  date (fix round 4: dateless imports carry 0L, see
+     *  [WritingStatsCalculator.compute]). */
     val writingSince: LocalDate?,
     /** Untrashed locked notes — counted in note totals and day
      *  activity, never in word totals. */
@@ -70,15 +72,28 @@ object WritingStatsCalculator {
         fun dayOf(epochMillis: Long): LocalDate =
             Instant.ofEpochMilli(epochMillis).atZone(zone).toLocalDate()
 
-        val createdDays = rows.map { dayOf(it.createdAt) }
+        // Fix round 4: 0L is the importer's unknown-date sentinel
+        // (MarkdownImport, PR #59 — the dedupe key is (title,
+        // createdAt), so a dateless import stores 0 rather than a
+        // wall-clock stamp). A dateless row therefore carries
+        // createdAt = 0 AND contentEditedAt = 0 (the v10 backfill
+        // copies updatedAt, which the importer also set to 0).
+        // 0 means "unknown", never a writing day: without this
+        // check it becomes 1970-01-01 in Dhaka, a fabricated
+        // writing day and a "Writing since 1 Jan 1970". The note
+        // still counts in totalNotes / totalWords — only its days
+        // are unknown.
+        val createdDays = rows.map { it.createdAt.takeIf { stamp -> stamp != 0L }?.let { dayOf(it) } }
         // Fix round 1: the edited day is the CONTENT edit. A null
         // contentEditedAt (a row that predates the v10 backfill
         // and somehow missed it) contributes no edited day — it
         // must never fall back to updatedAt, or a pin/archive/
-        // move would count as writing again.
-        val editedDays = rows.map { it.contentEditedAt?.let { edited -> dayOf(edited) } }
+        // move would count as writing again. A 0 contentEditedAt
+        // is the same "unknown" (fix round 4, above).
+        val editedDays =
+            rows.map { it.contentEditedAt?.takeIf { stamp -> stamp != 0L }?.let { edited -> dayOf(edited) } }
         val writingDays = HashSet<LocalDate>().apply {
-            addAll(createdDays)
+            createdDays.filterNotNull().forEach { add(it) }
             editedDays.filterNotNull().forEach { add(it) }
         }
 
@@ -108,9 +123,9 @@ object WritingStatsCalculator {
         rows.indices.forEach { i ->
             val created = createdDays[i]
             val edited = editedDays[i]
-            if (created in thisWeekStart..weekEnd) startedWeek++
+            if (created != null && created in thisWeekStart..weekEnd) startedWeek++
             if (edited != null && edited in thisWeekStart..weekEnd) editedWeek++
-            if (created in monthStart..monthEnd) startedMonth++
+            if (created != null && created in monthStart..monthEnd) startedMonth++
             if (edited != null && edited in monthStart..monthEnd) editedMonth++
         }
 
@@ -133,7 +148,7 @@ object WritingStatsCalculator {
             editedThisWeek = editedWeek,
             startedThisMonth = startedMonth,
             editedThisMonth = editedMonth,
-            writingSince = createdDays.minOrNull(),
+            writingSince = createdDays.filterNotNull().minOrNull(),
             lockedNotes = rows.count { it.locked },
         )
     }

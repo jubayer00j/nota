@@ -156,6 +156,45 @@ class WritingStatsCalculatorTest {
         assertEquals(1, stats.startedThisWeek)
     }
 
+    // Fix round 4 (R4-F1): 0L is the importer's unknown-date
+    // sentinel — a dateless import stores 0 for createdAt and
+    // (via the v10 backfill) contentEditedAt. The note counts in
+    // totals, but contributes no writing day and never sets
+    // "Writing since" (0L would otherwise become 1970-01-01).
+    private fun datelessRow(words: Int = 7) = NoteStatsRow(0L, 0L, false, words)
+
+    @Test
+    fun datelessNote_countsInTotalsButNoWritingDay() {
+        val stats = compute(listOf(datelessRow()))
+        assertEquals(1, stats.totalNotes)
+        assertEquals(7, stats.totalWords)
+        assertEquals(0, stats.writingDays)
+        assertEquals(0, stats.currentStreak)
+        assertEquals(0, stats.longestStreak)
+        assertNull(stats.writingSince)
+        assertEquals(0, stats.startedThisWeek)
+        assertEquals(0, stats.editedThisWeek)
+        assertEquals(0, stats.startedThisMonth)
+        assertEquals(0, stats.editedThisMonth)
+        assertEquals(List(WritingStatsCalculator.ACTIVITY_WEEKS) { 0 }, stats.weeklyActivity)
+    }
+
+    @Test
+    fun datelessNote_mixedLibraryWritingSinceIsTheDatedNote() {
+        val stats = compute(
+            listOf(
+                datelessRow(),
+                row(LocalDate.of(2026, 11, 23), words = 3),
+            ),
+        )
+        assertEquals(2, stats.totalNotes)
+        assertEquals(10, stats.totalWords)
+        assertEquals(1, stats.writingDays)
+        assertEquals(LocalDate.of(2026, 11, 23), stats.writingSince)
+        assertEquals(1, stats.longestStreak)
+        assertEquals(1, stats.startedThisWeek)
+    }
+
     @Test
     fun emptyRows_zeroStatsAndNoSince() {
         val stats = compute(emptyList())
