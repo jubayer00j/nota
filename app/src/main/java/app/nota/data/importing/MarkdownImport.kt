@@ -2727,7 +2727,44 @@ internal fun isZipFile(file: File): Boolean {
 
 /** A valid empty archive is just its end-of-central-directory record
  *  (PK\x05\x06 …); anything else that yields zero entries is not a
- *  readable archive at all (Codex R11-F2). */
+ *  readable archive at all (Codex R11-F2). The record is 22 bytes
+ *  minimum (Codex R46-F1): a file truncated after the 4-byte signature
+ *  passes a magic-only check and then reports a successful zero-note
+ *  import. Require the complete record — the 22 fixed bytes with zero
+ *  total entries, and a total size of exactly 22 + the comment length
+ *  the record itself declares, so an empty archive with a comment is
+ *  still accepted when complete. */
 internal fun isEmptyZipArchive(file: File): Boolean {
-    return zipMagic(file) == 0x06054b50
+    if (!file.exists()) return false
+    return try {
+        file.inputStream().buffered().use { input ->
+            val header = ByteArray(22)
+            var read = 0
+            while (read < 22) {
+                val n = input.read(header, read, 22 - read)
+                if (n < 0) break
+                read += n
+            }
+            if (read < 22) return false
+            val magic = (header[0].toInt() and 0xFF) or
+                ((header[1].toInt() and 0xFF) shl 8) or
+                ((header[2].toInt() and 0xFF) shl 16) or
+                ((header[3].toInt() and 0xFF) shl 24)
+            if (magic != 0x06054b50) return false
+            // Total entries, little-endian u16 at offset 10: an empty
+            // archive has none, and a file claiming entries that yields
+            // none is damaged, not empty.
+            val totalEntries = (header[10].toInt() and 0xFF) or
+                ((header[11].toInt() and 0xFF) shl 8)
+            if (totalEntries != 0) return false
+            // Comment length, little-endian u16 at offset 20: the
+            // record is only complete when the file holds exactly the
+            // 22 fixed bytes plus the comment it declares.
+            val commentLength = (header[20].toInt() and 0xFF) or
+                ((header[21].toInt() and 0xFF) shl 8)
+            file.length() == 22L + commentLength
+        }
+    } catch (e: Exception) {
+        false
+    }
 }

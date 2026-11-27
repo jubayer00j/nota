@@ -538,6 +538,24 @@ class NoteImportRobolectricTest {
         return file
     }
 
+    /** A genuinely valid empty archive: ZipOutputStream closed with no
+     *  entries writes exactly the 22-byte end-of-central-directory
+     *  record, plus the comment when one is set (Codex R46-F1). */
+    private fun emptyZipFile(comment: String? = null): File {
+        val file = File.createTempFile("import-empty", ".zip")
+        ZipOutputStream(file.outputStream().buffered()).use { zip ->
+            if (comment != null) zip.setComment(comment)
+        }
+        return file
+    }
+
+    /** The first [bytes] of a valid empty archive — a file truncated
+     *  after the PK\x05\x06 signature (4) or mid-record (12). */
+    private fun truncatedEocdFile(bytes: Int): File {
+        val data = emptyZipFile().readBytes().copyOf(bytes)
+        return File.createTempFile("import-trunc", ".zip").apply { writeBytes(data) }
+    }
+
     @Test
     fun corruptMarkdownZipIsSkippedAndSelectionKeepsOtherPicks() = runBlocking {
         // R43-F1: a ZIP with a valid header but corrupt entry data
@@ -583,6 +601,83 @@ class NoteImportRobolectricTest {
         assertEquals(0, outcome.report.imported)
         assertEquals(
             listOf(SkippedImportFile("Takeout ZIP", "That ZIP file is damaged and couldn't be read.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
+    fun truncatedEocdMarkdownZipIsReportedDamaged() = runBlocking {
+        // (Codex R46-F1): a file truncated after the 4-byte PK\x05\x06
+        // signature used to pass isEmptyZipArchive and report a
+        // successful zero-note import. It is now one skipped file.
+        val stack = newStack()
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("empty.zip", truncatedEocdFile(4), 1_700_000_000_000L)),
+        )
+        assertEquals(0, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(
+            listOf(SkippedImportFile("ZIP archive", "That file couldn't be read as a ZIP archive.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
+    fun truncatedEocdAtTwelveBytesIsReportedDamaged() = runBlocking {
+        // (Codex R46-F1): a 22-byte end-of-central-directory record
+        // cut at 12 bytes is the same damage, one skipped file.
+        val stack = newStack()
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("empty.zip", truncatedEocdFile(12), 1_700_000_000_000L)),
+        )
+        assertEquals(0, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(
+            listOf(SkippedImportFile("ZIP archive", "That file couldn't be read as a ZIP archive.")),
+            outcome.parse.skippedFiles,
+        )
+    }
+
+    @Test
+    fun validEmptyZipImportsAsZeroNotes() = runBlocking {
+        // (Codex R46-F1) control: a genuinely valid empty archive —
+        // a complete 22-byte record, no entries — still imports as a
+        // successful zero-note import, not damage.
+        val stack = newStack()
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("empty.zip", emptyZipFile(), 1_700_000_000_000L)),
+        )
+        assertEquals(0, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(emptyList<SkippedImportFile>(), outcome.parse.skippedFiles)
+        assertEquals(0, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun validEmptyZipWithCommentImportsAsZeroNotes() = runBlocking {
+        // (Codex R46-F1) control: an empty archive whose record
+        // carries a comment is complete too — the record's declared
+        // comment length must be honoured, not treated as damage.
+        val stack = newStack()
+        val outcome = stack.repo.importMarkdownSelection(
+            listOf(StagedImportFile("empty.zip", emptyZipFile("hello"), 1_700_000_000_000L)),
+        )
+        assertEquals(0, outcome.report.imported)
+        assertEquals(0, outcome.report.failed)
+        assertEquals(emptyList<SkippedImportFile>(), outcome.parse.skippedFiles)
+        assertEquals(0, stack.db.noteDao().getAll().size)
+    }
+
+    @Test
+    fun truncatedEocdKeepZipIsReportedDamaged() = runBlocking {
+        // (Codex R46-F1), Keep path: the same truncated record through
+        // importKeepZip is one skipped file, not a successful
+        // zero-note import.
+        val stack = newStack()
+        val outcome = stack.repo.importKeepZip(truncatedEocdFile(4))
+        assertEquals(0, outcome.report.imported)
+        assertEquals(
+            listOf(SkippedImportFile("Takeout ZIP", "That file couldn't be read as a ZIP archive.")),
             outcome.parse.skippedFiles,
         )
     }
@@ -4707,6 +4802,110 @@ class NoteImportRobolectricTest {
         assertEquals(0, result.report.duplicates)
         assertEquals(0, result.report.failed)
         assertEquals(3, stack.db.noteDao().getAllDedupeRows().size)
+    }
+
+    @Test
+    fun racedTagIsReusedNotDuplicated() = runBlocking {
+        // (Codex R46-F2): a tag added by a Merge restore after the
+        // seed — the caches miss, but the in-transaction database
+        // lookup finds it, so the note imports and the restore's row
+        // is reused instead of the upsert violating the unique name
+        // index and failing the note. Driven directly (the R45-F1
+        // test shape): the tag lands after meta.seed().
+        val stack = newStack()
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.db.tagDao().upsert(
+            TagEntity(id = "restore-tag", name = "Race", createdAt = 1_700_000_000_000L),
+        )
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Tagged",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = listOf("Race"),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "tagged.md",
+            ),
+            meta,
+        )
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(1, tags.size)
+        assertEquals("restore-tag", tags.single().id)
+        val noteId = stack.db.noteDao().getAll().single().id
+        assertEquals(listOf("Race"), stack.db.tagDao().getTagNamesForNote(noteId))
+    }
+
+    @Test
+    fun racedCaseVariantTagReusesExistingSpelling() = runBlocking {
+        // (Codex R46-F2): the restore added `Foo`; the note carries
+        // `foo`. The case-insensitive lookup reuses the existing row
+        // — first spelling wins (Codex R33-F1) — instead of creating
+        // a second tag that differs only by case.
+        val stack = newStack()
+        val meta = NoteImportRepository.RunMetadata(stack.db)
+        meta.seed()
+        stack.db.tagDao().upsert(
+            TagEntity(id = "restore-foo", name = "Foo", createdAt = 1_700_000_000_000L),
+        )
+        stack.repo.writeImportedNote(
+            stack.db,
+            ImportedNote(
+                title = "Tagged",
+                contentHtml = "<p>body</p>",
+                createdAt = 1_700_000_000_001L,
+                updatedAt = 1_700_000_000_001L,
+                pinned = false,
+                archived = false,
+                trashedAt = null,
+                tagNames = listOf("foo"),
+                folderName = null,
+                images = emptyList(),
+                sourceName = "tagged.md",
+            ),
+            meta,
+        )
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(1, tags.size)
+        assertEquals("Foo", tags.single().name)
+        val noteId = stack.db.noteDao().getAll().single().id
+        assertEquals(listOf("Foo"), stack.db.tagDao().getTagNamesForNote(noteId))
+    }
+
+    @Test
+    fun newTagStillCreatedByRun() = runBlocking {
+        // (Codex R46-F2) control: a genuinely new tag is still
+        // created by the run and linked — the lookup-before-create
+        // must not stop creation, only reuse.
+        val stack = newStack()
+        fun note(title: String) = ImportedNote(
+            title = title,
+            contentHtml = "<p>body</p>",
+            createdAt = 1_700_000_000_000L + title.hashCode(),
+            updatedAt = 1_700_000_000_000L + title.hashCode(),
+            pinned = false,
+            archived = false,
+            trashedAt = null,
+            tagNames = listOf("Fresh"),
+            folderName = null,
+            images = emptyList(),
+            sourceName = "$title.md",
+        )
+        val result = stack.repo.importNotes(listOf(note("One"), note("Two")))
+        assertEquals(2, result.report.imported)
+        assertEquals(0, result.report.failed)
+        val tags = stack.db.tagDao().getAllTags()
+        assertEquals(1, tags.size)
+        assertEquals("Fresh", tags.single().name)
+        for (n in stack.db.noteDao().getAll()) {
+            assertEquals(listOf("Fresh"), stack.db.tagDao().getTagNamesForNote(n.id))
+        }
     }
 
     @Test

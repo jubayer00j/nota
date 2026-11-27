@@ -474,6 +474,18 @@ interface TagDao {
     @Query("SELECT * FROM tags WHERE name = :name LIMIT 1")
     suspend fun getByName(name: String): TagEntity?
 
+    /** Case-insensitive tag lookup (Codex R46-F2): the importer's
+     *  run cache is seeded once, so a tag added by another writer
+     *  after the seed is invisible to it — the exact lookup above
+     *  misses a case-variant (`Foo` in the database, `foo` in the
+     *  note), and creating it would leave two tags differing only
+     *  by case. SQLite NOCASE folds ASCII only; a non-ASCII
+     *  case-variant in the race window can still create a second
+     *  row (never a crash — the unique index is BINARY, so
+     *  case-variants do not conflict). */
+    @Query("SELECT * FROM tags WHERE name = :name COLLATE NOCASE LIMIT 1")
+    suspend fun getByNameIgnoreCase(name: String): TagEntity?
+
     @Query("SELECT * FROM tags")
     suspend fun getAllTags(): List<TagEntity>
 

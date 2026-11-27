@@ -750,6 +750,33 @@ class NoteImportRepository(
             val name = rawName.trim()
             tagByExact[name]?.let { return TagResolution(it, null) }
             tagByLower[name.lowercase()]?.let { return TagResolution(it, null) }
+            // (Codex R46-F2): the caches are seeded once at run start,
+            // and a Merge restore can add a tag after the seed — the
+            // fix-48 recheck covers notes only, not metadata. Re-read
+            // the database before creating: the lookup runs inside the
+            // note's write transaction, which holds the write lock
+            // from its start (BEGIN IMMEDIATE, see the R45-F1 recheck
+            // comment in writeImportedNote), so no concurrent writer
+            // can commit between the lookup and the upsert below. The
+            // exact lookup first, then a case-insensitive one (first
+            // spelling wins, Codex R33-F1) — a raced case-variant
+            // reuses the existing row instead of creating a second tag
+            // that differs only by case. A row found here already
+            // exists, so it is adopted into the caches and returned
+            // with created = null: it is not this run's creation, and
+            // noteCommitted must not record it as one. (Adopting it
+            // now cannot poison the cache on a rollback — the row is
+            // persisted by another writer, so it exists regardless of
+            // this transaction's outcome.) Mirrors
+            // NoteRepository.setNoteTags, which does the same
+            // getByName-before-create inside its own transaction.
+            val existing = db.tagDao().getByName(name)
+                ?: db.tagDao().getByNameIgnoreCase(name)
+            if (existing != null) {
+                tagByExact[existing.name] = existing
+                tagByLower.putIfAbsent(existing.name.trim().lowercase(), existing)
+                return TagResolution(existing, null)
+            }
             val tag = TagEntity(
                 id = UUID.randomUUID().toString(),
                 name = name,
