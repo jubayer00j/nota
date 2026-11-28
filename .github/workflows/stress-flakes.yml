@@ -1,0 +1,133 @@
+name: Stress flakes (scratch, PR #65)
+
+# TEMPORARY diagnostic workflow for the flake-hardening round.
+# workflow_dispatch only; deleted before PR #65 is final.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe-t1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-v2-
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Run FlakeProbeTest
+        run: |
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete - forcing a real execution."
+            extra="--no-build-cache"
+          fi
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
+            --tests "app.nota.data.db.FlakeProbeTest" \
+            --stacktrace
+
+      - name: Upload probe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-probe-t1
+          path: |
+            app/build/test-results
+            app/build/reports/tests
+          if-no-files-found: ignore
+
+  stress-t1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-v2-
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      - name: Stress BackupRestoreSemanticsTest x40
+        run: |
+          mkdir -p stress-out
+          fails=0
+          for i in $(seq 1 40); do
+            rm -rf app/build/test-results/testDebugUnitTest app/build/reports/tests/testDebugUnitTest
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest --no-build-cache \
+              --tests "app.nota.data.backup.BackupRestoreSemanticsTest" \
+              --stacktrace > stress-out/iter-$i.log 2>&1
+            code=$?
+            mkdir -p stress-out/iter-$i
+            cp -r app/build/test-results/testDebugUnitTest stress-out/iter-$i/results 2>/dev/null || true
+            cp -r app/build/reports/tests/testDebugUnitTest stress-out/iter-$i/reports 2>/dev/null || true
+            echo "iter $i exit=$code" | tee -a stress-out/summary.txt
+            if [ $code -ne 0 ]; then fails=$((fails+1)); fi
+          done
+          echo "TOTAL_FAILURES=$fails" | tee -a stress-out/summary.txt
+
+      - name: Upload stress output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-t1-out
+          path: stress-out
+          if-no-files-found: ignore
