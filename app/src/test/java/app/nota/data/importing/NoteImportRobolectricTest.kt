@@ -2339,18 +2339,45 @@ class NoteImportRobolectricTest {
                 )
             }
             val stop = AtomicBoolean(false)
-            val storm = thread {
-                var toOther = true
-                while (!stop.get()) {
-                    provider.switchTo(if (toOther) otherId else startId)
-                    toOther = !toOther
+            // PR #65 (flake-hardening): the storm starts from the
+            // engine's first progress callback, NOT before the call.
+            // The callback fires per note from inside the write
+            // loop — strictly after importNotes has captured the
+            // starting database (the capture opens the run's
+            // dedicated handle, before any note is written).
+            // Starting the storm before the call let it flip
+            // provider.current ahead of that capture — the
+            // withContext(Dispatchers.IO) hop sits between the call
+            // and the capture — so the run legitimately "started"
+            // in the other account and landed all 30 notes there:
+            // AssertionError expected:<0> but was:<30> at the
+            // other-account check below (PR #64 gate attempt 1).
+            // The product guarantee — capture at run start, the
+            // whole run lands in the captured account — held in
+            // every flake; the race was this test's scheduling.
+            // Starting on first progress keeps the hammering (the
+            // remaining notes and the run-end finish are all
+            // written under the storm) and every assertion below is
+            // unchanged, while the starting account is now
+            // deterministic.
+            val stormStarted = AtomicBoolean(false)
+            var storm: Thread? = null
+            val startStorm = {
+                if (stormStarted.compareAndSet(false, true)) {
+                    storm = thread {
+                        var toOther = true
+                        while (!stop.get()) {
+                            provider.switchTo(if (toOther) otherId else startId)
+                            toOther = !toOther
+                        }
+                    }
                 }
             }
             val result = try {
-                repo.importNotes(notes)
+                repo.importNotes(notes) { _, _ -> startStorm() }
             } finally {
                 stop.set(true)
-                storm.join(10_000)
+                storm?.join(10_000)
             }
             assertEquals(30, result.report.imported)
             assertEquals(0, result.report.failed)
@@ -2403,13 +2430,32 @@ class NoteImportRobolectricTest {
             }
             val zip = zipOf(entries)
             val stop = AtomicBoolean(false)
+            // PR #65 (flake-hardening): the storm's first flip is
+            // gated on a latch released immediately before the
+            // call. The capture this test guards is importKeepZip's
+            // FIRST statement (provider.current, read synchronously
+            // at entry), and a flip is a whole switchTo — build and
+            // publish a database instance, close the previous one —
+            // so with the gate the storm cannot complete a flip
+            // before the capture has read the starting instance.
+            // Ungated, the storm thread only had to win the
+            // thread-start race against that single read — the same
+            // scheduling flaw that flaked
+            // importSurvivesRapidAccountSwitchesMidRun, whose
+            // capture sits behind a dispatcher hop. The storm is
+            // fully live for the whole parse (the window this test
+            // exists to hammer), and every assertion below is
+            // unchanged.
+            val stormGate = java.util.concurrent.CountDownLatch(1)
             val storm = thread {
+                stormGate.await()
                 var toOther = true
                 while (!stop.get()) {
                     provider.switchTo(if (toOther) otherId else startId)
                     toOther = !toOther
                 }
             }
+            stormGate.countDown()
             val outcome = try {
                 repo.importKeepZip(zip)
             } finally {

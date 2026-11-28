@@ -160,4 +160,73 @@ class DatabaseProviderSwitchingTest {
             holder.close()
         }
     }
+
+    // (PR #65 — the same flake, the other half of the fix): the
+    // 300 ms hold above is survived by the busy timeout, but the
+    // wild failures came from holds that outlasted the opener's
+    // whole retry budget (~10 s, measured): the opener's onOpen
+    // install INSERT needed the file's write lock and threw
+    // SQLiteDatabaseLockedException once the budget ran out. The
+    // install is now read-only when the library_meta machinery is
+    // already in place — and it IS in place here, because the
+    // holder's own open installed it. So this opener must succeed
+    // IMMEDIATELY, while the write lock is still held, and keep
+    // succeeding for as long as the holder keeps it. The holder
+    // releases only after the opener has finished (or at a 30 s
+    // safety bound), so pre-fix this test fails with the flake's
+    // own exception at ~10 s; post-fix it passes in milliseconds.
+    @Test
+    fun dbOpenSucceedsWhileWriteLockHeldUntilOpenCompletes() = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+        val accountId = "busy-indefinite"
+        context.deleteDatabase(NotaDatabase.databaseName(accountId))
+        val holder = NotaDatabase.build(context, accountId)
+        val holderDb = holder.openHelper.writableDatabase
+        val lockHeld = CountDownLatch(1)
+        val releaseLock = CountDownLatch(1)
+        var holderError: Throwable? = null
+        val holderThread = thread(isDaemon = true) {
+            try {
+                holderDb.beginTransaction()
+                try {
+                    holderDb.execSQL(
+                        "INSERT OR IGNORE INTO library_meta " +
+                            "(id, notesWriteGeneration) VALUES (1, 0)",
+                    )
+                    lockHeld.countDown()
+                    // Hold the write lock until the opener below
+                    // has completed its open — the exact shape the
+                    // busy timeout and the retry budget could not
+                    // survive in the wild.
+                    releaseLock.await(30, TimeUnit.SECONDS)
+                    holderDb.setTransactionSuccessful()
+                } finally {
+                    holderDb.endTransaction()
+                }
+            } catch (e: Throwable) {
+                holderError = e
+                lockHeld.countDown()
+            }
+        }
+        try {
+            assertTrue(lockHeld.await(10, TimeUnit.SECONDS))
+            assertNull(holderError)
+            val opener = NotaDatabase.build(context, accountId)
+            try {
+                withTimeout(20_000) {
+                    assertTrue(opener.noteDao().getAll().isEmpty())
+                }
+            } finally {
+                opener.close()
+            }
+            // The opener opened and read while the write lock was
+            // held the entire time — the release only happens now.
+            releaseLock.countDown()
+            holderThread.join(5_000)
+            assertNull(holderError)
+        } finally {
+            releaseLock.countDown()
+            holder.close()
+        }
+    }
 }
