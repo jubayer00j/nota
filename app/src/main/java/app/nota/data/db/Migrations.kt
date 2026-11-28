@@ -223,3 +223,116 @@ val MIGRATION_8_9: Migration = object : Migration(8, 9) {
         installLibraryMeta(db)
     }
 }
+
+/**
+ * Reading stats fix round 1 (v0.37.0, Codex R1-F1): the
+ * content-edited timestamp. `updatedAt` cannot tell a content
+ * edit from a metadata bump (pin, favourite, archive,
+ * trash/restore, move, lock/unlock all bump it), and stopping
+ * the bump is not an option — the library sorts by `updatedAt`
+ * and the sync merge is whole-row newest-wins on it, so a
+ * metadata op that stopped bumping could lose to a newer remote
+ * copy. A new nullable column is the minimal correct fix: no
+ * existing table is touched beyond the one added column, and no
+ * note data moves.
+ *
+ * - New rows are written with `contentEditedAt` set by their
+ *   content-edit path (create / updateBody / updateTitle /
+ *   updateRichBody / restoreVersion / saveLockedContent); the
+ *   archive converters (`BxNote.toEntity`, import) set it to the
+ *   source's `updatedAt`; metadata ops never touch it.
+ * - Existing rows are backfilled to their `updatedAt` — the only
+ *   edit timestamp a pre-upgrade install has. Honest residual:
+ *   a note whose last pre-upgrade bump was metadata-only keeps
+ *   that day in the stats until its next real content edit.
+ *
+ * Reading stats fix round 2 (v0.37.0, Codex R2-F1): the stored
+ * word count. The stats query used to select unbounded
+ * `plainText` to derive word totals — one note over Android's
+ * ~2 MiB CursorWindow fails the whole stats load. The count is
+ * now a column, maintained at every write (see NoteEntity),
+ * and the migration backfills it for existing rows. The
+ * backfill reads each body in bounded SUBSTR chunks (never a
+ * whole `plainText` cell) and counts with the exact same
+ * definition as BackupRepository.wordCount — maximal runs of
+ * non-whitespace, where "whitespace" is Java `\s` (space, tab,
+ * LF, VT, FF, CR) and nothing else. A character-length
+ * approximation would not be an exact count and is not used.
+ */
+val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE `notes` ADD COLUMN `contentEditedAt` INTEGER")
+        db.execSQL("UPDATE `notes` SET `contentEditedAt` = `updatedAt`")
+        db.execSQL("ALTER TABLE `notes` ADD COLUMN `wordCount` INTEGER NOT NULL DEFAULT 0")
+        backfillWordCounts(db)
+    }
+}
+
+/**
+ * The migration's word-count backfill (fix round 2): counts the
+ * words of every note's stored body without ever reading a whole
+ * `plainText` cell — a single oversized cell is exactly what
+ * broke the stats load. Each body is read in [WORD_COUNT_CHUNK]
+ * slices via SUBSTR (1-based, character — not byte — offsets),
+ * and the counter carries its mid-word state across slices, so
+ * a word straddling a boundary counts once. The separator set
+ * is Java `\s` exactly, matching BackupRepository.wordCount.
+ *
+ * Fix round 3: this is also the shared streaming word counter
+ * NoteRepository.upsert uses for changed text (with an in-memory
+ * slice reader instead of SUBSTR) — one definition, two reader
+ * shapes; the upsert comment states the contract.
+ */
+internal const val WORD_COUNT_CHUNK_CHARS = 65_536
+
+internal fun countWordsChunked(
+    chunkSize: Int = WORD_COUNT_CHUNK_CHARS,
+    readChunk: (offset: Int, size: Int) -> String,
+): Int {
+    var words = 0
+    var inWord = false
+    var offset = 1
+    while (true) {
+        val chunk = readChunk(offset, chunkSize)
+        if (chunk.isEmpty()) break
+        for (ch in chunk) {
+            // Java \s exactly: space, tab, LF, VT, FF, CR.
+            // Kotlin's Char.isWhitespace is wider (it also
+            // counts NBSP and other Unicode spaces), so it must
+            // NOT be used here — the count would drift from
+            // BackupRepository.wordCount on such text.
+            if (ch == ' ' || ch == '\t' || ch == '\n' ||
+                ch == '\u000B' || ch == '\u000C' || ch == '\r'
+            ) {
+                inWord = false
+            } else if (!inWord) {
+                words++
+                inWord = true
+            }
+        }
+        if (chunk.length < chunkSize) break
+        offset += chunkSize
+    }
+    return words
+}
+
+private fun backfillWordCounts(db: SupportSQLiteDatabase) {
+    val ids = db.query("SELECT `id` FROM `notes`")
+    ids.use {
+        while (it.moveToNext()) {
+            val id = it.getString(0)
+            val words = countWordsChunked { offset, size ->
+                db.query(
+                    "SELECT SUBSTR(`plainText`, ?, ?) FROM `notes` WHERE `id` = ?",
+                    arrayOf<Any?>(offset, size, id),
+                ).use { chunkCursor ->
+                    if (chunkCursor.moveToFirst()) chunkCursor.getString(0) ?: "" else ""
+                }
+            }
+            db.execSQL(
+                "UPDATE `notes` SET `wordCount` = ? WHERE `id` = ?",
+                arrayOf<Any?>(words, id),
+            )
+        }
+    }
+}

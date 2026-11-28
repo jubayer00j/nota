@@ -11,6 +11,7 @@ import app.nota.data.backup.BxAttachmentMeta
 import app.nota.data.backup.ImageBounds
 import app.nota.data.backup.rebuildLibraryIndexes
 import app.nota.data.backup.toEntity
+import app.nota.data.backup.toEntityPreservingContentEditedAt
 import app.nota.data.db.AttachmentEntity
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NoteTagCrossRef
@@ -187,7 +188,16 @@ class SyncApplier(
             val acceptableTagIds = merged.tags.map { it.id }.toSet() +
                 tagDao.getAllTags().map { it.id }
             for (note in regularNotes) {
-                noteDao.upsert(note.toEntity(validFolderIds))
+                // Fix round 1: a merged row whose content is
+                // unchanged must not re-date the last content edit
+                // (a remote pin/archive/move arrives with a newer
+                // updatedAt — the merge winner — but no writing
+                // happened). Same carry-over shape as the reminder
+                // device-local fields below.
+                val existing = noteDao.getById(note.id)
+                noteDao.upsert(
+                    note.toEntityPreservingContentEditedAt(validFolderIds, existing),
+                )
                 tagDao.unlinkAllForNote(note.id)
                 val seen = HashSet<String>()
                 for (tagId in note.tagIds) {

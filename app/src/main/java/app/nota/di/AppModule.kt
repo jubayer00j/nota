@@ -24,6 +24,7 @@ import app.nota.data.security.NoteLockDeviceKeyProvider
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteLockRepository
 import app.nota.data.repository.NoteRepository
+import app.nota.data.repository.WritingStatsRepository
 import app.nota.data.templates.TemplateRepository
 import app.nota.feature.ask.AskViewModel
 import app.nota.feature.editor.RichNoteEditorViewModel
@@ -59,6 +60,9 @@ val appModule = module {
     single { DatabaseProvider(androidContext(), initialAccountId = seededAccountId()) }
     single { NoteRepository(get()) }
     single { LibraryRepository(get()) }
+    // Reading stats (v0.37.0): the on-device "Your writing"
+    // numbers over the active account's projection.
+    single { WritingStatsRepository(get()) }
     single { AttachmentStore(androidContext(), get()) }
     // Phase 3.6 (G2): the durable picker-insert record (filesDir).
     single { app.nota.data.attachments.PendingInsertStore(androidContext()) }

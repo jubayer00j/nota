@@ -1,6 +1,7 @@
 package app.nota.data.db
 
 import androidx.room.Room
+import app.nota.data.backup.BackupRepository
 import app.nota.data.repository.LibraryRepository
 import app.nota.data.repository.NoteRepository
 import kotlinx.coroutines.runBlocking
@@ -226,5 +227,161 @@ class Migration78RobolectricTest {
         dao.getById("mig-a")
         dao.getAll()
         assertEquals(s3, dao.getLibraryStampRow())
+    }
+
+    private fun notesColumns(): List<String> {
+        val cursor = db.openHelper.writableDatabase
+            .query("PRAGMA table_info(`notes`)")
+        return cursor.use {
+            val out = ArrayList<String>()
+            val nameIdx = it.getColumnIndex("name")
+            while (it.moveToNext()) out += it.getString(nameIdx)
+            out
+        }
+    }
+
+    /**
+     * Reading stats fix round 1 (v0.37.0, Codex R1-F1):
+     * MIGRATION_9_10 adds the content-edited timestamp and
+     * backfills it from `updatedAt` — the only edit timestamp a
+     * pre-upgrade install has. The database is rolled back to its
+     * exact v9 shape (Room built it at v10, so the column is
+     * dropped — SQLite DROP COLUMN, 3.35+, Robolectric SDK 35)
+     * and the REAL migration object runs. One seeded note was
+     * never edited after creation (updatedAt == createdAt); the
+     * other was later bumped by a metadata op (updatedAt past
+     * createdAt, content untouched) — the backfill must carry
+     * each row's own `updatedAt`, and nothing else may move.
+     *
+     * Fix round 2 (R2-F1): the same migration also adds the
+     * stored word count and backfills it from the stored body —
+     * read in bounded SUBSTR chunks, never as a whole cell. The
+     * long note below (300,000 chars, 50,000 words) spans
+     * several 64 KiB chunks, so the backfill's cross-chunk
+     * carry is exercised, not just assumed.
+     */
+    @Test
+    fun migration910AddsContentEditedAtAndBackfills() = runBlocking {
+        val dao = db.noteDao()
+        val untouched = NoteEntity(
+            id = "mig-e", title = "plain", contentHtml = "<p>x</p>",
+            plainText = "x", wordCount = 1,
+            createdAt = 1000, updatedAt = 1000,
+            contentEditedAt = 1000,
+        )
+        val bumped = NoteEntity(
+            id = "mig-f", title = "pinned", contentHtml = "<p>y</p>",
+            plainText = "y", wordCount = 1,
+            createdAt = 1000, updatedAt = 9000,
+            contentEditedAt = 1000,
+        )
+        val longBody = "word ".repeat(50_000)
+        val long = NoteEntity(
+            id = "mig-g", title = "long", contentHtml = "<p>long</p>",
+            plainText = longBody, wordCount = 50_000,
+            createdAt = 1000, updatedAt = 1000,
+            contentEditedAt = 1000,
+        )
+        dao.upsert(untouched)
+        dao.upsert(bumped)
+        dao.upsert(long)
+
+        // Roll back to the v9 shape: both columns go away.
+        val supportDb = db.openHelper.writableDatabase
+        supportDb.execSQL("ALTER TABLE `notes` DROP COLUMN `contentEditedAt`")
+        supportDb.execSQL("ALTER TABLE `notes` DROP COLUMN `wordCount`")
+        assertTrue(!notesColumns().contains("contentEditedAt"))
+        assertTrue(!notesColumns().contains("wordCount"))
+
+        MIGRATION_9_10.migrate(supportDb)
+
+        assertTrue(notesColumns().contains("contentEditedAt"))
+        assertTrue(notesColumns().contains("wordCount"))
+        // The backfill carries each row's own updatedAt — and
+        // nothing else moves: titles, bodies and timestamps are
+        // exactly as seeded.
+        val e = dao.getById("mig-e")!!
+        assertEquals(1000L, e.contentEditedAt)
+        assertEquals(untouched, e)
+        val f = dao.getById("mig-f")!!
+        assertEquals(9000L, f.contentEditedAt)
+        assertEquals(9000L, f.updatedAt)
+        assertEquals(1000L, f.createdAt)
+        assertEquals("pinned", f.title)
+        assertEquals("<p>y</p>", f.contentHtml)
+        // The word-count backfill counts each stored body
+        // exactly — including the long one, whose body the
+        // migration could only read in bounded chunks.
+        assertEquals(1, e.wordCount)
+        assertEquals(1, f.wordCount)
+        val g = dao.getById("mig-g")!!
+        assertEquals(50_000, g.wordCount)
+        assertEquals(long, g)
+    }
+
+    /**
+     * Fix round 2: the migration's chunked word counter must
+     * agree with BackupRepository.wordCount exactly — same
+     * definition, same separator set — at every chunk size,
+     * including words straddling a chunk boundary and
+     * characters Java \s does NOT separate (NBSP, EM SPACE).
+     */
+    @Test
+    fun chunkedWordCount_matchesWordCountDefinition() {
+        val cases = listOf(
+            "",
+            " ",
+            "one",
+            " one ",
+            "one  two\tthree\nfour\rfive\u000Bsix\u000Cseven",
+            "a\u00A0b",
+            "a\u2003b",
+            "word ".repeat(100),
+            " lead and  trail  ",
+        )
+        for (text in cases) {
+            for (chunk in listOf(1, 2, 3, 7, 64)) {
+                val counted = countWordsChunked(chunkSize = chunk) { offset, size ->
+                    if (offset > text.length) "" else text.substring(
+                        offset - 1,
+                        minOf(offset - 1 + size, text.length),
+                    )
+                }
+                assertEquals(
+                    "chunk=$chunk text=${text.take(20)}",
+                    BackupRepository.wordCount(text),
+                    counted,
+                )
+            }
+        }
+    }
+
+    /**
+     * Fix round 3: the same counter with the default 64K chunk —
+     * the size upsert reads an in-memory body in — must agree with
+     * wordCount on long bodies, including bodies that end exactly
+     * on a chunk boundary.
+     */
+    @Test
+    fun countWordsChunked_defaultChunkSize_matchesWordCount() {
+        val cases = listOf(
+            "word ".repeat(50_000), // 250,000 chars, several chunks
+            "a".repeat(65_536), // exactly one chunk, a single word
+            "word ".repeat(13_107) + "x", // exactly 65,536 chars
+            "word ".repeat(26_214) + "ta", // exactly 131,072 chars
+        )
+        for (text in cases) {
+            val counted = countWordsChunked { offset, size ->
+                if (offset > text.length) "" else text.substring(
+                    offset - 1,
+                    minOf(offset - 1 + size, text.length),
+                )
+            }
+            assertEquals(
+                "len=${text.length}",
+                BackupRepository.wordCount(text),
+                counted,
+            )
+        }
     }
 }

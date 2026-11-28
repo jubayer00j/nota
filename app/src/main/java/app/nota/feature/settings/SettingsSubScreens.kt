@@ -12,12 +12,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import app.nota.data.preferences.PreferencesRepository
 import app.nota.data.preferences.SwipeAction
+import app.nota.data.repository.WritingStatsRepository
+import app.nota.data.repository.writingStatsSummary
 import app.nota.ui.theme.NotaSpacing
 import app.nota.ui.theme.notaEditorBody
 import kotlin.math.roundToInt
@@ -164,7 +167,9 @@ fun SettingsAppearanceScreen(
 fun SettingsNotesScreen(
     onBack: () -> Unit,
     onOpenTemplates: () -> Unit,
+    onOpenWritingStats: () -> Unit = {},
     preferencesRepository: PreferencesRepository = koinInject(),
+    statsRepository: WritingStatsRepository = koinInject(),
 ) {
     val startOnToday by preferencesRepository.startOnToday.collectAsState(initial = false)
     val swipeRight by preferencesRepository.swipeRightAction
@@ -182,6 +187,14 @@ fun SettingsNotesScreen(
     // Phase 6 extras (PR #45): 1.x's dictation language choice.
     val speechLanguage by preferencesRepository.speechLanguage
         .collectAsState(initial = PreferencesRepository.SPEECH_LANGUAGE_SYSTEM)
+    // Reading stats (v0.37.0): the "Your writing" row's live
+    // summary — the same stats its screen opens to, loaded once
+    // per visit to this sub-screen.
+    val writingSummary by produceState<String?>(initialValue = null) {
+        value = runCatching {
+            writingStatsSummary(statsRepository.loadStats())
+        }.getOrNull()
+    }
     val scope = rememberCoroutineScope()
 
     SettingsSubScreen(SettingsCategory.NOTES, INTRO_NOTES, onBack) {
@@ -301,6 +314,13 @@ fun SettingsNotesScreen(
                 title = "Templates",
                 subtitle = "Start notes from templates; create them from any note's menu",
                 onClick = onOpenTemplates,
+            )
+            // Reading stats (v0.37.0): the quiet stats screen,
+            // summarised live on the row in the root list's style.
+            SettingsNavRow(
+                title = "Your writing",
+                subtitle = writingSummary ?: "Notes, words and streaks",
+                onClick = onOpenWritingStats,
             )
         }
     }

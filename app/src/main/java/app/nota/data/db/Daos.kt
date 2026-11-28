@@ -86,6 +86,36 @@ data class NoteIndexRow(
     val folderId: String?,
 )
 
+/** Reading stats (v0.37.0): one note's stats input at projection
+ *  weight — exactly the columns the stats calculator reads
+ *  (creation/edit stamps, the lock flag, the stored word
+ *  count). Fix round 2 (R2-F1): the projection used to carry
+ *  the plain text, and one note over Android's ~2 MiB
+ *  CursorWindow failed the whole stats load. Word totals now
+ *  come from the stored `wordCount` column — maintained at
+ *  every write, never derived from an unbounded read — so no
+ *  body text crosses this query at all. A locked note's stored
+ *  count is 0 by construction (its plainText is blanked under
+ *  the seal), and the calculator additionally skips locked rows
+ *  for word counts by flag, so stats never decrypt — and never
+ *  need to. Trashed notes are filtered in SQL: they are
+ *  excluded from every stat. Archived notes ride along — the
+ *  stats semantics exclude trash only. */
+data class NoteStatsRow(
+    val createdAt: Long,
+    /** The last CONTENT edit (see [NoteEntity.contentEditedAt]);
+     *  null only for a row whose content edit was never recorded
+     *  (pre-v10 rows are backfilled by MIGRATION_9_10, so in
+     *  practice every row carries one) — the calculator treats
+     *  null as "no recorded content edit", never as [updatedAt],
+     *  or a metadata bump would count as writing again. */
+    val contentEditedAt: Long?,
+    val locked: Boolean,
+    /** Stored word count (see [NoteEntity.wordCount]) — the
+     *  stats' only word source. */
+    val wordCount: Int,
+)
+
 /** Performance chapter 2 (F3/F6): the library stamp — the
  *  invalidation key for the corpus cache and the semantic
  *  reconcile stamp gate, read on every search keystroke and
@@ -403,6 +433,21 @@ interface NoteDao {
      *  envelopes) for a whole library on a cold start. */
     @Query("SELECT id, title, plainText FROM notes")
     suspend fun getAllNoteTexts(): List<NoteTextRow>
+
+    /** Reading stats (v0.37.0): every untrashed note's stats
+     *  input — see [NoteStatsRow]. One pass over the projection;
+     *  the calculator derives days, streaks, periods and word
+     *  totals from it in memory. The edited day comes from
+     *  `contentEditedAt`, never `updatedAt` (fix round 1:
+     *  metadata ops bump `updatedAt` without any writing), and
+     *  word totals come from the stored `wordCount` column —
+     *  never from the body (fix round 2: an unbounded plainText
+     *  read fails the whole load past the CursorWindow limit). */
+    @Query(
+        "SELECT createdAt, contentEditedAt, locked, wordCount FROM notes " +
+            "WHERE trashedAt IS NULL",
+    )
+    suspend fun getStatsRows(): List<NoteStatsRow>
 
     /** Performance chapter 2 (F3/F6): the library stamp — see
      *  [LibraryStampRow]. A single-row read of `library_meta`;

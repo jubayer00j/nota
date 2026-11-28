@@ -56,6 +56,7 @@ import app.nota.feature.settings.SettingsNotesScreen
 import app.nota.feature.settings.SettingsScreen
 import app.nota.feature.settings.SettingsSecurityScreen
 import app.nota.feature.settings.SettingsSyncScreen
+import app.nota.feature.settings.WritingStatsScreen
 import app.nota.feature.templates.TemplatesScreen
 import app.nota.feature.today.TodayScreen
 import org.koin.compose.koinInject
@@ -91,6 +92,10 @@ object NotaRoutes {
     const val SETTINGS_NOTES = "settings/notes"
     const val SETTINGS_AI = "settings/ai"
     const val SETTINGS_ABOUT = "settings/about"
+    // Reading stats (v0.37.0): the "Your writing" screen, pushed
+    // from the Notes & writing sub-screen's row; back returns to
+    // that sub-screen.
+    const val WRITING_STATS = "settings/writing"
 }
 
 /** The sub-route for a Settings category (root row taps + deep landings). */
@@ -464,6 +469,12 @@ fun NotaNavShell(
                 SettingsNotesScreen(
                     onBack = { navController.popBackStack() },
                     onOpenTemplates = { navController.navigate(NotaRoutes.TEMPLATES) },
+                    onOpenWritingStats = { navController.navigate(NotaRoutes.WRITING_STATS) },
+                )
+            }
+            composable(NotaRoutes.WRITING_STATS) {
+                WritingStatsScreen(
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(NotaRoutes.SETTINGS_AI) {

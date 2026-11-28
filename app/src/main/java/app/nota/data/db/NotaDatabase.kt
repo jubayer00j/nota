@@ -7,12 +7,13 @@ import androidx.room.RoomDatabase
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
- * Nota's Room database — schema v9 (Phase 1b added saved_searches, Phase 1c
+ * Nota's Room database — schema v10 (Phase 1b added saved_searches, Phase 1c
  * note_links for [[backlinks]], Phase 2b the per-note lock columns,
  * Phase 3c the sync tombstones + sync_meta tables, Phase 5.1 the reminder
  * alertType column, Phase 6 extras the device-local reminder tone columns,
  * Search Quality Pass the tags/folder columns on notes_fts,
- * Performance chapter 2 R3 the library_meta write-generation counter;
+ * Performance chapter 2 R3 the library_meta write-generation counter,
+ * Reading stats fix round 1 the contentEditedAt column on notes;
  * migrations carry installs forward).
  *
  * Per-account isolation mirrors Noma 1.x (spec §3): one database file per account,
@@ -34,7 +35,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         SyncMetaEntity::class,
         LibraryMetaEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 abstract class NotaDatabase : RoomDatabase() {
@@ -83,7 +84,7 @@ abstract class NotaDatabase : RoomDatabase() {
                 context.applicationContext,
                 NotaDatabase::class.java,
                 databaseName(accountId),
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .addCallback(libraryMetaCallback)
                 .build()
     }

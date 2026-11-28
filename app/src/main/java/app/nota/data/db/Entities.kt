@@ -55,8 +55,35 @@ data class NoteEntity(
     val contentHtml: String = "",
     /** Derived plain-text projection of [contentHtml] for snippets + FTS. */
     val plainText: String = "",
+    /**
+     * Reading stats fix round 2 (v0.37.0, R2-F1): the stored word
+     * count of [plainText] (BackupRepository.wordCount — maximal
+     * runs of non-whitespace). The stats query reads this column
+     * instead of the body: one note over Android's ~2 MiB
+     * CursorWindow would fail a whole stats load that selected
+     * unbounded text. The count is maintained wherever the text
+     * is written — NoteRepository.upsert recomputes it for every
+     * in-app write (the one choke point), and the direct-DAO
+     * writers compute it at construction (BxNote.toEntity for
+     * sync/restore, the importer for imported notes). A new direct
+     * writer of notes MUST set it, or stats silently under-count.
+     * Locked notes store 0 (their plainText is empty under the
+     * seal); the stats skip locked rows for words regardless.
+     */
+    val wordCount: Int = 0,
     val createdAt: Long,
     val updatedAt: Long,
+    /**
+     * Reading stats fix round 1 (v0.37.0, R1-F1): epoch millis
+     * of the last CONTENT edit (title or body). Metadata-only
+     * operations — pin, favourite, archive, trash/restore, move,
+     * lock/unlock — bump [updatedAt] (load-bearing: library sort
+     * + sync newest-wins) but must never touch this field, so the
+     * stats can tell writing apart from organising. Null only
+     * for rows written before the v10 migration backfilled it;
+     * every writer since sets it (see MIGRATION_9_10).
+     */
+    val contentEditedAt: Long? = null,
     val pinned: Boolean = false,
     val favourite: Boolean = false,
     val archived: Boolean = false,
