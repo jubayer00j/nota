@@ -2438,3 +2438,106 @@ object NoteDocument {
 
     private fun unescapeText(value: String): String = HtmlEntities.decode(value)
 }
+
+/**
+ * Relink gap fix (v0.37.1): streaming [[...]] extraction for a
+ * body that must never be materialised whole — a note whose row
+ * exceeds Android's ~2 MiB CursorWindow is scanned for backlink
+ * titles through bounded SUBSTR slices (see NoteDao's chunk
+ * reads), and this scanner is fed one slice at a time.
+ *
+ * Equivalence with [NoteDocument.backlinkTitles] over the full
+ * text: a [[...]] match contains no `]` before its closing
+ * `]]` (the regex's capture and display parts both exclude
+ * `]`), so every match lies entirely inside the span from some
+ * `[[` to the FIRST `]]` after it. The scanner cuts the input
+ * into exactly those spans — carrying a split `[[` or `]]`
+ * across feed boundaries — and runs the same
+ * [NoteDocument.backlinkTitles] over each completed span,
+ * which yields precisely the match the whole-text scan finds
+ * in it (a span holds only one `]]`, so it holds at most one
+ * match; a dead start inside the span, e.g. `[[A] [[B]]`, is
+ * skipped by the regex exactly as in the whole-text scan).
+ *
+ * One documented bound: a single span longer than
+ * [MAX_SPAN_CHARS] is abandoned — the scanner resumes from a
+ * later `[[` inside it when one exists — so a `[[` followed by
+ * more than 250,000 characters without a `]]` does not resolve
+ * as a link. That is the same bound the index rebuild already
+ * applies to its link scan (NoteIndexRow's
+ * MAX_INDEX_PLAIN_TEXT_CHARS); a real note title is orders of
+ * magnitude shorter, and an abandoned span's text is never
+ * re-read whole.
+ */
+internal class BacklinkSpanScanner {
+
+    /** The currently open span's text (starting with its `[[`),
+     *  or null while seeking the next `[[`. An open span never
+     *  contains `]]` — completing one closes it immediately. */
+    private var span: StringBuilder? = null
+
+    /** Seeking: the previous character was `[` (half of a
+     *  possible `[[` split across feeds). */
+    private var prevOpen = false
+
+    /** In a span: the previous character was `]` (half of a
+     *  possible closing `]]` split across feeds). */
+    private var prevClose = false
+
+    /**
+     * Feeds one slice of the body; returns the backlink titles
+     * of every span this slice completed, in order (duplicates
+     * possible across spans — the caller dedupes, mirroring
+     * [NoteDocument.backlinkTitles]' distinct).
+     */
+    fun feed(text: String): List<String> {
+        val out = ArrayList<String>()
+        for (c in text) {
+            val current = span
+            if (current == null) {
+                if (prevOpen && c == '[') {
+                    span = StringBuilder("[[")
+                    prevOpen = false
+                    prevClose = false
+                } else {
+                    prevOpen = c == '['
+                }
+            } else {
+                current.append(c)
+                if (prevClose && c == ']') {
+                    out += NoteDocument.backlinkTitles(current.toString())
+                    span = null
+                    prevClose = false
+                    prevOpen = false
+                } else {
+                    prevClose = c == ']'
+                    if (current.length > MAX_SPAN_CHARS) abandonSpan(current)
+                }
+            }
+        }
+        return out
+    }
+
+    /** Drops an overlong span (see the class doc): resumes
+     *  from the last `[[` inside it when one exists past the
+     *  opening, otherwise returns to seeking. */
+    private fun abandonSpan(current: StringBuilder) {
+        val text = current.toString()
+        val restart = text.lastIndexOf("[[")
+        if (restart > 0) {
+            val tail = text.substring(restart)
+            span = StringBuilder(tail)
+            prevClose = tail.lastOrNull() == ']'
+        } else {
+            span = null
+            prevClose = false
+            prevOpen = text.lastOrNull() == '['
+        }
+    }
+
+    companion object {
+        /** The span bound — see the class doc. Mirrors the
+         *  index rebuild's link-scan bound. */
+        const val MAX_SPAN_CHARS = 250_000
+    }
+}

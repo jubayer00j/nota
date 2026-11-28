@@ -115,6 +115,49 @@ class NoteDocumentTest {
     }
 
     @Test
+    fun backlinkSpanScannerMatchesWholeTextExtractionAcrossChunkings() {
+        // Relink gap fix (v0.37.1): the chunked span scanner
+        // (which reads a huge note's body through bounded slices)
+        // must extract exactly what backlinkTitles extracts from
+        // the whole text — for every chunking, including size 1,
+        // which splits every [[ and ]] across feeds.
+        val texts = listOf(
+            "See [[Alpha]] and [[Beta|display text]]",
+            "[[ x [[B]]",
+            "[[A] [[B]]",
+            "an [[Unclosed link",
+            "[[A]]",
+            "[[ ]] and [[|nothing]]",
+            "[[A|B]] then [[A]] again",
+            "no links at all",
+            "[[One]] mid [[Two]] post [[Three|with display]]",
+            "x".repeat(5_000) + "[[Deep]]" + "y".repeat(5_000),
+            "[[A]]]",
+            "[[[A]]",
+            "a[b [[Split]] c",
+        )
+        for (text in texts) {
+            val expected = NoteDocument.backlinkTitles(text)
+            for (chunkSize in listOf(1, 2, 3, 7, 64, 4096)) {
+                val scanner = BacklinkSpanScanner()
+                val actual = LinkedHashSet<String>()
+                var i = 0
+                while (i < text.length) {
+                    actual += scanner.feed(
+                        text.substring(i, minOf(i + chunkSize, text.length)),
+                    )
+                    i += chunkSize
+                }
+                assertEquals(
+                    "chunkSize=$chunkSize text=${text.take(40)}",
+                    expected,
+                    actual.toList(),
+                )
+            }
+        }
+    }
+
+    @Test
     fun tiptapTaskListWithCheckboxScaffoldingParses() {
         // The fuller shape Tiptap emits: label + input inside the <li>.
         val html = "<ul data-type=\"taskList\">" +

@@ -116,6 +116,24 @@ data class NoteStatsRow(
     val wordCount: Int,
 )
 
+/** Relink gap fix (v0.37.1): everything [app.nota.data.repository.NoteRepository.upsert]
+ *  needs to know about the previously stored row — its title
+ *  (rename detection), its stored word count (the fix-round-3
+ *  reuse path), and whether the stored plain text equals the
+ *  incoming text. The text comparison runs INSIDE SQLite
+ *  (`plainText = :newText`), so only scalars cross the cursor:
+ *  the old full-row `getById` read made every write to a note
+ *  whose row exceeds Android's ~2 MiB CursorWindow fail —
+ *  pinning a huge note was impossible even though nothing about
+ *  the operation needs its body. */
+data class NoteUpsertStateRow(
+    val title: String,
+    val wordCount: Int,
+    /** 1 when the stored plainText equals the incoming text,
+     *  0 when it differs (SQLite comparison result). */
+    val textUnchanged: Int,
+)
+
 /** Performance chapter 2 (F3/F6): the library stamp — the
  *  invalidation key for the corpus cache and the semantic
  *  reconcile stamp gate, read on every search keystroke and
@@ -246,6 +264,51 @@ interface NoteDao {
 
     @Query("SELECT * FROM notes WHERE id = :id")
     suspend fun getById(id: String): NoteEntity?
+
+    /** Relink gap fix (v0.37.1): the upsert previous-row read at
+     *  scalar weight — see [NoteUpsertStateRow]. The text
+     *  equality is evaluated by SQLite; the stored body itself
+     *  never crosses the cursor, so writing to a note whose row
+     *  exceeds the ~2 MiB CursorWindow works. */
+    @Query(
+        "SELECT title, wordCount, (plainText = :newText) AS textUnchanged " +
+            "FROM notes WHERE id = :id",
+    )
+    suspend fun getUpsertState(id: String, newText: String): NoteUpsertStateRow?
+
+    /** Relink gap fix (v0.37.1): the rename path's candidate
+     *  selection, in SQL — the ids of notes whose body CONTAINS
+     *  the title text ([pattern] is a LIKE pattern built from
+     *  the escaped title, see NoteRepository). A note that
+     *  references `[[Title]]` necessarily contains the title
+     *  text, so this is a superset of the true referrers; the
+     *  exact [[...]] extraction still happens in Kotlin over
+     *  bounded chunks and stays the authority. Locked and
+     *  trashed notes are excluded here — the old in-memory scan
+     *  skipped exactly those, untouched. Only ids cross the
+     *  cursor, so a library containing a note whose row exceeds
+     *  the CursorWindow no longer breaks every create/rename
+     *  (the old full-entity getAll() materialised that row). */
+    @Query(
+        "SELECT id FROM notes WHERE id != :excludeId AND locked = 0 " +
+            "AND trashedAt IS NULL AND plainText LIKE :pattern ESCAPE '\\'",
+    )
+    suspend fun getRelinkCandidateIds(pattern: String, excludeId: String): List<String>
+
+    /** Relink gap fix (v0.37.1): a note's plain-text length in
+     *  SQLite characters — the bound for the chunked candidate
+     *  scan (SUBSTR offsets are 1-based character positions,
+     *  the same shape as the v10 backfill's word-count reads). */
+    @Query("SELECT LENGTH(plainText) FROM notes WHERE id = :id")
+    suspend fun getPlainTextLength(id: String): Int?
+
+    /** Relink gap fix (v0.37.1): one bounded slice of a note's
+     *  plain text ([offset] is 1-based, SQLite SUBSTR
+     *  semantics). A candidate note past the CursorWindow is
+     *  scanned through these slices, so its [[...]] references
+     *  are extracted without ever materialising its row. */
+    @Query("SELECT SUBSTR(plainText, :offset, :size) FROM notes WHERE id = :id")
+    suspend fun getPlainTextChunk(id: String, offset: Int, size: Int): String?
 
     /** Every note, for backlink re-resolution and the startup backfill. */
     @Query("SELECT * FROM notes")
