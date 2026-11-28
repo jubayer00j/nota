@@ -215,6 +215,18 @@ jobs:
   # remaining sixteen @GraphicsMode(NATIVE) classes are UI
   # suites in test-ui, whose probe already checks the
   # native runtime.)
+  # (b5 split, 2026-11-28: DriveRepositoryTest — the 132.6s
+  # solo class isolated in the 2026-11-24 rebalance above —
+  # is split into TWO 16-test classes (DriveBackupRestoreTest
+  # in test-fast-b5, DriveSyncSetupTest in the new
+  # test-fast-b6) sharing one abstract base with no tests of
+  # its own. The partition grows to 125 classes, each in
+  # exactly one fast shard; no other shard's class list
+  # changes, so no other fork composition shifts. On
+  # 2026-11-28 the fleet killed b5's runner mid-test-step
+  # six times across two runs without a single test failing:
+  # the split halves each job's exposure and its rerun cost
+  # — it does not make kills impossible.)
   test-fast-a:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -707,12 +719,16 @@ jobs:
           if-no-files-found: ignore
 
 
-  # CI pipeline hardening (2026-11-24): DriveRepositoryTest
+  # CI pipeline hardening (2026-11-24): the Drive suite
   # runs ALONE here. At ~133s of measured class time (stable
-  # across three green runs) it is a single indivisible class
+  # across three green runs) it was a single indivisible class
   # larger than the whole per-shard budget; inside shard B it
-  # made B's step the fleet's biggest target. Isolated, its
-  # step is ~4.5 min and a runner kill costs one small rerun.
+  # made B's step the fleet's biggest target.
+  # (b5 split, 2026-11-28: the class is now two 16-test
+  # classes sharing DriveRepositoryTestBase — this job runs
+  # DriveBackupRestoreTest, test-fast-b6 runs
+  # DriveSyncSetupTest. Each step is roughly half the old
+  # ~4.5 min, so a runner kill costs half the rerun.)
   test-fast-b5:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -805,7 +821,7 @@ jobs:
       - name: Run fast unit tests (shard B5, 1 class)
         run: |
           ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
-            --tests "app.nota.data.drive.DriveRepositoryTest" \
+            --tests "app.nota.data.drive.DriveBackupRestoreTest" \
             --stacktrace
 
       - name: Upload fast-shard-B5 test reports
@@ -813,6 +829,114 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: unit-test-evidence-fast-b5
+          path: |
+            app/build/probe-output
+            app/build/reports/tests
+          if-no-files-found: ignore
+  # CI (b5 split, 2026-11-28): the second half of the split
+  # Drive suite — DriveSyncSetupTest (16 tests) runs ALONE
+  # here, cloned from test-fast-b5. See the partition comment
+  # above test-fast-a for the why.
+  test-fast-b6:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # CI pipeline hardening (2026-11-24): Robolectric's
+      # MavenArtifactFetcher keeps the android-all runtime in
+      # ~/.m2/repository/org/robolectric — outside the Gradle
+      # User Home that setup-gradle caches — so without this the
+      # runtime is re-downloaded on every runner. Keyed on the
+      # version catalog (which pins Robolectric 4.16.1).
+      - name: Cache Robolectric runtime artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-4.16.1-v2-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.16.1-v2-
+
+      - name: Materialise google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
+            echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 -d > app/google-services.json
+            echo "google-services.json materialised ($(wc -c < app/google-services.json) bytes)."
+          else
+            echo "ERROR: GOOGLE_SERVICES_JSON_BASE64 secret is not set."
+            exit 1
+          fi
+
+      # CI pipeline hardening (2026-11-24): prefetch probe —
+      # run TWO cheap Robolectric classes through the real test
+      # task BEFORE the shard step: Migration67RobolectricTest
+      # pins @Config(sdk = [35]) and AiSettingsStoreTest is
+      # unpinned (default SDK 36) — the suite uses BOTH
+      # android-all runtimes, and each must be downloaded (or
+      # confirmed cached) here, with retries, instead of
+      # mid-step, where a download flake fails every class at
+      # sandbox boot. The probe also warms the compile cache
+      # for the shard step; its reports are removed afterwards
+      # so the uploaded evidence is the shard step's alone.
+      - name: Prefetch Robolectric runtime (probe classes)
+        run: |
+          # If either android-all runtime is missing from the
+          # local repository, the probe MUST really execute: a
+          # build-cache hit would skip the test JVM entirely
+          # and fetch nothing. --no-build-cache forces a real
+          # execution on that path only.
+          extra=""
+          if ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/15-robolectric-*/ >/dev/null 2>&1 \
+             || ! ls ~/.m2/repository/org/robolectric/android-all-instrumented/16-robolectric-*/ >/dev/null 2>&1; then
+            echo "Robolectric runtime incomplete in local repository - forcing a real probe execution."
+            extra="--no-build-cache"
+          fi
+          probe() {
+            ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest $extra \
+              --tests "app.nota.data.db.Migration67RobolectricTest" \
+              --tests "app.nota.data.ai.AiSettingsStoreTest" \
+              --stacktrace
+          }
+          ok=0
+          for attempt in 1 2 3; do
+            if probe; then ok=1; break; fi
+            echo "Robolectric prefetch attempt $attempt failed; retrying in 15s..."
+            sleep 15
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Prefetch failed 3 times - clearing possibly-poisoned cache and retrying clean..."
+            rm -rf ~/.m2/repository/org/robolectric
+            extra="--no-build-cache"
+            probe
+          fi
+          rm -rf app/build/reports/tests app/build/test-results
+
+      - name: Run fast unit tests (shard B6, 1 class)
+        run: |
+          ./gradlew -PnotaTestShard=fast :app:testDebugUnitTest \
+            --tests "app.nota.data.drive.DriveSyncSetupTest" \
+            --stacktrace
+
+      - name: Upload fast-shard-B6 test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-evidence-fast-b6
           path: |
             app/build/probe-output
             app/build/reports/tests
@@ -1170,7 +1294,7 @@ jobs:
           if-no-files-found: ignore
 
   build-android:
-    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-fast-b4, test-fast-b5, test-ui]
+    needs: [test-fast-a, test-fast-b, test-fast-b2, test-fast-b3, test-fast-b4, test-fast-b5, test-fast-b6, test-ui]
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
