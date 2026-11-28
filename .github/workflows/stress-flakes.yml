@@ -5,8 +5,6 @@ name: Stress flakes (scratch, PR #65)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [fix/flake-hardening]
 
 jobs:
   probe-t1:
