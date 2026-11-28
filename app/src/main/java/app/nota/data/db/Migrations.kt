@@ -156,7 +156,33 @@ val MIGRATION_4_5: Migration = object : Migration(4, 5) {
  * note inside its own transaction (and a rolled-back write rolls
  * its increments back with it — the counter counts COMMITTED
  * writes, which is exactly the stamp's contract).
+ *
+ * (PR #65, flake-hardening): the install used to WRITE on every
+ * open — and an open-time write needs the file's write lock, so a
+ * second instance opening the same file while another connection
+ * held a transaction (a restore, the guest-to-account copy,
+ * another handle's own install) threw SQLITE_BUSY out of onOpen
+ * once the opener's internal retry budget (~10 s, measured) ran
+ * out: BackupRestoreSemanticsTest flaked ~11 times with
+ * SQLiteDatabaseLockedException at the INSERT below, and the
+ * round-18 busy_timeout above only ever raised that budget.
+ * Two changes remove the collision instead of enlarging it:
+ * - When the machinery is already complete — the steady state,
+ *   every open after a database's first — the install is
+ *   READ-ONLY ([libraryMetaInstalled]): in WAL mode a reader
+ *   never waits on a writer, so the open cannot fail on a held
+ *   write lock, however long the holder keeps it.
+ * - The write path runs under a process-wide lock
+ *   ([libraryMetaInstallLock]): every actor that can open a
+ *   database lives in this process, so two first-time installs
+ *   of the same file cannot race each other either — the second
+ *   installer waits on the lock, then finds the machinery
+ *   complete and writes nothing.
+ * The self-heal contract is unchanged: a database missing the
+ * row or a trigger still converges on its next open.
  */
+private val libraryMetaInstallLock = java.util.concurrent.locks.ReentrantLock()
+
 fun installLibraryMeta(db: SupportSQLiteDatabase) {
     // (PR #59 fix round 18) How long this connection waits on a
     // locked database before failing with SQLITE_BUSY. The open
@@ -182,31 +208,77 @@ fun installLibraryMeta(db: SupportSQLiteDatabase) {
     // Migration67RobolectricTest proved it the hard way). Run it as
     // a query and close the cursor.
     db.query("PRAGMA busy_timeout = 5000").close()
-    db.execSQL(
-        "CREATE TABLE IF NOT EXISTS `library_meta` (`id` INTEGER NOT NULL, " +
-            "`notesWriteGeneration` INTEGER NOT NULL, PRIMARY KEY(`id`))",
-    )
-    db.execSQL(
-        "INSERT OR IGNORE INTO `library_meta` (`id`, `notesWriteGeneration`) VALUES (1, 0)",
-    )
-    db.execSQL(
-        "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_insert` " +
-            "AFTER INSERT ON `notes` BEGIN " +
-            "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
-            "END",
-    )
-    db.execSQL(
-        "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_update` " +
-            "AFTER UPDATE ON `notes` BEGIN " +
-            "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
-            "END",
-    )
-    db.execSQL(
-        "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_delete` " +
-            "AFTER DELETE ON `notes` BEGIN " +
-            "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
-            "END",
-    )
+    // (PR #65) The completeness check and any writes it finds
+    // missing run under the process-wide install lock, so two
+    // connections opening the same file at the same moment
+    // serialise here instead of racing for the file's write
+    // lock; and when the machinery is already complete the
+    // install is read-only and takes no write lock at all.
+    libraryMetaInstallLock.lock()
+    try {
+        if (libraryMetaInstalled(db)) return
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `library_meta` (`id` INTEGER NOT NULL, " +
+                "`notesWriteGeneration` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        )
+        db.execSQL(
+            "INSERT OR IGNORE INTO `library_meta` (`id`, `notesWriteGeneration`) VALUES (1, 0)",
+        )
+        db.execSQL(
+            "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_insert` " +
+                "AFTER INSERT ON `notes` BEGIN " +
+                "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
+                "END",
+        )
+        db.execSQL(
+            "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_update` " +
+                "AFTER UPDATE ON `notes` BEGIN " +
+                "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
+                "END",
+        )
+        db.execSQL(
+            "CREATE TRIGGER IF NOT EXISTS `trg_library_meta_notes_delete` " +
+                "AFTER DELETE ON `notes` BEGIN " +
+                "UPDATE `library_meta` SET `notesWriteGeneration` = `notesWriteGeneration` + 1 WHERE `id` = 1; " +
+                "END",
+        )
+    } finally {
+        libraryMetaInstallLock.unlock()
+    }
+}
+
+/**
+ * (PR #65) Read-only completeness check for [installLibraryMeta]:
+ * the `library_meta` table, its singleton row and all three notes
+ * triggers present. Pure SELECTs — in WAL mode a reader never
+ * needs the file's write lock, so this check cannot collide with
+ * another connection's transaction. Any doubt (a missing table,
+ * an unreadable schema) answers false, and the caller runs the
+ * idempotent writes, exactly as every open did before PR #65.
+ */
+private fun libraryMetaInstalled(db: SupportSQLiteDatabase): Boolean {
+    fun count(sql: String): Int? = try {
+        db.query(sql).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+    if (count(
+            "SELECT COUNT(*) FROM sqlite_master " +
+                "WHERE type = 'table' AND name = 'library_meta'",
+        ) != 1
+    ) {
+        return false
+    }
+    if (count("SELECT COUNT(*) FROM `library_meta` WHERE `id` = 1") != 1) {
+        return false
+    }
+    return count(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN (" +
+            "'trg_library_meta_notes_insert', 'trg_library_meta_notes_update', " +
+            "'trg_library_meta_notes_delete')",
+    ) == 3
 }
 
 /**
