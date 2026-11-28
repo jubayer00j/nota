@@ -1,6 +1,7 @@
 package app.nota.data.repository
 
 import androidx.room.Room
+import app.nota.data.backup.BackupRepository
 import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.NoteEntity
@@ -215,6 +216,102 @@ class NoteRepositoryRobolectricTest {
             assertEquals("scores for '$query'", expected.map { it.second }, actual.map { it.score })
         }
         assertEquals(1, repository.corpusLoadCount)
+    }
+
+    /** Relink gap fix (v0.37.1): a note whose full row exceeds
+     *  Android's ~2 MiB CursorWindow — 1.2M chars of plain text
+     *  (240,000 words) with the HTML to match — written straight
+     *  through the DAO, as an imported or restored note lands.
+     *  Writing the row is legal; reading it back as a full
+     *  entity is what used to blow up. */
+    private fun hugeNote(id: String, plainText: String): NoteEntity {
+        val now = System.currentTimeMillis()
+        return NoteEntity(
+            id = id,
+            title = id,
+            contentHtml = "<p>$plainText</p>",
+            plainText = plainText,
+            wordCount = BackupRepository.wordCount(plainText),
+            createdAt = now,
+            updatedAt = now,
+            contentEditedAt = now,
+        )
+    }
+
+    @Test
+    fun createAndRenameSucceedWithHugeNoteInLibrary() = runBlocking {
+        // Relink gap fix (v0.37.1): creating a note runs the
+        // rename path (null -> title), which used to load every
+        // note as a full entity (getAll) and die on the huge
+        // row with SQLiteBlobTooBigException.
+        db.noteDao().upsert(hugeNote("huge", "word ".repeat(240_000)))
+
+        val small = repository.createNote(title = "Small Note", plainBody = "tiny body")
+        assertEquals("Small Note", db.noteDao().getRowById(small.id)!!.title)
+
+        // Renaming a small note re-runs the same path.
+        val stored = db.noteDao().getById(small.id)!!
+        repository.updateTitle(stored, "Renamed Note")
+        assertEquals("Renamed Note", db.noteDao().getRowById(small.id)!!.title)
+    }
+
+    @Test
+    fun pinningHugeNoteSucceedsAndLeavesWordCountUntouched() = runBlocking {
+        // Relink gap fix (v0.37.1): a metadata op on the huge
+        // note itself — upsert used to read its full row back
+        // (getById) just to learn the previous title and word
+        // count, and died on the CursorWindow.
+        val hugeText = "word ".repeat(240_000)
+        val huge = hugeNote("huge", hugeText)
+        db.noteDao().upsert(huge)
+
+        repository.setPinned(huge, true)
+
+        assertTrue(db.noteDao().getRowById("huge")!!.pinned)
+        // The text never changed, so the stored count is the
+        // fixture's own — and the fix-round-3 seam proves no
+        // recomputation happened on the way.
+        assertEquals(240_000, db.noteDao().getUpsertState("huge", hugeText)!!.wordCount)
+        assertEquals(0, repository.wordCountRecomputations)
+    }
+
+    @Test
+    fun renameTracksBacklinksInMixedLibraryWithHugeNote() = runBlocking {
+        // Relink gap fix (v0.37.1): the huge note references
+        // [[Alpha]] from the middle of its body — past the
+        // first scan chunk (65,536 chars), so only the chunked
+        // candidate extraction can find it — and its edges must
+        // track the rename exactly like a normal note's.
+        val filler = "filler ".repeat(40_000) // 280,000 chars
+        val hugeText = filler + "[[Alpha]]" + filler + filler + filler
+        db.noteDao().upsert(hugeNote("huge", hugeText))
+
+        val alpha = repository.createNote(title = "Alpha", plainBody = "body")
+        val linker = repository.createRichNote(
+            title = "Linker",
+            contentHtml = "<p>See [[Alpha]]</p>",
+        )
+        val early = repository.createRichNote(
+            title = "Early",
+            contentHtml = "<p>See [[Beta]]</p>",
+        )
+        // Both the normal linker and the huge note link to
+        // Alpha (the huge edge was built by the candidate scan
+        // during Alpha's create); [[Beta]] resolves to nothing.
+        assertEquals(
+            setOf(linker.id, "huge"),
+            repository.observeLinkedFromRows(alpha.id).first().map { it.id }.toSet(),
+        )
+
+        val stored = db.noteDao().getById(alpha.id)!!
+        repository.updateTitle(stored, "Beta")
+        // [[Alpha]] no longer resolves: both edges are gone.
+        // [[Beta]] now resolves to the renamed note: Early's
+        // edge appears. Exactly one incoming edge remains.
+        assertEquals(
+            listOf(early.id),
+            repository.observeLinkedFromRows(alpha.id).first().map { it.id },
+        )
     }
 
     /** The search pipeline with no cache: score every corpus row

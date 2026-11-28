@@ -6,6 +6,7 @@ import app.nota.data.db.DatabaseProvider
 import app.nota.data.db.LibraryStampRow
 import app.nota.data.db.SearchTextRow
 import app.nota.data.db.SyncMetaEntity
+import app.nota.data.db.WORD_COUNT_CHUNK_CHARS
 import app.nota.data.db.countWordsChunked
 import app.nota.data.db.FolderEntity
 import app.nota.data.db.NoteEntity
@@ -15,6 +16,7 @@ import app.nota.data.db.NoteVersionEntity
 import app.nota.data.db.NotaDatabase
 import app.nota.data.db.SavedSearchEntity
 import app.nota.data.db.TagEntity
+import app.nota.data.html.BacklinkSpanScanner
 import app.nota.data.html.NoteDocument
 import app.nota.data.text.PlainTextCodec
 import java.util.UUID
@@ -97,7 +99,14 @@ class NoteRepository(
 
     suspend fun upsert(note: NoteEntity) {
         db.withTransaction {
-            val previous = noteDao.getById(note.id)
+            // Relink gap fix (v0.37.1): the previous row is read
+            // at scalar weight (title, stored word count, and a
+            // text-equality flag computed inside SQLite) — never
+            // as a full entity. The old getById read materialised
+            // the stored body, so ANY write to a note whose row
+            // exceeds Android's ~2 MiB CursorWindow failed,
+            // including a pin on the huge note itself.
+            val previous = noteDao.getUpsertState(note.id, note.plainText)
             val previousTitle = previous?.title
             // Reading stats fix round 2 (R2-F1): the stored word
             // count is the stats' only word source, so it is
@@ -119,7 +128,7 @@ class NoteRepository(
             // the fix-2 backfill counter — same Java \s definition
             // as BackupRepository.wordCount, no token list), reading
             // the in-memory body in bounded slices.
-            val stored = if (previous != null && previous.plainText == note.plainText) {
+            val stored = if (previous != null && previous.textUnchanged == 1) {
                 note.copy(wordCount = previous.wordCount)
             } else {
                 wordCountRecomputations++
@@ -151,20 +160,95 @@ class NoteRepository(
     }
 
     /**
-     * Re-runs [relink] for every note whose body references [oldTitle] or
-     * [newTitle] (either may be the side a rename just changed). Runs
-     * inside the caller's transaction. Locked/trashed notes are skipped:
-     * [relink] clears their edges and their own next upsert rebuilds them.
+     * Re-runs the edge rebuild for every note whose body references
+     * [oldTitle] or [newTitle] (either may be the side a rename just
+     * changed). Runs inside the caller's transaction. Locked/trashed
+     * notes are skipped: [relink] clears their edges and their own
+     * next upsert rebuilds them.
+     *
+     * Relink gap fix (v0.37.1): the candidate set is selected in
+     * SQL (ids of unlocked, untrashed notes whose body contains
+     * the title text — a superset of the true referrers, since a
+     * referencing body necessarily contains the title), and each
+     * candidate's [[...]] titles are extracted from bounded
+     * SUBSTR slices by [BacklinkSpanScanner] instead of loading
+     * its row. The old full-entity getAll() scan materialised
+     * every note in the library, so one note past Android's
+     * ~2 MiB CursorWindow broke every create and rename.
      */
     private suspend fun relinkReferencingNotes(oldTitle: String?, newTitle: String, excludeId: String) {
         val titles = listOfNotNull(oldTitle, newTitle).toSet()
         if (titles.isEmpty()) return
-        for (other in noteDao.getAll()) {
-            if (other.id == excludeId || other.locked || other.trashedAt != null) continue
-            if (NoteDocument.backlinkTitles(other.plainText).any { it in titles }) {
-                relink(other)
+        val handled = HashSet<String>()
+        for (title in titles) {
+            val candidates = noteDao.getRelinkCandidateIds(relinkLikePattern(title), excludeId)
+            for (id in candidates) {
+                if (!handled.add(id)) continue
+                val extracted = backlinkTitlesChunked(id)
+                if (extracted.any { it in titles }) {
+                    relinkCandidate(id, extracted)
+                }
             }
         }
+    }
+
+    /** The LIKE pattern matching bodies that contain [title]:
+     *  the title with LIKE's wildcards (`%`, `_`) and the escape
+     *  character itself escaped, wrapped in `%...%` (the DAO
+     *  query declares `ESCAPE '\'`). SQLite's LIKE folds ASCII
+     *  case, which only widens the candidate set — the chunked
+     *  extraction below stays the exact authority. */
+    private fun relinkLikePattern(title: String): String {
+        val escaped = StringBuilder(title.length + 8)
+        for (c in title) {
+            if (c == '\\' || c == '%' || c == '_') escaped.append('\\')
+            escaped.append(c)
+        }
+        return "%$escaped%"
+    }
+
+    /** A note's [[...]] titles, extracted from bounded SUBSTR
+     *  slices so its row is never materialised (see
+     *  [BacklinkSpanScanner] for the equivalence argument and
+     *  the one span bound). Distinct, in order — the same shape
+     *  [NoteDocument.backlinkTitles] returns for a whole body. */
+    private suspend fun backlinkTitlesChunked(id: String): List<String> {
+        val length = noteDao.getPlainTextLength(id) ?: return emptyList()
+        if (length == 0) return emptyList()
+        val scanner = BacklinkSpanScanner()
+        val titles = LinkedHashSet<String>()
+        var offset = 1
+        while (offset <= length) {
+            val chunk = noteDao.getPlainTextChunk(id, offset, WORD_COUNT_CHUNK_CHARS) ?: break
+            if (chunk.isEmpty()) break
+            titles.addAll(scanner.feed(chunk))
+            offset += WORD_COUNT_CHUNK_CHARS
+        }
+        return titles.toList()
+    }
+
+    /**
+     * [relink]'s edge rebuild for a candidate whose entity was
+     * never loaded: same delete-then-resolve over the candidate's
+     * extracted titles. The target lookup reads (id, locked) at
+     * row weight ([NoteDao.getLinkTargetByTitle] — the fields
+     * [relink] reads from a target), so resolving a link TO a
+     * huge note cannot materialise its row either. The candidate
+     * itself is unlocked and untrashed by the selection's SQL
+     * filter, matching the states [relink] rebuilds for.
+     */
+    private suspend fun relinkCandidate(sourceId: String, titles: List<String>) {
+        noteLinkDao.deleteForSource(sourceId)
+        if (titles.isEmpty()) return
+        val links = titles.mapNotNull { title ->
+            val target = noteDao.getLinkTargetByTitle(title)
+            if (target != null && target.id != sourceId && !target.locked) {
+                NoteLinkEntity(sourceId = sourceId, targetId = target.id)
+            } else {
+                null
+            }
+        }
+        if (links.isNotEmpty()) noteLinkDao.insertAll(links)
     }
 
     /**
