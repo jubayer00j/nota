@@ -45,7 +45,7 @@ class FlakeProbeTest {
         connA.execSQL(
             "INSERT OR IGNORE INTO `library_meta` (`id`, `notesWriteGeneration`) VALUES (1, 0)",
         )
-        println("PROBE A inTransaction=${connA.inTransaction}")
+        println("PROBE A inTransaction=${connA.inTransaction()}")
 
         val bOutcome = AtomicReference("not-run")
         val bElapsedMs = AtomicLong(-1)
