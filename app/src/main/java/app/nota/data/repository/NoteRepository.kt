@@ -291,6 +291,10 @@ class NoteRepository(
      * Runs inside the caller's transaction (the upsert/delete write path),
      * so edges can never diverge from the stored body. Locked or trashed
      * notes hold no resolvable body text here, so their edges are cleared.
+     * Targets resolve at row weight ([NoteDao.getLinkTargetByTitle] —
+     * id + locked are all this reads), exactly as in [relinkCandidate]:
+     * the full-entity lookup materialised an oversized target's row
+     * and threw SQLiteBlobTooBigException (Codex R1-F1).
      */
     private suspend fun relink(note: NoteEntity) {
         noteLinkDao.deleteForSource(note.id)
@@ -298,7 +302,7 @@ class NoteRepository(
         val titles = NoteDocument.backlinkTitles(note.plainText)
         if (titles.isEmpty()) return
         val links = titles.mapNotNull { title ->
-            val target = noteDao.getByTitle(title)
+            val target = noteDao.getLinkTargetByTitle(title)
             if (target != null && target.id != note.id && !target.locked) {
                 NoteLinkEntity(sourceId = note.id, targetId = target.id)
             } else {

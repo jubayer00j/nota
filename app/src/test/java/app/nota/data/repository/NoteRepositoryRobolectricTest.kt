@@ -314,6 +314,36 @@ class NoteRepositoryRobolectricTest {
         )
     }
 
+    @Test
+    fun linkingToHugeNoteSucceedsAndCreatesEdge() = runBlocking {
+        // Codex R1-F1 (PR #62 fix round 1): the DIRECT relink
+        // path — a note whose body links TO the huge note —
+        // resolved the target with the full-entity getByTitle
+        // and died on the huge row with
+        // SQLiteBlobTooBigException, even though the candidate
+        // path already resolved targets at row weight. Creating
+        // and editing a linker must succeed and the edge must
+        // land on the huge note.
+        db.noteDao().upsert(hugeNote("huge", "word ".repeat(240_000)))
+
+        val linker = repository.createRichNote(
+            title = "Linker",
+            contentHtml = "<p>See [[huge]]</p>",
+        )
+        assertEquals(
+            listOf(linker.id),
+            repository.observeLinkedFromRows("huge").first().map { it.id },
+        )
+
+        // Editing the linker re-runs the same direct relink.
+        val stored = db.noteDao().getById(linker.id)!!
+        repository.updateRichBody(stored, "Linker", "<p>Still [[huge]]</p>")
+        assertEquals(
+            listOf(linker.id),
+            repository.observeLinkedFromRows("huge").first().map { it.id },
+        )
+    }
+
     /** The search pipeline with no cache: score every corpus row
      *  with the production scorer and sort by the production
      *  order (score, then recency, then id). The reference the
