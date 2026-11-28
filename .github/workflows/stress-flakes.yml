@@ -5,6 +5,8 @@ name: Stress flakes (scratch, PR #65)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [fix/flake-hardening]
 
 jobs:
   probe-t1:
@@ -68,6 +70,7 @@ jobs:
           if-no-files-found: ignore
 
   stress-t1:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
